@@ -41,8 +41,8 @@ pub enum DispatchOutcome {
 }
 
 /// Fallback dispatch for backends whose state-aware impl isn't reachable
-/// from `wxc_common` (e.g. it lives in a backend crate that depends on
-/// `wxc_common`, so a direct call here would create a cycle). Callers in
+/// from `mxc_alpha_wxc_common` (e.g. it lives in a backend crate that depends on
+/// `mxc_alpha_wxc_common`, so a direct call here would create a cycle). Callers in
 /// `wxc-exec` resolve known backends and invoke `dispatch_state_aware`
 /// directly; anything they don't handle falls through to this function,
 /// which surfaces `unsupported_phase` for the resolved backend.

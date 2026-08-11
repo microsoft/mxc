@@ -4,7 +4,7 @@
 //! RAII wrapper around a Windows Job Object used to apply UI restrictions
 //! (`JOB_OBJECT_UILIMIT_*`) to a child process and any descendants it creates,
 //! plus the Windows-specific encoder that maps a platform-agnostic
-//! [`wxc_common::ui_policy::EffectiveUiRestrictions`] to the corresponding bitmask.
+//! [`mxc_alpha_wxc_common::ui_policy::EffectiveUiRestrictions`] to the corresponding bitmask.
 //!
 //! The wrapper owns the underlying job HANDLE and closes it on drop. Once a
 //! process has been assigned to a job, the kernel keeps the restrictions
@@ -28,8 +28,8 @@ use windows::Win32::System::JobObjects::{
 use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
 use windows_core::PCWSTR;
 
-use wxc_common::error::WxcError;
-use wxc_common::ui_policy::EffectiveUiRestrictions;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// Helper for loading `RtlGetVersion` from `ntdll.dll` to get the true
 /// (unshimmed) OS version. `GetVersionExW` lies on post-8.1 builds due

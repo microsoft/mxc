@@ -16,9 +16,9 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ExecutionRequest;
-use wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::ExecutionRequest;
+use mxc_alpha_wxc_common::mxc_error::MxcError;
 
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
@@ -534,7 +534,7 @@ impl CaptureDenialsMode {
 /// only). Its presence enables capture: the runner records the sandboxed
 /// process's ungranted access attempts and writes a JSON denials document,
 /// reported back through
-/// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
+/// [`SandboxOutputMetadata::capture_denials`](mxc_alpha_wxc_common::models::SandboxOutputMetadata).
 ///
 /// Ignored on Linux and macOS, whose backends have no learning-mode API.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -811,7 +811,7 @@ pub fn build_request(
 /// before they will spawn.
 ///
 /// ```no_run
-/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
+/// use mxc_alpha_mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
 ///     version: "0.7.0-alpha".to_string(),
@@ -824,7 +824,7 @@ pub fn build_request(
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 /// request.set_script("python3 -c 'print(1)'").set_experimental(true);
-/// # Ok::<(), mxc_engine::Error>(())
+/// # Ok::<(), mxc_alpha_mxc_engine::Error>(())
 /// ```
 pub fn build_request_with_containment(
     policy: &SandboxPolicy,
@@ -842,7 +842,7 @@ pub fn build_request_with_containment(
     // Map the wire config straight to a request — no base64/file round-trip.
     // The command line is intentionally empty here (the caller fills
     // `script_code` before running), so tolerate a missing command.
-    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+    let inner = mxc_alpha_wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
     Ok(SandboxRequest { inner })
 }
@@ -858,7 +858,7 @@ fn build_wire_config(
 
     let container_id = container_name
         .map(str::to_string)
-        .unwrap_or_else(wxc_common::id::mint_random_token);
+        .unwrap_or_else(mxc_alpha_wxc_common::id::mint_random_token);
 
     let fs = policy.filesystem.clone().unwrap_or_default();
     let clear_policy = fs.clear_policy_on_exit.unwrap_or(true);
@@ -1146,7 +1146,7 @@ mod tests {
     use super::{
         build_request, CaptureDenialsMode, CaptureDenialsSection, NetworkSection, SandboxPolicy,
     };
-    use wxc_common::wire;
+    use mxc_alpha_wxc_common::wire;
 
     fn policy_with_network(network: NetworkSection) -> SandboxPolicy {
         SandboxPolicy {
@@ -1261,7 +1261,7 @@ mod tests {
     #[test]
     fn build_request_preserves_clipboard_policy() {
         use super::ClipboardPolicy as P;
-        use wxc_common::models::ClipboardPolicy as Wire;
+        use mxc_alpha_wxc_common::models::ClipboardPolicy as Wire;
 
         for (input, expected) in [
             (P::None, Wire::None),
@@ -1379,7 +1379,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_reaches_the_container_policy() {
-        use wxc_common::models::CaptureDenialsMode as DomainMode;
+        use mxc_alpha_wxc_common::models::CaptureDenialsMode as DomainMode;
 
         // `build_request` validates that the parent directory exists, so anchor
         // the path somewhere guaranteed to be present.
@@ -1479,7 +1479,7 @@ mod tests {
         });
 
         let mut logger = super::Logger::new(super::Mode::Buffer);
-        let request = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+        let request = mxc_alpha_wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
             .expect("captureDenials alongside network.proxy satisfies the wire contract");
 
         assert!(
@@ -1526,7 +1526,7 @@ mod tests {
     }
 
     use super::{build_request_with_containment, Containment, WslcSection};
-    use wxc_common::models::ContainmentBackend;
+    use mxc_alpha_wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
         SandboxPolicy {

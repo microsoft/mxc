@@ -12,12 +12,12 @@ use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use wxc_common::id::mint_random_token;
-use wxc_common::models::ExecutionRequest;
-use wxc_common::mxc_error::MxcError;
-use wxc_common::process_util::resolve_sibling_binary;
-use wxc_common::script_runner::get_timeout_milliseconds;
-use wxc_common::state_aware_backend::{
+use mxc_alpha_wxc_common::id::mint_random_token;
+use mxc_alpha_wxc_common::models::ExecutionRequest;
+use mxc_alpha_wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::process_util::resolve_sibling_binary;
+use mxc_alpha_wxc_common::script_runner::get_timeout_milliseconds;
+use mxc_alpha_wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 
@@ -1030,8 +1030,8 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
-    use wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
 
     #[test]
     fn backend_key_matches_wire_format() {

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `learning_mode_windows` — runtime FFI adapter for the Windows AppInfo-brokered
+//! `mxc_alpha_learning_mode_windows` — runtime FFI adapter for the Windows AppInfo-brokered
 //! **Learning Mode trace API** exported by `processmodel.dll`.
 //!
 //! Supported Windows builds expose a privileged, per-client learning-mode

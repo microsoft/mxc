@@ -15,7 +15,7 @@
 //! process runs **without ever allocating a pty**.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
+//! use mxc_alpha_mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 //!
 //! // Turn a policy into a request, fill in the command, and run it.
 //! let policy = SandboxPolicy {
@@ -62,7 +62,7 @@
 //! the standalone executor binaries for those.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+//! use mxc_alpha_mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
 //!
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
@@ -74,7 +74,7 @@
 //! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 //! request.set_script("python3 -c 'print(42)'").set_experimental(true);
 //! let output = run(request)?;
-//! # Ok::<(), mxc_sdk::Error>(())
+//! # Ok::<(), mxc_alpha_mxc_sdk::Error>(())
 //! ```
 //!
 //! | Entry point            | Stdio                                   |
@@ -102,17 +102,17 @@
 //! Policy security warnings are available through [`Sandbox::warnings`] and
 //! [`Output::warnings`].
 //!
-//! ## Relationship to `mxc_engine`
+//! ## Relationship to `mxc_alpha_mxc_engine`
 //!
 //! This crate is a thin, streaming-focused public facade. Backend dispatch,
-//! host probing, and config building live in the internal `mxc_engine` crate;
+//! host probing, and config building live in the internal `mxc_alpha_mxc_engine` crate;
 //! `mxc-sdk` re-exports the curated surface and wraps the engine's streaming
 //! handle in [`Sandbox`].
 
 mod sandbox;
 
-pub use mxc_engine::policy;
-pub use mxc_engine::{
+pub use mxc_alpha_mxc_engine::policy;
+pub use mxc_alpha_mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend, Containment,
     Error, ErrorCode, FilesystemPolicyResult, PlatformSupport, SandboxPolicy, SandboxRequest,
@@ -130,7 +130,7 @@ pub use sandbox::{
 /// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
 /// drained and discarded by [`wait`](Sandbox::wait).
 pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
-    mxc_engine::spawn(&request).map(Sandbox::new)
+    mxc_alpha_mxc_engine::spawn(&request).map(Sandbox::new)
 }
 
 /// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
@@ -166,7 +166,7 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// a `phase` field). Errors (malformed request, unsupported phase, backend
 /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
 pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String, Error> {
-    mxc_engine::run_state_aware_json(request_json, dry_run)
+    mxc_alpha_mxc_engine::run_state_aware_json(request_json, dry_run)
 }
 
 /// Run the `exec` phase of a state-aware request (as a JSON string) as a **live
@@ -176,5 +176,5 @@ pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String,
 /// The request JSON must be an `exec`-phase state-aware request (with a
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 pub fn exec_sandbox(request_json: &str) -> Result<Sandbox, Error> {
-    mxc_engine::exec_state_aware_json(request_json).map(Sandbox::new)
+    mxc_alpha_mxc_engine::exec_state_aware_json(request_json).map(Sandbox::new)
 }

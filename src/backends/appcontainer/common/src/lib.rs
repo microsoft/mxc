@@ -9,7 +9,7 @@
 //! All modules are Windows-only. The crate links unconditionally so
 //! `wxc-exec` (which always targets Windows) can depend on it
 //! without feature gates, while cross-platform consumers of
-//! `wxc_common` are unaffected by AppContainer code.
+//! `mxc_alpha_wxc_common` are unaffected by AppContainer code.
 
 #[cfg(target_os = "windows")]
 pub mod appcontainer_runner;
@@ -37,7 +37,7 @@ pub mod proxy_coordinator;
 pub mod sandbox_tracking;
 
 /// Test-only helpers shared across this crate's unit-test modules.
-/// Mirrors the helper that previously lived in `wxc_common::test_env`;
+/// Mirrors the helper that previously lived in `mxc_alpha_wxc_common::test_env`;
 /// kept private to each crate so each test binary has its own
 /// `ENV_LOCK` (the process-globals are only contended within a test
 /// binary).

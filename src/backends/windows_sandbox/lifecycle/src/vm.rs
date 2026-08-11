@@ -137,7 +137,7 @@ pub(crate) async fn launch(wsb_path: &Path) -> Result<()> {
     // (`GetSystemDirectoryW`, not `%SystemRoot%` or the executable search order),
     // so a binary planted in the app dir or CWD can't be launched in its place.
     #[cfg(windows)]
-    let sandbox_exe = wxc_common::system_dir::system_directory().join("WindowsSandbox.exe");
+    let sandbox_exe = mxc_alpha_wxc_common::system_dir::system_directory().join("WindowsSandbox.exe");
     // `system_dir` is Windows-only, and Windows Sandbox does not exist on the
     // other targets the crates.io release packages for.
     #[cfg(not(windows))]
@@ -267,13 +267,13 @@ pub trait LaunchObserver: Send {
 pub async fn launch_managed_vm(
     wsb_path: &Path,
     rendezvous_dir: &Path,
-    nonce: &windows_sandbox_common::auth::Nonce,
+    nonce: &mxc_alpha_windows_sandbox_common::auth::Nonce,
     rendezvous_timeout: std::time::Duration,
     rendezvous_poll_interval: std::time::Duration,
     connect_timeout: std::time::Duration,
     observer: &mut dyn LaunchObserver,
 ) -> Result<(crate::bridge::GuestConnection, std::net::SocketAddr)> {
-    windows_sandbox_common::auth::write_nonce_file(rendezvous_dir, nonce)
+    mxc_alpha_windows_sandbox_common::auth::write_nonce_file(rendezvous_dir, nonce)
         .context("write guest nonce file")?;
 
     observer.set_ownership(crate::control_plane::VmOwnership::LaunchInFlight);

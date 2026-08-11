@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for `mxc_telemetry`.
+//! Build script for `mxc_alpha_mxc_telemetry`.
 //!
 //! Generates `provider_def.rs` containing the `define_provider!` invocation.
 //! The `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable controls

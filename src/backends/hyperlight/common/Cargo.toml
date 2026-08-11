@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Hyperlight micro-VM backend support for the MXC execution engine."
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight-unikraft = { version = "0.12.1", optional = true }

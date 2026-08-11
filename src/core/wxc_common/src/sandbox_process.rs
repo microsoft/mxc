@@ -11,8 +11,8 @@
 //! and kill while it runs.
 //!
 //! As with [`ScriptRunner`](crate::script_runner::ScriptRunner), the traits
-//! live in `wxc_common` (the cross-platform foundation) while the
-//! implementations live in the per-backend crates — `wxc_common` must not
+//! live in `mxc_alpha_wxc_common` (the cross-platform foundation) while the
+//! implementations live in the per-backend crates — `mxc_alpha_wxc_common` must not
 //! depend on any `backends/*` crate.
 
 use std::io::{Read, Write};

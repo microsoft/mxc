@@ -36,7 +36,7 @@ windows = { workspace = true, features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 
 [build-dependencies]
 mxc_build_common.workspace = true

@@ -16,12 +16,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wxc_common::config_parser::load_mxc_request;
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ContainmentBackend;
-use wxc_common::script_runner::ScriptRunner;
-use wxc_common::state_aware_request::MxcRequest;
-use wxc_common::validator::validate_common;
+use mxc_alpha_wxc_common::config_parser::load_mxc_request;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::ContainmentBackend;
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::state_aware_request::MxcRequest;
+use mxc_alpha_wxc_common::validator::validate_common;
 
 fuzz_target!(|data: &[u8]| {
     let Ok(s) = std::str::from_utf8(data) else {
@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
         match req.containment {
             #[cfg(feature = "microvm")]
             ContainmentBackend::MicroVm => {
-                let runner = nanvix_runner::NanVixScriptRunner::new();
+                let runner = mxc_alpha_nanvix_runner::NanVixScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "hyperlight")]
@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
             }
             #[cfg(feature = "isolation_session")]
             ContainmentBackend::IsolationSession => {
-                let runner = isolation_session_common::IsolationSessionRunner::new();
+                let runner = mxc_alpha_isolation_session_common::IsolationSessionRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             _ => {}

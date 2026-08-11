@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
-use learning_mode_core::{
+use mxc_alpha_learning_mode_core::{
     write_document, DenialAnalyzer, DenialSummary, DenialsDocument, DenialsOutputPointer,
 };
-use learning_mode_windows::{
+use mxc_alpha_learning_mode_windows::{
     CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
     SecurityEnvironmentApi, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
@@ -49,7 +49,7 @@ use crate::launch_diagnostics::{
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
-use process_security_environment_spec::process_security_environment_layout::{
+use mxc_alpha_process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, EndpointPolicy as PsecEndpointPolicy,
     EndpointPolicyArgs as PsecEndpointPolicyArgs, FilterAction as PsecFilterAction,
     NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
@@ -57,29 +57,29 @@ use process_security_environment_spec::process_security_environment_layout::{
     ProcessSecurityEnvironmentArgs as PsecProcessSecurityEnvironmentArgs,
     ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs, SchemaVersion,
 };
-use sandbox_spec::base_container_layout::{
+use mxc_alpha_windows_secenv_projection::base_container_layout::{
     endpoint_policy, endpoint_policyArgs, finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs,
     FilterAction as SboxFilterAction, IntegrityLevel, NetworkPolicy as FbsNetworkPolicy,
     NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
 };
-use wxc_common::log_symbols::{
+use mxc_alpha_wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
-use wxc_common::logger::Logger;
-use wxc_common::models::{
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{
     CaptureDenialsOutput, ContainerPolicy, ExecutionRequest, FailurePhase, NetworkEnforcementMode,
     NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
-use wxc_common::process_util::{
+use mxc_alpha_wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle,
 };
-use wxc_common::sandbox_process::{
+use mxc_alpha_wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
-use wxc_common::script_runner::get_timeout_milliseconds;
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::script_runner::get_timeout_milliseconds;
+use mxc_alpha_wxc_common::string_util;
 
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -265,13 +265,13 @@ fn is_schema_0_8_proxy_fallback_unavailable(
         && request.policy.network_proxy.is_enabled()
 }
 
-fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
+fn learning_mode_api_not_implemented(error: &mxc_alpha_learning_mode_windows::LearningModeError) -> bool {
     match error {
-        learning_mode_windows::LearningModeError::ApiSetUnavailable { .. }
-        | learning_mode_windows::LearningModeError::DllLoad(_)
-        | learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
-        learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
-        learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
+        mxc_alpha_learning_mode_windows::LearningModeError::ApiSetUnavailable { .. }
+        | mxc_alpha_learning_mode_windows::LearningModeError::DllLoad(_)
+        | mxc_alpha_learning_mode_windows::LearningModeError::ExportMissing { .. } => true,
+        mxc_alpha_learning_mode_windows::LearningModeError::HResultCall { code, .. } => *code == E_NOTIMPL.0,
+        mxc_alpha_learning_mode_windows::LearningModeError::ApiCall { code, .. } => {
             is_api_not_implemented(*code)
         }
         _ => false,
@@ -283,7 +283,7 @@ trait CaptureSessionOps {
     fn finish(
         self: Box<Self>,
         output_path: Option<&std::path::Path>,
-    ) -> Result<(), learning_mode_windows::LearningModeError>;
+    ) -> Result<(), mxc_alpha_learning_mode_windows::LearningModeError>;
 }
 
 impl CaptureSessionOps for CaptureSession {
@@ -294,7 +294,7 @@ impl CaptureSessionOps for CaptureSession {
     fn finish(
         self: Box<Self>,
         output_path: Option<&std::path::Path>,
-    ) -> Result<(), learning_mode_windows::LearningModeError> {
+    ) -> Result<(), mxc_alpha_learning_mode_windows::LearningModeError> {
         (*self).finish(output_path)
     }
 }
@@ -304,7 +304,7 @@ trait CaptureSessionFactory: Send + Sync {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError>;
+    ) -> Result<Box<dyn CaptureSessionOps>, mxc_alpha_learning_mode_windows::LearningModeError>;
 }
 
 trait CapturePlatformSupport: Send + Sync {
@@ -319,7 +319,7 @@ impl CaptureSessionFactory for RealCaptureSessionFactory {
         &self,
         sandbox_specification: &[u8],
         flags: u32,
-    ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
+    ) -> Result<Box<dyn CaptureSessionOps>, mxc_alpha_learning_mode_windows::LearningModeError> {
         let security_environment_api = SecurityEnvironmentApi::load()?;
         let learning_mode_api = LearningModeApi::load()?;
         CaptureSession::begin(
@@ -872,7 +872,7 @@ impl BaseContainerRunner {
         ));
 
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-            &wxc_common::ui_policy::resolve_ui_restrictions(
+            &mxc_alpha_wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
                 &request.policy.base_process_ui,
             ),
@@ -960,7 +960,7 @@ impl BaseContainerRunner {
 
         // UI restrictions
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-            &wxc_common::ui_policy::resolve_ui_restrictions(
+            &mxc_alpha_wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
                 &request.policy.base_process_ui,
             ),
@@ -1017,7 +1017,7 @@ impl BaseContainerRunner {
     /// Reads back token, network, and UI restriction fields from the serialised
     /// spec and writes a structured summary to the logger.
     fn log_sandbox_spec(spec_bytes: &[u8], logger: &mut Logger) {
-        let spec = match sandbox_spec::base_container_layout::root_as_sandbox_spec(spec_bytes) {
+        let spec = match mxc_alpha_windows_secenv_projection::base_container_layout::root_as_sandbox_spec(spec_bytes) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -1255,9 +1255,9 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec = use_process_security_environment
+        let mxc_alpha_process_security_environment_spec = use_process_security_environment
             .then(|| Self::build_process_security_environment_spec(&request));
-        if let Some(psec_spec) = process_security_environment_spec.as_ref() {
+        if let Some(psec_spec) = mxc_alpha_process_security_environment_spec.as_ref() {
             let _ = writeln!(
                 logger,
                 "process security environment spec built (PSEC 1.0, {} bytes)",
@@ -1591,7 +1591,7 @@ impl BaseContainerRunner {
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
         let mut security_environment: Option<ProcessSecurityEnvironment> = None;
         if use_process_security_environment {
-            let psec_spec = process_security_environment_spec
+            let psec_spec = mxc_alpha_process_security_environment_spec
                 .as_deref()
                 .expect("PSEC spec is initialized for schema version 0.8 and later");
             if capture_denials.is_some() {
@@ -2058,7 +2058,7 @@ impl SandboxBackend for BaseContainerRunner {
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+                mxc_alpha_wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         // Dry-run validates the schema and policy shape without requiring the
@@ -2098,7 +2098,7 @@ impl SandboxBackend for BaseContainerRunner {
                         ..ScriptResponse::error(PSEC_DENIED_PATHS_UNSUPPORTED_MSG)
                     }
                 } else {
-                    ScriptResponse::error(wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG)
+                    ScriptResponse::error(mxc_alpha_wxc_common::error::DENIED_PATHS_FEATURE_DISABLED_MSG)
                 });
             }
         }
@@ -2128,7 +2128,7 @@ impl SandboxBackend for BaseContainerRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        use wxc_common::validator::validate_common;
+        use mxc_alpha_wxc_common::validator::validate_common;
 
         validate_common(request)?;
         self.validate(request)?;
@@ -2236,7 +2236,7 @@ impl BaseContainerSandboxProcess {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
@@ -2649,14 +2649,14 @@ fn derive_sid_string_from_name(name: &str) -> String {
 mod tests {
     use super::*;
     use crate::job_object::to_job_object_uilimit_mask;
-    use learning_mode_core::{
+    use mxc_alpha_learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DeniedResource, ResourceType,
     };
-    use process_security_environment_spec::process_security_environment_layout as psec_layout;
-    use sandbox_spec::base_container_layout;
+    use mxc_alpha_process_security_environment_spec::process_security_environment_layout as psec_layout;
+    use mxc_alpha_windows_secenv_projection::base_container_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
-    use wxc_common::ui_policy::EffectiveUiRestrictions;
+    use mxc_alpha_wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
+    use mxc_alpha_wxc_common::ui_policy::EffectiveUiRestrictions;
 
     struct FakeCaptureSession {
         finish_error: Option<(&'static str, i32)>,
@@ -2671,11 +2671,11 @@ mod tests {
         fn finish(
             self: Box<Self>,
             _output_path: Option<&std::path::Path>,
-        ) -> Result<(), learning_mode_windows::LearningModeError> {
+        ) -> Result<(), mxc_alpha_learning_mode_windows::LearningModeError> {
             self.finish_calls.fetch_add(1, Ordering::SeqCst);
             match self.finish_error {
                 Some((function, code)) => {
-                    Err(learning_mode_windows::LearningModeError::HResultCall { function, code })
+                    Err(mxc_alpha_learning_mode_windows::LearningModeError::HResultCall { function, code })
                 }
                 None => Ok(()),
             }
@@ -2694,10 +2694,10 @@ mod tests {
             &self,
             _sandbox_specification: &[u8],
             _flags: u32,
-        ) -> Result<Box<dyn CaptureSessionOps>, learning_mode_windows::LearningModeError> {
+        ) -> Result<Box<dyn CaptureSessionOps>, mxc_alpha_learning_mode_windows::LearningModeError> {
             self.begin_calls.fetch_add(1, Ordering::SeqCst);
             if let Some((function, code)) = self.begin_error {
-                return Err(learning_mode_windows::LearningModeError::HResultCall {
+                return Err(mxc_alpha_learning_mode_windows::LearningModeError::HResultCall {
                     function,
                     code,
                 });
@@ -3001,7 +3001,7 @@ mod tests {
 
     #[test]
     fn learning_mode_api_not_implemented_checks_primary_failure() {
-        use learning_mode_windows::LearningModeError;
+        use mxc_alpha_learning_mode_windows::LearningModeError;
 
         let disabled = LearningModeError::HResultCall {
             function: "StartLearningModeTrace",
@@ -3074,7 +3074,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            learning_mode_windows::LearningModeError::HResultCall {
+            mxc_alpha_learning_mode_windows::LearningModeError::HResultCall {
                 function: "StopLearningModeTrace",
                 ..
             }
@@ -3521,7 +3521,7 @@ mod tests {
 
     #[test]
     fn build_sandbox_spec_proxy_url() {
-        use wxc_common::models::ProxyAddress;
+        use mxc_alpha_wxc_common::models::ProxyAddress;
 
         let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Allow;
@@ -3555,7 +3555,7 @@ mod tests {
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
-    use wxc_common::sandbox_process::SandboxBackend;
+    use mxc_alpha_wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_accepts_denied_paths_when_supported() {

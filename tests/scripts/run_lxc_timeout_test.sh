@@ -4,7 +4,7 @@
 # Regression coverage for issue #84: the LXC backend used to ignore
 # `process.timeout` from the config JSON, so a runaway script would run
 # forever inside the container. After the fix, attach_run threads the
-# timeout into `mxc_pty::PtyOptions` and the inner shell is killed and
+# timeout into `mxc_alpha_mxc_pty::PtyOptions` and the inner shell is killed and
 # reaped once the deadline passes.
 #
 # The config asks for a 120s sleep with a 5s timeout. A correct backend

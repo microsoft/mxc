@@ -1,5 +1,5 @@
 [package]
-name = "mxc-sdk"
+name = "mxc_alpha_mxc_sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,18 +7,18 @@ repository.workspace = true
 description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
 
 [lib]
-name = "mxc_sdk"
+name = "mxc_alpha_mxc_sdk"
 path = "src/lib.rs"
 
 [features]
 default = []
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
-wslc = ["mxc_engine/wslc"]
+wslc = ["mxc_alpha_mxc_engine/wslc"]
 
 [dependencies]
-wxc_common.workspace = true
-mxc_engine = { workspace = true }
+mxc_alpha_wxc_common.workspace = true
+mxc_alpha_mxc_engine = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }

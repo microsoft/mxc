@@ -55,7 +55,7 @@ static WPR_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// not happen on a real one).
 #[cfg(target_os = "windows")]
 fn resolve_wpr_path() -> Option<PathBuf> {
-    wxc_common::system_dir::resolve_system_directory().map(|mut dir| {
+    mxc_alpha_wxc_common::system_dir::resolve_system_directory().map(|mut dir| {
         dir.push("wpr.exe");
         dir
     })

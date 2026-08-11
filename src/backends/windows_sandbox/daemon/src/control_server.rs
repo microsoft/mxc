@@ -13,17 +13,17 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, MutexGuard, Notify, Semaphore};
 use tokio::time::{timeout, Instant};
 
-use windows_sandbox_lifecycle::bridge::{
+use mxc_alpha_windows_sandbox_lifecycle::bridge::{
     host_watchdog_deadline, reconnect_data_streams, stream_exec_on_guest, write_exit_frame,
     GuestConnection, HOST_WATCHDOG_GRACE,
 };
-use windows_sandbox_lifecycle::control_plane::{
+use mxc_alpha_windows_sandbox_lifecycle::control_plane::{
     parse_client_protocol, IPC_ERR, IPC_ERR_BUSY, IPC_ERR_NOT_READY, IPC_ERR_PROTOCOL, IPC_EXEC,
     IPC_PING, IPC_PROTOCOL_VERSION, IPC_STOP,
 };
-use windows_sandbox_lifecycle::ipc_exec;
+use mxc_alpha_windows_sandbox_lifecycle::ipc_exec;
 
-use windows_sandbox_common::auth::Nonce as GuestNonce;
+use mxc_alpha_windows_sandbox_common::auth::Nonce as GuestNonce;
 
 /// Maximum time to wait for a client request line.
 const CLIENT_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -462,8 +462,8 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener as TokioTcpListener;
-    use windows_sandbox_common::auth::generate_nonce;
-    use windows_sandbox_lifecycle::ipc_exec::ExecStart;
+    use mxc_alpha_windows_sandbox_common::auth::generate_nonce;
+    use mxc_alpha_windows_sandbox_lifecycle::ipc_exec::ExecStart;
 
     #[tokio::test]
     async fn released_guest_slot_is_unlocked() {

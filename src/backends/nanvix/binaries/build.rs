@@ -4,7 +4,7 @@
 //! Build script that downloads NanVix binaries from GitHub releases.
 //!
 //! Uses system tools (`curl.exe`, `tar.exe`, `certutil`) instead of Rust
-//! crates. Zero HTTP/zip/crypto build-dependencies — only `nanvix_common`
+//! crates. Zero HTTP/zip/crypto build-dependencies — only `mxc_alpha_nanvix_common`
 //! for shared constants and serde-based config parsing.
 //!
 //! ## Configuration files
@@ -38,7 +38,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
+use mxc_alpha_nanvix_common::{github_download_url, load_checksums, load_json, ReleaseConfig, RepoConfig};
 
 fn main() {
     // The build script's output (`NANVIX_BIN_DIR` and whether the download /
@@ -98,7 +98,7 @@ fn main() {
             .binaries_linux
             .as_ref()
             .map(|v| v.iter().map(|s| s.as_str()).collect())
-            .unwrap_or_else(|| nanvix_common::REQUIRED_BINARIES.to_vec());
+            .unwrap_or_else(|| mxc_alpha_nanvix_common::REQUIRED_BINARIES.to_vec());
 
         let needs_download =
             !use_prefetched_binaries && needs_download_linux(&binaries, &bin_dir, &checksums);
@@ -159,7 +159,7 @@ fn main() {
 
         // Generate host-local WHP snapshots at build time so even the first
         // runtime execution uses warm start. The runtime fallback in
-        // nanvix_runner.rs handles the case where snapshots are missing.
+        // mxc_alpha_nanvix_runner.rs handles the case where snapshots are missing.
         //
         // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
         // and launching it on (e.g.) ARM64 Windows fails with
@@ -176,8 +176,8 @@ fn main() {
                 host
             );
         } else {
-            let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
-            let snapshots_present = nanvix_common::SNAPSHOT_FILES
+            let snapshots_dir = bin_dir.join(mxc_alpha_nanvix_common::SNAPSHOTS_SUBDIR);
+            let snapshots_present = mxc_alpha_nanvix_common::SNAPSHOT_FILES
                 .iter()
                 .all(|name| snapshots_dir.join(name).exists());
             if snapshots_present {
@@ -186,7 +186,7 @@ fn main() {
                 // In offline mode the NANVIX_BIN directory is treated as an
                 // immutable, pre-fetched input — it may be a read-only or
                 // shared cache. Do not run nanvixd.exe to generate snapshots
-                // into it. The runtime fallback in nanvix_runner.rs cold-boots
+                // into it. The runtime fallback in mxc_alpha_nanvix_runner.rs cold-boots
                 // when snapshots are absent.
                 eprintln!(
                     "nanvix_binaries: offline — snapshots absent in NANVIX_BIN; \
@@ -242,8 +242,8 @@ fn needs_download(
     }
 
     // Check bin/ subdir files.
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let path = bin_subdir.join(name);
         if !path.exists() {
             return true;
@@ -285,7 +285,7 @@ fn download_and_extract(config: &RepoConfig, repo: &str, bin_dir: &Path) {
     }
 
     // Extract bin/ subdir files (kernel.elf stays in bin/ as nanvixd expects).
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
     fs::create_dir_all(&bin_subdir).expect("failed to create bin subdir");
     if let Err(msg) = try_tar_extract_bin_subdir(&zip_path, &bin_subdir) {
         cleanup(&zip_path);
@@ -301,7 +301,7 @@ fn generate_snapshots_locally(bin_dir: &Path) {
     let nanvixd = bin_dir.join("nanvixd.exe");
     let ramfs = bin_dir.join("nanvix_rootfs.img");
     let initrd = bin_dir.join("python3.initrd");
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
 
     if !nanvixd.exists() || !ramfs.exists() || !initrd.exists() {
         panic!(
@@ -315,12 +315,12 @@ fn generate_snapshots_locally(bin_dir: &Path) {
         );
     }
 
-    nanvix_common::generate_snapshot(bin_dir, &nanvixd, &bin_subdir, &ramfs, &initrd)
+    mxc_alpha_nanvix_common::generate_snapshot(bin_dir, &nanvixd, &bin_subdir, &ramfs, &initrd)
         .unwrap_or_else(|e| panic!("nanvix_binaries: {}", e));
 
     // Log generated file sizes.
-    let snapshots_dir = bin_dir.join(nanvix_common::SNAPSHOTS_SUBDIR);
-    for name in nanvix_common::SNAPSHOT_FILES {
+    let snapshots_dir = bin_dir.join(mxc_alpha_nanvix_common::SNAPSHOTS_SUBDIR);
+    for name in mxc_alpha_nanvix_common::SNAPSHOT_FILES {
         let path = snapshots_dir.join(name);
         let size = path.metadata().map(|m| m.len()).unwrap_or(0);
         eprintln!("  snapshots/{} -- generated ({} bytes)", name, size);
@@ -450,7 +450,7 @@ fn try_tar_extract(zip_path: &Path, dest_dir: &Path, files: &[&str]) -> Result<(
 fn try_tar_extract_bin_subdir(zip_path: &Path, dest_dir: &Path) -> Result<(), String> {
     const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
 
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let mut cmd = Command::new("tar");
         cmd.arg("-xf").arg(zip_path).arg("-C").arg(dest_dir);
         cmd.args(["--strip-components", "2"]);
@@ -556,8 +556,8 @@ fn verify_checksums(binaries: &[&str], bin_dir: &Path, checksums: &HashMap<Strin
 }
 
 fn verify_bin_subdir_checksums(bin_dir: &Path, checksums: &HashMap<String, String>) {
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let path = bin_subdir.join(name);
         if !path.exists() {
             panic!(
@@ -609,8 +609,8 @@ fn needs_download_linux(
     }
 
     // Check bin/ subdir files.
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let path = bin_subdir.join(name);
         if !path.exists() {
             return true;
@@ -649,7 +649,7 @@ fn download_and_extract_linux(tag: &str, asset: &str, binaries: &[&str], bin_dir
     }
 
     // Extract bin/ subdir files (kernel.elf, nanvixd.elf).
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
     fs::create_dir_all(&bin_subdir).expect("failed to create bin subdir");
     if let Err(msg) = try_tar_extract_bin_subdir_linux(&tar_path, &bin_subdir) {
         cleanup(&tar_path);
@@ -719,7 +719,7 @@ fn try_tar_extract_linux(tar_path: &Path, dest_dir: &Path, files: &[&str]) -> Re
 fn try_tar_extract_bin_subdir_linux(tar_path: &Path, dest_dir: &Path) -> Result<(), String> {
     const ARCHIVE_PREFIX: &str = "microvm-standalone-256mb";
 
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let mut cmd = Command::new("tar");
         cmd.arg("-xzf").arg(tar_path).arg("-C").arg(dest_dir);
         cmd.args(["--strip-components", "2"]);
@@ -804,8 +804,8 @@ fn verify_checksums_linux(binaries: &[&str], bin_dir: &Path, checksums: &HashMap
 }
 
 fn verify_bin_subdir_checksums_linux(bin_dir: &Path, checksums: &HashMap<String, String>) {
-    let bin_subdir = bin_dir.join(nanvix_common::BIN_SUBDIR);
-    for name in nanvix_common::BIN_SUBDIR_FILES {
+    let bin_subdir = bin_dir.join(mxc_alpha_nanvix_common::BIN_SUBDIR);
+    for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
         let path = bin_subdir.join(name);
         if !path.exists() {
             panic!(

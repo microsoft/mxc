@@ -27,7 +27,7 @@ use crate::lxc_bindings::LxcContainer;
 #[cfg(target_os = "linux")]
 use crate::network_iptables::NetworkIptablesManager;
 #[cfg(target_os = "linux")]
-use wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
 
 /// What the watchdog needs to roll back on a fatal signal: the container
 /// name (so we can `lxc-destroy` it) plus, when known, the host-side veth

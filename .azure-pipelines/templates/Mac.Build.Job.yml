@@ -66,14 +66,14 @@ jobs:
           # macOS-only crate set; the rest of the workspace has Windows-only
           # crates that do not compile on macOS. unix_test_proxy backs
           # network.proxy.builtinTestServer and ships next to mxc-exec-mac.
-          cargoPackages: mxc_darwin,seatbelt_common,wxc_common,unix_test_proxy
+          cargoPackages: mxc_darwin,mxc_alpha_seatbelt_common,mxc_alpha_wxc_common,unix_test_proxy
 
     - ${{ else }}:
       - template: Rust.Build.Steps.Unofficial.yml@self
         parameters:
           targetTriple: $(targetTriple)
           workingDirectory: $(workingDirectory)
-          cargoArgs: -p mxc_darwin -p seatbelt_common -p wxc_common -p unix_test_proxy
+          cargoArgs: -p mxc_darwin -p mxc_alpha_seatbelt_common -p mxc_alpha_wxc_common -p unix_test_proxy
 
     # --- macOS Code Signing + Notarization (official builds only) ---
     # ESRP handles the full signing flow using Microsoft's Developer ID

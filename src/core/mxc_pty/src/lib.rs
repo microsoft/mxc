@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc_pty` — shared pty bridge for the unix-side MXC backends.
+//! `mxc_alpha_mxc_pty` — shared pty bridge for the unix-side MXC backends.
 //!
-//! Both the Linux LXC backend (`lxc_common::lxc_bindings::attach_run`) and
-//! the macOS Seatbelt backend (`seatbelt_common::seatbelt_runner`) need to
+//! Both the Linux LXC backend (`mxc_alpha_lxc_common::lxc_bindings::attach_run`) and
+//! the macOS Seatbelt backend (`mxc_alpha_seatbelt_common::seatbelt_runner`) need to
 //! run a child process attached to a freshly-allocated pty so the inner
 //! shell sees a real TTY (`isatty(0/1/2) -> true`) and the host can stream
 //! output as it arrives. The two implementations were ~95% the same code;
@@ -495,7 +495,7 @@ impl Drop for RawSecondaryGuard {
 /// Stub for the workspace-wide clippy lane that runs on Windows.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn run_with_pty(_command: Command, _options: PtyOptions) -> Result<PtyOutcome, String> {
-    Err("mxc_pty::run_with_pty is only supported on Linux and macOS".to_string())
+    Err("mxc_alpha_mxc_pty::run_with_pty is only supported on Linux and macOS".to_string())
 }
 
 #[cfg(test)]

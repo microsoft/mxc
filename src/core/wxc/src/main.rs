@@ -13,20 +13,20 @@ use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
-use appcontainer_common::appcontainer_runner::delete_app_container_profile;
+use mxc_alpha_basecontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
-use wxc_common::config_parser::{
+use mxc_alpha_wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
+use mxc_alpha_wxc_common::config_parser::{
     load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
-use wxc_common::diagnostic::DiagnosticConfig;
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
-use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
-use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
-use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
-use wxc_common::telemetry;
+use mxc_alpha_wxc_common::diagnostic::DiagnosticConfig;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+use mxc_alpha_wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
+use mxc_alpha_wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
+use mxc_alpha_wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use mxc_alpha_wxc_common::telemetry;
 
 #[derive(Parser)]
 #[command(name = "wxc-exec", about = "Windows Container Executor")]
@@ -414,7 +414,7 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
-    let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    let mut outcome = mxc_alpha_mxc_engine::run_state_aware(parsed, dry_run);
     let elapsed = started.elapsed();
 
     // For provision, return the freshly-seeded correlation vector to the client
@@ -577,16 +577,16 @@ use audit::{
 // the next wxc-exec startup (which we already run at the top of
 // `main`).
 
-static DACL_CLEANUP_SLOT: OnceLock<Mutex<Option<wxc_common::filesystem_dacl::DaclManager>>> =
+static DACL_CLEANUP_SLOT: OnceLock<Mutex<Option<mxc_alpha_wxc_common::filesystem_dacl::DaclManager>>> =
     OnceLock::new();
 
-fn dacl_cleanup_slot() -> &'static Mutex<Option<wxc_common::filesystem_dacl::DaclManager>> {
+fn dacl_cleanup_slot() -> &'static Mutex<Option<mxc_alpha_wxc_common::filesystem_dacl::DaclManager>> {
     DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
 }
 
 /// Park the DACL manager in the global slot so the Ctrl-C handler can
 /// drop it if a signal arrives before the normal-exit path runs.
-fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
+fn park_dacl_for_cleanup(mgr: mxc_alpha_wxc_common::filesystem_dacl::DaclManager) {
     let slot = dacl_cleanup_slot();
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
     *guard = Some(mgr);
@@ -600,7 +600,7 @@ fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
 /// does (`into_inner`): a poisoned mutex must NOT silently swallow a
 /// parked manager — that would leak ACEs until the next-startup
 /// recovery scan reaps them.
-fn take_parked_dacl() -> Option<wxc_common::filesystem_dacl::DaclManager> {
+fn take_parked_dacl() -> Option<mxc_alpha_wxc_common::filesystem_dacl::DaclManager> {
     DACL_CLEANUP_SLOT.get().and_then(|slot| {
         let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
         guard.take()
@@ -758,7 +758,7 @@ fn main() {
     // (WinProcessContainer-Tests Phase 6, SDK warm-start) rely on. Errors here
     // are non-fatal and only surface via stderr. On a healthy host
     // with zero state files this is sub-millisecond.
-    match wxc_common::filesystem_dacl::recover_orphaned_state() {
+    match mxc_alpha_wxc_common::filesystem_dacl::recover_orphaned_state() {
         Ok(report) => {
             if report.files_processed > 0 || !report.errors.is_empty() {
                 eprintln!(
@@ -798,10 +798,10 @@ fn main() {
                 }
             }
         } else {
-            wxc_common::models::ContainerPolicy::default()
+            mxc_alpha_wxc_common::models::ContainerPolicy::default()
         };
-        let output = appcontainer_common::probe::run_probe(&policy);
-        match appcontainer_common::probe::to_json_pretty(&output) {
+        let output = mxc_alpha_basecontainer_common::probe::run_probe(&policy);
+        match mxc_alpha_basecontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 eprintln!("Error: probe serialization failed: {e}");
@@ -888,7 +888,7 @@ fn main() {
             // process exit. It owns the COM init contract documented on
             // `init_and_load_sdk`.
             let result = unsafe {
-                wslc_common::wsl_container_runner::WSLContainerRunner::setup_pull_image(
+                mxc_alpha_wslc_common::wsl_container_runner::WSLContainerRunner::setup_pull_image(
                     image,
                     cli.storage_path.as_deref(),
                     &mut logger,
@@ -1136,7 +1136,7 @@ fn main() {
         let exe_path = std::env::current_exe()
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "unknown".to_string());
-        let parent_info = wxc_common::diagnostic::get_parent_process_info();
+        let parent_info = mxc_alpha_wxc_common::diagnostic::get_parent_process_info();
         let _ = writeln!(
             logger,
             "wxc-exec v{} (PID {})",
@@ -1156,7 +1156,7 @@ fn main() {
 
         // Log the raw input JSON config before any transformation.
         let raw_json = if is_base64 {
-            wxc_common::encoding::base64_decode(&config_data)
+            mxc_alpha_wxc_common::encoding::base64_decode(&config_data)
                 .ok()
                 .and_then(|b| String::from_utf8(b).ok())
         } else {
@@ -1179,19 +1179,19 @@ fn main() {
     let _ = writeln!(
         logger,
         "{}",
-        wxc_common::diagnostic::redacted_request_json(&request)
+        mxc_alpha_wxc_common::diagnostic::redacted_request_json(&request)
     );
 
     // Run script in the selected containment backend. Backend selection and
     // runner construction — including the ProcessContainer BaseContainer /
     // AppContainer (BFS / DACL) fallback tiers and every experimental backend —
-    // live in `mxc_engine::resolve_runner`, the single home for one-shot backend
+    // live in `mxc_alpha_mxc_engine::resolve_runner`, the single home for one-shot backend
     // dispatch. The DACL guard it returns for the fallback tiers is parked into
     // the global slot (see `dacl_cleanup_slot`) so the Ctrl-C handler can drop
     // it on signal as well as the normal-exit path below; it is `None` when no
     // DACL augmentation was required. Tier-selection warnings and the selected
     // tier are logged to `logger` by the engine.
-    let mut runner: Box<dyn ScriptRunner> = match mxc_engine::resolve_runner(&request, &mut logger)
+    let mut runner: Box<dyn ScriptRunner> = match mxc_alpha_mxc_engine::resolve_runner(&request, &mut logger)
     {
         Ok(resolved) => {
             if let Some(mgr) = resolved.dacl_manager {
@@ -1398,7 +1398,7 @@ fn main() {
     // when the runner produced an error message (one-shot flows only).
     // In PTY mode stderr is merged into the PTY output stream, so the envelope
     // appears inline -- callers (e.g. copilot) can parse it from the output.
-    wxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_alpha_wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }
@@ -1408,10 +1408,10 @@ mod tests {
     use super::*;
 
     use clap::{CommandFactory, Parser};
-    use wxc_common::encoding::base64_encode;
-    use wxc_common::logger::Mode;
-    use wxc_common::mxc_error::MxcErrorCode;
-    use wxc_common::state_aware_request::MxcRequest;
+    use mxc_alpha_wxc_common::encoding::base64_encode;
+    use mxc_alpha_wxc_common::logger::Mode;
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::state_aware_request::MxcRequest;
 
     fn parse_cli(argv: &[&str]) -> Cli {
         Cli::try_parse_from(argv)
@@ -1471,7 +1471,7 @@ mod tests {
 
     #[test]
     fn audit_mode_rejects_both_capture_denials_modes() {
-        use wxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
+        use mxc_alpha_wxc_common::models::{CaptureDenialsConfig, CaptureDenialsMode};
 
         for mode in [CaptureDenialsMode::Block, CaptureDenialsMode::Allow] {
             let mut request = ExecutionRequest {

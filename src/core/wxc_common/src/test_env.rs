@@ -4,7 +4,7 @@
 //! Each crate has its own `ENV_LOCK` because env-var contention is
 //! only observable within a single test binary. The richer
 //! `ForceTierGuard` / `BfscfgPathGuard` helpers live next to their
-//! consumers in `appcontainer_common::test_env`.
+//! consumers in `mxc_alpha_basecontainer_common::test_env`.
 
 use std::sync::{Mutex, MutexGuard};
 

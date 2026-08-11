@@ -227,7 +227,7 @@ const KNOWN_CAPABILITIES: &[&str] = &[
 
 #[cfg(target_os = "windows")]
 fn to_wide_z(s: &str) -> Vec<u16> {
-    wxc_common::string_util::to_wide(s)
+    mxc_alpha_wxc_common::string_util::to_wide(s)
 }
 
 /// Copy a SID pointed to by `psid` into a managed byte vector.

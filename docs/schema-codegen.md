@@ -25,11 +25,11 @@ nested types). It is precise by construction:
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
 ```
 
-`mxc_schema_gen` calls `wxc_common::wire::generate_config_schema_json()`, which
+`mxc_schema_gen` calls `mxc_alpha_wxc_common::wire::generate_config_schema_json()`, which
 runs schemars and post-processes the result to replace schemars' Rust-specific
 integer `format`s (`uint32`, …) — undefined in JSON Schema draft-07 — with
 standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
-`wxc_common` gates the schemars dependency so production builds don't carry it.
+`mxc_alpha_wxc_common` gates the schemars dependency so production builds don't carry it.
 
 ## CI gates (`Versioning Checks` job)
 
@@ -44,7 +44,7 @@ standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
 
 Cross-field constraints — the single-backend-section rule and phase-scoping that
 the hand-written schema expressed with top-level `allOf` — are **not** in the
-generated schema. They are enforced by the parser (`wxc_common::config_parser`),
+generated schema. They are enforced by the parser (`mxc_alpha_wxc_common::config_parser`),
 which is the trust boundary. The schema is an editor/CI convenience, never the
 gate; the parser rejects a backend/containment mismatch regardless of what the
 schema says.
@@ -106,7 +106,7 @@ CI run, and the corpus gate pins the accept-side behavior.
 
 The SDK's wire TypeScript types are generated too — by a **Rust emitter**, with
 no third-party generator. `mxc_schema_gen --ts` walks the same generated schema
-value and `wxc_common::ts_emit` emits `sdk/node/src/generated/wire.ts`. That file is
+value and `mxc_alpha_wxc_common::ts_emit` emits `sdk/node/src/generated/wire.ts`. That file is
 **not public API** — it is a drift oracle. The unit test
 `sdk/node/tests/unit/wire-conformance.test.ts` asserts (at `tsc` time) that the
 hand-written public types in `sdk/node/src/types.ts` still conform to it, and
@@ -167,6 +167,6 @@ here.
   are gone, so the schema source and the trust boundary share one definition of
   the wire shape and cannot drift.
 - The SDK TypeScript wire types are generated from the same wire model
-  (`sdk/node/src/generated/wire.ts`, via the `wxc_common::ts_emit` Rust emitter),
+  (`sdk/node/src/generated/wire.ts`, via the `mxc_alpha_wxc_common::ts_emit` Rust emitter),
   guarded by a conformance test plus the `check-sdk-types-codegen.js` gate, and
   the hand-maintained `*-strict.json` stable view has been retired.

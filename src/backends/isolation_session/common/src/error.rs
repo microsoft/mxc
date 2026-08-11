@@ -4,10 +4,10 @@
 //! Typed error model for the IsolationSession backend and the conversions to
 //! `ScriptResponse` (one-shot) and `MxcError` (state-aware dispatch).
 
-use wxc_common::models::ScriptResponse;
-use wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::models::ScriptResponse;
+use mxc_alpha_wxc_common::mxc_error::MxcError;
 
-use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
+use mxc_alpha_isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 
 /// Categorised errors from the IsolationSession backend.
 #[derive(Debug)]
@@ -125,7 +125,7 @@ pub(super) fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
 
     #[test]
     fn map_lifecycle_error_categorises_each_variant() {

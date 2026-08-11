@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `mxc_engine` — the MXC execution engine.
+//! `mxc_alpha_mxc_engine` — the MXC execution engine.
 //!
 //! This crate owns the logic that turns an execution request into a running
 //! sandbox: backend dispatch, host-platform probing, and config building from
@@ -10,7 +10,7 @@
 //! binaries call into, so backend selection lives in exactly one place.
 //!
 //! It depends on the `backends/*` crates (cfg-split by target), which is why
-//! it cannot live in `wxc_common` (the cross-platform foundation those backends
+//! it cannot live in `mxc_alpha_wxc_common` (the cross-platform foundation those backends
 //! build on).
 //!
 //! ## Surface
@@ -27,7 +27,7 @@
 //! - [`available_backends`] / [`AvailableBackend`] — read-only host
 //!   backend-availability probe (with effective isolation tier).
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
-//!   `wxc_common`'s internal error type.
+//!   `mxc_alpha_wxc_common`'s internal error type.
 
 mod dispatch;
 mod error;
@@ -50,8 +50,8 @@ pub use probe::{available_backends, AvailableBackend};
 pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
 /// by [`build_request`] (with the command, and any working directory / env,
@@ -91,7 +91,7 @@ impl SandboxProcess for ProcessWithWarnings {
         &self.warnings
     }
 
-    fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+    fn output_metadata(&self) -> Option<&mxc_alpha_wxc_common::models::SandboxOutputMetadata> {
         self.inner.output_metadata()
     }
 

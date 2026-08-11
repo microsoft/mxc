@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Packages the mxc-sdk crate closure into .crate files, once per OS on that
+# Packages the mxc_alpha_mxc_sdk crate closure into .crate files, once per OS on that
 # OS's own agent.  cargo package compiles every crate, so each leg proves the
 # closure builds natively there.  Only the Windows leg publishes the artifact;
 # the other two are verification.

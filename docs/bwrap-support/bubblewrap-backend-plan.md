@@ -85,7 +85,7 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)
 
-### 4. New Crate: `bwrap_common`
+### 4. New Crate: `mxc_alpha_bwrap_common`
 
 **Pattern follows:** `backends/lxc/common/` and `backends/seatbelt/common/`
 
@@ -102,20 +102,20 @@ src/backends/bubblewrap/common/
 **Cargo.toml:**
 ```toml
 [package]
-name = "bwrap_common"
+name = "mxc_alpha_bwrap_common"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wxc_common = { workspace = true }
-lxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
+mxc_alpha_lxc_common = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 ```
 
-Add `bwrap_common` to workspace `members` in `src/Cargo.toml`.
+Add `mxc_alpha_bwrap_common` to workspace `members` in `src/Cargo.toml`.
 
 ### 5. BubblewrapScriptRunner Implementation
 
@@ -219,7 +219,7 @@ ContainmentBackend::Bubblewrap => {
 }
 ```
 
-Add `bwrap_common` dependency to `lxc/Cargo.toml`.
+Add `mxc_alpha_bwrap_common` dependency to `lxc/Cargo.toml`.
 
 ### 7. SDK / TypeScript Changes
 
@@ -266,7 +266,7 @@ Linux binary resolution path works as-is.
 ### 8. Network Policy — iptables (consistent with LXC)
 
 Bubblewrap provides all-or-nothing network isolation via `--unshare-net`. For per-host
-allow/block filtering, the runner reuses `NetworkIptablesManager` from `lxc_common` — the
+allow/block filtering, the runner reuses `NetworkIptablesManager` from `mxc_alpha_lxc_common` — the
 same iptables-based approach used by the LXC backend.
 
 **How it works:**
@@ -291,7 +291,7 @@ for consistency with the LXC backend. Configs that only need all-or-nothing netw
 still run fully unprivileged.
 
 **Implementation:** The `BubblewrapScriptRunner` imports `NetworkIptablesManager` from
-`lxc_common` (add `lxc_common` as a dependency of `bwrap_common`). The lifecycle mirrors
+`mxc_alpha_lxc_common` (add `mxc_alpha_lxc_common` as a dependency of `mxc_alpha_bwrap_common`). The lifecycle mirrors
 the LXC runner: apply rules before execution, remove rules after.
 
 ### 9. Test Additions
@@ -315,7 +315,7 @@ the LXC runner: apply rules before execution, remove rules after.
 | Schema + models | Low | Add enum value, config struct, wire through parser |
 | BubblewrapScriptRunner | Medium | Core logic is straightforward (build bwrap CLI), but need PTY handling, timeout, signal forwarding |
 | Filesystem policy mapping | Low | Direct 1:1 mapping to bwrap flags |
-| Network policy | Low | Reuse `NetworkIptablesManager` from `lxc_common`; `--unshare-net` for full block |
+| Network policy | Low | Reuse `NetworkIptablesManager` from `mxc_alpha_lxc_common`; `--unshare-net` for full block |
 | SDK TypeScript | Low | Add type, platform detection, builder function |
 | Binary integration | Low | Add dispatch arm to lxc-exec |
 | Tests | Medium | Need Linux environment with bwrap + user namespaces |
@@ -335,8 +335,8 @@ policy gap is a design decision, not an implementation challenge.
 - `src/backends/bubblewrap/common/src/filesystem_policy.rs`
 
 ### Rust (modify)
-- `src/Cargo.toml` — add `bwrap_common` to workspace members + dependencies
-- `src/core/lxc/Cargo.toml` — add `bwrap_common` dependency
+- `src/Cargo.toml` — add `mxc_alpha_bwrap_common` to workspace members + dependencies
+- `src/core/lxc/Cargo.toml` — add `mxc_alpha_bwrap_common` dependency
 - `src/core/lxc/src/main.rs` — add dispatch arm for `ContainmentBackend::Bubblewrap`
 - `src/core/wxc_common/src/models.rs` — add `Bubblewrap` variant, `BubblewrapConfig` struct, wire into `ExperimentalConfig` and `ExecutionRequest`
 - `src/core/wxc_common/src/wire.rs` — add the `Bubblewrap` containment variant (and any backend fields), then regenerate the schema

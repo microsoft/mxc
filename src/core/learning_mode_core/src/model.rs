@@ -11,7 +11,7 @@
 //!
 //! The types stay tiny and cross-platform so the wire format never
 //! accidentally encodes a Windows-only assumption. The Windows ETL
-//! decoder lives in the `learning_mode_windows` backend crate and maps
+//! decoder lives in the `mxc_alpha_learning_mode_windows` backend crate and maps
 //! its ETW-intermediate events into these types.
 
 use serde::{Deserialize, Serialize};
@@ -85,7 +85,7 @@ pub enum AccessType {
 /// # Examples
 ///
 /// ```
-/// use learning_mode_core::{AccessType, DeniedResource, ResourceType};
+/// use mxc_alpha_learning_mode_core::{AccessType, DeniedResource, ResourceType};
 ///
 /// let denial = DeniedResource {
 ///     resource: r"C:\Users\test\secret.txt".to_string(),

@@ -8,10 +8,10 @@
 use std::fmt::Write;
 use std::io::IsTerminal;
 
-use wxc_common::id::mint_random_token;
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, IsolationSessionConfigurationId, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::id::mint_random_token;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, IsolationSessionConfigurationId, ScriptResponse};
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 use super::manager::IsolationSessionManager;
 use super::policy::validate_provision_policy;
@@ -141,7 +141,7 @@ impl ScriptRunner for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser};
+    use mxc_alpha_wxc_common::models::{ExperimentalConfig, IsolationSessionConfig, IsolationSessionUser};
 
     fn well_formed_user() -> IsolationSessionUser {
         IsolationSessionUser {

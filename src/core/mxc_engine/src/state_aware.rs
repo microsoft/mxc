@@ -9,19 +9,19 @@
 //! can shrink to a thin CLI shell.
 //!
 //! Backends whose `StatefulSandboxBackend` impl lives in a `backends/*` crate
-//! (which depends on `wxc_common`, so the construction can't live inside
-//! `wxc_common` without a cycle) are constructed here — the engine already
+//! (which depends on `mxc_alpha_wxc_common`, so the construction can't live inside
+//! `mxc_alpha_wxc_common` without a cycle) are constructed here — the engine already
 //! depends on those crates. Anything without a state-aware impl falls back to
-//! [`wxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
+//! [`mxc_alpha_wxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
 //! `unsupported_phase` envelope.
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::SandboxProcess;
-use wxc_common::state_aware_dispatch::{
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::sandbox_process::SandboxProcess;
+use mxc_alpha_wxc_common::state_aware_dispatch::{
     resolve_backend, run_state_aware as run_state_aware_fallback, DispatchOutcome,
 };
-use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use mxc_alpha_wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 
 use crate::error::Error;
 
@@ -38,8 +38,8 @@ pub fn run_state_aware(
     let backend = resolve_backend(&parsed)?;
     if matches!(
         backend,
-        wxc_common::models::ContainmentBackend::WindowsSandbox
-            | wxc_common::models::ContainmentBackend::IsolationSession
+        mxc_alpha_wxc_common::models::ContainmentBackend::WindowsSandbox
+            | mxc_alpha_wxc_common::models::ContainmentBackend::IsolationSession
     ) && !parsed.request.experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
@@ -49,14 +49,14 @@ pub fn run_state_aware(
     }
     match backend {
         #[cfg(target_os = "windows")]
-        wxc_common::models::ContainmentBackend::WindowsSandbox => {
-            let mut runner = windows_sandbox_lifecycle::WindowsSandboxRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        mxc_alpha_wxc_common::models::ContainmentBackend::WindowsSandbox => {
+            let mut runner = mxc_alpha_windows_sandbox_lifecycle::WindowsSandboxRunner::new();
+            mxc_alpha_wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        wxc_common::models::ContainmentBackend::IsolationSession => {
-            let mut runner = isolation_session_common::IsolationSessionRunner::new();
-            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        mxc_alpha_wxc_common::models::ContainmentBackend::IsolationSession => {
+            let mut runner = mxc_alpha_isolation_session_common::IsolationSessionRunner::new();
+            mxc_alpha_wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
         _ => run_state_aware_fallback(parsed, dry_run),
     }
@@ -75,12 +75,12 @@ pub fn exec_state_aware(
     let backend = resolve_backend(&parsed)?;
     match backend {
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
-        wxc_common::models::ContainmentBackend::IsolationSession => {
-            let mut runner = isolation_session_common::IsolationSessionRunner::new();
+        mxc_alpha_wxc_common::models::ContainmentBackend::IsolationSession => {
+            let mut runner = mxc_alpha_isolation_session_common::IsolationSessionRunner::new();
             let handle =
-                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+                mxc_alpha_wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
             Ok(Box::new(
-                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle),
+                mxc_alpha_wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle),
             ))
         }
         _ => Err(MxcError::unsupported_phase(format!(
@@ -94,7 +94,7 @@ pub fn exec_state_aware(
 /// rejecting a one-shot config (no `phase`).
 fn parse_state_aware(request_json: &str) -> Result<ParsedStateAwareRequest, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    match wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger) {
+    match mxc_alpha_wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger) {
         Ok(MxcRequest::StateAware(parsed)) => Ok(parsed),
         Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
             "expected a state-aware lifecycle request (with a 'phase' field), got a one-shot config",
@@ -103,11 +103,11 @@ fn parse_state_aware(request_json: &str) -> Result<ParsedStateAwareRequest, Erro
     }
 }
 
-/// Map a [`config_parser::ParseError`](wxc_common::config_parser::ParseError) to
+/// Map a [`config_parser::ParseError`](mxc_alpha_wxc_common::config_parser::ParseError) to
 /// an [`MxcError`]. The state-aware arm already carries one; the decode / one-
 /// shot arms carry a `WxcError` that maps to `malformed_request`.
-fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
-    use wxc_common::config_parser::ParseError;
+fn parse_error_to_mxc(e: mxc_alpha_wxc_common::config_parser::ParseError) -> MxcError {
+    use mxc_alpha_wxc_common::config_parser::ParseError;
     match e {
         ParseError::StateAware(err) => err,
         ParseError::Decode(err) | ParseError::OneShot(err) => {
@@ -161,9 +161,9 @@ pub fn exec_state_aware_json(request_json: &str) -> Result<Box<dyn SandboxProces
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainmentBackend, ExecutionRequest};
-    use wxc_common::mxc_error::MxcErrorCode;
-    use wxc_common::state_aware_request::Phase;
+    use mxc_alpha_wxc_common::models::{ContainmentBackend, ExecutionRequest};
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::state_aware_request::Phase;
 
     #[test]
     fn experimental_backend_requires_flag() {

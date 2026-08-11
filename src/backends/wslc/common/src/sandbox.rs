@@ -5,7 +5,7 @@
 //! [`WSLContainerRunner`]'s run-to-completion `ScriptRunner`.
 //!
 //! Implementing [`SandboxBackend`] for the same runner lets the Rust SDK
-//! (`mxc-sdk`, via `mxc_engine`) spawn a WSL container and drive it live: read
+//! (`mxc-sdk`, via `mxc_alpha_mxc_engine`) spawn a WSL container and drive it live: read
 //! its stdout/stderr while it runs, wait for it with the request's timeout, and
 //! kill it.
 //!
@@ -25,13 +25,13 @@
 
 use std::io::{Read, Write};
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
-use wxc_common::sandbox_process::{
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::{ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, SandboxBackend,
     SandboxProcess, StdioMode, StreamCloser,
 };
-use wxc_common::validator::validate_common;
+use mxc_alpha_wxc_common::validator::validate_common;
 
 use crate::stream_buffer::{StreamCanceller, StreamReader};
 use crate::wsl_container_runner::{OutputMode, StartedContainer, WSLContainerRunner};
@@ -73,7 +73,7 @@ fn timeout_error(timeout_ms: u32) -> std::io::Error {
 /// confirmed.
 ///
 /// Deliberately *not* `ErrorKind::TimedOut`: the public
-/// [`mxc_sdk::Sandbox::wait`] maps that kind onto `WaitOutcome::TimedOut`, a
+/// [`mxc_alpha_mxc_sdk::Sandbox::wait`] maps that kind onto `WaitOutcome::TimedOut`, a
 /// success value whose contract is that the process tree *was* killed — which
 /// would silently restore the very claim this case exists to avoid, discarding
 /// the message with it. Being unable to establish the sandbox's state is a
@@ -127,7 +127,7 @@ struct WslcSandboxProcess {
 // `CoInitializeEx` is nonetheless per-thread, so moving this handle to a thread
 // that never initialized COM would otherwise leave the SDK on the stack of an
 // apartment-less thread. Every entry point that calls the SDK joins the MTA for
-// the duration via `ComApartment`, mirroring `appcontainer_common`'s guard:
+// the duration via `ComApartment`, mirroring `mxc_alpha_basecontainer_common`'s guard:
 // `StartedContainer`'s `wait_for_exit` / `destroy` / `stop` / `exit_code`, and
 // — because a `Send` handle can be *dropped* on such a thread too — the
 // `Drop` impls of the `WslcSessionGuard` / `WslcContainerGuard` /
@@ -454,7 +454,7 @@ mod tests {
 
     /// Only a *confirmed* kill may carry `ErrorKind::TimedOut`.
     ///
-    /// `mxc_sdk::Sandbox::wait` turns that kind into `WaitOutcome::TimedOut`, a
+    /// `mxc_alpha_mxc_sdk::Sandbox::wait` turns that kind into `WaitOutcome::TimedOut`, a
     /// success value promising the process tree was killed — and drops the
     /// message doing it. An unconfirmed kill must therefore not use that kind,
     /// or the distinction would be erased at the public API boundary.

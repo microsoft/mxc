@@ -187,7 +187,7 @@ no filter will not override an earlier path-scoped deny.
 
 `readonlyPaths` and `readwritePaths` are emitted **shallow-to-deep**, one rule
 per path, using the same ordering the Linux backends apply
-(`wxc_common::filesystem_resolve`). Last-match-wins then makes the *deepest*
+(`mxc_alpha_wxc_common::filesystem_resolve`). Last-match-wins then makes the *deepest*
 intent win at every path, so a read-only entry nested inside a broader
 read-write subtree stays read-only. That last part needs an explicit
 `(deny file-write* network-bind network-outbound …)` per read-only path,

@@ -125,7 +125,7 @@ Once you've discussed your proposed change with a team member and agreed on an a
 ### Project layout
 
 ```
-src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, wxc_common, etc.)
+src/                Rust workspace (wxc-exec, lxc-exec, mxc-exec-mac, mxc_alpha_wxc_common, etc.)
 sdk/                TypeScript SDK (@microsoft/mxc-sdk)
 docs/               Schema and configuration documentation
 tests/              Test collateral (examples, configs, scripts)
@@ -198,8 +198,8 @@ Testing is a key component in the development workflow. We expect contributors t
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
-cargo test -p wxc_common                    # Single crate
-cargo test -p wxc_common -- config_parser   # Filter by test name
+cargo test -p mxc_alpha_wxc_common                    # Single crate
+cargo test -p mxc_alpha_wxc_common -- config_parser   # Filter by test name
 
 # SDK unit and integration tests (from sdk/node/)
 npm test

@@ -5,7 +5,7 @@
 //!
 //! Provides structured event emission for execution observability
 //! and adoption metrics. Events are emitted to the local ETW subsystem
-//! via the `mxc_telemetry` crate (pure Rust, using the `tracelogging`
+//! via the `mxc_alpha_mxc_telemetry` crate (pure Rust, using the `tracelogging`
 //! crate). Every event includes common fields (Version, Channel,
 //! IsDebugging, UTCReplace_AppSessionGuid) as Part C custom event data.
 //!
@@ -91,14 +91,14 @@ thread_local! {
 }
 
 /// Whether the emit glue should proceed. In production this is exactly
-/// [`mxc_telemetry::is_active`]; in tests a forced override (thread-local, set
+/// [`mxc_alpha_mxc_telemetry::is_active`]; in tests a forced override (thread-local, set
 /// under `TEST_LOCK`) can make it report active without a real ETW provider.
 fn emit_active() -> bool {
     #[cfg(test)]
     if TEST_FORCE_ACTIVE.with(|f| f.get()) {
         return true;
     }
-    mxc_telemetry::is_active()
+    mxc_alpha_mxc_telemetry::is_active()
 }
 
 /// Claim the single terminal-emit slot for this process. Returns `true` if a
@@ -160,14 +160,14 @@ pub fn is_enabled(config: &TelemetryConfig) -> bool {
 /// diagnostic via the supplied [`Logger`] (so the failure is visible on the
 /// console when running with diagnostics) and otherwise swallowed — the caller
 /// simply proceeds with telemetry inactive. ETW is Windows-only; on other
-/// platforms `mxc_telemetry::init` is a no-op stub that always returns `false`,
+/// platforms `mxc_alpha_mxc_telemetry::init` is a no-op stub that always returns `false`,
 /// which is expected rather than a failure, so no diagnostic is emitted there.
 pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
     if !is_enabled(config) {
         return false;
     }
 
-    let activated = mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
+    let activated = mxc_alpha_mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
     if !activated && cfg!(target_os = "windows") {
         logger
             .log_line("telemetry: ETW provider registration failed; continuing without telemetry");
@@ -181,7 +181,7 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 /// On early-exit paths where `shutdown()` cannot be called, the OS
 /// will clean up the provider registration at process termination.
 pub fn shutdown() {
-    mxc_telemetry::shutdown();
+    mxc_alpha_mxc_telemetry::shutdown();
 }
 
 /// Classify a failed execution into a bounded [`FailureReason`].
@@ -466,7 +466,7 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 
 /// Emit crash telemetry from a global panic hook.
 ///
-/// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
+/// Guarded by [`mxc_alpha_mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or the provider is already shut down. It records a
 /// failure `MXC.Execution` and an `MXC.Error` categorised as
 /// [`FailureReason::InternalError`], attributed to the process backend stashed
@@ -495,7 +495,7 @@ pub fn emit_panic() {
 /// Emit cancellation telemetry from a console control (Ctrl-C / close / shutdown)
 /// handler.
 ///
-/// Guarded by [`mxc_telemetry::is_active`], so it is a cheap no-op when
+/// Guarded by [`mxc_alpha_mxc_telemetry::is_active`], so it is a cheap no-op when
 /// telemetry is disabled or already shut down. It records a failure
 /// `MXC.Execution` and an `MXC.Error` categorised as [`FailureReason::Cancelled`],
 /// attributed to the process backend stashed by [`set_process_context`] and the
@@ -657,7 +657,7 @@ mod tests {
     /// Serializes tests that touch the process-global emit slot / context
     /// (`HAS_EMITTED`, `PROCESS_BACKEND`, `PROCESS_PHASE`, `PROCESS_CORRELATION_VECTOR`)
     /// or drive the emit paths, so their global state can't leak across tests.
-    /// Mirrors the `TEST_LOCK` pattern in `mxc_telemetry`.
+    /// Mirrors the `TEST_LOCK` pattern in `mxc_alpha_mxc_telemetry`.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -1180,7 +1180,7 @@ mod tests {
         reset_for_test();
     }
 
-    // Validates that the emit guard honors the *real* `mxc_telemetry` provider —
+    // Validates that the emit guard honors the *real* `mxc_alpha_mxc_telemetry` provider —
     // not just the `TEST_FORCE_ACTIVE` override — by registering the provider for
     // real (only possible on Windows) and asserting `emit_panic` captures without
     // any forced-active flag set.
@@ -1193,10 +1193,10 @@ mod tests {
 
         // Register the real ETW provider; on Windows this makes is_active() true.
         assert!(
-            mxc_telemetry::init(version(), MXC_CHANNEL),
+            mxc_alpha_mxc_telemetry::init(version(), MXC_CHANNEL),
             "provider registration should succeed on Windows"
         );
-        assert!(mxc_telemetry::is_active());
+        assert!(mxc_alpha_mxc_telemetry::is_active());
         // Deliberately do NOT set TEST_FORCE_ACTIVE — the emit must proceed off
         // the real provider state alone.
         set_process_context(&ContainmentBackend::IsolationSession);
@@ -1210,7 +1210,7 @@ mod tests {
             "emit must fire off the real active provider without TEST_FORCE_ACTIVE"
         );
 
-        mxc_telemetry::shutdown();
+        mxc_alpha_mxc_telemetry::shutdown();
         reset_for_test();
     }
 }

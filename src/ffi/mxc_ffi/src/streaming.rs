@@ -6,7 +6,7 @@
 //! Where [`mxc_run`](crate::mxc_run) runs a sandbox to completion and captures
 //! its output, this surface hands the caller a live, opaque handle it can feed
 //! stdin, read stdout/stderr from, wait on, and kill while the child runs —
-//! mirroring [`mxc_sdk::spawn_sandbox`] / [`mxc_sdk::Sandbox`].
+//! mirroring [`mxc_alpha_mxc_sdk::spawn_sandbox`] / [`mxc_alpha_mxc_sdk::Sandbox`].
 //!
 //! ## Handles & ownership
 //!
@@ -54,7 +54,7 @@ use std::io::{Read, Write};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, WaitOutcome};
+use mxc_alpha_mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, WaitOutcome};
 
 use crate::{
     alloc_cstring, cstr_to_str, status_from_error_code, MXC_STATUS_BACKEND_ERROR,
@@ -66,14 +66,14 @@ use crate::{
 // Opaque handles
 // ---------------------------------------------------------------------------
 
-/// Opaque live-sandbox handle wrapping an [`mxc_sdk::Sandbox`]. Created by
+/// Opaque live-sandbox handle wrapping an [`mxc_alpha_mxc_sdk::Sandbox`]. Created by
 /// [`mxc_spawn`], destroyed by [`mxc_sandbox_free`].
 pub struct MxcSandbox {
     inner: Sandbox,
 }
 
 impl MxcSandbox {
-    /// Wrap an [`mxc_sdk::Sandbox`] as an opaque FFI handle. Used by both the
+    /// Wrap an [`mxc_alpha_mxc_sdk::Sandbox`] as an opaque FFI handle. Used by both the
     /// one-shot spawn path ([`mxc_spawn`]) and the state-aware streaming exec
     /// path (`mxc_state_aware_exec`).
     pub(crate) fn new(inner: Sandbox) -> Self {

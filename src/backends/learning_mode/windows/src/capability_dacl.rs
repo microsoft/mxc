@@ -11,7 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use learning_mode_core::{AccessType, ResourceType};
+use mxc_alpha_learning_mode_core::{AccessType, ResourceType};
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, GetLengthSid, PSID};

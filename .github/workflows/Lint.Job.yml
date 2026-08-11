@@ -28,7 +28,7 @@ jobs:
             target: aarch64-apple-darwin
             working-directory: src
             # Workspace has Windows-only crates, so --all-features won't build on macOS.
-            clippy-args: --locked --release -p mxc_darwin -p seatbelt_common
+            clippy-args: --locked --release -p mxc_darwin -p mxc_alpha_seatbelt_common
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

@@ -6,10 +6,10 @@
 //! plus the `share_folders` non-lifecycle op. `create_process` also drives
 //! the ConPTY relay setup + shutdown ladder against the local console.
 
-use wxc_common::models::IsolationSessionConfigurationId;
-use wxc_common::process_util::OwnedHandle;
+use mxc_alpha_wxc_common::models::IsolationSessionConfigurationId;
+use mxc_alpha_wxc_common::process_util::OwnedHandle;
 
-use isolation_session_bindings::bindings::{
+use mxc_alpha_isolation_session_bindings::bindings::{
     IsoSessionConfigId, IsoSessionFolderSharingRequest, IsoSessionFolderSharingResult,
     IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult, IsoSessionUserResult,
 };
@@ -208,7 +208,7 @@ impl IsolationSessionManager {
         &self,
         readwrite_paths: &[String],
         readonly_paths: &[String],
-        logger: Option<&mut wxc_common::logger::Logger>,
+        logger: Option<&mut mxc_alpha_wxc_common::logger::Logger>,
     ) -> Result<(), IsolationSessionError> {
         // Emergency mitigation (MXC issue #330): drop protected paths
         // before forwarding. See `protected_paths_filter.rs`.

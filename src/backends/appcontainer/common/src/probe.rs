@@ -14,8 +14,8 @@
 use serde::Serialize;
 
 use crate::fallback_detector::{self, FallbackError};
-use wxc_common::models::ContainerPolicy;
-use wxc_common::ui_policy::EffectiveUiRestrictions;
+use mxc_alpha_wxc_common::models::ContainerPolicy;
+use mxc_alpha_wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
 #[derive(Serialize, Debug)]

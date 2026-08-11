@@ -6,5 +6,5 @@
 /// `std::env::current_exe()` — it does NOT use this constant.
 pub const NANVIX_BIN_DIR: &str = env!("NANVIX_BIN_DIR");
 
-// Re-export shared constants from nanvix_common.
-pub use nanvix_common::REQUIRED_BINARIES;
+// Re-export shared constants from mxc_alpha_nanvix_common.
+pub use mxc_alpha_nanvix_common::REQUIRED_BINARIES;

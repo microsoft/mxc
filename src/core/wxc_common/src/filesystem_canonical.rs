@@ -12,7 +12,7 @@
 //! DOS spelling that callers can compare structurally.
 //!
 //! Like [`crate::filesystem_object`] this does file I/O, so it lives in
-//! `wxc_common` and is invoked by backend runners close to the point of
+//! `mxc_alpha_wxc_common` and is invoked by backend runners close to the point of
 //! enforcement. A path that exists but cannot be resolved is reported as
 //! [`PathCanonical::Unknown`] (distinct from a cleanly-missing
 //! [`PathCanonical::Absent`]) so callers can **fail closed** when `deniedPaths`

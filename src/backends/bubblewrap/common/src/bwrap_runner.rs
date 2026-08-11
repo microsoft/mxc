@@ -13,12 +13,12 @@
 //! supports two paths:
 //! - **Cooperative env-var proxy** (default, no privilege required): when
 //!   `network.proxy` is configured the runner launches an unprivileged HTTP
-//!   proxy via [`wxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
+//!   proxy via [`mxc_alpha_wxc_common::unix_proxy_coordinator::UnixProxyCoordinator`]
 //!   and the command builder injects `HTTP_PROXY` / `HTTPS_PROXY` /
 //!   `NO_PROXY` env vars into the sandbox.
 //! - **iptables firewall** (requires `CAP_NET_ADMIN` / root): when
 //!   `network.enforcementMode` is `firewall` or `both`, the runner reuses
-//!   [`lxc_common::network_iptables::NetworkIptablesManager`] from the LXC
+//!   [`mxc_alpha_lxc_common::network_iptables::NetworkIptablesManager`] from the LXC
 //!   backend.
 //!
 //! When only `defaultPolicy: "block"` is set (no host lists and no proxy),
@@ -32,17 +32,17 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
 
-use lxc_common::network_iptables::NetworkIptablesManager;
-use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
-use wxc_common::sandbox_process::{
+use mxc_alpha_lxc_common::network_iptables::NetworkIptablesManager;
+use mxc_alpha_wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use mxc_alpha_wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
     WaitError,
 };
-use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::validate_common;
+use mxc_alpha_wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
+use mxc_alpha_wxc_common::validator::validate_common;
 
 use crate::{bwrap_command, bwrap_version};
 
@@ -97,7 +97,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // aliasing conflict actually needs tightening (the common case is none);
         // an unresolvable path with deniedPaths present fails closed.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+        let request = match mxc_alpha_wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
@@ -115,7 +115,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // access, so the sandbox never gains access the caller lacks. Runs AFTER
         // object normalization so it is evaluated against the already-tightened
         // intents (a path moved rw -> denied must not then require write access).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+        if let Err(msg) = mxc_alpha_wxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
         // Resolve denied paths that traverse a symlink to their real host path
@@ -367,7 +367,7 @@ impl BubblewrapSandboxProcess {
             return;
         }
         self.teardown_done = true;
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         self.inner.cleanup(&mut logger);
     }
 }
@@ -534,7 +534,7 @@ struct DeniedPlan {
 /// file-masked with `/dev/null` — nothing resolvable is behind it to leak, and
 /// bwrap tolerates `/dev/null` over a symlink node (whereas `--tmpfs` aborts).
 fn resolve_denied_paths(
-    policy: &wxc_common::models::ContainerPolicy,
+    policy: &mxc_alpha_wxc_common::models::ContainerPolicy,
     logger: &mut Logger,
 ) -> Result<DeniedPlan, String> {
     let mut changed = false;
@@ -631,7 +631,7 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ProxyConfig;
+    use mxc_alpha_wxc_common::models::ProxyConfig;
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -642,7 +642,7 @@ mod tests {
 
     #[test]
     fn validate_does_not_locally_gate_builtin_test_server() {
-        // The builtinTestServer gate moved to `wxc_common::validator::validate_common`
+        // The builtinTestServer gate moved to `mxc_alpha_wxc_common::validator::validate_common`
         // (enforced centrally for every backend). The bwrap runner must therefore no
         // longer reject it locally — otherwise the gate would be applied twice with
         // diverging messages.
@@ -676,14 +676,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_symlink_to_dir() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real_dir");
         std::fs::create_dir(&target).unwrap();
         let link = dir.path().join("link_to_dir");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -705,14 +705,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_symlink_to_file() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("real_file.txt");
         std::fs::write(&target, b"secret").unwrap();
         let link = dir.path().join("link_to_file");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -733,7 +733,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_ancestor_symlink() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -744,7 +744,7 @@ mod tests {
         // Deny .../link/secret — the leaf `secret` is a real dir, `link` is the
         // symlinked ancestor.
         let denied = link.join("secret");
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -764,7 +764,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_rewrites_ancestor_symlink_missing_leaf() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -774,7 +774,7 @@ mod tests {
 
         // Deny .../link/newfile — `newfile` does not exist yet.
         let denied = link.join("newfile");
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -797,7 +797,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_noop_for_non_symlinks() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         // Canonicalize up front so a symlinked tempdir root (e.g. via TMPDIR)
         // doesn't spuriously trigger a rewrite — we are testing symlink-free paths.
@@ -808,7 +808,7 @@ mod tests {
         std::fs::create_dir(&subdir).unwrap();
         let missing = base.join("does_not_exist");
 
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![
                 file.to_string_lossy().into_owned(),
                 subdir.to_string_lossy().into_owned(),
@@ -831,13 +831,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_masks_dangling_symlink_as_file() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let link = base.join("dangling");
         std::os::unix::fs::symlink(base.join("nonexistent_target"), &link).unwrap();
 
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![link.to_string_lossy().into_owned()],
             ..Default::default()
         };
@@ -858,7 +858,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_denied_paths_folds_dotdot_under_symlinked_ancestor() {
-        use wxc_common::logger::{Logger, Mode};
+        use mxc_alpha_wxc_common::logger::{Logger, Mode};
         let dir = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(dir.path()).unwrap();
         let real = base.join("real");
@@ -869,7 +869,7 @@ mod tests {
         // Deny .../link/missing/../secret — `missing` does not exist and the
         // `..` cancels it, so the real target is .../real/secret.
         let denied = link.join("missing").join("..").join("secret");
-        let policy = wxc_common::models::ContainerPolicy {
+        let policy = mxc_alpha_wxc_common::models::ContainerPolicy {
             denied_paths: vec![denied.to_string_lossy().into_owned()],
             ..Default::default()
         };

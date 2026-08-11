@@ -10,7 +10,7 @@
 //! injected, so its logic stays testable without touching disk.
 
 use crate::wslc_bindings::WslcContainerNetworkingMode;
-use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use mxc_alpha_wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,17 +222,17 @@ impl NormalizedPath {
 /// exact-path match between a denied path and a mounted path is likewise
 /// enforceable (the path is not mounted) and is not treated as an overlap; such
 /// exact same-string conflicts are already collapsed most-restrictive-wins at
-/// parse time by `wxc_common`'s `normalize_filesystem_paths` (which runs for
+/// parse time by `mxc_alpha_wxc_common`'s `normalize_filesystem_paths` (which runs for
 /// every backend), and object-identity aliases (different spellings of the same
 /// object via symlink/hard link/bind) are additionally tightened at the runner
-/// by [`wxc_common::filesystem_object::normalize_object_conflicts`].
+/// by [`mxc_alpha_wxc_common::filesystem_object::normalize_object_conflicts`].
 ///
 /// This is a **two-tier** check. Tier 1 is a structural, lexical pre-check (no
 /// disk access): paths are parsed with drive prefix and root kept distinct,
 /// case-folded (full Unicode), and `.`/`..` folded, so traversal spellings
 /// (`C:\proj\sub\..`), whole-drive mounts (`C:\`, `\`), and drive-relative
 /// spellings (`C:secrets`) are caught. Tier 2 canonicalizes each path on disk
-/// ([`wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
+/// ([`mxc_alpha_wxc_common::filesystem_canonical::canonicalize_allowing_absent_tail`]) to
 /// collapse symlinks, junctions, 8.3 short names, and `\\?\` prefixes, then
 /// re-runs the structural compare on the resolved forms — closing the gap where
 /// a **policy path itself** is an alias that resolves into a mounted tree. A
@@ -242,7 +242,7 @@ impl NormalizedPath {
 /// mount is still caught. With `deniedPaths` present, a path that exists but
 /// cannot be resolved **fails closed** (config rejected) rather than falling
 /// back to the weaker textual compare, matching the D6 pass
-/// ([`wxc_common::filesystem_object::normalize_object_conflicts`]).
+/// ([`mxc_alpha_wxc_common::filesystem_object::normalize_object_conflicts`]).
 ///
 /// **Scope / known limitations.** Tier 2 canonicalizes only the paths *listed in
 /// the policy*; it does not scan *inside* a mounted directory for reparse

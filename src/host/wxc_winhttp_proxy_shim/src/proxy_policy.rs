@@ -20,9 +20,9 @@ use windows::Win32::System::Com::CoCreateGuid;
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
 use windows_core::PWSTR;
 
-use wxc_common::error::WxcError;
-use wxc_common::logger::Logger;
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::string_util;
 
 use crate::bindings::*;
 

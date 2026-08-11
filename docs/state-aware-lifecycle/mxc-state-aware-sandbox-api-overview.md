@@ -26,7 +26,7 @@ function signatures throughout. One-line summaries; full definitions live in
 | `SandboxSpawnOptions` | `sdk/node/src/sandbox.ts` | Existing options bag (debug, dryRun, logDir, executablePath, ptyOptions, usePty, experimental). State-aware reuses it as the third positional arg, extended with `signal?: AbortSignal` for cancellation. |
 | `pty.IPty` | `node-pty` package | Interactive PTY handle. Used as the streaming-exec return type, matching existing `spawnSandbox`. |
 | `getAvailableToolsPolicy`, `getUserProfilePolicy`, `getTemporaryFilesPolicy` | `sdk/node/src/policy.ts` | Filesystem-policy discovery helpers. Produce `FilesystemPolicyResult` fragments that compose into a state-aware Config's `filesystem` field. |
-| `ContainmentBackend` (Rust) | `wxc_common::models` | Rust dispatch enum (one variant per backend). State-aware adds `IsolationSession` and future variants. |
+| `ContainmentBackend` (Rust) | `mxc_alpha_wxc_common::models` | Rust dispatch enum (one variant per backend). State-aware adds `IsolationSession` and future variants. |
 | ProcessContainer | MXC's existing AppContainer-based one-shot backend | Relevant context: ProcessContainer streams stdout/stderr live via PTY; state-aware exec preserves that streaming model. |
 
 **Disambiguation: `sandboxId` vs `containerId`.** The state-aware wire envelope's
@@ -265,7 +265,7 @@ wire-format `containment` value and `experimental.<BACKEND_KEY>.<phase>` deseria
 — see reference §5), per-phase config and metadata as associated types (use `()` for
 phases that don't need either), and override only the methods they care about — `exec`
 is the only required method. Trait methods take `&ExecutionRequest` (the existing one-shot
-domain model from `wxc_common::models`) plus `sandbox_id` for non-provision phases and
+domain model from `mxc_alpha_wxc_common::models`) plus `sandbox_id` for non-provision phases and
 an optional backend-specific typed config; cross-cutting policy fields flow through
 `request.policy` (a `ContainerPolicy`) and per-exec process info flows through
 `request.script_code` / `request.working_directory` / `request.script_timeout` /

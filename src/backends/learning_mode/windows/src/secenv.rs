@@ -45,7 +45,7 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::WindowsProgramming::IsApiSetImplemented;
 use windows_core::{HRESULT, PCSTR, PCWSTR};
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::string_util;
 
 use crate::LearningModeError;
 

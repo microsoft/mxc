@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use wxc_common::models::{ExecutionRequest, NetworkPolicy};
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy};
 
 use crate::error::OneShotError;
 use crate::vm::MappedFolder;
@@ -289,7 +289,7 @@ fn is_descendant(child: &[String], ancestor: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
 
     fn request_with(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {

@@ -12,7 +12,7 @@
 //! [`start_container`](WSLContainerRunner::start_container) owns everything up
 //! to and including "container started, init process in hand" and is shared by
 //! both execution models: the run-to-completion [`ScriptRunner`] here, and the
-//! streaming [`SandboxBackend`](wxc_common::sandbox_process::SandboxBackend) in
+//! streaming [`SandboxBackend`](mxc_alpha_wxc_common::sandbox_process::SandboxBackend) in
 //! [`crate::sandbox`]. They differ only in where the SDK's I/O callbacks send
 //! their bytes — see [`IoSink`].
 
@@ -23,11 +23,11 @@ use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
-use wxc_common::sandbox_process::StdioMode;
-use wxc_common::script_runner::ScriptRunner;
-use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+use mxc_alpha_wxc_common::sandbox_process::StdioMode;
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
@@ -1238,7 +1238,7 @@ impl WSLContainerRunner {
     /// validation, session, image, process/container settings, start, iptables,
     /// and the init-process handle. The caller decides what happens next — wait
     /// to completion ([`Self::run_internal`]) or stream
-    /// (the [`SandboxBackend`](wxc_common::sandbox_process::SandboxBackend) impl
+    /// (the [`SandboxBackend`](mxc_alpha_wxc_common::sandbox_process::SandboxBackend) impl
     /// in [`crate::sandbox`]).
     ///
     /// `output` selects where the SDK's output callbacks send their bytes; the
@@ -1266,12 +1266,12 @@ impl WSLContainerRunner {
 
         // Object-based FS-policy normalization (D6): tighten aliases of the same
         // host object to the strictest intent (deny > ro > rw) before mapping to
-        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
+        // volume mounts. See `mxc_alpha_wxc_common::filesystem_object`. (A path moved to
         // `denied` is simply not mounted by WSLC — unmounted = invisible.) Only
         // clone the request when an aliasing conflict actually needs tightening;
         // an unresolvable path with deniedPaths present fails closed.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+        let request = match mxc_alpha_wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
@@ -1290,7 +1290,7 @@ impl WSLContainerRunner {
         // object normalization so it is evaluated against the already-tightened
         // intents. On Windows this covers directory readwrite paths (the common
         // WSLC case).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+        if let Err(msg) = mxc_alpha_wxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
 
@@ -1372,7 +1372,7 @@ impl WSLContainerRunner {
         // Route egress through the cooperative proxy: WSLc has no in-kernel
         // iptables, so per-host policy is enforced at the proxy layer by
         // injecting HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
-        // See wxc_common::proxy_env.
+        // See mxc_alpha_wxc_common::proxy_env.
         let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
             // url-only (also enforced at parse time). Fail fast rather than
             // inject an empty HTTP_PROXY= for the localhost/builtinTestServer
@@ -1396,9 +1396,9 @@ impl WSLContainerRunner {
             let _ = writeln!(
                 logger,
                 "[WSLC] Cooperative network proxy configured: {}",
-                wxc_common::proxy_env::redact_proxy_url(&proxy_url)
+                mxc_alpha_wxc_common::proxy_env::redact_proxy_url(&proxy_url)
             );
-            wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
+            mxc_alpha_wxc_common::proxy_env::apply_cooperative_proxy_env(&request.env, &proxy_url)
         } else {
             request.env.clone()
         };
@@ -2039,7 +2039,7 @@ impl StartedContainer {
     }
 
     /// Signal the container's processes, for
-    /// [`SandboxProcess::kill`](wxc_common::sandbox_process::SandboxProcess::kill).
+    /// [`SandboxProcess::kill`](mxc_alpha_wxc_common::sandbox_process::SandboxProcess::kill).
     /// `timeout_secs` is how long the SDK waits for a graceful stop.
     pub(crate) fn stop(&self, signal: WslcSignal, timeout_secs: u32) -> Result<(), String> {
         let _com = ComApartment::enter()?;
@@ -2189,8 +2189,8 @@ mod tests {
         // non-existent paths so D6 (Absent) and delegation (unknown) pass through
         // to the overlap check.
         let request = ExecutionRequest {
-            containment: wxc_common::models::ContainmentBackend::Wslc,
-            policy: wxc_common::models::ContainerPolicy {
+            containment: mxc_alpha_wxc_common::models::ContainmentBackend::Wslc,
+            policy: mxc_alpha_wxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![r"C:\mxc-nonexistent-parent".to_string()],
                 denied_paths: vec![r"C:\mxc-nonexistent-parent\secrets".to_string()],
                 ..Default::default()
@@ -2199,7 +2199,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
@@ -2237,8 +2237,8 @@ mod tests {
         }
 
         let request = ExecutionRequest {
-            containment: wxc_common::models::ContainmentBackend::Wslc,
-            policy: wxc_common::models::ContainerPolicy {
+            containment: mxc_alpha_wxc_common::models::ContainmentBackend::Wslc,
+            policy: mxc_alpha_wxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![real.to_string_lossy().into_owned()],
                 denied_paths: vec![link.join("secret").to_string_lossy().into_owned()],
                 ..Default::default()
@@ -2247,7 +2247,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 
@@ -2286,8 +2286,8 @@ mod tests {
         }
 
         let request = ExecutionRequest {
-            containment: wxc_common::models::ContainmentBackend::Wslc,
-            policy: wxc_common::models::ContainerPolicy {
+            containment: mxc_alpha_wxc_common::models::ContainmentBackend::Wslc,
+            policy: mxc_alpha_wxc_common::models::ContainerPolicy {
                 readwrite_paths: vec![real.to_string_lossy().into_owned()],
                 // `real\newsecret` never created — only reachable via the junction.
                 denied_paths: vec![link.join("newsecret").to_string_lossy().into_owned()],
@@ -2297,7 +2297,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let mut runner = WSLContainerRunner::new(&WslcConfig::default());
         let response = runner.execute(&request, &mut logger);
 

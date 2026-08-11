@@ -4,7 +4,7 @@
 //! TraceLogging ETW event emission for MXC telemetry.
 //!
 //! Event-specific data types and emission functions. The actual ETW
-//! write is delegated to the `mxc_telemetry` crate, which adds
+//! write is delegated to the `mxc_alpha_mxc_telemetry` crate, which adds
 //! common fields automatically.
 
 /// Bounded set of failure categories for error classification.
@@ -84,12 +84,12 @@ pub struct ExecutionEvent<'a> {
 
 /// Log an MXC.Execution ETW event.
 ///
-/// Delegates to the `mxc_telemetry` provider which adds common fields
+/// Delegates to the `mxc_alpha_mxc_telemetry` provider which adds common fields
 /// (Version, Channel, IsDebugging, UTCReplace_AppSessionGuid).
 pub fn log_execution(event: &ExecutionEvent<'_>) {
     let failure_str = event.failure_reason.map(|r| r.as_str()).unwrap_or("");
 
-    mxc_telemetry::log_execution(
+    mxc_alpha_mxc_telemetry::log_execution(
         event.backend,
         event.exit_code,
         event.outcome,
@@ -111,7 +111,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 /// `exit_code`, and the [`TelemetryContext`] attribution (backend, lifecycle
 /// phase, and correlation vector — the latter two empty for one-shot).
 pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code: i32) {
-    mxc_telemetry::log_error(
+    mxc_alpha_mxc_telemetry::log_error(
         ctx.backend,
         error_type.as_str(),
         exit_code,
@@ -127,7 +127,7 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
 /// records that the real emit glue (`emit_panic` / `emit_cancellation` /
 /// `emit_state_aware`) produces without an ETW consumer. Inert unless a test
 /// explicitly installs it; the production path above always makes the direct
-/// `mxc_telemetry` call regardless.
+/// `mxc_alpha_mxc_telemetry` call regardless.
 #[cfg(test)]
 pub(super) mod test_sink {
     use super::{ExecutionEvent, FailureReason, TelemetryContext};

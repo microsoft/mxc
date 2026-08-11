@@ -8,7 +8,7 @@
 //! for SIGTERM, SIGINT, or EOF on its parent-lifetime pipe before shutting
 //! down.
 //!
-//! Designed to be spawned by `wxc_common::unix_proxy_coordinator` to provide
+//! Designed to be spawned by `mxc_alpha_wxc_common::unix_proxy_coordinator` to provide
 //! cooperative, unprivileged proxy-based enforcement of `allowedHosts` /
 //! `blockedHosts`. Used by the Bubblewrap backend on Linux and the Seatbelt
 //! backend on macOS. It builds and runs on any Unix; the CONNECT proxy itself

@@ -243,7 +243,7 @@ fn run(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResp
    section, update the single-backend-section enforcement when it graduates
    from experimental to top-level:
 
-   - In `wxc_common::config_parser`, rename the matching entry in
+   - In `mxc_alpha_wxc_common::config_parser`, rename the matching entry in
      `present_backend_sections` (and update `validate_single_backend_section`)
      from `experimental.<name>` to `<name>`.
 
@@ -292,7 +292,7 @@ Process runs in sandbox
 MXC deliberately keeps **two** Rust representations of a config with a mapping at
 the parse boundary, rather than one shared type:
 
-- **Wire model** (`wxc_common::wire::MxcConfig`) — a faithful 1:1 mirror of the
+- **Wire model** (`mxc_alpha_wxc_common::wire::MxcConfig`) — a faithful 1:1 mirror of the
   config JSON: every field `Option`, `camelCase`, `experimental` carried as a raw
   `serde_json::Value`, no invariants enforced. It is the parser's deserialization
   target **and** the single source of truth the JSON schema (via schemars) and the

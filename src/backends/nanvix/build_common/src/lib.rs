@@ -7,13 +7,13 @@
 //! This crate is **build-only**: it is consumed exclusively as a
 //! `[build-dependencies]` entry by the `nanvix_binaries`, `wxc`, and `lxc`
 //! build scripts and is never linked into the shipping runtime binary. The
-//! file-staging logic lives here (rather than in the runtime `nanvix_common`
+//! file-staging logic lives here (rather than in the runtime `mxc_alpha_nanvix_common`
 //! crate) so it adds no weight to mainline code.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-use nanvix_common::{
+use mxc_alpha_nanvix_common::{
     BIN_SUBDIR, BIN_SUBDIR_FILES, REQUIRED_BINARIES, SNAPSHOTS_SUBDIR, SNAPSHOT_FILES,
 };
 
@@ -249,7 +249,7 @@ pub fn stage_artifacts_next_to_exe(nanvix_bin_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nanvix_common::{SNAPSHOT_CBOR, SNAPSHOT_VMEM};
+    use mxc_alpha_nanvix_common::{SNAPSHOT_CBOR, SNAPSHOT_VMEM};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 

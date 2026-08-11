@@ -253,7 +253,7 @@ const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
 /// `WSLContainerRunner::init_and_load_sdk`), but `CoInitializeEx` is per-thread,
 /// and the streaming handle is `Send` — so `wait`/`kill`/`Drop` can call the SDK
 /// from a thread that never initialized COM. Every such entry point takes one of
-/// these first, mirroring `appcontainer_common`'s `ComApartment`, so the calling
+/// these first, mirroring `mxc_alpha_basecontainer_common`'s `ComApartment`, so the calling
 /// thread always has an apartment while the SDK is on the stack.
 pub(crate) struct ComApartment {
     /// Whether *this* guard performed the initialization it must balance with

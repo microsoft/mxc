@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 //! The SDK's sandbox handle — a crate-owned facade over the internal
-//! `wxc_common` streaming handle, so the public API never exposes the
+//! `mxc_alpha_wxc_common` streaming handle, so the public API never exposes the
 //! foundation crate's traits.
 
 use std::io::{Read, Write};
 
-pub use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
-use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
+pub use mxc_alpha_wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
+use mxc_alpha_wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
 ///

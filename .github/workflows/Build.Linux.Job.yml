@@ -63,7 +63,7 @@ jobs:
 
       # Bubblewrap is required to run the executor characterization tests in
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
-      # always includes the Bubblewrap backend (bwrap_common is a non-optional
+      # always includes the Bubblewrap backend (mxc_alpha_bwrap_common is a non-optional
       # dependency), so the binary built above can drive it.
       - name: Install Bubblewrap
         working-directory: ${{ github.workspace }}

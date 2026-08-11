@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! C ABI over the MXC public Rust SDK ([`mxc_sdk`]).
+//! C ABI over the MXC public Rust SDK ([`mxc_alpha_mxc_sdk`]).
 //!
 //! This is the flat, panic-safe C surface that language bindings (currently the
 //! C# SDK) load. It spans three surfaces:
@@ -28,7 +28,7 @@
 //!   [`std::panic::catch_unwind`]; a panic becomes a status code
 //!   ([`MXC_STATUS_PANIC`]), never an unwind across the boundary.
 //! - **Data contract**: JSON in, captured bytes + status out. The status codes
-//!   mirror `mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
+//!   mirror `mxc_alpha_mxc_sdk::ErrorCode` one-for-one (plus a few FFI-local codes).
 //!
 //! ## ABI stability
 //!
@@ -49,7 +49,7 @@ use std::panic::catch_unwind;
 use std::ptr;
 use std::sync::OnceLock;
 
-use mxc_sdk::{build_request, run, ErrorCode, SandboxPolicy, WaitOutcome};
+use mxc_alpha_mxc_sdk::{build_request, run, ErrorCode, SandboxPolicy, WaitOutcome};
 
 mod state_aware;
 mod streaming;
@@ -62,7 +62,7 @@ pub use streaming::*;
 
 /// Success.
 pub const MXC_STATUS_SUCCESS: i32 = 0;
-// 1..=12 mirror `mxc_sdk::ErrorCode` (kept in lockstep with a CI drift gate).
+// 1..=12 mirror `mxc_alpha_mxc_sdk::ErrorCode` (kept in lockstep with a CI drift gate).
 /// The request/policy was malformed.
 pub const MXC_STATUS_MALFORMED_REQUEST: i32 = 1;
 /// The requested containment backend is not supported by this library.

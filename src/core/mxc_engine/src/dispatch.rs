@@ -4,15 +4,15 @@
 //! Streaming backend dispatch for the `mxc-sdk` library.
 //!
 //! Spawns the right [`SandboxProcess`] for the request's containment backend.
-//! It lives here — rather than in `wxc_common` — because constructing a
+//! It lives here — rather than in `mxc_alpha_wxc_common` — because constructing a
 //! backend runner requires depending on the `backends/*` crates, and
-//! `wxc_common` must not (it is the cross-platform foundation those backends
+//! `mxc_alpha_wxc_common` must not (it is the cross-platform foundation those backends
 //! build on).
 //!
 //! Only the backends with a streaming path are handled here: ProcessContainer
 //! (Windows AppContainer / BaseContainer, with the full three-tier fallback —
 //! BaseContainer, AppContainer + BFS, AppContainer + DACL — shared with the
-//! run-to-completion path via `appcontainer_common::dispatcher`), Bubblewrap
+//! run-to-completion path via `mxc_alpha_basecontainer_common::dispatcher`), Bubblewrap
 //! (Linux), Seatbelt (macOS), and WSLC (Windows, experimental, behind the
 //! `wslc` feature). Every other backend — including the remaining experimental
 //! ones (Windows Sandbox, IsolationSession, MicroVM, Hyperlight) and LXC (no
@@ -21,10 +21,10 @@
 //! standalone executor binaries (whose run-to-completion path will, in a later
 //! increment, also route through this engine).
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use wxc_common::mxc_error::MxcError;
-use wxc_common::sandbox_process::SandboxProcess;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::sandbox_process::SandboxProcess;
 
 /// `Err` when the host OS has no MXC sandbox backend. Checked before backend
 /// selection so an unsupported platform reports a clear message rather than a
@@ -82,7 +82,7 @@ pub fn spawn_runner(
 /// back to a lower tier) and folding any `extended_error` detail into the
 /// message — rather than flattening everything to a generic `BackendError`.
 fn map_spawn_error(resp: ScriptResponse) -> MxcError {
-    use wxc_common::models::FailurePhase;
+    use mxc_alpha_wxc_common::models::FailurePhase;
 
     let mut message = resp.error_message;
     if !resp.extended_error.is_empty() {
@@ -103,8 +103,8 @@ fn spawn_bubblewrap(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
-    let mut runner = bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
+    use mxc_alpha_wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    let mut runner = mxc_alpha_bwrap_common::bwrap_runner::BubblewrapScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -125,8 +125,8 @@ fn spawn_seatbelt(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
-    let mut runner = seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
+    use mxc_alpha_wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    let mut runner = mxc_alpha_seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new();
     runner
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -147,9 +147,9 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use appcontainer_common::dispatcher::{spawn_with_fallback, DispatchError, SpawnDispatchError};
+    use mxc_alpha_basecontainer_common::dispatcher::{spawn_with_fallback, DispatchError, SpawnDispatchError};
     use std::fmt::Write;
-    use wxc_common::sandbox_process::StdioMode;
+    use mxc_alpha_wxc_common::sandbox_process::StdioMode;
 
     // ProcessContainer resolves to a concrete backend + isolation tier purely
     // by host capability, via the shared `spawn_with_fallback` dispatcher — the
@@ -220,7 +220,7 @@ fn spawn_wslc(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    use mxc_alpha_wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
     if !request.experimental_enabled {
         return Err(MxcError::malformed_request(
@@ -229,7 +229,7 @@ fn spawn_wslc(
         ));
     }
     let config = request.experimental.wslc.clone().unwrap_or_default();
-    let mut runner = wslc_common::WSLContainerRunner::new(&config);
+    let mut runner = mxc_alpha_wslc_common::WSLContainerRunner::new(&config);
     runner
         .spawn(request, logger, StdioMode::Pipes)
         .map_err(map_spawn_error)
@@ -258,9 +258,9 @@ fn spawn_wslc(
 mod tests {
     use super::{ensure_host_supported, spawn_runner};
     use crate::policy::{build_request, SandboxPolicy};
-    use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::ContainmentBackend;
-    use wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::logger::{Logger, Mode};
+    use mxc_alpha_wxc_common::models::ContainmentBackend;
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
 
     fn minimal_policy() -> SandboxPolicy {
         SandboxPolicy {

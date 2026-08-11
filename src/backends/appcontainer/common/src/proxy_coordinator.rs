@@ -13,11 +13,11 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
-use wxc_common::error::WxcError;
-use wxc_common::logger::Logger;
-use wxc_common::models::{ProxyAddress, ProxyConfig};
-use wxc_common::process_util::{resolve_sibling_binary, OwnedHandle, SidAndAttributes};
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ProxyAddress, ProxyConfig};
+use mxc_alpha_wxc_common::process_util::{resolve_sibling_binary, OwnedHandle, SidAndAttributes};
+use mxc_alpha_wxc_common::string_util;
 
 /// Remove an AppContainer from the loopback exemption list.
 fn remove_loopback_exemption(container_name: &str) {
@@ -214,7 +214,7 @@ fn poll_for_ready_file(
 /// In both cases, WinHTTP proxy policy is set by an elevated
 /// `winhttp-proxy-shim` process launched via UAC.
 pub struct ProxyCoordinator {
-    proxy_address: Option<wxc_common::models::ProxyAddress>,
+    proxy_address: Option<mxc_alpha_wxc_common::models::ProxyAddress>,
     shim_process_handle: Option<OwnedHandle>,
     shim_cleanup_event: Option<OwnedHandle>,
     shim_ready_file_path: Option<PathBuf>,
@@ -271,7 +271,7 @@ impl ProxyCoordinator {
     }
 
     /// Returns the proxy address (if active).
-    pub fn address(&self) -> Option<&wxc_common::models::ProxyAddress> {
+    pub fn address(&self) -> Option<&mxc_alpha_wxc_common::models::ProxyAddress> {
         self.proxy_address.as_ref()
     }
 
@@ -489,7 +489,7 @@ impl Default for ProxyCoordinator {
 impl Drop for ProxyCoordinator {
     fn drop(&mut self) {
         // Best-effort cleanup without a logger.
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         self.stop(&mut logger);
     }
 }
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn test_stop_when_not_active() {
         let mut mgr = ProxyCoordinator::new();
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         mgr.stop(&mut logger);
         assert!(!mgr.is_active());
     }

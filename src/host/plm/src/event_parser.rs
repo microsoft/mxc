@@ -277,7 +277,7 @@ fn for_each_event_xml<F>(trace_file: &Path, verbose: bool, on_xml: F) -> Result<
 where
     F: FnMut(&str) -> Result<()>,
 {
-    let path_w = wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
+    let path_w = mxc_alpha_wxc_common::string_util::to_wide(&trace_file.to_string_lossy());
     // The event-id filter is a compile-time constant, so bake it into
     // the binary as a wide, NUL-terminated literal with `w!` rather than
     // formatting + re-encoding it on every call. The literal must stay

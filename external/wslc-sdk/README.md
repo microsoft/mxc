@@ -8,7 +8,7 @@ Azure Artifacts feed — a public, anonymous-read mirror of nuget.org.
 
 ## How the SDK is consumed
 
-The `wslc_common` crate's `build.rs` downloads the `Microsoft.WSL.Containers`
+The `mxc_alpha_wslc_common` crate's `build.rs` downloads the `Microsoft.WSL.Containers`
 `.nupkg` (pinned to `WSLC_SDK_VERSION`) from the MxcDependencies feed at compile
 time and extracts it (a nupkg is a zip) into the cargo build output directory.
 

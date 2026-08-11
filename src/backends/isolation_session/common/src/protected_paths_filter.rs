@@ -22,7 +22,7 @@ use std::collections::HashSet;
 use std::fmt::Write;
 use std::sync::OnceLock;
 
-use wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::logger::Logger;
 
 /// Returns the lazily-computed, cached set of canonical paths the filter
 /// rejects. Contents:

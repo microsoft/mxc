@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `seatbelt_common` — shared library for the macOS sandbox backend.
+//! `mxc_alpha_seatbelt_common` — shared library for the macOS sandbox backend.
 //!
 //! - [`profile_builder`] is platform-agnostic (pure string generation) so it
 //!   compiles and is fully unit-tested on every host. This lets reviewers

@@ -8,7 +8,7 @@ use tokio::fs;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-use windows_sandbox_common::auth::{self, ChannelRole, Nonce};
+use mxc_alpha_windows_sandbox_common::auth::{self, ChannelRole, Nonce};
 
 /// Bind a TCP listener and publish its address for the host.
 pub async fn bind_and_advertise(rendezvous_dir: &str) -> Result<(TcpListener, SocketAddr)> {
@@ -191,7 +191,7 @@ fn find_guest_ip() -> Result<std::net::IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sandbox_common::auth::{
+    use mxc_alpha_windows_sandbox_common::auth::{
         generate_nonce, write_nonce, ChannelRole, Nonce, NONCE_LEN_IN_BYTES,
     };
 

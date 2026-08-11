@@ -29,7 +29,7 @@
 //! this — they are genuinely absent, so there is nothing to alias.
 //!
 //! This does file I/O (`stat`/`CreateFile`), so — per design review — it lives
-//! here in `wxc_common` and is invoked by each backend runner close to the
+//! here in `mxc_alpha_wxc_common` and is invoked by each backend runner close to the
 //! point of enforcement (NOT in `config_parser`, which stays string-only). This
 //! both honors that separation and shrinks the TOCTOU window between the check
 //! and the backend actually building its mounts.

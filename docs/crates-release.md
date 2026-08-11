@@ -76,7 +76,7 @@ pwsh scripts/ci/Get-CrateOrder.ps1 -Yaml
 `-Yaml` prints paste-ready `- name` lines. Run it after adding or removing a
 crate and replace the `crateOrder` default with its output. Because packaging
 calls the same script, the packaged set is always the true closure of
-`mxc-sdk`, whatever the literal says — the literal only decides what gets
+`mxc_alpha_mxc_sdk`, whatever the literal says — the literal only decides what gets
 published.
 
 Nothing validates the literal against the packaged set before the release, and

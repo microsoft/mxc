@@ -4,7 +4,7 @@ A unified diagnostic view across every layer of the MXC stack:
 
 | Layer | Source | What you see |
 |-------|--------|--------------|
-| **SDK** | `mxc-sdk` (TypeScript) | SDK version, policy construction |
+| **SDK** | `mxc_alpha_mxc_sdk` (TypeScript) | SDK version, policy construction |
 | **Runtime** | `wxc-exec.exe` (Rust) | Input config, parsed request, sandbox spec, process lifecycle, timing |
 | **OS** | MXC OS-side ETW provider | Kernel-side sandbox creation and validation events |
 | **Internals** | Kernel-General ETW (learning mode) | Access checks that would have been denied, logged instead of blocked |

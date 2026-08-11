@@ -180,7 +180,7 @@ mxc/docs/
 
 ## Testing Strategy
 
-### Unit tests (`cargo test -p wxc_common`)
+### Unit tests (`cargo test -p mxc_alpha_wxc_common`)
 
 - `is_installed_false_on_empty_dir` — negative case for the install probe
 - `resolve_home_errors_when_nothing_configured` — actionable error when no image

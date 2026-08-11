@@ -28,10 +28,10 @@ pub const HOST_VM_MUTEX_NAME: &str = r"Local\wxc-wsb-vm";
 /// user, who would retain implicit `WRITE_DAC`.
 #[cfg(windows)]
 pub fn set_owner_only_dir(dir: &Path) -> Result<()> {
-    wxc_common::filesystem_dacl::set_owner_only_dacl(dir, true)
+    mxc_alpha_wxc_common::filesystem_dacl::set_owner_only_dacl(dir, true)
         .map_err(|e| anyhow::Error::new(e).context(format!("secure dir {dir:?}")))?;
     // A foreign owner could use implicit WRITE_DAC to defeat the new ACL.
-    let owned = wxc_common::filesystem_dacl::owner_is_self(dir)
+    let owned = mxc_alpha_wxc_common::filesystem_dacl::owner_is_self(dir)
         .map_err(|e| anyhow::Error::new(e).context(format!("read owner of {dir:?}")))?;
     if !owned {
         anyhow::bail!(
@@ -64,7 +64,7 @@ pub fn ensure_secure_dir(dir: &Path) -> Result<()> {
 /// Apply an owner-only DACL to an existing file.
 #[cfg(windows)]
 pub(crate) fn set_owner_only_file(path: &Path) -> Result<()> {
-    wxc_common::filesystem_dacl::set_owner_only_dacl(path, false)
+    mxc_alpha_wxc_common::filesystem_dacl::set_owner_only_dacl(path, false)
         .map_err(|e| anyhow::Error::new(e).context(format!("secure file {path:?}")))
 }
 

@@ -13,17 +13,17 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ExecutionRequest;
+use mxc_alpha_wxc_common::config_parser::load_request;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::ExecutionRequest;
 
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 #[cfg(target_os = "macos")]
-use wxc_common::models::ScriptResponse;
+use mxc_alpha_wxc_common::models::ScriptResponse;
 
 #[cfg(target_os = "macos")]
-use wxc_common::script_runner::handle_dry_run_exit;
+use mxc_alpha_wxc_common::script_runner::handle_dry_run_exit;
 
 #[derive(Parser)]
 #[command(name = "mxc-exec-mac", about = "macOS sandbox executor for MXC")]
@@ -125,7 +125,7 @@ fn main() {
 
 #[cfg(target_os = "macos")]
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
-    use wxc_common::telemetry;
+    use mxc_alpha_wxc_common::telemetry;
 
     // ── Telemetry init (experimental) ───────────────────────────────
     // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
@@ -151,11 +151,11 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
         telemetry::install_panic_hook();
     }
 
-    // Backend selection lives in `mxc_engine::run`, the single home for one-shot
+    // Backend selection lives in `mxc_alpha_mxc_engine::run`, the single home for one-shot
     // dispatch. On macOS it always resolves to Seatbelt (logging a note if the
     // request asked for a different backend) and runs it to completion.
     let run_start = Instant::now();
-    let response = match mxc_engine::run(request, logger) {
+    let response = match mxc_alpha_mxc_engine::run(request, logger) {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e.message);
@@ -187,7 +187,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     // `display_script_results` only writes the error into the (buffered,
     // non-debug-suppressed) logger, so surface it on stderr here for parity
     // with lxc-exec / wxc-exec (issue #564).
-    wxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_alpha_wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }

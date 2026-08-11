@@ -11,7 +11,7 @@
 //! the SDK facade's contract (parse, reject one-shot, reject non-dry-run exec,
 //! surface unsupported_phase for a backend without a state-aware impl).
 
-use mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
+use mxc_alpha_mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
 
 #[test]
 fn run_state_aware_json_rejects_one_shot_config() {

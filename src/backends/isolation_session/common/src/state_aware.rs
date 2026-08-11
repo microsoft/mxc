@@ -10,12 +10,12 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
-use wxc_common::id::mint_random_token;
-use wxc_common::models::{
+use mxc_alpha_wxc_common::id::mint_random_token;
+use mxc_alpha_wxc_common::models::{
     ExecutionRequest, IsolationSessionConfig, IsolationSessionProvisionConfig,
 };
-use wxc_common::mxc_error::MxcError;
-use wxc_common::state_aware_backend::{
+use mxc_alpha_wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::state_aware_backend::{
     DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
 };
 
@@ -293,8 +293,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, IsolationSessionUser};
-    use wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, IsolationSessionUser};
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
 
     fn well_formed_user() -> IsolationSessionUser {
         IsolationSessionUser {

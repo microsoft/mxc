@@ -1,5 +1,5 @@
 [package]
-name = "wslc_common"
+name = "mxc_alpha_wslc_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,7 +11,7 @@ default = []
 link-wslcsdk = []
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 tar = "0.4"
 libloading = "0.8"
 

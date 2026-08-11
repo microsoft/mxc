@@ -2,9 +2,9 @@
 // Licensed under the MIT License.
 
 //! The SDK's own error type — a crate-owned facade over the internal
-//! `wxc_common` error, so the public API never exposes the foundation crate.
+//! `mxc_alpha_wxc_common` error, so the public API never exposes the foundation crate.
 
-use wxc_common::mxc_error::{MxcError, MxcErrorCode};
+use mxc_alpha_wxc_common::mxc_error::{MxcError, MxcErrorCode};
 
 /// Closed set of error codes the SDK can return. Mirrors the wire-format codes
 /// (serialised as snake_case strings) one-for-one.

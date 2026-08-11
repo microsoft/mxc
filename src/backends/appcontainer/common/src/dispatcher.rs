@@ -70,12 +70,12 @@ use std::path::PathBuf;
 use crate::appcontainer_runner::{derive_sid_string, AppContainerScriptRunner, FilesystemMode};
 use crate::base_container_runner::BaseContainerRunner;
 use crate::fallback_detector::{self, FallbackError, IsolationTier};
-use wxc_common::error::WxcError;
-use wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
-use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::filesystem_dacl::{DaclError, DaclManager, RO_MASK, RW_MASK};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 /// Result of a successful dispatch decision: a phased handle holding a
 /// runner and (optionally) a `DaclManager`, with **private fields** so
@@ -474,7 +474,7 @@ pub struct DispatchedProcess {
 /// flat error so the caller can preserve fallback semantics: tier-selection /
 /// DACL failures map to `backend_unavailable` (as the run-to-completion path
 /// does), while a backend spawn failure preserves the backend's
-/// [`FailurePhase`](wxc_common::models::FailurePhase).
+/// [`FailurePhase`](mxc_alpha_wxc_common::models::FailurePhase).
 pub enum SpawnDispatchError {
     /// Tier selection or DACL application failed before the process spawned.
     /// Mirrors [`dispatch_with_fallback`]'s [`DispatchError`].
@@ -604,11 +604,11 @@ impl SandboxProcess for DaclGuardedProcess {
         self.inner.wait()
     }
 
-    fn stdout_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+    fn stdout_closer(&self) -> Option<Box<dyn mxc_alpha_wxc_common::sandbox_process::StreamCloser>> {
         self.inner.stdout_closer()
     }
 
-    fn stderr_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
+    fn stderr_closer(&self) -> Option<Box<dyn mxc_alpha_wxc_common::sandbox_process::StreamCloser>> {
         self.inner.stderr_closer()
     }
 }
@@ -616,7 +616,7 @@ impl SandboxProcess for DaclGuardedProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ExecutionRequest, ProxyAddress, ProxyConfig};
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, ExecutionRequest, ProxyAddress, ProxyConfig};
     // `ForceTierGuard` lives in `crate::test_env` so the lock is
     // shared with the `fallback_detector::tests` module — otherwise
     // a dispatcher test and a fallback-detector test running on
@@ -863,7 +863,7 @@ mod tests {
         // Stamp an Everyone grant on td_grant via `grant_appcontainer_access`
         // and persist it for the duration of the test by holding the
         // manager. Drop at end of scope rolls it back.
-        let mut mgr = wxc_common::filesystem_dacl::DaclManager::new().expect("dacl mgr");
+        let mut mgr = mxc_alpha_wxc_common::filesystem_dacl::DaclManager::new().expect("dacl mgr");
         mgr.grant_appcontainer_access(
             "S-1-1-0",
             std::slice::from_ref(&td_grant.path().to_path_buf()),
@@ -1023,7 +1023,7 @@ mod tests {
     fn dacl_guarded_process_delegates_to_inner() {
         use crate::test_env::ScopedStateDir;
         use std::io::{Read, Write};
-        use wxc_common::sandbox_process::SandboxProcess;
+        use mxc_alpha_wxc_common::sandbox_process::SandboxProcess;
 
         /// Minimal fake recording which delegated calls arrived and returning
         /// distinctive canned values.

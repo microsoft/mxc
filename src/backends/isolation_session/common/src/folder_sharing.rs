@@ -7,7 +7,7 @@
 
 use std::fmt::Write;
 
-use isolation_session_bindings::bindings::{
+use mxc_alpha_isolation_session_bindings::bindings::{
     IsoSessionFolderSharingAccessLevel, IsoSessionFolderSharingRequest,
     IsoSessionFolderSharingResult, IsoSessionFolderSharingStatus,
 };

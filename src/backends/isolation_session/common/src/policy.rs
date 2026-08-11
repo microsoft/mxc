@@ -6,8 +6,8 @@
 //! other filesystem field is rejected, and network / proxy policy is
 //! rejected at every phase — the backend has no equivalent primitive.
 
-use wxc_common::models::{ExecutionRequest, IsolationSessionUser, NetworkPolicy};
-use wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, IsolationSessionUser, NetworkPolicy};
+use mxc_alpha_wxc_common::mxc_error::MxcError;
 
 use super::error::IsolationSessionError;
 
@@ -87,8 +87,8 @@ fn validate_network_and_proxy_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
-    use wxc_common::mxc_error::MxcErrorCode;
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+    use mxc_alpha_wxc_common::mxc_error::MxcErrorCode;
 
     fn assert_policy_err_contains(err: IsolationSessionError, expected: &str) {
         match err {

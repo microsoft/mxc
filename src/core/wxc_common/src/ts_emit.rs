@@ -29,8 +29,8 @@ const BANNER: &str = "\
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
+ * model `mxc_alpha_wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
+ * (`mxc_alpha_wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
  * `scripts/versioning/check-sdk-types-codegen.js`.

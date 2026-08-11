@@ -10,7 +10,7 @@
 //! narrower "what can `mxc-sdk` itself launch?" question and reports no tier.
 
 use serde::Serialize;
-use wxc_common::models::ContainmentBackend;
+use mxc_alpha_wxc_common::models::ContainmentBackend;
 
 /// One host-available backend, plus its effective isolation tier (if any).
 ///
@@ -20,7 +20,7 @@ use wxc_common::models::ContainmentBackend;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AvailableBackend {
-    /// Canonical [`wxc_common::wire::Containment`] wire name.
+    /// Canonical [`mxc_alpha_wxc_common::wire::Containment`] wire name.
     pub backend: String,
     /// Highest-isolation tier the host supports for this backend (a canonical
     /// `IsolationTier::as_str()` name); `None`, and omitted from JSON, for
@@ -87,12 +87,12 @@ fn macos_backends() -> Vec<AvailableBackend> {
 #[cfg(target_os = "linux")]
 fn linux_backends() -> Vec<AvailableBackend> {
     let mut backends = Vec::new();
-    if bwrap_common::bwrap_version::probe_bwrap().is_ok() {
+    if mxc_alpha_bwrap_common::bwrap_version::probe_bwrap().is_ok() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Bubblewrap.wire_name(),
         ));
     }
-    if lxc_common::availability::is_lxc_available() {
+    if mxc_alpha_lxc_common::availability::is_lxc_available() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Lxc.wire_name(),
         ));
@@ -102,7 +102,7 @@ fn linux_backends() -> Vec<AvailableBackend> {
 
 #[cfg(target_os = "windows")]
 fn windows_backends() -> Vec<AvailableBackend> {
-    use appcontainer_common::fallback_detector::is_base_container_usable;
+    use mxc_alpha_basecontainer_common::fallback_detector::is_base_container_usable;
 
     // `processcontainer` is always present and the only backend with a tier
     // ladder, so it carries its effective (highest-reachable) tier.
@@ -112,7 +112,7 @@ fn windows_backends() -> Vec<AvailableBackend> {
         tier.as_str(),
     )];
 
-    if windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
+    if mxc_alpha_windows_sandbox_lifecycle::availability::is_windows_sandbox_available() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::WindowsSandbox.wire_name(),
         ));
@@ -122,7 +122,7 @@ fn windows_backends() -> Vec<AvailableBackend> {
     // runtime present), matching `platform_support()` and the runner preflight.
     // `WslcSdk::load()` alone only proves the DLL and its exports resolve.
     #[cfg(feature = "wslc")]
-    if wslc_common::is_available() {
+    if mxc_alpha_wslc_common::is_available() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::Wslc.wire_name(),
         ));
@@ -130,7 +130,7 @@ fn windows_backends() -> Vec<AvailableBackend> {
 
     // Available when the `IsoSessionOps` WinRT class is registered on the OS.
     #[cfg(feature = "isolation_session")]
-    if isolation_session_common::availability::is_isolation_session_available() {
+    if mxc_alpha_isolation_session_common::availability::is_isolation_session_available() {
         backends.push(AvailableBackend::tierless(
             ContainmentBackend::IsolationSession.wire_name(),
         ));
@@ -154,8 +154,8 @@ fn windows_backends() -> Vec<AvailableBackend> {
 fn select_tier(
     base_container_usable: bool,
     tier2_bfs_enabled: bool,
-) -> appcontainer_common::fallback_detector::IsolationTier {
-    use appcontainer_common::fallback_detector::IsolationTier;
+) -> mxc_alpha_basecontainer_common::fallback_detector::IsolationTier {
+    use mxc_alpha_basecontainer_common::fallback_detector::IsolationTier;
     if base_container_usable {
         IsolationTier::BaseContainer
     } else if tier2_bfs_enabled {
@@ -168,7 +168,7 @@ fn select_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::wire::Containment;
+    use mxc_alpha_wxc_common::wire::Containment;
 
     fn wire_name(containment: &Containment) -> String {
         serde_json::to_string(containment)
@@ -276,7 +276,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn canonical_tier_strings_match_isolation_tier() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use mxc_alpha_basecontainer_common::fallback_detector::IsolationTier;
         assert_eq!(IsolationTier::BaseContainer.as_str(), CANONICAL_TIERS[0]);
         assert_eq!(IsolationTier::AppContainerBfs.as_str(), CANONICAL_TIERS[1]);
         assert_eq!(IsolationTier::AppContainerDacl.as_str(), CANONICAL_TIERS[2]);
@@ -300,7 +300,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn tier_precedence_prefers_the_strongest_reachable_rung() {
-        use appcontainer_common::fallback_detector::IsolationTier;
+        use mxc_alpha_basecontainer_common::fallback_detector::IsolationTier;
         // BaseContainer wins whenever usable, regardless of tier2_bfs.
         assert_eq!(select_tier(true, false), IsolationTier::BaseContainer);
         assert_eq!(select_tier(true, true), IsolationTier::BaseContainer);

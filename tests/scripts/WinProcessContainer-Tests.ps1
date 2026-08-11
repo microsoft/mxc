@@ -1593,8 +1593,8 @@ function Phase-UnitTests {
     Set-Content -LiteralPath $CargoLog -Value "WinProcessContainer-Tests cargo log — $(Get-Date -Format 'o')`n" -Encoding utf8
     Push-Location $CargoRoot
     try {
-        $exit1 = Invoke-CargoTest -Arguments @('test', '-p', 'wxc_common', '--lib') -Label 'wxc_common --lib'
-        Record-Result -Phase 'P7' -Name 'cargo test -p wxc_common' -Pass ($exit1 -eq 0) -Detail "exit=$exit1; full log: $CargoLog"
+        $exit1 = Invoke-CargoTest -Arguments @('test', '-p', 'mxc_alpha_wxc_common', '--lib') -Label 'mxc_alpha_wxc_common --lib'
+        Record-Result -Phase 'P7' -Name 'cargo test -p mxc_alpha_wxc_common' -Pass ($exit1 -eq 0) -Detail "exit=$exit1; full log: $CargoLog"
         # `wxc` is a binary-only crate — no --lib target. Run its bin tests.
         $exit2 = Invoke-CargoTest -Arguments @('test', '-p', 'wxc', '--bins') -Label 'wxc --bins'
         Record-Result -Phase 'P7' -Name 'cargo test -p wxc --bins' -Pass ($exit2 -eq 0) -Detail "exit=$exit2; full log: $CargoLog"

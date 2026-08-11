@@ -10,9 +10,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
-use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use mxc_alpha_wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
 
 use crate::control_plane::{self, HostVmLock};
 use crate::error::OneShotError;
@@ -20,7 +20,7 @@ use crate::rendezvous::{GUEST_CONNECT_TIMEOUT, RENDEZVOUS_POLL_INTERVAL, RENDEZV
 use crate::teardown::{self, Reconcile, VmTeardownGuard};
 use crate::{bridge, policy, vm};
 
-use windows_sandbox_common::auth as wsb_auth;
+use mxc_alpha_windows_sandbox_common::auth as wsb_auth;
 
 const HOST_VM_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 

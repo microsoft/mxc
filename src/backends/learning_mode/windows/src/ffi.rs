@@ -22,7 +22,7 @@ use windows::Win32::System::LibraryLoader::{
     GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows_core::{HRESULT, PCSTR, PCWSTR};
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::string_util;
 
 use crate::LearningModeError;
 

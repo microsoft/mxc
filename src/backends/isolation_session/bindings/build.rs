@@ -95,7 +95,7 @@ fn main() {
         if !req.matches(&actual_ver) {
             panic!(
                 "\n\n\
-                 isolation_session_bindings: generated code targets windows crate {expected},\n\
+                 mxc_alpha_isolation_session_bindings: generated code targets windows crate {expected},\n\
                  but workspace has {actual}. Bindings must be regenerated.\n\
                  \n",
                 expected = expected_version,

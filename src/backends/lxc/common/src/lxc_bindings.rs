@@ -53,7 +53,7 @@ where
 pub fn resolve_default_lxcpath() -> String {
     // lxc-exec is Linux-only at runtime, but the crate has to compile
     // workspace-wide (clippy runs on windows-latest, and macOS dev builds
-    // pull lxc_common in transitively). On non-Linux targets the function
+    // pull mxc_alpha_lxc_common in transitively). On non-Linux targets the function
     // is never invoked in production, so fall back to a non-root EUID.
     #[cfg(target_os = "linux")]
     // SAFETY: `geteuid` is a thread-safe, side-effect-free libc call.
@@ -264,7 +264,7 @@ impl LxcContainer {
 
     /// Execute a command inside a running container using lxc-attach, with
     /// the inner process attached to a freshly-allocated pty via
-    /// [`mxc_pty::run_with_pty`]. See that crate for the full pty-bridge
+    /// [`mxc_alpha_mxc_pty::run_with_pty`]. See that crate for the full pty-bridge
     /// contract (output streamed live to host stdio, stdin forwarded after
     /// first byte arrives from inner shell, etc.).
     ///
@@ -316,7 +316,7 @@ impl LxcContainer {
         env: &[String],
         timeout: Option<std::time::Duration>,
     ) -> Result<(i32, String, String), String> {
-        use mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
+        use mxc_alpha_mxc_pty::{run_with_pty, PtyOptions, PtyOutcome, Signal};
 
         const UNBLOCK: &[Signal] = &[Signal::SIGHUP, Signal::SIGTERM, Signal::SIGINT];
 

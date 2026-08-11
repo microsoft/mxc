@@ -1,5 +1,5 @@
 [package]
-name = "lxc_common"
+name = "mxc_alpha_lxc_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,10 @@ repository.workspace = true
 description = "Shared Linux container backend support for MXC sandboxing."
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 libc = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-mxc_pty = { workspace = true }
+mxc_alpha_mxc_pty = { workspace = true }

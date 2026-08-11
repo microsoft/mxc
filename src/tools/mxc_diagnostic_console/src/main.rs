@@ -182,7 +182,7 @@ fn main() {
     };
 
     // Compute the per-user pipe name (includes current user's SID).
-    let pipe_name = wxc_common::diagnostic::diagnostic_pipe_name();
+    let pipe_name = mxc_alpha_wxc_common::diagnostic::diagnostic_pipe_name();
 
     // Enable ANSI escape codes on Windows console.
     enable_virtual_terminal();

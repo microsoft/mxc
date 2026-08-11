@@ -32,21 +32,21 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
-use wxc_common::error::WxcError;
-use wxc_common::logger::Logger;
-use wxc_common::models::{
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{
     ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
 };
-use wxc_common::process_util::{
+use mxc_alpha_wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
 };
-use wxc_common::sandbox_process::{
+use mxc_alpha_wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, take_boxed_write,
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
-use wxc_common::script_runner::get_timeout_milliseconds;
-use wxc_common::{string_util, ui_policy};
+use mxc_alpha_wxc_common::script_runner::get_timeout_milliseconds;
+use mxc_alpha_wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
     "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
@@ -147,7 +147,7 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
 /// proxy env vars (stripping any pre-existing proxy vars first).
 fn build_explicit_entries(
     env_vars: &[String],
-    proxy_address: Option<&wxc_common::models::ProxyAddress>,
+    proxy_address: Option<&mxc_alpha_wxc_common::models::ProxyAddress>,
 ) -> Vec<(String, String)> {
     let mut entries: Vec<(String, String)> = env_vars
         .iter()
@@ -167,7 +167,7 @@ fn build_explicit_entries(
 
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
-fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &mxc_alpha_wxc_common::models::ProxyAddress) {
     entries.retain(|(key, _)| {
         !PROXY_VAR_NAMES
             .iter()
@@ -516,7 +516,7 @@ pub(crate) fn log_learning_mode_capability_diagnostics(
 pub struct AppContainerScriptRunner {
     app_container_name: String,
     app_container_sid: PSID,
-    proxy_address: Option<wxc_common::models::ProxyAddress>,
+    proxy_address: Option<mxc_alpha_wxc_common::models::ProxyAddress>,
     filesystem_mode: FilesystemMode,
     /// Optional pre-derived SID string supplied by the dispatcher.
     ///
@@ -1303,12 +1303,12 @@ impl SandboxBackend for AppContainerScriptRunner {
         }
         if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
             return Err(ScriptResponse::error(
-                wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
+                mxc_alpha_wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+                mxc_alpha_wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
         Ok(())
@@ -1320,7 +1320,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        use wxc_common::validator::validate_common;
+        use mxc_alpha_wxc_common::validator::validate_common;
 
         validate_common(request)?;
         self.validate(request)?;
@@ -1438,7 +1438,7 @@ impl AppContainerSandboxProcess {
             return;
         }
         self.teardown_done = true;
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         self.prepared
             .network_manager
             .stop_all(!self.preserve_policy, &mut logger);
@@ -1624,7 +1624,7 @@ mod tests {
     #[test]
     fn permissive_learning_mode_uses_security_warning_channel() {
         let caps = vec!["permissiveLearningMode".to_string()];
-        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = mxc_alpha_wxc_common::logger::Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
 
         super::log_learning_mode_capability_diagnostics(&caps, &mut logger);
 
@@ -1678,7 +1678,7 @@ mod tests {
         let res = super::derive_sid_string("");
         assert!(matches!(
             res,
-            Err(wxc_common::error::WxcError::Initialization(_))
+            Err(mxc_alpha_wxc_common::error::WxcError::Initialization(_))
         ));
     }
 
@@ -1800,7 +1800,7 @@ mod tests {
             "https_proxy=old2".to_string(),
             "NO_PROXY=localhost".to_string(),
         ];
-        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let proxy = mxc_alpha_wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
         let entries = super::build_explicit_entries(&env, Some(&proxy));
 
         // Original proxy vars should be stripped.
@@ -1824,8 +1824,8 @@ mod tests {
     use super::{
         AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
     };
-    use wxc_common::models::{ExecutionRequest, FailurePhase};
-    use wxc_common::sandbox_process::SandboxBackend;
+    use mxc_alpha_wxc_common::models::{ExecutionRequest, FailurePhase};
+    use mxc_alpha_wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {

@@ -4,7 +4,7 @@
 
 // Schema codegen gate: the committed dev JSON Schema must be identical (modulo
 // line endings) to the schema generated from the Rust wire model
-// (`wxc_common::wire`), so the schema can never drift from its single source of
+// (`mxc_alpha_wxc_common::wire`), so the schema can never drift from its single source of
 // truth. Regenerates the schema into a temp file via the `mxc_schema_gen` tool
 // and diffs it against the committed
 // `schemas/dev/mxc-config.schema.<devSchemaFile>.json`.

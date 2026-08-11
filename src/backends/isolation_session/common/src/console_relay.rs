@@ -18,8 +18,8 @@
 //! can be exhaustively unit-tested against synthetic records without
 //! requiring a real console.
 
-use wxc_common::error::WxcError;
-use wxc_common::process_util::OwnedHandle;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::process_util::OwnedHandle;
 
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};

@@ -15,15 +15,15 @@ async fn main() -> Result<()> {
     eprintln!("[guest] starting");
 
     // Without the nonce, host connections cannot be authenticated.
-    let nonce = windows_sandbox_common::auth::read_and_consume_nonce_file(
+    let nonce = mxc_alpha_windows_sandbox_common::auth::read_and_consume_nonce_file(
         std::path::Path::new(RENDEZVOUS_DIR),
-        windows_sandbox_common::auth::NONCE_READ_TIMEOUT,
+        mxc_alpha_windows_sandbox_common::auth::NONCE_READ_TIMEOUT,
     )
     .await
     .context("read per-launch authentication nonce")?;
     eprintln!(
         "[guest] authentication nonce loaded ({} bytes)",
-        windows_sandbox_common::auth::NONCE_LEN_IN_BYTES
+        mxc_alpha_windows_sandbox_common::auth::NONCE_LEN_IN_BYTES
     );
 
     // Pre-authorise before binding to avoid an interactive firewall prompt.

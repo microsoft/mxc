@@ -6,13 +6,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
-use wxc_common::script_runner::handle_dry_run_exit;
-use wxc_common::telemetry;
+use mxc_alpha_wxc_common::config_parser::load_request;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::models::{ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::script_runner::handle_dry_run_exit;
+use mxc_alpha_wxc_common::telemetry;
 
-use lxc_common::signal_cleanup;
+use mxc_alpha_lxc_common::signal_cleanup;
 
 #[derive(Parser)]
 #[command(name = "lxc-exec", about = "Linux Container Executor")]
@@ -91,7 +91,7 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 }
 
 fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
-    use lxc_common::lxc_bindings::LxcContainer;
+    use mxc_alpha_lxc_common::lxc_bindings::LxcContainer;
 
     let container = LxcContainer::new(name, None);
 
@@ -233,12 +233,12 @@ fn main() {
     // construction — Bubblewrap (the Linux default for abstract intents), LXC
     // (explicit `containment: "lxc"`, plus the catch-all for anything else such
     // as `processcontainer`), and the experimental Hyperlight / MicroVM
-    // backends — live in `mxc_engine::run`, the single home for one-shot backend
+    // backends — live in `mxc_alpha_mxc_engine::run`, the single home for one-shot backend
     // dispatch. It runs the selected backend to completion and returns the
     // response; experimental backends that require `--experimental` (or that
     // aren't compiled in) surface an error here.
     let run_start = Instant::now();
-    let response = match mxc_engine::run(&request, &mut logger) {
+    let response = match mxc_alpha_mxc_engine::run(&request, &mut logger) {
         Ok(response) => response,
         Err(e) => {
             eprintln!("error: {}", e.message);
@@ -275,7 +275,7 @@ fn main() {
     // `display_script_results` only writes the error into the (buffered,
     // non-debug-suppressed) logger, so surface it on stderr here for parity
     // with wxc-exec (issue #564).
-    wxc_common::script_runner::emit_backend_error_envelope(&response);
+    mxc_alpha_wxc_common::script_runner::emit_backend_error_envelope(&response);
 
     process::exit(response.exit_code);
 }

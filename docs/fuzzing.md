@@ -23,7 +23,7 @@ grows the corpus across daily runs, so we keep the in-repo seeds small.
 
 ## Platform coverage
 
-Targets are pure-Rust code in `wxc_common`, so they compile and run
+Targets are pure-Rust code in `mxc_alpha_wxc_common`, so they compile and run
 identically on Windows, Linux, and macOS. We fuzz on **Windows only**
 because:
 
@@ -102,7 +102,7 @@ triage steps:
    and can be fixed in-band.
 3. **Add a regression test.** Drop the minimized crash input into the
    appropriate corpus subdir so `cmin` keeps it. If the bug fits the unit
-   test pattern, add a dedicated `#[test]` in `wxc_common` too.
+   test pattern, add a dedicated `#[test]` in `mxc_alpha_wxc_common` too.
 4. **Fix + verify.** After the fix lands, re-run the fuzz target locally
    against the original crash to confirm. Once the daily pipeline runs
    again with the fix, the fuzz job should mark the bug as resolved.

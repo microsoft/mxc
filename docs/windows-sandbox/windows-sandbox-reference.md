@@ -63,7 +63,7 @@ A phase process sends:
 | `STOP` | None | `OK\n`, followed by daemon teardown |
 | `EXEC` | Binary `ExecStart` frame | `OK\n`, output frames, then one exit frame |
 
-`EXEC` output uses the codec in `windows_sandbox_lifecycle::ipc_exec`.
+`EXEC` output uses the codec in `mxc_alpha_windows_sandbox_lifecycle::ipc_exec`.
 Single-flight admission returns `ERR busy` while another execution owns the
 guest slot and `ERR not_ready` while the VM is booting.
 

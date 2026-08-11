@@ -1,5 +1,5 @@
 [package]
-name = "appcontainer_common"
+name = "mxc-alpha-basecontainer-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,7 +15,7 @@ description = "Windows AppContainer/BaseContainer backend support for MXC sandbo
 tier2_bfs = []
 
 [dependencies]
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -26,12 +26,12 @@ semver = "1"
 windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }
-sandbox_spec = { workspace = true }
-process_security_environment_spec = { workspace = true }
+mxc-alpha-windows-secenv-projection = { workspace = true }
+mxc_alpha_process_security_environment_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
-learning_mode_windows = { workspace = true }
-learning_mode_core = { workspace = true }
+mxc_alpha_learning_mode_windows = { workspace = true }
+mxc_alpha_learning_mode_core = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

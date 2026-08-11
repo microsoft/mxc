@@ -18,9 +18,9 @@ use windows::Win32::System::Variant::VARIANT;
 use windows_core::Interface;
 
 use crate::proxy_coordinator::ProxyCoordinator;
-use wxc_common::error::WxcError;
-use wxc_common::logger::Logger;
-use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultPolicy {
@@ -245,7 +245,7 @@ impl NetworkManager {
     }
 
     /// Returns the proxy address if a proxy is active.
-    pub fn proxy_address(&self) -> Option<&wxc_common::models::ProxyAddress> {
+    pub fn proxy_address(&self) -> Option<&mxc_alpha_wxc_common::models::ProxyAddress> {
         self.proxy_coordinator.address()
     }
 
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_firewall_mode_block() {
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Firewall,
             default_network_policy: NetworkPolicy::Block,
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_capabilities_mode() {
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             ..Default::default()
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_initialize_policy_firewall_with_allowed_hosts() {
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Both,
             default_network_policy: NetworkPolicy::Allow,

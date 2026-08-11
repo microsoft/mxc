@@ -1,5 +1,5 @@
 [package]
-name = "bwrap_common"
+name = "mxc_alpha_bwrap_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,8 @@ repository.workspace = true
 description = "Bubblewrap (Linux) backend support for MXC sandboxing."
 
 [dependencies]
-wxc_common = { workspace = true }
-lxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
+mxc_alpha_lxc_common = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

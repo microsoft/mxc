@@ -6,4 +6,4 @@ license.workspace = true
 description = "Build-time helpers for staging NanVix micro-VM binaries (build-only; never linked into runtime)"
 
 [dependencies]
-nanvix_common = { path = "../common" }
+mxc_alpha_nanvix_common = { path = "../common" }

@@ -41,7 +41,7 @@
 
 use std::path::{Path, PathBuf};
 
-use wxc_common::filesystem_dacl::{
+use mxc_alpha_wxc_common::filesystem_dacl::{
     apply_explicit_ace, revoke_specific_aces_for_sid, scan_explicit_aces_for_sid, AceType,
     DaclError,
 };

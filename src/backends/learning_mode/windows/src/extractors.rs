@@ -8,7 +8,7 @@
 //! fixtures without a live/sealed ETW trace. A [`RawDenial`] still carries
 //! the *kernel-form* object path; [`crate::etl_decode`] path-normalises and
 //! de-duplicates them into the public
-//! [`learning_mode_core::DeniedResource`].
+//! [`mxc_alpha_learning_mode_core::DeniedResource`].
 //!
 //! These policy-oriented extractors intentionally do not reuse the diagnostic
 //! console's display mapping. The console accepts broad real-time provider
@@ -44,7 +44,7 @@
 //!   hashed capabilities fall back to the SID string). Records without a
 //!   decoded identifier are omitted.
 
-use learning_mode_core::{AccessType, ResourceType};
+use mxc_alpha_learning_mode_core::{AccessType, ResourceType};
 use windows::core::GUID;
 
 /// Microsoft-Windows-Kernel-General provider.

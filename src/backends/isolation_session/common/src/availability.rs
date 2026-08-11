@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use isolation_session_bindings::bindings::IsoSessionOps;
+use mxc_alpha_isolation_session_bindings::bindings::IsoSessionOps;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows_core::HRESULT;
 

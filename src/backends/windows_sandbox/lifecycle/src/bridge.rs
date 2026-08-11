@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use windows_sandbox_common::auth::{self, ChannelRole, Nonce};
-use windows_sandbox_common::sandbox_protocol::{
+use mxc_alpha_windows_sandbox_common::auth::{self, ChannelRole, Nonce};
+use mxc_alpha_windows_sandbox_common::sandbox_protocol::{
     decode_message, encode_message, validate_preamble, ControlMessage, DecodeResult, ExecRequest,
     PREAMBLE_LEN,
 };
@@ -824,8 +824,8 @@ mod tests {
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-    use windows_sandbox_common::auth::generate_nonce;
-    use windows_sandbox_common::sandbox_protocol::{encode_message, encode_preamble};
+    use mxc_alpha_windows_sandbox_common::auth::generate_nonce;
+    use mxc_alpha_windows_sandbox_common::sandbox_protocol::{encode_message, encode_preamble};
 
     #[test]
     fn classify_data_read_clean_eof_is_none() {
@@ -1073,12 +1073,12 @@ mod tests {
 
     /// Spawn an authenticated fake guest that pairs sockets by declared role.
     async fn spawn_fake_guest(
-        nonce: windows_sandbox_common::auth::Nonce,
+        nonce: mxc_alpha_windows_sandbox_common::auth::Nonce,
     ) -> (
         SocketAddr,
         oneshot::Receiver<Result<FakeGuestSide, std::io::Error>>,
     ) {
-        use windows_sandbox_common::auth::ChannelRole;
+        use mxc_alpha_windows_sandbox_common::auth::ChannelRole;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = oneshot::channel();
@@ -1086,9 +1086,9 @@ mod tests {
             let result: Result<FakeGuestSide, std::io::Error> = async {
                 let accept_one = || async {
                     let (mut s, _) = listener.accept().await?;
-                    let mut buf = [0u8; windows_sandbox_common::auth::NONCE_LEN_IN_BYTES];
+                    let mut buf = [0u8; mxc_alpha_windows_sandbox_common::auth::NONCE_LEN_IN_BYTES];
                     s.read_exact(&mut buf).await?;
-                    let got = windows_sandbox_common::auth::Nonce::from_bytes(&buf)
+                    let got = mxc_alpha_windows_sandbox_common::auth::Nonce::from_bytes(&buf)
                         .expect("read_exact filled the nonce buffer");
                     if !nonce.constant_time_eq(&got) {
                         return Err(std::io::Error::new(
@@ -1176,7 +1176,7 @@ mod tests {
             fake.stderr.write_all(b"warn").await.unwrap();
             fake.stderr.shutdown().await.ok();
             let exit = encode_message(&ControlMessage::Exit(
-                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                mxc_alpha_windows_sandbox_common::sandbox_protocol::ExitNotification {
                     exec_id: "exec-test".to_string(),
                     exit_code: 0,
                     error_message: String::new(),
@@ -1253,7 +1253,7 @@ mod tests {
             fake.stdout.shutdown().await.ok();
             fake.stderr.shutdown().await.ok();
             let exit = encode_message(&ControlMessage::Exit(
-                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                mxc_alpha_windows_sandbox_common::sandbox_protocol::ExitNotification {
                     exec_id: "exec-stdin".to_string(),
                     exit_code: 0,
                     error_message: String::new(),
@@ -1320,7 +1320,7 @@ mod tests {
             fake.stdout.shutdown().await.ok();
             fake.stderr.shutdown().await.ok();
             let exit = encode_message(&ControlMessage::Exit(
-                windows_sandbox_common::sandbox_protocol::ExitNotification {
+                mxc_alpha_windows_sandbox_common::sandbox_protocol::ExitNotification {
                     exec_id: "exec-disco".to_string(),
                     exit_code: 0,
                     error_message: String::new(),

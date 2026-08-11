@@ -312,7 +312,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create temp dir");
         // Secure the dir owner-only + inheritable, mirroring how the launch path
         // prepares the rendezvous dir before writing the nonce.
-        wxc_common::filesystem_dacl::set_owner_only_dacl(&dir, true).expect("secure dir");
+        mxc_alpha_wxc_common::filesystem_dacl::set_owner_only_dacl(&dir, true).expect("secure dir");
 
         let nonce = generate_nonce().expect("generate nonce");
         write_nonce_file(&dir, &nonce).expect("write nonce file");
@@ -322,7 +322,7 @@ mod tests {
         // Created fresh inside the owner-only dir, the file is owned by us; a
         // cross-user reader cannot open it.
         assert!(
-            wxc_common::filesystem_dacl::owner_is_self(&path).expect("read owner"),
+            mxc_alpha_wxc_common::filesystem_dacl::owner_is_self(&path).expect("read owner"),
             "nonce.bin must be owned by us (inherited owner-only DACL)"
         );
 

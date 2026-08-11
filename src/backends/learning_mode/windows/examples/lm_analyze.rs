@@ -14,10 +14,10 @@
 //!
 //! ```text
 //! # Emit the DeniedResource JSON document to stdout:
-//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
+//! cargo run -p mxc_alpha_learning_mode_windows --example lm_analyze -- <path-to.etl> --exit-code <code>
 //!
 //! # Dump every decoded event (id + property name/value pairs):
-//! cargo run -p learning_mode_windows --example lm_analyze -- <path-to.etl> --raw
+//! cargo run -p mxc_alpha_learning_mode_windows --example lm_analyze -- <path-to.etl> --raw
 //! ```
 //!
 //! Exit codes: `0` = decoded; `2` = wrong platform / bad args; `1` = decode
@@ -40,8 +40,8 @@ mod windows_impl {
     use std::io::Write;
     use std::path::Path;
 
-    use learning_mode_core::{emit, DenialAnalyzer, DenialSummary};
-    use learning_mode_windows::{visit_raw_events, EtlDenialAnalyzer};
+    use mxc_alpha_learning_mode_core::{emit, DenialAnalyzer, DenialSummary};
+    use mxc_alpha_learning_mode_windows::{visit_raw_events, EtlDenialAnalyzer};
 
     pub fn run() -> i32 {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -108,7 +108,7 @@ mod windows_impl {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         let event_count = {
-            let mut visitor = |ev: &learning_mode_windows::DecodedEventParts| {
+            let mut visitor = |ev: &mxc_alpha_learning_mode_windows::DecodedEventParts| {
                 let provider = format!("{:?}", ev.provider);
                 *histogram
                     .entry((provider.clone(), ev.event_id))

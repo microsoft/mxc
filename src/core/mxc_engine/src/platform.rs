@@ -58,10 +58,10 @@ pub fn platform_support() -> PlatformSupport {
     {
         // Presence alone is not enough: `bwrap` must also be new enough for
         // every flag the argument builder emits (see
-        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
+        // `mxc_alpha_bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
         // host-capability backend the SDK can't launch, so it is reported by
         // `available_backends()` rather than here.
-        match bwrap_common::bwrap_version::probe_bwrap() {
+        match mxc_alpha_bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => PlatformSupport {
                 is_supported: true,
                 available_methods: vec!["bubblewrap".to_string()],
@@ -110,7 +110,7 @@ pub fn platform_support() -> PlatformSupport {
 fn wslc_available() -> bool {
     #[cfg(feature = "wslc")]
     {
-        wslc_common::is_available()
+        mxc_alpha_wslc_common::is_available()
     }
     #[cfg(not(feature = "wslc"))]
     {
@@ -121,7 +121,7 @@ fn wslc_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::platform_support;
-    use wxc_common::wire::Containment;
+    use mxc_alpha_wxc_common::wire::Containment;
 
     fn wire_name(containment: &Containment) -> String {
         serde_json::to_string(containment)

@@ -13,7 +13,7 @@
 //! feature-enabled Windows build to confirm the runtime FFI resolves against the real API.
 //!
 //! ```text
-//! cargo run -p learning_mode_windows --example lm_probe
+//! cargo run -p mxc_alpha_learning_mode_windows --example lm_probe
 //! ```
 
 fn main() {
@@ -22,23 +22,23 @@ fn main() {
 
 #[cfg(target_os = "windows")]
 fn run_probe() -> i32 {
-    let learning_mode_available = learning_mode_windows::is_learning_mode_api_available();
+    let learning_mode_available = mxc_alpha_learning_mode_windows::is_learning_mode_api_available();
     println!("is_learning_mode_api_available = {learning_mode_available}");
 
-    match learning_mode_windows::LearningModeApi::load() {
+    match mxc_alpha_learning_mode_windows::LearningModeApi::load() {
         Ok(api) => println!("LearningModeApi::load = OK  ({api:?})"),
         Err(e) => println!("LearningModeApi::load = ERR ({e})"),
     }
 
-    let secenv_available = learning_mode_windows::is_security_environment_api_available();
+    let secenv_available = mxc_alpha_learning_mode_windows::is_security_environment_api_available();
     println!("is_security_environment_api_available = {secenv_available}");
 
-    let report = learning_mode_windows::probe_security_environment_exports();
+    let report = mxc_alpha_learning_mode_windows::probe_security_environment_exports();
     println!("  create export = {:?}", report.create);
     println!("  query support = {:?}", report.query_support);
     println!("  close  export = {:?}", report.close);
 
-    match learning_mode_windows::SecurityEnvironmentApi::load() {
+    match mxc_alpha_learning_mode_windows::SecurityEnvironmentApi::load() {
         Ok(api) => println!("SecurityEnvironmentApi::load = OK  ({api:?})"),
         Err(e) => println!("SecurityEnvironmentApi::load = ERR ({e})"),
     }

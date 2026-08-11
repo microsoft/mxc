@@ -3,11 +3,11 @@
 
 use std::path::PathBuf;
 
-use wxc_common::error::WxcError;
-use wxc_common::logger::Logger;
-use wxc_common::models::ContainerPolicy;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::ContainerPolicy;
 #[cfg(feature = "tier2_bfs")]
-use wxc_common::process_util;
+use mxc_alpha_wxc_common::process_util;
 
 #[cfg(feature = "tier2_bfs")]
 pub(crate) const BFSCFG_EXE: &str = "bfscfg.exe";

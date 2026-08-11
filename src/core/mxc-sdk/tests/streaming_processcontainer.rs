@@ -9,7 +9,7 @@
 
 #![cfg(target_os = "windows")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_alpha_mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
@@ -18,7 +18,7 @@ fn streaming_processcontainer_bidirectional_stdio() {
 
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
+        filesystem: Some(mxc_alpha_mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],

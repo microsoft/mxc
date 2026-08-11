@@ -22,8 +22,8 @@ use windows::Win32::System::Threading::{
     OpenEventW, OpenProcess, WaitForMultipleObjects, EVENT_ALL_ACCESS, PROCESS_SYNCHRONIZE,
 };
 
-use wxc_common::logger::{Logger, Mode};
-use wxc_common::string_util;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::string_util;
 mod bindings;
 mod proxy_policy;
 

@@ -1,5 +1,5 @@
 [package]
-name = "sandbox_spec"
+name = "mxc-alpha-windows-secenv-projection"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

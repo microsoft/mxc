@@ -2,8 +2,8 @@
 // Licensed under the MIT License.
 
 // NanVix runs on Windows and Linux only.  This predicate deliberately mirrors
-// the pre-existing gate on `wxc_common::microvm_staging`
-// (`src/core/wxc_common/src/lib.rs`), which this crate's core logic depends on
+// the pre-existing gate on `mxc_alpha_wxc_common::microvm_staging`
+// (`src/core/mxc_alpha_wxc_common/src/lib.rs`), which this crate's core logic depends on
 // and which does not exist on other platforms -- so this propagates an
 // existing platform constraint rather than introducing a new one.  On any
 // other platform the crate compiles to an empty library, which keeps the
@@ -65,24 +65,24 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 /// Multi-binary initrd (daemons + CPython) loaded by NanVix at warm start.
-const INITRD_BINARY: &str = nanvix_common::INITRD_BINARY;
+const INITRD_BINARY: &str = mxc_alpha_nanvix_common::INITRD_BINARY;
 /// NanVix daemon binary launched by the host runner (platform-conditional).
-const NANVIXD_BINARY: &str = nanvix_common::NANVIXD_BINARY;
+const NANVIXD_BINARY: &str = mxc_alpha_nanvix_common::NANVIXD_BINARY;
 /// Combined rootfs image (NanVix kernel userspace + CPython stdlib).
-const RAMFS_IMAGE: &str = nanvix_common::RAMFS_IMAGE;
+const RAMFS_IMAGE: &str = mxc_alpha_nanvix_common::RAMFS_IMAGE;
 /// Pre-built VM state snapshot (CBOR) for warm start (Windows/WHP only).
 #[cfg(target_os = "windows")]
-const SNAPSHOT_CBOR: &str = nanvix_common::SNAPSHOT_CBOR;
+const SNAPSHOT_CBOR: &str = mxc_alpha_nanvix_common::SNAPSHOT_CBOR;
 /// Subdirectory holding snapshot files next to the exe (Windows/WHP only).
 #[cfg(target_os = "windows")]
-const SNAPSHOTS_DIR: &str = nanvix_common::SNAPSHOTS_SUBDIR;
+const SNAPSHOTS_DIR: &str = mxc_alpha_nanvix_common::SNAPSHOTS_SUBDIR;
 /// Subdirectory holding kernel binary.
-const BIN_DIR: &str = nanvix_common::BIN_SUBDIR;
+const BIN_DIR: &str = mxc_alpha_nanvix_common::BIN_SUBDIR;
 /// Env var override for the NanVix snapshot home directory. Set this to
 /// force a specific location; otherwise the runner uses a standard
 /// OS-local data path or falls back to `<exe>/snapshots/`.
@@ -209,7 +209,7 @@ impl NanVixError {
 
 /// Returns the directory containing the current executable.
 ///
-/// Inlined (rather than reusing `wxc_common::process_util::exe_dir`) because
+/// Inlined (rather than reusing `mxc_alpha_wxc_common::process_util::exe_dir`) because
 /// `process_util` is gated to `target_os = "windows"`.
 fn exe_dir() -> Result<PathBuf, NanVixError> {
     std::env::current_exe()
@@ -380,7 +380,7 @@ impl NanVixScriptRunner {
         // via `-bin-dir`; missing the file here yields a clearer error than
         // letting nanvixd fail at boot time).
         let bin_subdir = dir.join(BIN_DIR);
-        for name in nanvix_common::BIN_SUBDIR_FILES {
+        for name in mxc_alpha_nanvix_common::BIN_SUBDIR_FILES {
             let path = bin_subdir.join(name);
             if !path.exists() {
                 return Err(NanVixError::Preflight(format!(
@@ -398,7 +398,7 @@ impl NanVixScriptRunner {
             // Warm start requires *all* snapshot files (kernel.vmem + kernel.whp.cbor);
             // a partial/corrupt set must trigger regeneration instead of a late failure
             // inside nanvixd.
-            let snapshots_present = nanvix_common::SNAPSHOT_FILES
+            let snapshots_present = mxc_alpha_nanvix_common::SNAPSHOT_FILES
                 .iter()
                 .all(|name| home.join(SNAPSHOTS_DIR).join(name).exists());
             if !snapshots_present {
@@ -452,7 +452,7 @@ impl NanVixScriptRunner {
         //    actually used instead of triggering a fresh cold boot in
         //    %LOCALAPPDATA%.
         let exe_snapshots = exe_dir.join(SNAPSHOTS_DIR);
-        let exe_snapshots_complete = nanvix_common::SNAPSHOT_FILES
+        let exe_snapshots_complete = mxc_alpha_nanvix_common::SNAPSHOT_FILES
             .iter()
             .all(|name| exe_snapshots.join(name).exists());
         if exe_snapshots_complete {
@@ -478,7 +478,7 @@ impl NanVixScriptRunner {
 
     /// Generate a WHP snapshot via cold boot (one-time cost, Windows only).
     ///
-    /// Delegates to `nanvix_common::generate_snapshot` which runs nanvixd with
+    /// Delegates to `mxc_alpha_nanvix_common::generate_snapshot` which runs nanvixd with
     /// `-kernel-args snapshot` and cwd set to `snapshot_home`. nanvixd writes
     /// snapshot files to `<snapshot_home>/snapshots/` directly. Subsequent runs
     /// restore from the snapshot (~20 ms vs ~430 ms cold boot).
@@ -497,7 +497,7 @@ impl NanVixScriptRunner {
         eprintln!("nanvix: no snapshot found — generating via cold boot (one-time cost)...");
 
         let start = Instant::now();
-        nanvix_common::generate_snapshot(
+        mxc_alpha_nanvix_common::generate_snapshot(
             snapshot_home,
             nanvixd,
             &exe_dir.join(BIN_DIR),
@@ -872,7 +872,7 @@ impl NanVixScriptRunner {
     ) -> ScriptResponse {
         // Drain stderr concurrently with `wait()` so a verbose child cannot
         // block on a full pipe buffer. We retain only the last
-        // [`nanvix_common::STDERR_TAIL_BYTES`] bytes so an untrusted guest
+        // [`mxc_alpha_nanvix_common::STDERR_TAIL_BYTES`] bytes so an untrusted guest
         // emitting unbounded stderr cannot cause host memory growth
         // (availability / DoS hardening). In the default (non-trace) mode
         // stderr is inherited and `child.stderr` is `None`, so the join
@@ -880,13 +880,13 @@ impl NanVixScriptRunner {
         let stderr_handle = child
             .stderr
             .take()
-            .map(|s| thread::spawn(move || nanvix_common::drain_stderr_tail(s)));
+            .map(|s| thread::spawn(move || mxc_alpha_nanvix_common::drain_stderr_tail(s)));
 
         let exit_status = child.wait();
 
         let stderr_output = stderr_handle
             .and_then(|h| h.join().ok())
-            .map(|(bytes, truncated)| nanvix_common::format_stderr_tail(&bytes, truncated))
+            .map(|(bytes, truncated)| mxc_alpha_nanvix_common::format_stderr_tail(&bytes, truncated))
             .unwrap_or_default();
 
         {
@@ -956,11 +956,11 @@ impl ScriptRunner for NanVixScriptRunner {
         // Build staging directory with script and filesystem policy paths.
         let staging_root = std::env::temp_dir().join("mxc-microvm");
         // Sweep orphaned staging dirs from previous crashed runs (older than 1 hour).
-        wxc_common::microvm_staging::sweep_orphaned_staging_dirs(
+        mxc_alpha_wxc_common::microvm_staging::sweep_orphaned_staging_dirs(
             &staging_root,
             std::time::Duration::from_secs(ORPHAN_SWEEP_MAX_AGE_SECS),
         );
-        let mut staging = match wxc_common::microvm_staging::StagingDir::new(
+        let mut staging = match mxc_alpha_wxc_common::microvm_staging::StagingDir::new(
             staging_root,
             &request.script_code,
             &request.policy.readwrite_paths,
@@ -1056,8 +1056,8 @@ impl ScriptRunner for NanVixScriptRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::logger::{Logger, Mode};
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use mxc_alpha_wxc_common::logger::{Logger, Mode};
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, NetworkPolicy};
 
     #[test]
     fn total_timeout_adds_boot_staging_and_script() {
@@ -1414,8 +1414,8 @@ mod tests {
         let request = ExecutionRequest {
             script_code: "echo test".to_string(),
             policy: ContainerPolicy {
-                network_proxy: wxc_common::models::ProxyConfig {
-                    address: Some(wxc_common::models::ProxyAddress::new(
+                network_proxy: mxc_alpha_wxc_common::models::ProxyConfig {
+                    address: Some(mxc_alpha_wxc_common::models::ProxyAddress::new(
                         "127.0.0.1".to_string(),
                         8080,
                     )),

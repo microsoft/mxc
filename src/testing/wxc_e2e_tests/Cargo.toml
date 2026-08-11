@@ -14,4 +14,4 @@ serde_json.workspace = true
 # Bubblewrap characterization tests reuse the backend's own version probe so
 # their skip condition cannot drift from what the runner accepts.
 [target.'cfg(target_os = "linux")'.dependencies]
-bwrap_common.workspace = true
+mxc_alpha_bwrap_common.workspace = true

@@ -3,7 +3,7 @@
 # see README.md and regenerate.ps1. Provenance (schema hash, pinned flatc
 # version, source build) lives in the schema's .provenance.toml.
 [package]
-name = "process_security_environment_spec"
+name = "mxc_alpha_process_security_environment_spec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

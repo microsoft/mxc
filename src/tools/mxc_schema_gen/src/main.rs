@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Schema codegen tool. Emits the MXC config JSON Schema — or, with `--ts`, the
-//! SDK wire TypeScript types — generated from the dedicated `wxc_common::wire`
+//! SDK wire TypeScript types — generated from the dedicated `mxc_alpha_wxc_common::wire`
 //! model.
 //!
 //! Usage (run from the repo root; the Cargo workspace lives in `src/`):
@@ -24,11 +24,11 @@ fn main() -> ExitCode {
     };
 
     let content = if emit_ts {
-        wxc_common::wire::generate_sdk_types_ts()
+        mxc_alpha_wxc_common::wire::generate_sdk_types_ts()
     } else {
         // Preserve the historical schema output: the rendered string + trailing
         // newline, byte-for-byte (the schema codegen gate diffs against it).
-        format!("{}\n", wxc_common::wire::generate_config_schema_json())
+        format!("{}\n", mxc_alpha_wxc_common::wire::generate_config_schema_json())
     };
     let label = if emit_ts {
         "SDK TypeScript types"

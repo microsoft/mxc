@@ -9,11 +9,11 @@ use std::fmt::Write;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{
     ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
 };
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
@@ -91,11 +91,11 @@ impl LxcScriptRunner {
     fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // Object-based FS-policy normalization (D6): tighten aliases of the same
         // host object to the strictest intent (deny > ro > rw) before building
-        // mounts. See `wxc_common::filesystem_object`. Only clone the request
+        // mounts. See `mxc_alpha_wxc_common::filesystem_object`. Only clone the request
         // when an aliasing conflict actually needs tightening; an unresolvable
         // path with deniedPaths present fails closed.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+        let request = match mxc_alpha_wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
             logger,
         ) {
@@ -113,7 +113,7 @@ impl LxcScriptRunner {
         // access, so the sandbox never gains access the caller lacks. Runs AFTER
         // object normalization so it is evaluated against the already-tightened
         // intents.
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+        if let Err(msg) = mxc_alpha_wxc_common::filesystem_access::check_delegation(&request.policy) {
             return ScriptResponse::error(&msg);
         }
 

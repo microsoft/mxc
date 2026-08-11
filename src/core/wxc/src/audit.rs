@@ -39,7 +39,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
-use wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::logger::Logger;
 
 /// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
 /// same install directory. Returns `None` when the current exe path

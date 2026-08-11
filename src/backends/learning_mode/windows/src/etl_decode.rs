@@ -12,7 +12,7 @@
 //! traces do not accumulate every decoded event in memory.
 //!
 //! [`EtlDenialAnalyzer`] implements the cross-platform
-//! [`learning_mode_core::DenialAnalyzer`] trait so the runner and tests can
+//! [`mxc_alpha_learning_mode_core::DenialAnalyzer`] trait so the runner and tests can
 //! depend on the abstraction rather than this Windows-specific decoder.
 //!
 //! The diagnostic console has a separate real-time, display-oriented ETW
@@ -28,7 +28,7 @@ use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use learning_mode_core::{AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource};
+use mxc_alpha_learning_mode_core::{AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource};
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
@@ -64,7 +64,7 @@ type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> 
 struct Accumulator<'visitor> {
     mode: CollectionMode,
     denials: Vec<DeniedResource>,
-    seen: HashSet<(String, learning_mode_core::AccessType)>,
+    seen: HashSet<(String, mxc_alpha_learning_mode_core::AccessType)>,
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
     raw_event_count: usize,
@@ -112,7 +112,7 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial(&mut self, raw: RawDenial) {
-        let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
+        let resource = if raw.resource_type == mxc_alpha_learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
                 Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
                 Some(_) => return,
@@ -125,7 +125,7 @@ impl<'visitor> Accumulator<'visitor> {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
         let dedup_resource = match raw.resource_type {
-            learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
+            mxc_alpha_learning_mode_core::ResourceType::File | mxc_alpha_learning_mode_core::ResourceType::Other => {
                 resource.to_ascii_lowercase()
             }
             _ => resource.clone(),
@@ -435,7 +435,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{AccessType, ResourceType};
+    use mxc_alpha_learning_mode_core::{AccessType, ResourceType};
 
     #[test]
     fn raw_visitor_panic_is_captured_inside_callback_state() {

@@ -3,8 +3,8 @@
 
 //! State-aware lifecycle C ABI over the MXC public Rust SDK.
 //!
-//! Two entry points mirror the SDK's [`mxc_sdk::run_state_aware_json`] and
-//! [`mxc_sdk::exec_sandbox`]:
+//! Two entry points mirror the SDK's [`mxc_alpha_mxc_sdk::run_state_aware_json`] and
+//! [`mxc_alpha_mxc_sdk::exec_sandbox`]:
 //!
 //! - [`mxc_state_aware`] drives the **envelope phases** (`provision` / `start` /
 //!   `stop` / `deprovision`, and a dry run of any phase): JSON request in, JSON
@@ -22,7 +22,7 @@ use std::ffi::c_char;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 
-use mxc_sdk::{exec_sandbox, run_state_aware_json};
+use mxc_alpha_mxc_sdk::{exec_sandbox, run_state_aware_json};
 
 use crate::streaming::MxcSandbox;
 use crate::{

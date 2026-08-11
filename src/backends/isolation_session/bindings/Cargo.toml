@@ -1,5 +1,5 @@
 [package]
-name = "isolation_session_bindings"
+name = "mxc_alpha_isolation_session_bindings"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

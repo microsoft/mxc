@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 //
-// Fuzz target for `wxc_common::config_parser::load_mxc_request`.
+// Fuzz target for `mxc_alpha_wxc_common::config_parser::load_mxc_request`.
 //
 // This exercises the full parse pipeline for a one-shot or state-aware MXC
 // request supplied as raw (non-base64) JSON: the serde_json deserializer for
@@ -13,8 +13,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use wxc_common::config_parser::load_mxc_request;
-use wxc_common::logger::{Logger, Mode};
+use mxc_alpha_wxc_common::config_parser::load_mxc_request;
+use mxc_alpha_wxc_common::logger::{Logger, Mode};
 
 fuzz_target!(|data: &[u8]| {
     // The real entry point accepts a `&str`, so reject non-UTF-8 input the

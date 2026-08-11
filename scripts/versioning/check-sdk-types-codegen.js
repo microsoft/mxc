@@ -5,7 +5,7 @@
 // SDK wire-types codegen gate: the committed `sdk/node/src/generated/wire.ts` must
 // be identical (modulo line endings) to the output of the Rust TypeScript
 // emitter (`mxc_schema_gen --ts`), so the SDK's drift oracle can never go stale
-// relative to the Rust wire model. The emitter lives in `wxc_common::ts_emit`
+// relative to the Rust wire model. The emitter lives in `mxc_alpha_wxc_common::ts_emit`
 // and uses no third-party generator.
 //
 // Mirrors `check-schema-codegen.js`. Run from anywhere:

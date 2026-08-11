@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Build script for wslc_common — downloads the WSLC SDK NuGet package and
+//! Build script for mxc_alpha_wslc_common — downloads the WSLC SDK NuGet package and
 //! copies wslcsdk.dll next to the final binary so it can be loaded at runtime.
 //!
 //! The SDK is resolved from:
@@ -42,7 +42,7 @@ fn feed_url(version: &str) -> String {
 fn main() {
     // Skip nupkg extraction and DLL copy unless the `link-wslcsdk` feature is
     // enabled. Without this gate, workspace builds would extract the nupkg
-    // even when no binary depends on wslc_common.
+    // even when no binary depends on mxc_alpha_wslc_common.
     if std::env::var("CARGO_FEATURE_LINK_WSLCSDK").is_err() {
         return;
     }
@@ -189,7 +189,7 @@ fn download_and_extract(version: &str, arch: &str) -> Result<PathBuf, String> {
 /// environments.
 fn extract_vendored(version: &str, arch: &str) -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    // wslc_common lives at src/backends/wslc/common → repo root is four levels up.
+    // mxc_alpha_wslc_common lives at src/backends/wslc/common → repo root is four levels up.
     let nupkg = manifest_dir
         .join("../../../../external/wslc-sdk")
         .join(format!("Microsoft.WSL.Containers.{version}.nupkg"));

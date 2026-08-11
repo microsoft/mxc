@@ -27,8 +27,8 @@
 
 use std::fmt::Write as _;
 
-use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
-use wxc_common::models::{
+use mxc_alpha_wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
+use mxc_alpha_wxc_common::models::{
     ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress,
 };
 
@@ -199,7 +199,7 @@ fn write_filesystem_allow(out: &mut String, paths: &ResolvedPaths) {
     }
 
     // Emit shallow-to-deep, one rule per path, using the same ordering the
-    // Linux backends apply (`wxc_common::filesystem_resolve`). Seatbelt is
+    // Linux backends apply (`mxc_alpha_wxc_common::filesystem_resolve`). Seatbelt is
     // last-match-wins between rules that carry a filter, so ordering by depth
     // makes the *deepest* intent win at every path — a `readonlyPaths` entry
     // nested inside a broader `readwritePaths` subtree stays read-only rather
@@ -676,7 +676,7 @@ fn escape_for_quotes(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{SeatbeltConfig, UiPolicy};
+    use mxc_alpha_wxc_common::models::{SeatbeltConfig, UiPolicy};
 
     fn build_profile(request: &ExecutionRequest) -> Result<String, String> {
         build_profile_with_proxy(request, request.policy.network_proxy.address.as_ref())
@@ -859,7 +859,7 @@ mod tests {
         // rule to that exact port under default-deny — not silently dropping it.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Block;
-        r.policy.network_proxy = wxc_common::models::ProxyConfig {
+        r.policy.network_proxy = mxc_alpha_wxc_common::models::ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".into(), 9091)),
             builtin_test_server: false,
         };

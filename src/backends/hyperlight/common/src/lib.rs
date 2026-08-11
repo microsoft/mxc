@@ -81,9 +81,9 @@
 
 use std::path::{Path, PathBuf};
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 use hyperlight_unikraft::pyhl;
 use hyperlight_unikraft::{AllowList, BlockList, Preopen};
@@ -647,8 +647,8 @@ fn os_data_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::logger::Mode;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use mxc_alpha_wxc_common::logger::Mode;
+    use mxc_alpha_wxc_common::models::{ContainerPolicy, NetworkPolicy};
 
     fn runner() -> HyperlightScriptRunner {
         HyperlightScriptRunner::new()

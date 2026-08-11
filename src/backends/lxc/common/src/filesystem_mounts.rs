@@ -11,9 +11,9 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
-use wxc_common::logger::Logger;
-use wxc_common::models::ContainerPolicy;
+use mxc_alpha_wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::ContainerPolicy;
 
 use crate::lxc_bindings::LxcContainer;
 

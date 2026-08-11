@@ -9,8 +9,8 @@
 use std::net::ToSocketAddrs;
 use std::process::Command;
 
-use wxc_common::logger::Logger;
-use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 
 /// Manages iptables rules for an LXC container's network policy.
 pub struct NetworkIptablesManager {
@@ -296,7 +296,7 @@ impl NetworkIptablesManager {
 impl Drop for NetworkIptablesManager {
     fn drop(&mut self) {
         if self.rules_applied {
-            let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
+            let mut logger = mxc_alpha_wxc_common::logger::Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
             let _ = self.remove_firewall_rules(&mut logger);
         }
     }

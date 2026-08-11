@@ -12,7 +12,7 @@
 //!
 //! - [`resolve_runner`] performs backend selection only, returning a
 //!   [`ResolvedRunner`] (the boxed runner plus, on Windows, an optional
-//!   [`DaclManager`](wxc_common::filesystem_dacl::DaclManager) guard for the
+//!   [`DaclManager`](mxc_alpha_wxc_common::filesystem_dacl::DaclManager) guard for the
 //!   ProcessContainer fallback tiers, whose `Drop` restores host ACEs).
 //!   Callers that must manage the guard's lifetime across signal / audit
 //!   machinery (`wxc-exec`) use this and own the guard themselves.
@@ -26,12 +26,12 @@
 //! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
 //! resolves to Seatbelt.
 
-use wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::logger::Logger;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-use wxc_common::models::ContainmentBackend;
-use wxc_common::models::{ExecutionRequest, ScriptResponse};
-use wxc_common::mxc_error::MxcError;
-use wxc_common::script_runner::ScriptRunner;
+use mxc_alpha_wxc_common::models::ContainmentBackend;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, ScriptResponse};
+use mxc_alpha_wxc_common::mxc_error::MxcError;
+use mxc_alpha_wxc_common::script_runner::ScriptRunner;
 
 use crate::error::Error;
 
@@ -49,7 +49,7 @@ pub struct ResolvedRunner {
     /// Guard restoring host ACEs applied by the ProcessContainer DACL-fallback
     /// tier; `None` for every other tier and backend. Windows only.
     #[cfg(target_os = "windows")]
-    pub dacl_manager: Option<wxc_common::filesystem_dacl::DaclManager>,
+    pub dacl_manager: Option<mxc_alpha_wxc_common::filesystem_dacl::DaclManager>,
 }
 
 impl ResolvedRunner {
@@ -73,7 +73,7 @@ impl ResolvedRunner {
 /// run-to-completion [`ScriptRunner`].
 ///
 /// On Windows the ProcessContainer backend drives
-/// [`dispatch_with_fallback`](appcontainer_common::dispatcher::dispatch_with_fallback),
+/// [`dispatch_with_fallback`](mxc_alpha_basecontainer_common::dispatcher::dispatch_with_fallback),
 /// logging the selected isolation tier and any tier-selection warnings to
 /// `logger`, and surfacing the DACL guard in the returned [`ResolvedRunner`].
 ///
@@ -120,7 +120,7 @@ fn resolve_runner_inner(
             // BaseContainer (OS sandbox API) when usable and otherwise falls
             // back to AppContainer tiers (BFS / DACL). The schema version does
             // not influence this choice.
-            match appcontainer_common::dispatcher::dispatch_with_fallback(request) {
+            match mxc_alpha_basecontainer_common::dispatcher::dispatch_with_fallback(request) {
                 Ok(dispatched) => {
                     for w in &dispatched.warnings {
                         let _ = writeln!(logger, "warning: {w}");
@@ -139,7 +139,7 @@ fn resolve_runner_inner(
                 Err(e) => {
                     // Surface any retained-entry DACL warnings through the
                     // logger so the caller's buffer flush still reports them.
-                    if let appcontainer_common::dispatcher::DispatchError::Dacl {
+                    if let mxc_alpha_basecontainer_common::dispatcher::DispatchError::Dacl {
                         warnings, ..
                     } = &e
                     {
@@ -167,7 +167,7 @@ fn resolve_runner_inner(
                     .cloned()
                     .unwrap_or_default();
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    wslc_common::wsl_container_runner::WSLContainerRunner::new(&wslc_config),
+                    mxc_alpha_wslc_common::wsl_container_runner::WSLContainerRunner::new(&wslc_config),
                 )))
             }
             #[cfg(not(feature = "wslc"))]
@@ -199,7 +199,7 @@ fn resolve_runner_inner(
             #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
+                    mxc_alpha_nanvix_runner::NanVixScriptRunner::new(),
                 )))
             }
             #[cfg(not(feature = "microvm"))]
@@ -217,7 +217,7 @@ fn resolve_runner_inner(
                 ));
             }
             if let Some(ws) = &request.experimental.windows_sandbox {
-                let default = wxc_common::models::WindowsSandboxConfig::default();
+                let default = mxc_alpha_wxc_common::models::WindowsSandboxConfig::default();
                 if ws.idle_timeout_ms != default.idle_timeout_ms
                     || ws.daemon_pipe_name != default.daemon_pipe_name
                 {
@@ -230,7 +230,7 @@ fn resolve_runner_inner(
                 }
             }
             Ok(ResolvedRunner::without_guard(Box::new(
-                windows_sandbox_lifecycle::WindowsSandboxRunner::new(),
+                mxc_alpha_windows_sandbox_lifecycle::WindowsSandboxRunner::new(),
             )))
         }
         ContainmentBackend::IsolationSession => {
@@ -242,7 +242,7 @@ fn resolve_runner_inner(
                     ));
                 }
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    isolation_session_common::IsolationSessionRunner::new(),
+                    mxc_alpha_isolation_session_common::IsolationSessionRunner::new(),
                 )))
             }
             #[cfg(not(feature = "isolation_session"))]
@@ -265,7 +265,7 @@ fn resolve_runner_inner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use wxc_common::sandbox_process::Runner;
+    use mxc_alpha_wxc_common::sandbox_process::Runner;
 
     match request.containment {
         ContainmentBackend::Hyperlight => resolve_hyperlight(request),
@@ -278,7 +278,7 @@ fn resolve_runner_inner(
             #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
-                    nanvix_runner::NanVixScriptRunner::new(),
+                    mxc_alpha_nanvix_runner::NanVixScriptRunner::new(),
                 )))
             }
             #[cfg(not(feature = "microvm"))]
@@ -289,10 +289,10 @@ fn resolve_runner_inner(
             }
         }
         ContainmentBackend::Bubblewrap => Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
-            bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
+            mxc_alpha_bwrap_common::bwrap_runner::BubblewrapScriptRunner::new(),
         )))),
         ContainmentBackend::Lxc => Ok(ResolvedRunner::without_guard(Box::new(
-            lxc_common::lxc_runner::LxcScriptRunner::new(
+            mxc_alpha_lxc_common::lxc_runner::LxcScriptRunner::new(
                 &request.lxc_config,
                 &request.container_id,
                 &request.lifecycle,
@@ -303,7 +303,7 @@ fn resolve_runner_inner(
                 "Note: containment {other:?} unsupported on lxc-exec; falling back to LXC."
             ));
             Ok(ResolvedRunner::without_guard(Box::new(
-                lxc_common::lxc_runner::LxcScriptRunner::new(
+                mxc_alpha_lxc_common::lxc_runner::LxcScriptRunner::new(
                     &request.lxc_config,
                     &request.container_id,
                     &request.lifecycle,
@@ -323,13 +323,13 @@ fn resolve_runner_inner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
-    use wxc_common::sandbox_process::Runner;
+    use mxc_alpha_wxc_common::sandbox_process::Runner;
 
     if request.containment != ContainmentBackend::Seatbelt {
         logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
     }
     Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
-        seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
+        mxc_alpha_seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
     ))))
 }
 
@@ -376,8 +376,8 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
-    use wxc_common::logger::Mode;
-    use wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
+    use mxc_alpha_wxc_common::logger::Mode;
+    use mxc_alpha_wxc_common::models::{ExperimentalConfig, WindowsSandboxConfig};
 
     fn windows_sandbox_request(config: Option<WindowsSandboxConfig>) -> ExecutionRequest {
         ExecutionRequest {

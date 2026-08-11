@@ -27,16 +27,16 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
-use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
-use wxc_common::sandbox_process::{
+use mxc_alpha_wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
+use mxc_alpha_wxc_common::logger::Logger;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
+use mxc_alpha_wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
     WaitError,
 };
-use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::validate_common;
+use mxc_alpha_wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
+use mxc_alpha_wxc_common::validator::validate_common;
 
 use crate::profile_builder::build_profile_with_proxy;
 
@@ -451,7 +451,7 @@ impl SeatbeltSandboxProcess {
     fn run_cleanup(&mut self) {
         // Silent buffer logger: teardown may run during `drop` (possibly on an
         // unwinding path), and the coordinator's own `Drop` is likewise silent.
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        let mut logger = Logger::new(mxc_alpha_wxc_common::logger::Mode::Buffer);
         self.proxy.stop(&mut logger);
 
         if self.cleanup.is_empty() {
@@ -820,7 +820,7 @@ fn cleanup_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExecutionRequest, SeatbeltConfig};
+    use mxc_alpha_wxc_common::models::{ExecutionRequest, SeatbeltConfig};
 
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {

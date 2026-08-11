@@ -5,9 +5,9 @@
 //! `ProcessOptions` built from an `ExecutionRequest`, then translated to the
 //! WinRT `IsoSessionProcessOptions` consumed by `RunProcessWithOptionsAsync`.
 
-use wxc_common::models::ExecutionRequest;
+use mxc_alpha_wxc_common::models::ExecutionRequest;
 
-use isolation_session_bindings::bindings::IsoSessionProcessOptions;
+use mxc_alpha_isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
 use super::error::{lifecycle_err, IsolationSessionError};

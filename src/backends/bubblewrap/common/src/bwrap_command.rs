@@ -9,9 +9,9 @@
 
 use std::collections::HashSet;
 
-use wxc_common::filesystem_resolve::FsIntent;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
-use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
+use mxc_alpha_wxc_common::filesystem_resolve::FsIntent;
+use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
+use mxc_alpha_wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
 /// deny-by-default baseline. Mirrors the seatbelt backend's
@@ -235,7 +235,7 @@ pub fn build_args_classified(
     // precedence. `resolve_mount_order` assumes object normalization already ran
     // (it does, in the runner before `build_args`), so exact same-path conflicts
     // are already collapsed to the strictest intent.
-    for mount in wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
+    for mount in mxc_alpha_wxc_common::filesystem_resolve::resolve_mount_order(&request.policy) {
         match mount.intent {
             // Read-write: override the base ro-bind and any standard mount.
             FsIntent::ReadWrite => {
@@ -309,7 +309,7 @@ pub fn build_args_classified(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
+    use mxc_alpha_wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {

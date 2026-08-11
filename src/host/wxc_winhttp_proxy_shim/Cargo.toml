@@ -9,7 +9,7 @@ name = "winhttp-proxy-shim"
 path = "src/main.rs"
 
 [dependencies]
-wxc_common.workspace = true
+mxc_alpha_wxc_common.workspace = true
 clap.workspace = true
 windows.workspace = true
 windows-core.workspace = true

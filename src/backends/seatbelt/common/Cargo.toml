@@ -1,5 +1,5 @@
 [package]
-name = "seatbelt_common"
+name = "mxc_alpha_seatbelt_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ description = "Seatbelt (macOS) backend support for MXC sandboxing."
 # Provides ExecutionRequest, ContainerPolicy, SeatbeltConfig, Logger, and
 # the ScriptRunner trait that seatbelt_runner implements. Same dep that
 # lxc_common uses.
-wxc_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }

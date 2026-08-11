@@ -9,7 +9,7 @@
 //! skip the SDK's DISM query: `dism /online` needs elevation and this probe only
 //! runs unelevated, so it would always fall through to this same exe check.
 
-use wxc_common::system_dir::system_directory;
+use mxc_alpha_wxc_common::system_dir::system_directory;
 
 pub fn is_windows_sandbox_available() -> bool {
     // `system_directory()` resolves via `GetSystemDirectoryW`, not

@@ -6,12 +6,12 @@
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
 //! [`build_request`], `spawn_sandbox`, read the (untaken)
-//! stdout/stderr, then [`wait`](mxc_sdk::Sandbox::wait) for the exit code —
+//! stdout/stderr, then [`wait`](mxc_alpha_mxc_sdk::Sandbox::wait) for the exit code —
 //! the same path the consumer drives.
 
-use mxc_sdk::{build_request, ErrorCode, SandboxPolicy};
+use mxc_alpha_mxc_sdk::{build_request, ErrorCode, SandboxPolicy};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::{spawn_sandbox, SandboxRequest, WaitOutcome};
+use mxc_alpha_mxc_sdk::{spawn_sandbox, SandboxRequest, WaitOutcome};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
@@ -19,7 +19,7 @@ use mxc_sdk::{spawn_sandbox, SandboxRequest, WaitOutcome};
 fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
+        filesystem: Some(mxc_alpha_mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -45,7 +45,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
 fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> SandboxRequest {
     let policy = SandboxPolicy {
         version: version.to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
+        filesystem: Some(mxc_alpha_mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["C:\\Windows\\Temp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],
@@ -78,7 +78,7 @@ struct RunOutcome {
 /// Spawn a request, read its stdout/stderr concurrently, and wait for exit —
 /// the streaming-API equivalent of running to completion.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_sdk::Error> {
+fn spawn_and_wait(request: SandboxRequest) -> Result<RunOutcome, mxc_alpha_mxc_sdk::Error> {
     use std::io::Read;
 
     fn read_thread(
@@ -300,7 +300,7 @@ fn process_container_finite_timeout_fires() {
 #[test]
 fn run_captures_stdout_seatbelt() {
     // `run` spawns, waits, and returns captured stdout/stderr in one call.
-    let output = mxc_sdk::run(seatbelt_request("echo hello-run", 10000))
+    let output = mxc_alpha_mxc_sdk::run(seatbelt_request("echo hello-run", 10000))
         .expect("seatbelt run should succeed");
     assert_eq!(output.outcome, WaitOutcome::Exited(0));
     assert!(
@@ -316,7 +316,7 @@ fn run_reports_timeout_seatbelt() {
     // A finite scriptTimeout shorter than the command must surface as
     // `WaitOutcome::TimedOut` rather than an error.
     let output =
-        mxc_sdk::run(seatbelt_request("sleep 30", 1000)).expect("run should return an outcome");
+        mxc_alpha_mxc_sdk::run(seatbelt_request("sleep 30", 1000)).expect("run should return an outcome");
     assert_eq!(output.outcome, WaitOutcome::TimedOut);
 }
 
@@ -325,7 +325,7 @@ fn run_reports_timeout_seatbelt() {
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn run_captures_stdout_process_container() {
     // `run` spawns, waits, and returns captured stdout/stderr in one call.
-    let output = mxc_sdk::run(process_container_request(
+    let output = mxc_alpha_mxc_sdk::run(process_container_request(
         "0.7.0-alpha",
         "cmd /c echo hello-run",
         30000,

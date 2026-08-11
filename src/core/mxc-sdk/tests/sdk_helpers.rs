@@ -4,13 +4,13 @@
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
 //! the SandboxPolicy -> SandboxRequest builder.
 
-use mxc_sdk::{
+use mxc_alpha_mxc_sdk::{
     available_tools_policy, build_request, platform_support, temporary_files_policy,
     user_profile_policy, SandboxPolicy,
 };
 
 #[cfg(target_os = "macos")]
-use mxc_sdk::{spawn_sandbox, WaitOutcome};
+use mxc_alpha_mxc_sdk::{spawn_sandbox, WaitOutcome};
 
 fn env_pairs(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -131,7 +131,7 @@ fn build_request_rejects_empty_version() {
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
-    assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
+    assert_eq!(err.code, mxc_alpha_mxc_sdk::ErrorCode::MalformedRequest);
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn build_request_host_rules_require_outbound() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(mxc_sdk::policy::NetworkSection {
+        network: Some(mxc_alpha_mxc_sdk::policy::NetworkSection {
             allow_outbound: false,
             allow_local_network: false,
             allowed_hosts: vec!["example.com".to_string()],
@@ -172,7 +172,7 @@ fn build_request_host_rules_require_outbound() {
 fn build_request_then_run_seatbelt() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
-        filesystem: Some(mxc_sdk::policy::FilesystemSection {
+        filesystem: Some(mxc_alpha_mxc_sdk::policy::FilesystemSection {
             readwrite_paths: vec!["/tmp".to_string()],
             readonly_paths: vec![],
             denied_paths: vec![],

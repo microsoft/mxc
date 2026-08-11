@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Publishes the mxc-sdk crate closure to crates.io through ESRP Release, under
+# Publishes the mxc_alpha_mxc_sdk crate closure to crates.io through ESRP Release, under
 # the microsoft-oss-releases account.  Consumes the mxc-crates-package
 # artifact.
 #
@@ -29,27 +29,27 @@ parameters:
   - name: crateOrder
     type: object
     default:
-    - isolation_session_bindings
-    - learning_mode_core
-    - mxc_pty
-    - mxc_telemetry
-    - nanvix_common
-    - process_security_environment_spec
-    - sandbox_spec
-    - wxc_common
-    - isolation_session_common
-    - learning_mode_windows
-    - lxc_common
+    - mxc-alpha-windows-secenv-projection
+    - mxc_alpha_isolation_session_bindings
+    - mxc_alpha_learning_mode_core
+    - mxc_alpha_mxc_pty
+    - mxc_alpha_mxc_telemetry
+    - mxc_alpha_nanvix_common
+    - mxc_alpha_process_security_environment_spec
+    - mxc_alpha_wxc_common
+    - mxc_alpha_isolation_session_common
+    - mxc_alpha_learning_mode_windows
+    - mxc_alpha_lxc_common
+    - mxc_alpha_nanvix_runner
+    - mxc_alpha_seatbelt_common
     - mxc_alpha_test_hyperlight_common
-    - nanvix_runner
-    - seatbelt_common
-    - windows_sandbox_common
-    - wslc_common
-    - appcontainer_common
-    - bwrap_common
-    - windows_sandbox_lifecycle
-    - mxc_engine
-    - mxc-sdk
+    - mxc_alpha_windows_sandbox_common
+    - mxc_alpha_wslc_common
+    - mxc-alpha-basecontainer-common
+    - mxc_alpha_bwrap_common
+    - mxc_alpha_windows_sandbox_lifecycle
+    - mxc_alpha_mxc_engine
+    - mxc_alpha_mxc_sdk
   - name: cratesArtifactName
     type: string
     default: mxc-crates-package

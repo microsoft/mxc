@@ -11,8 +11,8 @@
 //!   in TTY (ConPTY) mode where the agent can exit while the local stdin
 //!   handle remains open.
 
-use wxc_common::error::WxcError;
-use wxc_common::process_util::OwnedHandle;
+use mxc_alpha_wxc_common::error::WxcError;
+use mxc_alpha_wxc_common::process_util::OwnedHandle;
 
 use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
 use windows::Win32::Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile};
@@ -224,8 +224,8 @@ mod tests {
         PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOW,
     };
     use windows_core::{PCWSTR, PWSTR};
-    use wxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
-    use wxc_common::string_util;
+    use mxc_alpha_wxc_common::process_util::{create_std_pipes, read_from_pipe, SendOwnedHandle};
+    use mxc_alpha_wxc_common::string_util;
 
     /// Creates a non-inheritable pipe pair for use in tests. Unlike
     /// `create_std_pipes`, neither end is marked inheritable, which prevents

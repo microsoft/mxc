@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `bwrap_common` — shared library for the Bubblewrap sandbox backend.
+//! `mxc_alpha_bwrap_common` — shared library for the Bubblewrap sandbox backend.
 //!
 //! - [`bwrap_command`] builds the `bwrap` CLI argument vector from a
-//!   [`ExecutionRequest`](wxc_common::models::ExecutionRequest). It is
+//!   [`ExecutionRequest`](mxc_alpha_wxc_common::models::ExecutionRequest). It is
 //!   platform-agnostic (pure argument generation) so it compiles and is
 //!   fully unit-tested on every host.
 //! - [`bwrap_version`] probes the host `bwrap` and checks it is new enough to

@@ -1,5 +1,5 @@
 [package]
-name = "windows_sandbox_lifecycle"
+name = "mxc_alpha_windows_sandbox_lifecycle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,8 @@ repository.workspace = true
 description = "Host-side lifecycle management for the MXC Windows Sandbox backend."
 
 [dependencies]
-windows_sandbox_common = { workspace = true }
-wxc_common = { workspace = true }
+mxc_alpha_windows_sandbox_common = { workspace = true }
+mxc_alpha_wxc_common = { workspace = true }
 tokio.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
