@@ -452,7 +452,11 @@ policy.
 
 The SDK does not ship a consent UI. It invokes your presenter with the exact
 Rust-owned canonical resource over a private, session-bound child protocol.
-Render every supplied field verbatim and return a typed decision:
+Render every supplied field verbatim and return a typed decision. Follow the
+normative
+[SDK presenter requirements](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, learn-more handling, status, and
+withdrawal:
 
 ```typescript
 import {

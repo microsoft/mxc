@@ -320,7 +320,10 @@ The crate is UI-agnostic: it does not render a prompt. A host may call
 `request_consent()` or `request_consent_async()` and render every field of the
 canonical prompt supplied to its presenter callback verbatim. MXC persists a
 grant only from the typed decision returned by that callback. If the host never
-requests consent, telemetry remains off.
+requests consent, telemetry remains off. See the normative
+[SDK presenter requirements](../../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, learn-more handling, status, and
+withdrawal.
 
 Telemetry is also off per invocation unless the request explicitly enables it
 with `SandboxRequest::set_telemetry_enabled(true)`. This stable switch does not

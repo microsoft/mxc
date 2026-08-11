@@ -63,6 +63,41 @@ assembled from fragments. Adding a translation does not change the public API.
 A material wording or data-inventory change requires a new resource version and
 explicit re-consent.
 
+## SDK presenter requirements
+
+An SDK host owns the native presentation experience, while MXC owns the
+resource, decision validation, and persistence. Implementers must follow this
+contract:
+
+1. Call the SDK consent-request API with a presenter callback. Do not write the
+   consent store directly or create a separate grant path.
+2. Render every supplied field verbatim: title, body, affirmative label,
+   negative label, learn-more label, and learn-more URL. Hosts may control
+   layout, accessibility, and platform-native styling, but must not hardcode,
+   shorten, reorder within a message, or replace the supplied wording.
+3. Map the affirmative control to `Yes` and the negative control to `No`.
+4. Map window close, cancel, timeout, or no response to `Dismissed`. If the UI
+   cannot be presented or otherwise fails, return a presenter error instead.
+   Never infer `Yes` from a default button, policy, prior application
+   preference, or absence of a response.
+5. Make the learn-more control open the supplied URL, normally in the user's
+   default browser. Do not substitute a different privacy destination.
+6. Return only the typed decision to MXC. MXC persists the decision together
+   with the resource version and locale that were actually presented.
+7. Use the typed status API to explain the current stored/effective state and
+   administrative ceiling. Provide an explicit withdrawal control in the
+   host's settings or other appropriate telemetry-controls surface.
+
+MXC does not invoke the presenter when the result is already determined:
+
+- `AlreadyGranted`: the current resource version is already granted.
+- `PolicyBlocked`: administrative policy prevents collection.
+- `NotApplicable`: telemetry is unavailable on this platform.
+
+If the host never calls the request API, telemetry remains off. A presenter
+failure must be surfaced as an error to the host and must not create or alter a
+grant.
+
 ## State and persistence
 
 MXC stores consent per user at:

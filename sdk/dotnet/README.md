@@ -88,7 +88,10 @@ for the full design.
 
 `MxcTelemetry` is UI-agnostic. It invokes a host presenter with the exact
 Rust-owned canonical resource; only the typed decision returned from that
-invocation may be persisted.
+invocation may be persisted. Follow the normative
+[SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, learn-more handling, status, and
+withdrawal.
 
 Collection is also disabled for each invocation unless the caller opts in.
 Set `SandboxPolicy.TelemetryEnabled = true` for one-shot `Run`/`Spawn` calls.
