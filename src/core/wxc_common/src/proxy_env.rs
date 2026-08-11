@@ -95,31 +95,57 @@ pub fn is_managed_proxy_key(key: &str) -> bool {
 /// URL. `scheme:opaque` is redacted too, since `url::Url::parse` accepts it and
 /// the resulting error message would otherwise carry the password.
 pub fn redact_proxy_url(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return redact_opaque_userinfo(url);
+    let Some(parts) = split_proxy_authority(url) else {
+        return url.to_string();
     };
-    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let (authority, tail) = rest.split_at(auth_end);
-    match authority.rsplit_once('@') {
-        Some((_userinfo, host)) => format!("{scheme}://***@{host}{tail}"),
+    match parts.authority.rsplit_once('@') {
+        Some((_userinfo, host)) => format!(
+            "{}{}***@{}{}",
+            parts.scheme, parts.separator, host, parts.tail
+        ),
         None => url.to_string(),
     }
 }
 
-/// Redact userinfo from a `scheme:rest` URL that has no `://` authority.
+/// The pieces of a proxy URL that userinfo handling needs.
+struct ProxyAuthority<'a> {
+    scheme: &'a str,
+    /// Whichever separator followed the scheme, `://` or `:`, so a redaction
+    /// can be reassembled in the same form it arrived in.
+    separator: &'a str,
+    /// Everything between the separator and the first path, query, or fragment
+    /// delimiter. An `@` after that point belongs to the path, not to userinfo.
+    authority: &'a str,
+    tail: &'a str,
+}
+
+/// Split `url` into scheme, separator, authority, and tail.
 ///
-/// `url::Url::parse("alice:hunter2@example.com")` succeeds with scheme `alice`,
-/// so such a string reaches the scheme diagnostic with the password intact.
-fn redact_opaque_userinfo(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once(':') else {
-        return url.to_string();
+/// Both forms are recognized deliberately. `url::Url::parse` accepts the
+/// opaque `scheme:rest` form -- `alice:hunter2@example.com` parses with scheme
+/// `alice` -- and [`ProxyAddress::from_url`] stores whatever string it is
+/// given, so the opaque form reaches the same places the absolute form does.
+///
+/// This is the single parse shared by [`redact_proxy_url`] and
+/// [`proxy_url_has_credentials`]. They previously had one each, which is how
+/// they came to disagree: redaction handled the opaque form while the guard
+/// reported it as carrying no credentials.
+fn split_proxy_authority(url: &str) -> Option<ProxyAuthority<'_>> {
+    let (scheme, separator, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (scheme, "://", rest),
+        None => {
+            let (scheme, rest) = url.split_once(':')?;
+            (scheme, ":", rest)
+        }
     };
     let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(auth_end);
-    match authority.rsplit_once('@') {
-        Some((_userinfo, host)) => format!("{scheme}:***@{host}{tail}"),
-        None => url.to_string(),
-    }
+    Some(ProxyAuthority {
+        scheme,
+        separator,
+        authority,
+        tail,
+    })
 }
 
 /// Whether a proxy URL carries `user:pass@` userinfo.
@@ -133,13 +159,17 @@ fn redact_opaque_userinfo(url: &str) -> String {
 /// and returns the input unchanged when the userinfo is already the literal
 /// redaction marker, which would report a credential-bearing URL as clean.
 pub fn proxy_url_has_credentials(url: &str) -> bool {
-    let Some((_scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    // Stop at the first path, query, or fragment delimiter: an `@` after that
-    // point belongs to the path, not to userinfo.
-    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    rest[..auth_end].contains('@')
+    match split_proxy_authority(url) {
+        Some(parts) => parts.authority.contains('@'),
+        // No scheme at all, so nothing downstream should accept this as a
+        // proxy URL. The guard still fails closed rather than reasoning about
+        // what a malformed value will do once it is somewhere else: any `@`
+        // ahead of the path is userinfo.
+        None => {
+            let auth_end = url.find(['/', '?', '#']).unwrap_or(url.len());
+            url[..auth_end].contains('@')
+        }
+    }
 }
 
 /// Build the effective environment for a sandbox whose egress is routed

@@ -496,12 +496,34 @@ fn userinfo_that_looks_like_the_redaction_marker_still_carries_credentials() {
     );
 }
 
-// A string with no scheme separator has no authority to parse, so there is no
-// userinfo to find and the guard must not refuse it on a spurious match.
+// This test used to assert that `not-a-url@at-all` carries no credentials, on
+// the premise that a string with no scheme separator has no authority to parse
+// and therefore no userinfo to find.  The premise confuses parseability with
+// safety.  Nothing downstream re-parses the value: `ProxyAddress::from_url`
+// stores it verbatim, `to_url` returns it verbatim, and it lands in
+// `lxc-attach` argv as written.
+//
+// The decisive shape is a bearer token used as the sole userinfo --
+// `token@proxy.example.com` has no colon and no scheme, so a predicate that
+// gives up without a scheme reports a live secret as clean.  Every
+// password-bearing form does contain a colon, which is why this looked safe.
+//
+// What survives from the original test is the part that was actually right: a
+// port colon is not a scheme separator, and the guard must not fire on it.
 #[test]
-fn a_url_without_a_scheme_carries_no_credentials() {
-    assert!(!proxy_url_has_credentials("proxy.example.com:8080"));
-    assert!(!proxy_url_has_credentials("not-a-url@at-all"));
+fn a_port_colon_is_not_userinfo_but_a_schemeless_token_is() {
+    assert!(
+        !proxy_url_has_credentials("proxy.example.com:8080"),
+        "a port colon must not be mistaken for userinfo"
+    );
+    assert!(
+        !proxy_url_has_credentials("not-a-url-at-all"),
+        "a schemeless string with no `@` carries nothing"
+    );
+    assert!(
+        proxy_url_has_credentials("not-a-url@at-all"),
+        "an `@` ahead of the path is userinfo even with no scheme to anchor it"
+    );
 }
 
 // Protects client (d): a proxy URL is redacted on the *failure* path, where it
@@ -529,4 +551,106 @@ fn redact_proxy_url_leaves_a_scheme_opaque_url_without_userinfo_alone() {
     let input = "socks5:proxy.example.com";
 
     assert_eq!(redact_proxy_url(input), input);
+}
+
+// The bypass the redactor already knew about and the guard did not.
+// `url::Url::parse` accepts `scheme:rest`, `ProxyAddress::from_url` is public
+// and stores whatever string it is handed, and `to_url` returns it verbatim --
+// so this shape reaches `--set-var` in `lxc-attach` argv, and argv is
+// world-readable through /proc/<pid>/cmdline.  The two functions used to parse
+// the URL separately, which is exactly how they came to disagree about it.
+#[test]
+fn a_scheme_opaque_url_with_userinfo_carries_credentials() {
+    assert!(
+        proxy_url_has_credentials("http:alice:hunter2@proxy.example.com"),
+        "the opaque scheme:rest form hides userinfo from a `://`-only parser"
+    );
+}
+
+#[test]
+fn a_scheme_opaque_url_with_a_bare_username_carries_credentials() {
+    assert!(
+        proxy_url_has_credentials("http:alice@proxy.example.com"),
+        "userinfo without a password is still userinfo"
+    );
+}
+
+// The complement, so the fix cannot be "return true more often".  A port colon
+// must not be mistaken for the opaque scheme separator.
+#[test]
+fn a_scheme_opaque_url_without_userinfo_carries_no_credentials() {
+    assert!(
+        !proxy_url_has_credentials("socks5:proxy.example.com"),
+        "an opaque URL with no `@` carries nothing"
+    );
+    assert!(
+        !proxy_url_has_credentials("proxy.example.com:8080"),
+        "a port colon is not userinfo"
+    );
+}
+
+// An `@` after the path delimiter belongs to the path, in the opaque form just
+// as in the absolute one.
+#[test]
+fn an_at_sign_in_the_path_of_an_opaque_url_is_not_userinfo() {
+    assert!(
+        !proxy_url_has_credentials("http:proxy.example.com/a@b"),
+        "an `@` after the path delimiter is not userinfo"
+    );
+}
+
+// A value with no scheme at all reaches no legitimate proxy path, but the guard
+// is the last line before argv, so it fails closed rather than reasoning about
+// where a malformed value ends up.
+#[test]
+fn a_schemeless_value_with_userinfo_fails_closed() {
+    assert!(
+        proxy_url_has_credentials("alice@proxy.example.com"),
+        "a schemeless value carrying userinfo must not be reported as clean"
+    );
+}
+
+// The two functions must agree about what an authority is.  Disagreeing about
+// it is the whole defect: redaction handled the opaque form while the guard
+// called the same string clean.
+#[test]
+fn redaction_and_the_credential_guard_agree_on_every_shape() {
+    let bearing = [
+        "http://alice:hunter2@proxy.example.com:8080",
+        "http:alice:hunter2@proxy.example.com",
+        "https://alice@proxy.example.com",
+        "http:alice@proxy.example.com",
+    ];
+    for url in bearing {
+        assert!(
+            proxy_url_has_credentials(url),
+            "guard reported no credentials for {url}"
+        );
+        assert_ne!(
+            redact_proxy_url(url),
+            url,
+            "redaction left {url} unchanged while the guard flagged it"
+        );
+        assert!(
+            !redact_proxy_url(url).contains("hunter2"),
+            "password survived redaction of {url}"
+        );
+    }
+
+    let clean = [
+        "http://proxy.example.com:8080",
+        "socks5:proxy.example.com",
+        "http://proxy.example.com/a@b",
+    ];
+    for url in clean {
+        assert!(
+            !proxy_url_has_credentials(url),
+            "guard invented credentials in {url}"
+        );
+        assert_eq!(
+            redact_proxy_url(url),
+            url,
+            "redaction altered the credential-free {url}"
+        );
+    }
 }
