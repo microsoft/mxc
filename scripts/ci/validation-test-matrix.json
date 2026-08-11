@@ -346,64 +346,19 @@
     }
   },
   "triggers": {
-    "pr": [
-      {
-        "os": "windows-canary",
-        "backends": [
-          "process-t1"
-        ]
-      },
-      {
-        "os": "windows-25h2",
-        "backends": [
-          "process-t3"
-        ]
-      },
-      {
-        "os": "macos-26",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
-        "os": "ubuntu-26.04",
-        "backends": [
-          "bubblewrap"
-        ]
-      }
-    ],
+    "pr": [],
     "nightly": [
-      {
-        "os": "windows-prerelease-isolation-session",
-        "backends": [
-          "isolation-session"
-        ]
-      },
       {
         "os": "windows-prerelease-process-container",
         "backends": [
           "process-t1",
-          "isolation-session",
-          "wslc",
-          "windows-sandbox",
-          "microvm",
-          "hyperlight"
-        ]
-      },
-      {
-        "os": "windows-canary",
-        "backends": [
-          "process-t1"
+          "isolation-session"
         ]
       },
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t3",
-          "wslc",
-          "windows-sandbox",
-          "microvm",
-          "hyperlight"
+          "process-t3"
         ]
       },
       {
@@ -422,52 +377,6 @@
         "os": "macos-26",
         "backends": [
           "seatbelt"
-        ]
-      },
-      {
-        "os": "ubuntu-26.04",
-        "backends": [
-          "bubblewrap",
-          "hyperlight",
-          "lxc"
-        ]
-      },
-      {
-        "os": "ubuntu-24.04",
-        "backends": [
-          "microvm"
-        ]
-      },
-      {
-        "os": "rhel-10",
-        "backends": [
-          "bubblewrap"
-        ]
-      }
-    ],
-    "weekly": [
-      {
-        "os": "windows-canary",
-        "backends": [
-          "isolation-session"
-        ]
-      },
-      {
-        "os": "windows-24h2",
-        "backends": [
-          "wslc",
-          "windows-sandbox",
-          "microvm",
-          "hyperlight"
-        ]
-      },
-      {
-        "os": "windows-23h2",
-        "backends": [
-          "wslc",
-          "windows-sandbox",
-          "microvm",
-          "hyperlight"
         ]
       },
       {
@@ -477,17 +386,23 @@
         ]
       },
       {
+        "os": "ubuntu-26.04",
+        "backends": [
+          "bubblewrap",
+          "lxc"
+        ]
+      },
+      {
         "os": "ubuntu-24.04",
         "backends": [
           "bubblewrap",
-          "hyperlight",
           "lxc"
         ]
       },
       {
         "os": "rhel-10",
         "backends": [
-          "hyperlight",
+          "bubblewrap",
           "lxc"
         ]
       },
@@ -495,11 +410,11 @@
         "os": "debian-13",
         "backends": [
           "bubblewrap",
-          "hyperlight",
           "lxc"
         ]
       }
     ],
+    "weekly": [],
     "enabled": [
       {
         "os": "windows-prerelease-process-container",

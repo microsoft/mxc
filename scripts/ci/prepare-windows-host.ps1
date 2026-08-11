@@ -180,56 +180,112 @@ function Initialize-WslcHost {
     Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
         -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'
 
-    # The optional features can be enabled while the modern (Store/MSIX) WSL
-    # runtime is absent — the image may still carry only the legacy inbox
-    # wsl.exe. `wsl --version` exists only on the modern runtime, so it doubles
-    # as the presence probe. Installing needs no reboot once the features are on.
+    # The features can be enabled while the modern (Store/MSIX) WSL runtime is
+    # absent — the image may still carry only the legacy inbox wsl.exe, which
+    # has no --version. Installing needs no reboot once the features are on.
     #
     # Probe quietly: the legacy wsl.exe answers an unknown switch with its full
-    # usage text, which would bury the real progress messages below.
-    if ((Invoke-Wsl @('--version') -Quiet) -ne 0) {
-        Write-Host 'Modern WSL runtime absent; installing via wsl --update (features are already enabled, so no reboot is needed)...'
-
+    # usage text, which would bury the real progress messages.
+    if ($null -eq (Get-InstalledWslVersion)) {
+        Write-Host 'Modern WSL runtime absent; installing via wsl --update...'
         # --web-download avoids the Microsoft Store, which CI images generally
         # cannot use. Older wsl.exe builds reject the flag, so retry without it.
         if ((Invoke-Wsl @('--update', '--web-download') -Quiet) -ne 0 -and
             (Invoke-Wsl @('--update')) -ne 0) {
             Exit-WithError 'wsl --update failed; the WSL2 runtime could not be installed on this runner.'
         }
-
-        if ((Invoke-Wsl @('--version')) -ne 0) {
-            Exit-WithError 'wsl --version still fails after wsl --update; the WSL2 runtime is not usable on this runner.'
-        }
     }
+
+    # WSLC needs a runtime at least as new as the pinned WSLC SDK, and those
+    # builds ship only on the pre-release ring — the stable ring lands well
+    # behind it. Without this the SDK fails at run time with
+    # "WSLC runtime unavailable. Missing components: WslPackage".
+    $required = Get-RequiredWslVersion
+    $installed = Get-InstalledWslVersion
+    if ($null -ne $required -and ($null -eq $installed -or $installed -lt $required)) {
+        Write-Host "WSL $installed is older than the $required WSLC requires; updating to pre-release..."
+        if ((Invoke-Wsl @('--update', '--pre-release', '--web-download') -Quiet) -ne 0 -and
+            (Invoke-Wsl @('--update', '--pre-release')) -ne 0) {
+            Exit-WithError "wsl --update --pre-release failed; WSLC requires WSL $required or newer."
+        }
+        $installed = Get-InstalledWslVersion
+    }
+
+    if ($null -eq $installed) {
+        Exit-WithError 'wsl --version failed after updating; the WSL2 runtime is not usable on this runner.'
+    }
+    if ($null -ne $required -and $installed -lt $required) {
+        Exit-WithError "WSL $installed is installed, but WSLC requires $required or newer."
+    }
+    Write-Host "WSL runtime $installed is ready (WSLC requires $required or newer)."
 
     # Diagnostic only: --status exits non-zero with no distribution installed,
     # which is expected since WSLC creates its own containers via the SDK.
     Invoke-Wsl @('--status') | Out-Null
 }
 
+# Minimum WSL runtime for WSLC, read from the pinned SDK version so the two
+# cannot drift. The SDK's own runtime error names this same version.
+function Get-RequiredWslVersion {
+    $buildScript = Join-Path $PSScriptRoot '..\..\src\backends\wslc\common\build.rs'
+    if (-not (Test-Path $buildScript)) {
+        Write-Host "WARNING: $buildScript not found; skipping the WSL version gate."
+        return $null
+    }
+
+    $match = [regex]::Match((Get-Content $buildScript -Raw), 'WSLC_SDK_VERSION:\s*&str\s*=\s*"([0-9]+(?:\.[0-9]+)+)"')
+    if (-not $match.Success) {
+        Write-Host 'WARNING: could not parse WSLC_SDK_VERSION; skipping the WSL version gate.'
+        return $null
+    }
+    return [version]$match.Groups[1].Value
+}
+
+# Installed modern-runtime version, or $null when wsl.exe is the legacy inbox
+# build (no --version) or otherwise unusable.
+function Get-InstalledWslVersion {
+    $result = Invoke-WslCapture -Arguments @('--version')
+    if ($result.ExitCode -ne 0) {
+        return $null
+    }
+
+    $match = [regex]::Match($result.Output, '(?im)^\s*WSL version:\s*([0-9]+(?:\.[0-9]+)+)')
+    if (-not $match.Success) {
+        return $null
+    }
+    return [version]$match.Groups[1].Value
+}
+
 # wsl.exe emits UTF-16LE, which the default console encoding renders as
-# null-separated garbage. Returns the exit code. -Quiet suppresses output for
-# probes, where the legacy wsl.exe dumps its whole usage text on an unknown
-# switch.
+# null-separated garbage. Returns @{ ExitCode; Output } with the output decoded.
+function Invoke-WslCapture {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        $output = & wsl.exe @Arguments 2>&1 | Out-String
+        return @{ ExitCode = $LASTEXITCODE; Output = $output }
+    } catch {
+        return @{ ExitCode = 1; Output = "wsl.exe could not be run: $($_.Exception.Message)" }
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
+    }
+}
+
+# Run wsl.exe and return its exit code. -Quiet suppresses output for probes,
+# where the legacy wsl.exe dumps its whole usage text on an unknown switch.
 function Invoke-Wsl {
     param(
         [Parameter(Mandatory)][string[]]$Arguments,
         [switch]$Quiet
     )
 
-    $previousEncoding = [Console]::OutputEncoding
-    try {
-        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-        $output = & wsl.exe @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-        if (-not $Quiet) { $output | Write-Host }
-        return $exitCode
-    } catch {
-        Write-Host "WARNING: wsl.exe $($Arguments -join ' ') could not be run: $($_.Exception.Message)"
-        return 1
-    } finally {
-        [Console]::OutputEncoding = $previousEncoding
+    $result = Invoke-WslCapture -Arguments $Arguments
+    if (-not $Quiet -and $result.Output.Trim()) {
+        Write-Host $result.Output.Trim()
     }
+    return $result.ExitCode
 }
 
 if (-not (Test-Path $BinaryDirectory)) {
