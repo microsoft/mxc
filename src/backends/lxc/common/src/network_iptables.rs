@@ -613,11 +613,27 @@ impl NetworkIptablesManager {
     /// is installed nearly everywhere, an explicitly allowed destination is
     /// unreachable: the request goes out and the answer never comes back.
     ///
-    /// This rule cannot widen the policy. A packet only matches
-    /// `ESTABLISHED,RELATED` if conntrack already has an entry for the flow,
-    /// and the flow can only have an entry because its outbound direction was
-    /// accepted by the chain. Inbound *new* connections match nothing here and
-    /// are left to the host policy exactly as before.
+    /// This rule cannot widen the policy, and the reason is that conntrack
+    /// state is not created by a packet the chain drops. Conntrack attaches an
+    /// *unconfirmed* entry at PREROUTING, but only `nf_conntrack_confirm`
+    /// inserts it into the table, and that runs after the FORWARD verdict --
+    /// so a dropped packet is freed and takes its unconfirmed entry with it.
+    /// The reverse packet then finds no state, is classified `NEW` rather than
+    /// `ESTABLISHED`, matches nothing here, and falls to the host policy.
+    ///
+    /// Measured rather than assumed, on the directly routed topology, with a
+    /// positive control to prove the detector works. Outbound allowed: two
+    /// conntrack entries, this rule matched three times, three packets reached
+    /// the container. Outbound dropped by the chain, then a cooperating peer
+    /// sending the reverse packets: zero conntrack entries, this rule matched
+    /// **zero** times, zero packets reached the container.
+    ///
+    /// What this rule does accept is the continuation of a flow whose state
+    /// already exists -- which includes a flow the *host* authorized inbound,
+    /// not only one this chain accepted outbound. That is what stateful
+    /// filtering means and it is not a widening: the connection's first packet
+    /// still had to pass the host's own policy. Inbound *new* connections
+    /// match nothing here and are left to that policy exactly as before.
     ///
     /// It deliberately accepts rather than jumping to the chain, even though
     /// the chain carries an `ESTABLISHED,RELATED` rule of its own that would
