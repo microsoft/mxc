@@ -8,6 +8,8 @@
 //! policy. The transient [`WindowsSandboxRunner`] composes these primitives for
 //! one-shot execution.
 
+#[cfg(windows)]
+pub mod availability;
 pub mod bridge;
 pub mod constants;
 pub mod control_plane;

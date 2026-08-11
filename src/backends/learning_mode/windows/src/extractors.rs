@@ -212,18 +212,13 @@ pub fn build_denial_from_learning_mode(
     pid: u32,
     filetime: u64,
 ) -> Option<RawDenial> {
-    let category = find_prop(&parts.props, "Category")?
-        .trim_matches('"')
-        .to_string();
-    let detail = find_prop(&parts.props, "Detail")?.trim_matches('"');
-    let object_name = match category.as_str() {
-        "1" => "ConvertToGui".to_string(),
-        "2" => parse_u32(detail)
-            .and_then(ui_operation_name)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("UiOperation({detail})")),
-        _ => format!("Category({category})/Detail({detail})"),
+    let category = find_prop(&parts.props, "Category").and_then(|value| parse_u32(value))?;
+    let detail = match find_prop(&parts.props, "Detail") {
+        Some(value) => parse_u32(value)?,
+        None if category == crate::ui::CONVERT_TO_GUI => 0,
+        None => return None,
     };
+    let object_name = crate::ui::resource_name(category, detail)?;
 
     Some(RawDenial {
         pid,
@@ -290,22 +285,6 @@ pub fn build_denial_from_capability(
         filetime,
         event_id: parts.event_id,
     })
-}
-
-fn ui_operation_name(value: u32) -> Option<&'static str> {
-    match value {
-        0x001 => Some("Handles"),
-        0x002 => Some("ReadClipboard"),
-        0x004 => Some("WriteClipboard"),
-        0x008 => Some("SystemParameters"),
-        0x010 => Some("DisplaySettings"),
-        0x020 => Some("GlobalAtoms"),
-        0x040 => Some("Desktop"),
-        0x080 => Some("ExitWindows"),
-        0x100 => Some("IME"),
-        0x200 => Some("Injection"),
-        _ => None,
-    }
 }
 
 /// Parses a `"0x…"` / decimal / bare-hex property value into a `u32`.
@@ -592,6 +571,76 @@ mod tests {
         assert_eq!(ev.resource_type, ResourceType::Ui);
         assert_eq!(ev.access_type, AccessType::Unknown);
         assert_eq!(ev.object_name, "WriteClipboard");
+    }
+
+    #[test]
+    fn learning_mode_violation_accepts_hex_category_and_detail() {
+        let p = parts(
+            27,
+            &[
+                ("ProcessName", "\"caller.exe\""),
+                ("Category", "0x2"),
+                ("Detail", "0x200"),
+            ],
+        );
+        let ev = extract_denial(&p, 9999, FIXED_FILETIME).expect("should extract");
+        assert_eq!(ev.object_name, "Injection");
+    }
+
+    #[test]
+    fn learning_mode_violation_maps_every_ui_limit() {
+        let expected = [
+            (0x0001, "Handles"),
+            (0x0002, "ReadClipboard"),
+            (0x0004, "WriteClipboard"),
+            (0x0008, "SystemParameters"),
+            (0x0010, "DisplaySettings"),
+            (0x0020, "GlobalAtoms"),
+            (0x0040, "Desktop"),
+            (0x0080, "ExitWindows"),
+            (0x0100, "IME"),
+            (0x0200, "Injection"),
+        ];
+
+        for (detail, name) in expected {
+            let detail = detail.to_string();
+            let p = parts(27, &[("Category", "2"), ("Detail", detail.as_str())]);
+            let ev = extract_denial(&p, 9999, FIXED_FILETIME).expect("should extract");
+            assert_eq!(ev.object_name, name);
+        }
+    }
+
+    #[test]
+    fn learning_mode_violation_is_supported_from_permissive_provider() {
+        let p = parts_with_provider(
+            PRIVACY_LEARNING_MODE_PROVIDER,
+            27,
+            &[("Category", "1"), ("Detail", "0")],
+        );
+        let ev = extract_denial(&p, 9999, FIXED_FILETIME).expect("should extract");
+        assert_eq!(ev.object_name, "ConvertToGui");
+    }
+
+    #[test]
+    fn convert_to_gui_does_not_require_detail() {
+        let p = parts(27, &[("Category", "1")]);
+        let ev = extract_denial(&p, 9999, FIXED_FILETIME).expect("should extract");
+        assert_eq!(ev.object_name, "ConvertToGui");
+    }
+
+    #[test]
+    fn learning_mode_violation_rejects_invalid_required_numbers() {
+        let invalid_category = parts(27, &[("Category", "not-a-number"), ("Detail", "4")]);
+        assert!(extract_denial(&invalid_category, 9999, FIXED_FILETIME).is_none());
+
+        let invalid_detail = parts(27, &[("Category", "2"), ("Detail", "not-a-number")]);
+        assert!(extract_denial(&invalid_detail, 9999, FIXED_FILETIME).is_none());
+    }
+
+    #[test]
+    fn learning_mode_category_none_is_dropped() {
+        let p = parts(27, &[("Category", "0"), ("Detail", "0")]);
+        assert!(extract_denial(&p, 9999, FIXED_FILETIME).is_none());
     }
 
     // ---- event 28 capability denial ---------------------------------------

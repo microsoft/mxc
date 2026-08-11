@@ -36,6 +36,8 @@ mod lifecycle;
 mod secenv;
 
 #[cfg(target_os = "windows")]
+mod capability_dacl;
+#[cfg(target_os = "windows")]
 mod capability_names;
 #[cfg(target_os = "windows")]
 mod etl_decode;
@@ -45,6 +47,8 @@ mod extractors;
 mod path_norm;
 #[cfg(target_os = "windows")]
 mod tdh_decode;
+#[cfg(target_os = "windows")]
+mod ui;
 
 #[cfg(target_os = "windows")]
 pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};

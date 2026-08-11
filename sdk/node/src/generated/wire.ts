@@ -126,68 +126,26 @@ export interface Filesystem {
 }
 
 /**
- * IsolationSession sizing profile.
- */
-export type IsolationConfigurationId = "small" | "medium" | "large" | "composable";
-
-/**
- * IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).
+ * IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.
  */
 export interface IsolationSession {
   /**
-   * Sizing profile (one-shot).
-   */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * State-aware deprovision-phase configuration.
-   */
-  deprovision?: IsolationSessionPhase | null;
-  /**
    * State-aware provision-phase configuration.
    */
-  provision?: IsolationSessionPhase | null;
-  /**
-   * State-aware start-phase configuration.
-   */
-  start?: IsolationSessionPhase | null;
-  /**
-   * State-aware stop-phase configuration.
-   */
-  stop?: IsolationSessionPhase | null;
-  /**
-   * Optional Entra cloud-agent user bundle (one-shot).
-   */
-  user?: IsolationUser | null;
+  provision?: IsolationSessionProvisionPhase | null;
   [k: string]: unknown;
 }
 
 /**
- * Per-phase IsolationSession configuration (state-aware lifecycle).
+ * Provision-phase IsolationSession configuration (state-aware lifecycle).
+ * 
+ * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
-export interface IsolationSessionPhase {
+export interface IsolationSessionProvisionPhase {
   /**
-   * Sizing profile for this phase.
+   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
-  configurationId?: IsolationConfigurationId | null;
-  /**
-   * Entra cloud-agent user bundle for this phase.
-   */
-  user?: IsolationUser | null;
-  [k: string]: unknown;
-}
-
-/**
- * Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
- */
-export interface IsolationUser {
-  /**
-   * User principal name.
-   */
-  upn: string;
-  /**
-   * Short-lived WAM bearer token (passed verbatim to the OS service).
-   */
-  wamToken: string;
+  appId?: string | null;
   [k: string]: unknown;
 }
 
@@ -297,7 +255,7 @@ export interface Process {
    */
   commandLine?: string | null;
   /**
-   * Working directory for the process.
+   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
    */
   cwd?: string | null;
   /**

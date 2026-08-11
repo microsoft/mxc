@@ -147,6 +147,7 @@ impl WslcSdk {
             WslcSetContainerSettingsPortMappings,
             WslcSetContainerSettingsVolumes,
             WslcCreateContainerProcess,
+            WslcSignalProcess,
             WslcReleaseContainer,
             WslcGetContainerInitProcess,
             WslcStopContainer,

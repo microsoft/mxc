@@ -1,0 +1,28 @@
+[package]
+name = "wxc_wslc_daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wxc-wslc-daemon"
+path = "src/main.rs"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+wxc_common = { workspace = true }
+wslc_common = { workspace = true }
+windows = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[build-dependencies]
+mxc_build_common.workspace = true

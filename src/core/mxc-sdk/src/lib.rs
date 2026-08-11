@@ -24,6 +24,7 @@
 //!     network: None,
 //!     ui: None,
 //!     timeout_ms: None,
+//!     capture_denials: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
@@ -66,6 +67,7 @@
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
+//! #     capture_denials: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
@@ -111,9 +113,10 @@ mod sandbox;
 
 pub use mxc_engine::policy;
 pub use mxc_engine::{
-    available_tools_policy, build_request, build_request_with_containment, platform_support,
-    temporary_files_policy, user_profile_policy, Containment, Error, ErrorCode,
-    FilesystemPolicyResult, PlatformSupport, SandboxPolicy, SandboxRequest, WslcSection,
+    available_backends, available_tools_policy, build_request, build_request_with_containment,
+    platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
+    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
+    SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{

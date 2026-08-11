@@ -1,0 +1,30 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Network-Dualstack-Hostname",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "wget -qO- https://dns.google/"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [
+      "localhost",
+      "dns.google",
+      "one.one.one.one",
+      "8.8.8.8",
+      "2001:4860:4860::8888"
+    ],
+    "blockedHosts": [
+      "10.0.0.0/8",
+      "2001:db8::/32"
+    ]
+  }
+}

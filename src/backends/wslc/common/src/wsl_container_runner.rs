@@ -29,6 +29,7 @@ use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::container_steps::sdk_error;
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
@@ -468,8 +469,8 @@ impl WSLContainerRunner {
     /// Supports both rootfs tars (`docker export`) and Docker image archives
     /// (`docker save`). The format is auto-detected via `detect_tar_format`.
     /// Returns `Ok(())` on success or `Err(ScriptResponse)` on failure.
-    unsafe fn import_image_from_tar(
-        sdk: &'static WslcSdk,
+    pub(crate) unsafe fn import_image_from_tar(
+        sdk: &WslcSdk,
         session: WslcSession,
         image_name: &str,
         tar_path: &str,
@@ -593,21 +594,11 @@ enum TarFormat {
     Unknown,
 }
 
-/// Create a ScriptResponse error from an HRESULT failure with optional SDK error message.
-fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
-}
-
 /// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
 /// reports as missing. `missing` may combine multiple bits, and the guidance is branched
 /// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
 /// (which doesn't enable that Windows optional feature), and vice versa.
-fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
+pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     let needs_vmp =
         missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
     let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
@@ -637,6 +628,30 @@ fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
 }
 
 impl ScriptRunner for WSLContainerRunner {
+    /// Reject policies WSLc cannot enforce, before any container is created.
+    /// Mirrors the config parser so requests reaching the engine directly
+    /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
+    /// instead of late in `execute` on the broken in-container iptables path.
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request.policy.needs_host_filtering() {
+            return Err(ScriptResponse::error(
+                "WSLc: per-host egress filtering (allowedHosts with \
+                 defaultPolicy='block', or blockedHosts with defaultPolicy='allow') \
+                 is not supported. A WSLc container has no CAP_NET_ADMIN for in-container \
+                 iptables, and VM-level enforcement is not available without breaking other \
+                 security guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
+                 for cooperative host filtering, or remove the host lists.",
+            ));
+        }
+        if request.policy.allow_local_network {
+            return Err(ScriptResponse::error(
+                "WSLc: network.allowLocalNetwork=true is not supported. Expose specific \
+                 ports with experimental.wslc portMappings instead.",
+            ));
+        }
+        Ok(())
+    }
+
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
     }
@@ -1369,9 +1384,10 @@ impl WSLContainerRunner {
             return Err(sdk_error("WslcSetProcessSettingsCmdLine failed", hr, ""));
         }
 
-        // Route egress through the cooperative proxy: WSLc has no in-kernel
-        // iptables, so per-host policy is enforced at the proxy layer by
-        // injecting HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
+        // Route egress through the cooperative proxy: WSLc cannot apply an
+        // iptables drop-floor (no CAP_NET_ADMIN, no VM-level enforcement hook),
+        // so per-host policy is enforced at the proxy layer by injecting
+        // HTTP(S)_PROXY (and scrubbing caller-supplied proxy vars).
         // See wxc_common::proxy_env.
         let effective_env: Vec<String> = if request.policy.network_proxy.is_enabled() {
             // url-only (also enforced at parse time). Fail fast rather than
@@ -2310,6 +2326,71 @@ mod tests {
             "expected the overlap error, got: {}",
             response.error_message
         );
+    }
+
+    #[test]
+    fn validate_runner_rejects_allowlist_host_filtering() {
+        // block default + allowlist = per-host filtering WSLc can't enforce.
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                allowed_hosts: vec!["example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("per-host egress filtering"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_blocklist_host_filtering() {
+        // allow default + blocklist is the other filtering shape.
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
+                blocked_hosts: vec!["evil.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        assert!(runner.validate_runner(&request).is_err());
+    }
+
+    #[test]
+    fn validate_runner_rejects_allow_local_network() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("allowLocalNetwork"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_bare_defaults() {
+        // Full cutoff / full NAT (no host lists) is enforceable — must pass.
+        for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                policy: wxc_common::models::ContainerPolicy {
+                    default_network_policy: policy,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let runner = WSLContainerRunner::new(&WslcConfig::default());
+            assert!(runner.validate_runner(&request).is_ok());
+        }
     }
 
     // -- Host-stdio forwarding (`StdioMode::Inherit`) --------------------

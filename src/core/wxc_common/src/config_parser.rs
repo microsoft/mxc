@@ -9,9 +9,9 @@ use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, IsolationSessionConfig, LifecycleConfig, LxcConfig,
-    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
-    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -343,6 +343,22 @@ fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
 
 fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     for path in paths {
+        // A blank entry names nothing: backends would either grant nothing or,
+        // worse, treat it as "unset" (e.g. a NULL working directory).
+        if path.trim().is_empty() {
+            return Err(WxcError::ConfigParse(
+                "Filesystem path is empty".to_string(),
+            ));
+        }
+        // An interior NUL silently truncates the path once it is converted to a
+        // C/UTF-16 string, so the enforced grant would not be the one requested.
+        if path.contains('\0') {
+            let msg = format!(
+                "Filesystem path '{}' contains an embedded NUL character",
+                config_deserialize::escape_diagnostic_text(path)
+            );
+            return Err(WxcError::ConfigParse(msg));
+        }
         if path.contains('"') {
             let msg = format!(
                 "Filesystem path '{}' contains invalid character '\"'",
@@ -950,7 +966,11 @@ fn convert_wire_config(
         }
     }
 
-    // Network section
+    // Network section. Capture presence before the typed mapping consumes
+    // `cfg.network` so backends can distinguish an absent policy from an
+    // explicit default-valued one (the domain `default_network_policy` defaults
+    // to `Block` either way).
+    policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
@@ -1024,6 +1044,40 @@ fn convert_wire_config(
                        proxy, not forwarded to it.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // WSLc cannot enforce per-host egress filtering: containers lack
+        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
+        // cannot expose VM-level enforcement without breaking other security
+        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
+        // enforces the same for requests that bypass this parser. Bare defaults
+        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
+        if containment == ContainmentBackend::Wslc {
+            if policy.needs_host_filtering() {
+                let msg = "WSLc: per-host egress filtering (allowedHosts with \
+                           defaultPolicy='block', or blockedHosts with \
+                           defaultPolicy='allow') is not supported. A WSLc container has \
+                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
+                           enforcement is not available without breaking other security \
+                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
+                           for cooperative host filtering, or remove the host lists.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // WSLc cannot honor a blanket inbound-listen grant. The runner only
+            // wires explicit host->container port forwards (experimental.wslc
+            // portMappings) into the WSL2 VM's NAT; it never consults
+            // allowLocalNetwork. Reject `true` and point at portMappings.
+            // (`false` is the default and a no-op.)
+            if policy.allow_local_network {
+                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
+                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
+                           blanket inbound-listen grant; expose specific ports with \
+                           experimental.wslc.portMappings instead.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
         }
 
         // Bubblewrap is unprivileged by design; iptables-based enforcement
@@ -1219,14 +1273,6 @@ fn convert_wire_config(
         } else {
             None
         };
-        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
-            let mut config = IsolationSessionConfig::default();
-            if let Some(id) = as_cfg.configuration_id {
-                config.configuration_id = id.into();
-            }
-            config.user = as_cfg.user.map(Into::into);
-            config
-        });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1240,7 +1286,6 @@ fn convert_wire_config(
             test,
             windows_sandbox,
             wslc,
-            isolation_session,
             telemetry,
         }
     } else {
@@ -1251,7 +1296,12 @@ fn convert_wire_config(
     // rejected above.
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
 
-    // UI section
+    // UI section. Capture presence before the typed mapping consumes `ui`:
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // otherwise indistinguishable from an absent one, and a backend that cannot
+    // honor UI restrictions has no way to tell "caller asked for lockdown" from
+    // "caller said nothing". Twin of `network_specified`.
+    policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
@@ -1627,7 +1677,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"configurationId": "small"}}
+                "isolation_session": {"start": {"opaqueFutureField": true}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1641,7 +1691,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"configurationId": "small"}}
+                        "isolation_session": {"start": {"opaqueFutureField": true}}
                     })
                 );
             }
@@ -1680,7 +1730,7 @@ mod tests {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
-            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+            "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
@@ -2883,6 +2933,67 @@ mod tests {
     }
 
     #[test]
+    fn network_specified_true_when_network_present() {
+        // An empty `network: {}` object still counts as "supplied".
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_specified);
+    }
+
+    #[test]
+    fn network_specified_false_when_network_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_when_ui_present() {
+        // An empty `ui: {}` still counts as "supplied" — the twin of
+        // `network_specified`. Backends with no UI primitive refuse on
+        // presence, because `UiPolicy::default()` is full lockdown and so an
+        // explicit lockdown `ui` is indistinguishable from an absent one.
+        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_false_when_ui_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_on_state_aware_requests() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "ui": {"disable": true}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn filesystem_paths() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -2916,6 +3027,47 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    /// A blank grant names nothing, and previously flowed through to backends
+    /// that treat an empty path as "unset" (e.g. a NULL working directory).
+    #[test]
+    fn block_blank_filesystem_paths() {
+        for blank in ["", "   "] {
+            let json = format!(
+                r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "filesystem": {{ "readwritePaths": ["{blank}", "C:\\workspace"] }}
+            }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let result = load_request(&encoded, &mut logger, true);
+            let err = result.expect_err("blank path should be rejected");
+            assert!(
+                format!("{err}").contains("empty"),
+                "unexpected error for {blank:?}: {err}"
+            );
+        }
+    }
+
+    /// An interior NUL truncates the path once converted to a C/UTF-16 string,
+    /// so the grant enforced would not be the one requested.
+    #[test]
+    fn block_filesystem_paths_with_embedded_nul() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readonlyPaths": ["C:\\workspace\u0000\\..\\secrets"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.expect_err("embedded NUL should be rejected");
+        assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
     }
 
     #[test]
@@ -3886,6 +4038,124 @@ mod tests {
     }
 
     #[test]
+    fn wslc_rejects_host_filtering_block_with_allowed_hosts() {
+        // 'block' default + an allowlist is the doomed in-container iptables path
+        // (Privileged != CAP_NET_ADMIN). Reject at parse time instead of failing
+        // the run at exec.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_allow_with_blocked_hosts() {
+        // 'allow' default + a blocklist is the other in-container iptables path.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_block_default_without_host_lists() {
+        // 'block' with no allowlist is a full cutoff (NetworkingMode::None) --
+        // enforceable, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(req.policy.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_accepts_allow_default_without_host_lists() {
+        // 'allow' with no blocklist is full NAT (Bridged) -- enforceable, not rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(req.policy.blocked_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_rejects_allow_local_network_true() {
+        // A blanket inbound-listen grant is silently ignored by the WSLc runner
+        // (only explicit portMappings have inbound effect), so accepting it would
+        // promise reachability the backend never delivers. Reject at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowLocalNetwork=true is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_allow_local_network_false() {
+        // The default/explicit `false` is a no-op and must be accepted.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
     fn new_toplevel_fields_parsed() {
         let json = r#"{"version": "0.6.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -4053,19 +4323,28 @@ mod tests {
     }
 
     #[test]
-    fn experimental_isolation_user_unknown_field_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
+    fn one_shot_ignores_stray_isolation_session_config_rather_than_rejecting() {
+        // The one-shot surface takes no backend configuration at all, and the
+        // `experimental` block is deliberately permissive, so an unrecognised
+        // key there is silently ignored rather than rejected. Parsing must
+        // succeed and select the backend normally.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"unrecognizedSetting": {"nested": "value", "futureField": true}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("one-shot must accept and ignore a stray isolation_session key");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
+    }
+
+    #[test]
+    fn one_shot_accepts_empty_isolation_session_block() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let iso = req
-            .experimental
-            .isolation_session
-            .expect("iso config present");
-        let user = iso.user.expect("user present");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
     #[test]
@@ -4809,125 +5088,23 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+    fn isolation_session_section_still_marks_a_configured_backend() {
+        // `experimental.isolation_session` no longer maps to any domain
+        // config, but its presence on the WIRE model is what
+        // `present_backend_sections` reads to detect a configured backend.
+        // Pairing it with another backend section must still be refused, or
+        // removing the domain slot would have silently dropped the check.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Medium
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Large
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_unknown_is_rejected() {
-        // Strict enums: an unrecognized configurationId is rejected at
-        // deserialize time rather than silently defaulting to `composable`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = err.to_string();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("two backend sections must be refused");
+        let msg = format!("{err}");
         assert!(
-            msg.contains("unknown variant") && msg.contains("xlarge"),
-            "expected an unknown-variant rejection for configurationId 'xlarge', got: {msg}"
+            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
+            "expected the conflicting section to be named, got: {msg}"
         );
-    }
-
-    #[test]
-    fn isolation_session_absent_from_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.isolation_session.is_none());
-    }
-
-    #[test]
-    fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        let user = cfg
-            .user
-            .expect("user field should round-trip through the one-shot parser");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert!(cfg.user.is_none());
     }
 
     #[test]

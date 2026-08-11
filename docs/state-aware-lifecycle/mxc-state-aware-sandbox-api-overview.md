@@ -43,7 +43,7 @@ on the response, and neither shape carries `containerId`.
 | TypeScript SDK (reference §6) | Five new functions: `provisionSandbox`, `startSandbox`, `execInSandbox` / `execInSandboxAsync`, `stopSandbox`, `deprovisionSandbox`. Branded `SandboxId<C>` type tagging ids by backend (`containment` named once at provision, inferred from the id thereafter). Per-(backend, phase) typed `*Config` interfaces (e.g. `IsolationSessionProvisionConfig`) that absorb cross-cutting fields directly — no separate policy parameter. Per-phase typed `*Result` types per backend. `AbortSignal` cancellation via the existing `SandboxSpawnOptions`. Typed `MxcError` class carrying a closed-enum `code`. | `spawnSandbox` family preserved. `ContainmentBackend` extension reused. The wire-format-aligned `Process` / `Filesystem` / `Network` / `UiConfig` interfaces from `sdk/node/src/types.ts` are reused as field types inside state-aware Configs. `SandboxSpawnOptions` reused as the third-arg options bag (gains `signal?: AbortSignal`). `*Config` naming convention reused. |
 | JSON wire format (reference §7) | Top-level `phase` discriminator. Top-level `sandboxId`. `containment` carried on provision only; non-provision phases route via the `sandboxId` prefix. Per-phase nesting under `experimental.<backend>.<phase>`. Named envelope types as a TypeScript discriminated union. | One-shot configs (no `phase`) work unchanged. Cross-cutting `filesystem` / `network` / `ui` at top level for state-aware too — backends declare per-phase honor. |
 | Rust executor (reference §9) | Dispatch arm for state-aware. New `StatefulSandboxBackend` trait. Rust mirror of the wire envelope (the `wire::MxcConfig` parse target). | `ScriptRunner` trait. Existing one-shot dispatch path. Existing backends unchanged. |
-| Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. `details` open object. | Existing one-shot error paths preserved. |
+| Error model (reference §8) | Closed enum of 12 codes. `MxcError` class with `code: ErrorCode`. Named structured fields `operation` / `nativeCode` / `remediation` for failures raised by an underlying platform API, plus the open `details` object for backend-specific data. | Existing one-shot error paths preserved. |
 | Plug-in surface (reference §11) | Implement `StatefulSandboxBackend`. Define typed per-(backend, phase) `*Config` interfaces. Declare the trait's `ID_PREFIX` and `BACKEND_KEY` consts. Document the cross-cutting honor matrix. | Ephemeral-only backends require no changes. |
 
 ## Lifecycle
@@ -144,7 +144,8 @@ The wire envelope is a TypeScript discriminated union over `phase`, JSON-seriali
 The Rust executor parses the same shape into the typed wire model
 (`wire::MxcConfig`, reference §9.1). The only `Record<string, unknown>` in the contract is
 `ErrorEnvelope.details` — the escape hatch for backend-specific structured failure
-information.
+information. Backend-neutral failure detail travels in the error envelope's named
+fields (`operation`, `nativeCode`, `remediation`) instead.
 
 ```typescript
 interface OneShotRequest {
@@ -183,8 +184,8 @@ type StateAwareRequest = ProvisionStateAwareRequest | NonProvisionStateAwareRequ
 // builds this from per-(backend, phase) Configs (see TypeScript SDK section above).
 interface ExperimentalStateAwareConfigs {
   isolation_session?: {
-    start?: { configurationId?: 'small' | 'medium' | 'large' | 'composable' };
-    // provision, exec, stop, deprovision omitted — IsolationSession has no
+    provision?: { appId?: string };
+    // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
   };
   // future state-aware-capable backends add typed entries here
@@ -290,15 +291,14 @@ Provision and exec — the two most distinctive shapes. Reference §7.4 has all 
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  filesystem: { readwritePaths: ['C:\\workspace'] },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
   config,
   { experimental: true },
 );
-// sandboxId = "iso:reg-abc:prov-123"
+// sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
 
 ```json
@@ -306,28 +306,31 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.6.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "filesystem": { "readwritePaths": ["C:\\workspace"] },
-  "network": { "defaultPolicy": "allow", "allowedHosts": ["api.anthropic.com"] }
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
 }
 ```
 
 ```rust
 // Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allowed_hosts = ["api.anthropic.com"]
-// (the same one-shot path the parser already uses). The dispatcher then calls:
+//   request.policy.allow_local_network = true
+//   request.policy.network_specified = true
+// (the same one-shot path the parser already uses). No filesystem policy
+// appears because this backend refuses it at every phase. The dispatcher
+// then calls:
 backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
-//     sandbox_id: "iso:reg-abc:prov-123".into(),
+//     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
 //         agent_user_name: "_iso_abc_123".into(),
+//         agent_user_sid: "S-1-5-21-1001".into(),
+//         ephemeral_workspace_path: "C:\\ProgramData\\...\\_iso_abc_123".into(),
 //     }),
 // })
 ```
 
 ```json
-{ "result": { "sandboxId": "iso:reg-abc:prov-123", "metadata": { "agentUserName": "_iso_abc_123" } } }
+{ "result": { "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", "metadata": { "agentUserName": "_iso_abc_123", "agentUserSid": "S-1-5-21-1001", "ephemeralWorkspacePath": "C:\\ProgramData\\...\\_iso_abc_123" } } }
 ```
 
 #### Exec (buffered)
@@ -346,7 +349,7 @@ const r = await execInSandboxAsync(
 {
   "version": "0.6.0-alpha",
   "phase": "exec",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello" }
 }
 ```
@@ -354,7 +357,7 @@ const r = await execInSandboxAsync(
 ```rust
 // Parser populates request.script_code = "echo hello" from the wire-format `process`
 // block (same path as one-shot). The dispatcher then calls:
-backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 
@@ -370,13 +373,17 @@ Cross-backend exec fields flow through top-level `process`. Cross-cutting fields
 (`filesystem` / `network` / `ui`) on the per-(backend, phase) Config map directly to
 top-level wire fields (backend declares per-phase honor per reference §10.3). The
 SDK Config exposes only the cross-cutting fields the runtime currently honors —
-for IsolationSession at provision today that's `filesystem`; `network` and `ui` are
-added when the runtime honors them.
+for IsolationSession at provision that's `network` — the required unrestricted-network
+acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork: true }`); `filesystem` is
+rejected.
 
 ## Error codes
 
-Closed enum at the MXC layer; backend-specific failures use `backend_error` with
-structured `details`. Reference §8 has the full list and the `MxcError` mapping.
+Closed enum at the MXC layer; backend-specific failures use `backend_error`, with the
+detail carried in the error envelope's named structured fields (`operation`,
+`nativeCode`, `remediation`) and, where a backend needs data with no cross-backend
+meaning, in `details`. Reference §8 has the full list and the `MxcError` mapping, and
+§7.3 the field invariant.
 
 | Group | Codes |
 |---|---|
@@ -385,7 +392,7 @@ structured `details`. Reference §8 has the full list and the `MxcError` mapping
 | Id problems | `malformed_id`, `stale_id` |
 | State-machine violations | `not_provisioned`, `not_started`, `already_started`, `already_stopped` |
 | Config / policy | `policy_validation` |
-| Catch-all | `backend_error` (with structured `details`) |
+| Catch-all | `backend_error` |
 
 Process-runtime kill conditions (timeouts, backend-initiated termination) surface as
 sentinel exit codes from the exec process, not as typed wire-format errors. Each code
