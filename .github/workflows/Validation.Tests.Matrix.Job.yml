@@ -50,8 +50,6 @@ jobs:
 
       - name: Prepare backend prerequisites
         shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           & ./scripts/ci/prepare-windows-host.ps1 `
             -Backend '${{ matrix.backend }}' `

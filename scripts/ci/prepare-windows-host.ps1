@@ -57,109 +57,6 @@ function Assert-RequiredFile {
     Get-ChildItem $BinaryDirectory -Include $leaves -Recurse | Format-Table FullName, Length
 }
 
-# Fetch the pinned NanVix release onto the test host, mirroring the offline-build
-# contract in docs/nanvix-microvm/nanvix.md: flat binaries plus bin/, verified
-# against checksums.json, and no snapshots (the runtime cold-boots and
-# regenerates a verified one on first use).
-function Install-NanvixBinaries {
-    $configDir = Join-Path $PSScriptRoot '..\..\src\backends\nanvix\binaries'
-    $versionsPath = Join-Path $configDir 'versions.json'
-    $checksumsPath = Join-Path $configDir 'checksums.json'
-    foreach ($path in $versionsPath, $checksumsPath) {
-        if (-not (Test-Path $path)) {
-            Exit-WithError "NanVix pin file not found: $path"
-        }
-    }
-
-    $release = (Get-Content $versionsPath -Raw | ConvertFrom-Json).nanvix_python
-    $checksums = (Get-Content $checksumsPath -Raw | ConvertFrom-Json).windows
-    $prefix = [System.IO.Path]::GetFileNameWithoutExtension($release.asset)
-    $binSubdir = Join-Path $BinaryDirectory 'bin'
-
-    # The build VM's copies are discarded: its snapshots are a host-specific WHP
-    # memory image, and a partial set would silently cost a cold boot per run.
-    Write-Host 'Discarding build-staged NanVix binaries in favor of the pinned release.'
-    Remove-Item (Join-Path $BinaryDirectory 'snapshots') -Recurse -Force -ErrorAction SilentlyContinue
-    foreach ($name in $release.binaries) {
-        Remove-Item (Join-Path $BinaryDirectory $name) -Force -ErrorAction SilentlyContinue
-    }
-    Remove-Item (Join-Path $binSubdir 'kernel.elf') -Force -ErrorAction SilentlyContinue
-
-    $url = "https://github.com/nanvix/nanvix-python/releases/download/$($release.tag)/$($release.asset)"
-    $archive = Join-Path ([System.IO.Path]::GetTempPath()) $release.asset
-    Write-Host "Downloading nanvix/nanvix-python $($release.tag)..."
-
-    try {
-        $curlArgs = @(
-            '--silent', '--show-error', '--fail', '--location',
-            '--retry', '5', '--retry-delay', '5', '--retry-all-errors',
-            '--output', $archive
-        )
-        $token = if ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { $env:GH_TOKEN }
-        if ($token) {
-            $curlArgs += @('--header', "Authorization: Bearer $token")
-        }
-        $curlArgs += $url
-
-        & curl.exe @curlArgs
-        if ($LASTEXITCODE -ne 0) {
-            Exit-WithError "curl failed for $url (exit code $LASTEXITCODE)"
-        }
-
-        New-Item -ItemType Directory -Force -Path $binSubdir | Out-Null
-
-        # nanvixd.exe and kernel.elf live under <prefix>/bin/; the rest at <prefix>/.
-        Expand-NanvixEntry -Archive $archive -Entry "$prefix/bin/nanvixd.exe" -StripComponents 2 -Destination $BinaryDirectory
-        Expand-NanvixEntry -Archive $archive -Entry "$prefix/bin/kernel.elf" -StripComponents 2 -Destination $binSubdir
-        foreach ($name in $release.binaries | Where-Object { $_ -ne 'nanvixd.exe' }) {
-            Expand-NanvixEntry -Archive $archive -Entry "$prefix/$name" -StripComponents 1 -Destination $BinaryDirectory
-        }
-    } finally {
-        Remove-Item $archive -Force -ErrorAction SilentlyContinue
-    }
-
-    Assert-NanvixChecksum -Path (Join-Path $binSubdir 'kernel.elf') -Expected $checksums.'kernel.elf'
-    foreach ($name in $release.binaries) {
-        Assert-NanvixChecksum -Path (Join-Path $BinaryDirectory $name) -Expected $checksums.$name
-    }
-
-    Write-Host "NanVix $($release.tag) staged and verified; the runner will cold-boot and regenerate its snapshot."
-}
-
-function Expand-NanvixEntry {
-    param(
-        [Parameter(Mandatory)][string]$Archive,
-        [Parameter(Mandatory)][string]$Entry,
-        [Parameter(Mandatory)][int]$StripComponents,
-        [Parameter(Mandatory)][string]$Destination
-    )
-
-    & tar.exe -xf $Archive -C $Destination --strip-components $StripComponents $Entry
-    if ($LASTEXITCODE -ne 0) {
-        Exit-WithError "tar failed to extract $Entry (exit code $LASTEXITCODE)"
-    }
-}
-
-function Assert-NanvixChecksum {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [string]$Expected
-    )
-
-    if (-not (Test-Path $Path)) {
-        Exit-WithError "NanVix binary missing after extraction: $Path"
-    }
-    if (-not $Expected) {
-        Exit-WithError "No pinned checksum for $(Split-Path $Path -Leaf)"
-    }
-
-    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash
-    if ($actual -ne $Expected) {
-        Exit-WithError "Checksum mismatch for $(Split-Path $Path -Leaf): expected $($Expected.ToLowerInvariant()), got $($actual.ToLowerInvariant())"
-    }
-    Write-Host "  $(Split-Path $Path -Leaf) verified"
-}
-
 # Read a Windows optional feature's state without throwing, so both the
 # diagnostic and assertion paths can share one query. A host that cannot answer
 # (querying needs elevation) reports the reason as its state rather than
@@ -252,8 +149,16 @@ function Initialize-ProcessContainerHost {
 }
 
 function Initialize-MicroVmHost {
-    Assert-RequiredFile @('wxc-exec.exe')
-    Install-NanvixBinaries
+    # Staged next to wxc-exec.exe by the --features microvm build, so their
+    # absence means a broken artifact rather than a host problem. Snapshots are
+    # excluded: they are a warm-start cache the runner regenerates on demand.
+    Assert-RequiredFile @(
+        'wxc-exec.exe',
+        'nanvixd.exe',
+        'nanvix_rootfs.img',
+        'python3.initrd',
+        'bin\kernel.elf'
+    )
 
     # NanVix boots a VM from these images on every invocation; Defender scanning
     # them can push boot past its timeout.
