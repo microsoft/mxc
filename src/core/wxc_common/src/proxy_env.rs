@@ -187,17 +187,17 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
         Some(colon) if is_uri_scheme(&url[..colon]) => url.split_at(colon),
         _ => (&url[..0], url),
     };
-    // For the special schemes, WHATWG reads a backslash exactly as a slash --
-    // both where an authority begins and where it ends. Reading only `/`
-    // truncated `http:\/alice:hunter2@host` to an authority of `\`, which
-    // carries no `@`, so the guard reported no credentials while the password
-    // still reached argv. The equivalence is deliberately not applied to other
-    // schemes, because the parser does not apply it there either, and a guard
-    // that over-reports rejects proxies that leak nothing.
-    let backslash_is_a_slash = is_special_scheme(scheme);
-    let introduces_authority = |c: char| c == '/' || (backslash_is_a_slash && c == '\\');
-    let ends_authority =
-        |c: char| matches!(c, '/' | '?' | '#') || (backslash_is_a_slash && c == '\\');
+
+    // A backslash is read exactly as a slash, both where an authority begins
+    // and where it ends. WHATWG only does that for the special schemes, and
+    // this function deliberately does it for every scheme, because the two
+    // ways of being wrong are not symmetric. Missing userinfo puts a password
+    // into argv and into the very error text meant to hide it; claiming
+    // userinfo a strict parse would not is a rejected config. The guard is
+    // therefore allowed to be more suspicious than the parser and never less.
+    // `http:\/alice:hunter2@host` was a live bypass on exactly this point.
+    let introduces_authority = |c: char| c == '/' || c == '\\';
+    let ends_authority = |c: char| matches!(c, '/' | '?' | '#' | '\\');
 
     let slashes = after_scheme
         .strip_prefix(':')
@@ -212,20 +212,6 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
         authority,
         tail,
     }
-}
-
-/// Whether `scheme` is one of the WHATWG "special" schemes, for which a
-/// backslash is equivalent to a slash.
-///
-/// The list is fixed by the URL Standard rather than open-ended, so naming it
-/// here matches the parser instead of guessing at it. Comparison ignores case
-/// because the parser lowercases the scheme before deciding, and
-/// `HTTP:\/alice:hunter2@host` is the same URL as its lowercase form.
-fn is_special_scheme(scheme: &str) -> bool {
-    let scheme = scheme.trim_start_matches(':');
-    ["http", "https", "ws", "wss", "ftp", "file"]
-        .iter()
-        .any(|special| scheme.eq_ignore_ascii_case(special))
 }
 
 /// Whether `candidate` satisfies the RFC 3986 scheme grammar,
@@ -264,13 +250,20 @@ fn is_uri_scheme(candidate: &str) -> bool {
 /// refusing them would reject a configuration that leaks nothing. A single
 /// component *is* one, though -- `http://token@proxy.example.com` is how a
 /// bearer token is passed, and `http://:secret@proxy.example.com` is a
-/// password with the username omitted -- so anything other than colons counts.
+/// password with the username omitted.
+///
+/// Emptiness stops at `""` and `":"`. A previous version treated any run of
+/// colons as empty, which is wrong because only the *first* colon separates
+/// the two components: in `::` the second colon is the password's own value.
+/// Measured against the parser, `http://::@host` reports
+/// `password = Some("%3A")` while `http://:@host` reports `None`, so that is
+/// exactly where the boundary belongs.
 ///
 /// Sharing this between the two public functions is what makes them unable to
 /// disagree about a given string.
 fn credential_userinfo(authority: &str) -> Option<(&str, &str)> {
     let (userinfo, host) = authority.rsplit_once('@')?;
-    if userinfo.chars().all(|c| c == ':') {
+    if userinfo.is_empty() || userinfo == ":" {
         return None;
     }
     Some((userinfo, host))

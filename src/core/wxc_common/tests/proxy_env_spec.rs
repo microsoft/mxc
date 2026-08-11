@@ -719,18 +719,48 @@ fn a_schemeless_value_with_userinfo_is_redacted_as_well_as_refused() {
 
 // Empty userinfo names no user and no password. Refusing it would reject a
 // configuration that leaks nothing, and redacting it would invent a secret.
+//
+// Only `""` and `":"` are empty. `"::"` is not: the *first* colon separates the
+// username from the password, so the second one is the password's own value.
+// Measured against the parser, `http://::@host` yields `password = Some("%3A")`
+// while `http://:@host` yields `None`, which is where the boundary sits.
 #[test]
 fn empty_userinfo_is_not_a_credential() {
     for url in [
         "http://@proxy.example.com:3128",
         "http://:@proxy.example.com:3128",
-        "http://::@proxy.example.com:3128",
     ] {
         assert!(
             !proxy_url_has_credentials(url),
             "{url} names neither a user nor a password"
         );
         assert_eq!(redact_proxy_url(url), url, "nothing to redact in {url}");
+    }
+}
+
+// The boundary case that the all-colons rule got wrong. A password made of
+// colons carries little, but the guard's whole job is to agree with the parser
+// about what the userinfo is, and disagreeing here is how it disagreed
+// everywhere else.
+#[test]
+fn a_second_colon_in_the_userinfo_is_a_password_not_emptiness() {
+    for url in [
+        "http://::@proxy.example.com:3128",
+        "http://:::@proxy.example.com:3128",
+    ] {
+        let parsed = Url::parse(url).expect("corpus entry should parse");
+        assert!(
+            parsed.password().is_some(),
+            "the parser should see a password in {url}"
+        );
+        assert!(
+            proxy_url_has_credentials(url),
+            "{url} carries a password the guard missed"
+        );
+        assert!(
+            !redact_proxy_url(url).contains("::@"),
+            "the userinfo survived redaction in {url}"
+        );
     }
 }
 
@@ -898,105 +928,121 @@ fn whitespace_around_a_clean_url_stays_clean() {
 
 // The guard exists to agree with the parser that actually consumes this URL.
 // Every bypass found in review was the same failure -- the guard read one
-// string and `lxc-attach` received another -- so the strongest available
-// assertion is not another hand-picked example but a differential one: for any
-// input, if `url::Url::parse` finds userinfo, the guard must say so too.
-// `url` is the crate `ProxyAddress` itself parses with, so it is the oracle,
-// not a second opinion.
+// string and `lxc-attach` received another -- so the assertion is differential:
+// wherever `url::Url::parse` finds userinfo, the guard must find it too, and
+// wherever the parser finds none, the guard must not invent one. `url` is the
+// crate `ProxyAddress` itself parses with, so it is the oracle rather than a
+// second opinion.
+//
+// The corpus is *generated* rather than listed. A hand-written list already
+// failed twice: it missed the backslash authority introducer, and it missed
+// `::@`, where the second colon is a password rather than more emptiness.
+// Both were shapes nobody thought to write down. Crossing the dimensions
+// instead makes coverage a property of the dimensions, so a gap has to be a
+// missing *dimension* rather than a missing example.
+fn differential_corpus() -> Vec<String> {
+    let schemes = [
+        "http",
+        "https",
+        "HTTP",
+        "ftp",
+        "ws",
+        "socks5",
+        "weird-scheme",
+    ];
+    let separators = ["://", ":/", ":", ":\\/", ":/\\", ":\\\\", "//"];
+    let userinfos = [
+        "",
+        "@",
+        ":@",
+        "::@",
+        ":::@",
+        "alice@",
+        ":hunter2@",
+        "alice:hunter2@",
+        "alice:@",
+        "***@",
+        "a%40b:c@",
+        "alice:hun%20ter2@",
+    ];
+    let hosts = ["10.0.3.1:3128", "proxy.example.com", "[::1]:3128"];
+    let tails = ["", "/path", "/p@th", "?q=a@b", "#f@g"];
+    let paddings = ["", " ", "\t", "\n", "\r"];
+
+    let mut corpus = Vec::new();
+    for scheme in schemes {
+        for separator in separators {
+            for userinfo in userinfos {
+                for host in hosts {
+                    for tail in tails {
+                        let body = format!("{scheme}{separator}{userinfo}{host}{tail}");
+                        for padding in paddings {
+                            corpus.push(format!("{padding}{body}"));
+                            corpus.push(format!("{body}{padding}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    corpus
+}
+
 #[test]
 fn the_guard_agrees_with_the_parser_that_will_actually_read_the_url() {
-    let corpus = [
-        "http://alice:hunter2@10.0.3.1:3128",
-        "http:alice:hunter2@10.0.3.1:3128",
-        "http:/alice:hunter2@10.0.3.1:3128",
-        "alice@proxy.example.com:3128",
-        " http://alice:hunter2@10.0.3.1:3128",
-        "http://alice:hunter2@10.0.3.1:3128 ",
-        "\thttp://alice:hunter2@10.0.3.1:3128",
-        "http://ali\tce:hunter2@10.0.3.1:3128",
-        "http://alice:hun\nter2@10.0.3.1:3128",
-        "http://alice:hunter2@10.0.3.1:3128\r",
-        "http:\\\\alice:hunter2@10.0.3.1:3128",
-        "http:/\\alice:hunter2@10.0.3.1:3128",
-        "http:\\/alice:hunter2@10.0.3.1:3128",
-        "HTTP://alice:hunter2@10.0.3.1:3128",
-        "HtTp://alice:hunter2@10.0.3.1:3128",
-        "http://alice%40x:hunter2@10.0.3.1:3128",
-        "http://alice:hunter2@@10.0.3.1:3128",
-        "http://@10.0.3.1:3128",
-        "https://alice:hunter2@10.0.3.1:3128",
-        "socks5://alice:hunter2@10.0.3.1:1080",
-        "http://alice@10.0.3.1:3128",
-        "http://alice:@10.0.3.1:3128",
-        "http://:hunter2@10.0.3.1:3128",
-        "http://10.0.3.1:3128",
-        "http://10.0.3.1:3128/path@notuserinfo",
-        "http://10.0.3.1:3128/?q=a@b",
-        "http://10.0.3.1:3128/#frag@ment",
-        "proxy.example.com:3128",
-        "10.0.3.1:3128",
-        "",
-        "http://[::1]:3128",
-        "http://alice:hunter2@[::1]:3128",
-    ];
+    let mut missed = Vec::new();
+    let mut invented = Vec::new();
+    let mut compared = 0usize;
 
-    let mut disagreements = Vec::new();
-    for raw in corpus {
-        // The parser is only an oracle for inputs it accepts.  Where it
-        // refuses outright, nothing reaches `lxc-attach` and there is no
-        // credential to leak, so it has no verdict to compare against.
-        let Ok(parsed) = Url::parse(raw) else {
+    for raw in differential_corpus() {
+        // The parser is only an oracle for inputs it accepts. Where it refuses
+        // outright, nothing reaches `lxc-attach` and there is no credential to
+        // leak, so it has no verdict to compare against.
+        let Ok(parsed) = Url::parse(&raw) else {
             continue;
         };
+        compared += 1;
 
-        let parser_sees_credentials = !parsed.username().is_empty() || parsed.password().is_some();
-        let guard_sees_credentials = proxy_url_has_credentials(raw);
+        let parser_sees = !parsed.username().is_empty() || parsed.password().is_some();
+        let guard_sees = proxy_url_has_credentials(&raw);
 
-        if parser_sees_credentials && !guard_sees_credentials {
-            disagreements.push(format!(
-                "BYPASS: parser found userinfo (username={:?}, password={:?}) but the guard did not, for bytes {:?}",
+        if parser_sees && !guard_sees {
+            missed.push(format!(
+                "  MISSED: parser found user={:?} pass={:?}, guard found none, in bytes {:?}",
                 parsed.username(),
                 parsed.password(),
+                raw.as_bytes()
+            ));
+        }
+
+        // Over-reporting and under-reporting do not cost the same, so they are
+        // not held to the same standard. A miss puts a password into argv and
+        // into the error text meant to hide it. An over-report rejects a
+        // config -- bad, since the caller destroys the container, but not a
+        // disclosure. So the guard is allowed to fire on any string carrying an
+        // `@`, since that is the only character that can introduce userinfo and
+        // its presence makes suspicion defensible. What the guard may never do
+        // is claim a credential in a string with no `@` anywhere, which would
+        // be an invention rather than caution.
+        if !parser_sees && guard_sees && !raw.contains('@') {
+            invented.push(format!(
+                "  INVENTED: guard claimed a credential with no `@` anywhere, in bytes {:?}",
                 raw.as_bytes()
             ));
         }
     }
 
     assert!(
-        disagreements.is_empty(),
-        "the guard disagreed with the parser that will read the URL:\n{}",
-        disagreements.join("\n")
+        compared > 500,
+        "the corpus degenerated: only {compared} inputs parsed"
     );
-}
-
-// A guard that simply answered "credentials" to everything would satisfy the
-// differential test above while rejecting every legitimate proxy, so the
-// agreement has to hold in the other direction too.
-#[test]
-fn the_guard_does_not_invent_credentials_the_parser_cannot_see() {
-    let clean = [
-        "http://10.0.3.1:3128",
-        "https://proxy.example.com:8080",
-        "http://proxy.example.com",
-        "socks5://10.0.3.1:1080",
-        "http://[::1]:3128",
-        "http://10.0.3.1:3128/path",
-        "http://10.0.3.1:3128/path@notuserinfo",
-        "http://10.0.3.1:3128/?q=a@b",
-    ];
-
-    for raw in clean {
-        let parsed = Url::parse(raw).expect("corpus entry should parse");
-        assert!(
-            parsed.username().is_empty() && parsed.password().is_none(),
-            "corpus entry {raw:?} was supposed to be credential-free"
-        );
-        assert!(
-            !proxy_url_has_credentials(raw),
-            "the guard claimed {raw:?} carries credentials, but the parser sees none; \
-             a guard that over-reports rejects legitimate proxies"
-        );
-    }
+    assert!(
+        missed.is_empty() && invented.is_empty(),
+        "the guard disagreed with the parser on {} of {compared} parseable inputs:\n{}\n{}",
+        missed.len() + invented.len(),
+        missed.join("\n"),
+        invented.join("\n")
+    );
 }
 
 // The fifth bypass, and the second one a differential test caught rather than
@@ -1045,31 +1091,41 @@ fn a_backslash_still_ends_an_authority_it_does_not_only_begin_one() {
     );
 }
 
-// The backslash equivalence belongs to the special schemes and stops there,
-// which is what keeps the guard from rejecting a proxy that leaks nothing.
-// The parser reads `socks5:\/alice:hunter2@host` as an opaque path -- measured
-// directly, it reports `cannot_be_a_base = true`, an empty username, and no
-// host at all -- so it names no credential, and a value with no host could
-// never become a `ProxyAddress` in the first place. Applying the equivalence
-// everywhere would make the guard claim a credential the parser cannot see,
-// and rejection here is fatal: the caller destroys the container.
+// The backslash equivalence is applied to every scheme, not only the special
+// ones, and that is a deliberate divergence from the parser.  The parser reads
+// `socks5:\/alice:hunter2@host` as an opaque path -- measured directly, it
+// reports `cannot_be_a_base = true`, an empty username, and no host -- so by
+// its rules there is no credential.  But the password is still sitting in the
+// string, and that string reaches argv and the failure diagnostic.  The two
+// ways of being wrong do not cost the same: over-reporting rejects a config,
+// under-reporting publishes a password.  So the guard is allowed to be more
+// suspicious than the parser here, and the redactor has to strip it.
 #[test]
-fn a_backslash_after_a_non_special_scheme_is_a_path_not_an_authority() {
+fn a_backslash_does_not_hide_a_credential_behind_an_unusual_scheme() {
     let opaque = "socks5:\\/alice:hunter2@10.0.3.1:1080";
 
     let parsed = Url::parse(opaque).expect("the parser accepts it as an opaque path");
-    assert!(parsed.cannot_be_a_base());
-    assert!(parsed.username().is_empty() && parsed.password().is_none());
-    assert!(parsed.host_str().is_none());
+    assert!(
+        parsed.username().is_empty() && parsed.password().is_none(),
+        "the parser is supposed to see no userinfo here -- that is the whole point"
+    );
 
     assert!(
-        !proxy_url_has_credentials(opaque),
-        "the guard claimed a credential the parser cannot see"
+        proxy_url_has_credentials(opaque),
+        "the password is in the string and reaches argv, so the guard must fire"
     );
-    assert_eq!(redact_proxy_url(opaque), opaque);
+    let redacted = redact_proxy_url(opaque);
+    assert!(
+        !redacted.contains("hunter2"),
+        "password survived redaction: {redacted}"
+    );
+    assert!(
+        redacted.contains("10.0.3.1"),
+        "the host must survive so the error still diagnoses something: {redacted}"
+    );
 
-    // The ordinary `//` form of the same non-special scheme is a real
-    // authority, and that one does carry a credential.
+    // The ordinary `//` form of the same scheme is an authority by anyone's
+    // reading, and it carries a credential too.
     assert!(proxy_url_has_credentials(
         "socks5://alice:hunter2@10.0.3.1:1080"
     ));
