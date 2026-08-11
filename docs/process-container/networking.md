@@ -102,6 +102,22 @@ The caller must:
 - keep it alive until the client exits; and
 - leave egress deny-default with no direct allow or deny rules.
 
+#### Proxy identity and firewall authorization
+
+A packaged AppContainer proxy is recommended. Supported deployment options are:
+
+| Proxy deployment | `allowedProxyPeer` | Enforcement |
+|---|---|---|
+| Packaged AppContainer | Package family name | AppContainer isolation and package firewall rule |
+| Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
+
+The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
+Firewall's block-inbound-to-non-allowed-apps policy. A packaged proxy uses the package-owned firewall declaration shown
+in the [schema 0.8 examples](examples/0.8.0-schema.md); a packaged AppContainer also needs AppContainer trust. An
+unpackaged AppContainer proxy requires its installer or administrator to own the equivalent firewall rule. See
+[CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
+for unpackaged profile creation.
+
 ### Model 3: externally blocked (most restrictive)
 
 - **Capabilities:** none; no host or peer loopback exemptions.
