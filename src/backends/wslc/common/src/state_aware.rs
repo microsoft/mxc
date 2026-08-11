@@ -15,7 +15,8 @@
 
 use std::io::Write;
 
-use wxc_common::models::{ExecutionRequest, NetworkPolicy};
+use wxc_common::logger::{Logger, Mode};
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ProvisionResult, StartResult,
@@ -70,6 +71,26 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             .and_then(|c| c.image.clone())
             .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
         let image_tar_path = config.and_then(|c| c.image_tar_path);
+
+        // Object-identity normalization (D6) + delegation (D3), mirroring the
+        // one-shot runner: tighten rw/ro/denied aliases of the same host object
+        // to the strictest intent, then reject any path the caller cannot access.
+        // The daemon must mount the tightened policy, so a writable alias of a
+        // readonly object never leaks and a persistent daemon never mounts a path
+        // the phase caller could not delegate.
+        let normalized = normalize_and_check_delegation(request)?;
+        let normalized_request;
+        let request = match normalized {
+            Some(policy) => {
+                normalized_request = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &normalized_request
+            }
+            None => request,
+        };
+
         let volumes = build_daemon_volumes(request)?;
         let network = map_network(request);
 
@@ -293,6 +314,22 @@ fn validate_sandbox_id(sandbox_id: &str) -> Result<(), MxcError> {
     }
 }
 
+/// Object-identity normalization (D6) then delegation check (D3) for the
+/// provision phase, mirroring the one-shot runner order. Returns the tightened
+/// policy when aliasing required a change, else `None`; either check maps its
+/// `String` error to a `policy_validation` envelope.
+fn normalize_and_check_delegation(
+    request: &ExecutionRequest,
+) -> Result<Option<ContainerPolicy>, MxcError> {
+    let mut logger = Logger::new(Mode::Buffer);
+    let normalized =
+        wxc_common::filesystem_object::normalize_object_conflicts(&request.policy, &mut logger)
+            .map_err(MxcError::policy_validation)?;
+    let policy = normalized.as_ref().unwrap_or(&request.policy);
+    wxc_common::filesystem_access::check_delegation(policy).map_err(MxcError::policy_validation)?;
+    Ok(normalized)
+}
+
 /// Build daemon volume mounts from the request's filesystem policy. Overlapping
 /// denied paths are rejected earlier in `validate_provision`; an invalid mount
 /// path (e.g. a UNC share) surfaces here as `policy_validation`.
@@ -450,6 +487,34 @@ mod tests {
             err.code,
             wxc_common::mxc_error::MxcErrorCode::PolicyValidation
         );
+    }
+
+    #[test]
+    fn normalize_and_check_delegation_empty_policy_is_none() {
+        let req = ExecutionRequest::default();
+        assert!(normalize_and_check_delegation(&req).unwrap().is_none());
+    }
+
+    #[test]
+    fn normalize_and_check_delegation_tightens_rw_alias_of_ro() {
+        // The same host object listed both readwrite and readonly must be
+        // tightened to readonly (D6) before the daemon mounts it, so a writable
+        // alias of a readonly object never leaks.
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().to_str().unwrap().to_string();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec![d.clone()],
+                readonly_paths: vec![d.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tightened = normalize_and_check_delegation(&req)
+            .unwrap()
+            .expect("aliasing conflict should tighten the policy");
+        assert!(tightened.readwrite_paths.is_empty());
+        assert_eq!(tightened.readonly_paths, vec![d]);
     }
 
     #[test]

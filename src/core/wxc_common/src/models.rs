@@ -498,6 +498,15 @@ pub struct ContainerPolicy {
     /// never on the wire.
     #[serde(skip)]
     pub network_specified: bool,
+    /// Whether the caller supplied any network *mode* field (`defaultPolicy`,
+    /// `enforcementMode`, `allowLocalNetwork`, `allowedHosts`, `blockedHosts`) —
+    /// i.e. anything other than `proxy`. Distinguishes an explicit
+    /// `defaultPolicy: "block"` from an omitted network block (both leave
+    /// `default_network_policy == Block`), so backends can reject a mode change
+    /// on a phase where the network posture is immutable while still honouring a
+    /// proxy-only network block. Parse-derived, never on the wire.
+    #[serde(skip)]
+    pub network_mode_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
     /// Whether the caller supplied a `ui` block on the wire (any field

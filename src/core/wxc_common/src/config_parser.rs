@@ -972,6 +972,14 @@ fn convert_wire_config(
     // to `Block` either way).
     policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
+        // Presence of any network *mode* field (everything except `proxy`), so
+        // post-provision phases can reject an immutable-posture change by
+        // presence while still accepting a proxy-only network block.
+        policy.network_mode_specified = net.default_policy.is_some()
+            || net.enforcement_mode.is_some()
+            || net.allow_local_network.is_some()
+            || net.allowed_hosts.is_some()
+            || net.blocked_hosts.is_some();
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()

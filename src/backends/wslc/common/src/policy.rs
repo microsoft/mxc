@@ -21,7 +21,7 @@
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 
-use wxc_common::models::{ExecutionRequest, NetworkPolicy};
+use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 
 use crate::policy_mapping::validate_denied_path_overlap;
@@ -67,7 +67,7 @@ pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<()
 pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_host_filtering(request)?;
-    reject_non_default_network(request)?;
+    reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() {
         return Err(MxcError::policy_validation(ERR_PROXY_AT_PHASE));
     }
@@ -80,7 +80,7 @@ pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Resu
 pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_host_filtering(request)?;
-    reject_non_default_network(request)?;
+    reject_post_provision_network_mode(request)?;
     if request.policy.network_proxy.is_enabled() && exec_proxy_url(request).is_none() {
         return Err(MxcError::policy_validation(ERR_PROXY_URL_FORM));
     }
@@ -118,8 +118,14 @@ fn reject_host_filtering(request: &ExecutionRequest) -> Result<(), MxcError> {
     Ok(())
 }
 
-fn reject_non_default_network(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if request.policy.default_network_policy != NetworkPolicy::Block {
+/// Reject any network *mode* field supplied after provision. The network
+/// posture (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host
+/// lists) is bound to the provision phase; presence — not value — is checked so
+/// an explicit `defaultPolicy: "block"` (indistinguishable from an omitted
+/// block by value) is rejected too. The cooperative proxy is a separate
+/// exec-time concern handled by the callers.
+fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), MxcError> {
+    if request.policy.network_mode_specified {
         return Err(MxcError::policy_validation(ERR_NETWORK_IMMUTABLE));
     }
     Ok(())
@@ -128,7 +134,7 @@ fn reject_non_default_network(request: &ExecutionRequest) -> Result<(), MxcError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig};
+    use wxc_common::models::{ContainerPolicy, NetworkPolicy, ProxyAddress, ProxyConfig};
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
@@ -237,9 +243,11 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_rejects_non_default_network() {
+    fn post_provision_rejects_network_mode_by_presence() {
+        // Explicit `defaultPolicy: "block"` (value equals the default) must still
+        // be rejected post-provision: presence, not value, is what matters.
         let req = request_with_policy(ContainerPolicy {
-            default_network_policy: NetworkPolicy::Allow,
+            network_mode_specified: true,
             ..Default::default()
         });
         assert_policy_validation(
@@ -292,6 +300,31 @@ mod tests {
             ..Default::default()
         });
         assert_policy_validation(validate_exec_policy(&req).unwrap_err(), "provision phase");
+    }
+
+    #[test]
+    fn exec_rejects_network_mode_by_presence() {
+        let req = request_with_policy(ContainerPolicy {
+            network_mode_specified: true,
+            ..Default::default()
+        });
+        assert_policy_validation(validate_exec_policy(&req).unwrap_err(), "network mode");
+    }
+
+    #[test]
+    fn exec_accepts_proxy_only_network_block() {
+        // A proxy-only network block sets `network_specified` but not
+        // `network_mode_specified`, so exec still honours the cooperative proxy.
+        let req = request_with_policy(ContainerPolicy {
+            network_specified: true,
+            network_proxy: url_proxy(),
+            ..Default::default()
+        });
+        validate_exec_policy(&req).unwrap();
+        assert_eq!(
+            exec_proxy_url(&req).as_deref(),
+            Some("http://127.0.0.1:8888")
+        );
     }
 
     #[test]
