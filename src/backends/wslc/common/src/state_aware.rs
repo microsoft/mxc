@@ -13,7 +13,8 @@
 //!
 //! Windows-only: the daemon and its pipe transport are a Windows feature.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
+use std::time::{Duration, Instant};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
@@ -24,6 +25,7 @@ use wxc_common::state_aware_backend::{
 };
 use wxc_common::wire::WslcProvisionPhase;
 
+use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
 use crate::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
@@ -35,6 +37,42 @@ use crate::policy::{
 
 /// Default image when a provision request omits `experimental.wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
+
+/// Bytes accumulated on a non-TTY exec output stream before [`FlushGate`] forces
+/// a flush, bounding how much newline-free output can sit buffered.
+const NON_TTY_FLUSH_BYTES: usize = 32 * 1024;
+/// Max wall-clock between flushes on a non-TTY exec output stream, so slow
+/// carriage-return progress output reaches a pipe consumer promptly.
+const NON_TTY_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Bounded flush policy for non-TTY exec output: flush once enough bytes have
+/// accumulated or enough wall-clock has elapsed, so a pipe consumer sees
+/// newline-free progress output promptly without a syscall per chunk.
+struct FlushGate {
+    last: Instant,
+    pending: usize,
+}
+
+impl FlushGate {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            pending: 0,
+        }
+    }
+
+    /// Record `n` freshly-written bytes and report whether to flush now.
+    fn should_flush(&mut self, n: usize) -> bool {
+        self.pending += n;
+        if self.pending >= NON_TTY_FLUSH_BYTES || self.last.elapsed() >= NON_TTY_FLUSH_INTERVAL {
+            self.pending = 0;
+            self.last = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh
 /// [`DaemonClient`] connection (the daemon holds all persistent state).
@@ -126,12 +164,11 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         Ok(DeprovisionResult { metadata: None })
     }
 
-    /// Runs one command in the warm container. The daemon buffers the run to
-    /// completion and returns the captured stdout/stderr plus the exit code;
-    /// this relays the buffers to the executor's own stdio, then hands back an
+    /// Runs one command in the warm container, relaying its stdout/stderr to the
+    /// executor's own stdio **live** as the daemon streams it, then hands back an
     /// [`ExecHandle`] with sentinel pipe handles and a waiter that yields the
-    /// already-captured exit code (so the dispatcher's `relay_exec_to_stdio` is
-    /// a thin call-through, mirroring the IsolationSession backend).
+    /// captured exit code (so the dispatcher's `relay_exec_to_stdio` is a thin
+    /// call-through, mirroring the IsolationSession and Windows Sandbox backends).
     fn exec(
         &mut self,
         sandbox_id: &str,
@@ -152,30 +189,46 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         };
 
         let client = connect_daemon()?;
-        let result = client
-            .exec(ExecConfig {
-                sandbox_id: sandbox_id.to_string(),
-                script_code: request.script_code.clone(),
-                working_directory: request.working_directory.clone(),
-                env,
-                timeout_ms: request.script_timeout,
-            })
+
+        // Relay each chunk to our own stdio as it arrives. Best-effort: a failed
+        // local write must not mask the container's exit code. A `FlushGate`
+        // bounds latency on a non-TTY pipe consumer; a TTY flushes every chunk.
+        let mut stdout = std::io::stdout();
+        let mut stderr = std::io::stderr();
+        let stdout_is_tty = stdout.is_terminal();
+        let stderr_is_tty = stderr.is_terminal();
+        let mut stdout_gate = FlushGate::new();
+        let mut stderr_gate = FlushGate::new();
+
+        let exit_code = client
+            .exec_streaming(
+                ExecConfig {
+                    sandbox_id: sandbox_id.to_string(),
+                    script_code: request.script_code.clone(),
+                    working_directory: request.working_directory.clone(),
+                    env,
+                    timeout_ms: request.script_timeout,
+                },
+                |stream, bytes| match stream {
+                    OutStream::Stdout => {
+                        let _ = stdout.write_all(bytes);
+                        if stdout_is_tty || stdout_gate.should_flush(bytes.len()) {
+                            let _ = stdout.flush();
+                        }
+                    }
+                    OutStream::Stderr => {
+                        let _ = stderr.write_all(bytes);
+                        if stderr_is_tty || stderr_gate.should_flush(bytes.len()) {
+                            let _ = stderr.flush();
+                        }
+                    }
+                },
+            )
             .map_err(map_daemon_error)?;
 
-        // Relay the daemon-captured buffers to our own stdio. Best-effort:
-        // a failed local write must not mask the container's exit code.
-        if !result.stdout.is_empty() {
-            let mut out = std::io::stdout();
-            let _ = out.write_all(&result.stdout);
-            let _ = out.flush();
-        }
-        if !result.stderr.is_empty() {
-            let mut err = std::io::stderr();
-            let _ = err.write_all(&result.stderr);
-            let _ = err.flush();
-        }
+        let _ = stdout.flush();
+        let _ = stderr.flush();
 
-        let exit_code = result.exit_code;
         Ok(ExecHandle {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),

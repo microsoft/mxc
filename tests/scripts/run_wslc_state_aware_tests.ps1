@@ -197,6 +197,76 @@ function Invoke-StateAware {
     }
 }
 
+# Like Invoke-StateAware but records the wall-clock arrival time of each stdout
+# line, so a test can prove output is streamed incrementally (an early line lands
+# well before a later one) rather than buffered and dumped together at process
+# exit. `ReadLineAsync` returns the moment the child flushes a newline-terminated
+# line, so a streamed line is observed immediately; a buffer-then-dump impl would
+# surface every line at once only when the process exits. Returns
+# @{ ExitCode; Stdout; Stderr; Lines = @(@{ Text; At }) } (At = UTC DateTime).
+function Invoke-StateAwareStreaming {
+    param(
+        [string]$ConfigFile,
+        [hashtable]$Request,
+        [string]$SandboxId
+    )
+
+    if ($ConfigFile) {
+        $path = Join-Path $ConfigDir $ConfigFile
+        if (-not (Test-Path $path)) { throw "Config fixture not found: $path" }
+        $json = Get-Content $path -Raw
+        if ($json -match '\{\{SANDBOX_ID\}\}') {
+            if (-not $SandboxId) {
+                throw "Fixture $ConfigFile contains {{SANDBOX_ID}} but -SandboxId was not supplied"
+            }
+            $json = $json -replace '\{\{SANDBOX_ID\}\}', $SandboxId
+        }
+    } elseif ($Request) {
+        $json = $Request | ConvertTo-Json -Compress -Depth 12
+    } else {
+        throw "Invoke-StateAwareStreaming requires either -Request or -ConfigFile"
+    }
+
+    $b64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+    $argList = @('--experimental')
+    if ($Debug) { $argList += '--debug' }
+    $argList += @('--config-base64', $b64)
+
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $WxcExec
+    foreach ($a in $argList) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $proc = [System.Diagnostics.Process]::new()
+    $proc.StartInfo = $psi
+    $null = $proc.Start()
+
+    # Drain stderr async so a large stderr can never deadlock the stdout read.
+    $stderrTask = $proc.StandardError.ReadToEndAsync()
+
+    $lines = New-Object System.Collections.Generic.List[object]
+    $sb = [System.Text.StringBuilder]::new()
+    while ($true) {
+        $line = $proc.StandardOutput.ReadLineAsync().GetAwaiter().GetResult()
+        if ($null -eq $line) { break }
+        $null = $lines.Add(@{ Text = $line; At = [DateTime]::UtcNow })
+        $null = $sb.AppendLine($line)
+    }
+    $proc.WaitForExit()
+    $stderrText = $stderrTask.GetAwaiter().GetResult()
+    $exitCode = $proc.ExitCode
+    $proc.Dispose()
+    @{
+        ExitCode = $exitCode
+        Stdout   = $sb.ToString()
+        Stderr   = if ($null -eq $stderrText) { "" } else { [string]$stderrText }
+        Lines    = $lines
+    }
+}
+
 # Parse the wxc-exec stdout envelope; $null if not valid JSON.
 function Parse-Envelope {
     param([string]$Stdout)
@@ -230,22 +300,6 @@ function Assert-True {
         Write-Host "  FAIL: $Message" -ForegroundColor Red
         if ($script:currentTestPassed) { $script:currentTestFirstFailReason = $Message }
         $script:currentTestPassed = $false
-    }
-}
-
-# Non-failing probe for assertions that depend on exec STDOUT/STDERR content.
-# Live exec output forwarding is deferred: the daemon's handle_exec runs the
-# command to completion and emits only the terminal Exit frame, so container
-# output is captured but not yet framed back to the caller (exit codes, timeouts,
-# and the phase state machine all work). These probes print PASS the moment the
-# output path lands and an INFO note until then, keeping the lifecycle-mechanic
-# coverage green in the interim without masking a hard-assert regression.
-function Probe-ExecOutput {
-    param([bool]$Condition, [string]$Message)
-    if ($Condition) {
-        Write-Host "  PASS: $Message" -ForegroundColor Green
-    } else {
-        Write-Host "  INFO (exec-output deferred): $Message" -ForegroundColor DarkYellow
     }
 }
 
@@ -356,12 +410,34 @@ try {
         $execedOk = Run-StateAwareTest "A: exec (basic)" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_basic.json' -SandboxId $script:sandboxId
             Assert-True ($r.ExitCode -eq 0) "exit code = 0 on success"
-            Probe-ExecOutput ($r.Stdout -match 'wslc-state-aware-exec-marker') `
+            Assert-True ($r.Stdout -match 'wslc-state-aware-exec-marker') `
                 "stdout contains the script's output (relayed live, not enveloped)"
             $maybeEnv = Parse-Envelope -Stdout $r.Stdout
             Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
                 "stdout is not a state-aware error envelope on success"
         }
+    }
+
+    # A3b: LIVE DRIP -- prove output is streamed incrementally, not buffered and
+    # dumped at exit. The script prints PART1, sleeps 2s, then prints PART2. With
+    # live streaming the harness observes PART1 well before PART2 (~the sleep);
+    # a buffer-then-dump impl would surface both lines together at process exit
+    # (gap ~0). Asserting the inter-line arrival gap is the airtight liveness
+    # proof a content-only "stdout contains X" check cannot give.
+    if ($execedOk) {
+        Run-StateAwareTest "A: exec (live drip -- incremental streaming)" {
+            $r = Invoke-StateAwareStreaming -ConfigFile 'wslc_state_aware_exec_drip.json' -SandboxId $script:sandboxId
+            Assert-True ($r.ExitCode -eq 0) "drip exec exit code = 0"
+            $p1 = $r.Lines | Where-Object { $_.Text -match 'DRIP-PART1' } | Select-Object -First 1
+            $p2 = $r.Lines | Where-Object { $_.Text -match 'DRIP-PART2' } | Select-Object -First 1
+            Assert-True ($null -ne $p1) "PART1 line observed on stdout"
+            Assert-True ($null -ne $p2) "PART2 line observed on stdout"
+            if ($p1 -and $p2) {
+                $gapSec = ($p2.At - $p1.At).TotalSeconds
+                Assert-True ($gapSec -ge 1.0) `
+                    ("PART1 arrived >=1.0s before PART2 (gap {0:N2}s) -- streamed live, not buffered" -f $gapSec)
+            }
+        } | Out-Null
     }
 
     # A4: WARM REUSE -- in-container state continuity across separate wxc-exec
@@ -375,7 +451,7 @@ try {
             Assert-True ($w.ExitCode -eq 0) "exec #1 (write /tmp marker) exit 0"
             $rd = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_read_marker.json' -SandboxId $script:sandboxId
             Assert-True ($rd.ExitCode -eq 0) "exec #2 (read /tmp marker) exit 0"
-            Probe-ExecOutput ($rd.Stdout -match 'wslc-warm-marker-content') `
+            Assert-True ($rd.Stdout -match 'wslc-warm-marker-content') `
                 "exec #2 sees the marker exec #1 wrote (container stayed warm across wxc-exec processes)"
         } | Out-Null
     }
@@ -402,7 +478,7 @@ try {
         Run-StateAwareTest "A: multi-exec (per-invocation env)" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_env.json' -SandboxId $script:sandboxId
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Probe-ExecOutput ($r.Stdout -match 'MY_SA_VAR=state-aware-env-value') `
+            Assert-True ($r.Stdout -match 'MY_SA_VAR=state-aware-env-value') `
                 "wire env block reaches the container ($($r.Stdout.Trim()))"
         } | Out-Null
     }
@@ -511,7 +587,7 @@ try {
             }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "container read of ro mount exit 0"
-            Probe-ExecOutput ($r.Stdout -match 'ro-seed-content') "container reads host-seeded ro content"
+            Assert-True ($r.Stdout -match 'ro-seed-content') "container reads host-seeded ro content"
         } | Out-Null
 
         Run-StateAwareTest "B: ro mount write denied" {
@@ -521,7 +597,7 @@ try {
                 process   = @{ commandLine = "sh -c 'echo x > /mnt/c/mxc_wslc_sa_test/ro/should_fail.txt && echo WROTE || echo BLOCKED'"; timeout = 30000 }
             }
             $r = Invoke-StateAware -Request $req
-            Probe-ExecOutput ($r.Stdout -match 'BLOCKED') "write to ro mount is blocked"
+            Assert-True ($r.Stdout -match 'BLOCKED') "write to ro mount is blocked"
             Assert-True (-not (Test-Path "$script:BTestRoot\ro\should_fail.txt")) "no file created on host ro path"
         } | Out-Null
     }
@@ -573,9 +649,9 @@ try {
         Run-StateAwareTest "C: exec injects cooperative proxy env" {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_proxy.json' -SandboxId $script:netSandboxId
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Probe-ExecOutput ($r.Stdout -match 'HTTP_PROXY=\[http://127\.0\.0\.1:8888\]') `
+            Assert-True ($r.Stdout -match 'HTTP_PROXY=\[http://127\.0\.0\.1:8888\]') `
                 "HTTP_PROXY injected into the container ($($r.Stdout.Trim()))"
-            Probe-ExecOutput ($r.Stdout -match 'https_proxy=\[http://127\.0\.0\.1:8888\]') `
+            Assert-True ($r.Stdout -match 'https_proxy=\[http://127\.0\.0\.1:8888\]') `
                 "https_proxy injected into the container"
         } | Out-Null
     }
@@ -692,7 +768,7 @@ try {
             $req = @{ phase = 'exec'; sandboxId = $script:reSandboxId; process = @{ commandLine = 'echo pre-restart-ok'; timeout = 30000 } }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "exec #1 exit 0"
-            Probe-ExecOutput ($r.Stdout -match 'pre-restart-ok') "exec #1 produces output"
+            Assert-True ($r.Stdout -match 'pre-restart-ok') "exec #1 produces output"
         } | Out-Null
 
         $reStoppedOk = Run-StateAwareTest "E: stop" {
@@ -723,7 +799,7 @@ try {
                     $req = @{ phase = 'exec'; sandboxId = $script:reSandboxId; process = @{ commandLine = 'echo post-restart-ok'; timeout = 30000 } }
                     $r = Invoke-StateAware -Request $req
                     Assert-True ($r.ExitCode -eq 0) "exec after re-start exit 0"
-                    Probe-ExecOutput ($r.Stdout -match 'post-restart-ok') "exec after re-start produces output"
+                    Assert-True ($r.Stdout -match 'post-restart-ok') "exec after re-start produces output"
                 } | Out-Null
             }
         }
@@ -795,7 +871,7 @@ try {
             $after = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = 'echo survived-timeout'; timeout = 30000 } }
             $r2 = Invoke-StateAware -Request $after
             Assert-True ($r2.ExitCode -eq 0) "next exec after a timeout succeeds (container stayed warm)"
-            Probe-ExecOutput ($r2.Stdout -match 'survived-timeout') "warm container still executes commands"
+            Assert-True ($r2.Stdout -match 'survived-timeout') "warm container still executes commands"
         } | Out-Null
     }
 
@@ -805,7 +881,7 @@ try {
             $req = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = 'pwd'; cwd = '/tmp'; timeout = 30000 } }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "exit code = 0"
-            Probe-ExecOutput ($r.Stdout -match '(^|\s)/tmp\s*$') "pwd reports the requested cwd (/tmp) ($($r.Stdout.Trim()))"
+            Assert-True ($r.Stdout -match '(^|\s)/tmp\s*$') "pwd reports the requested cwd (/tmp) ($($r.Stdout.Trim()))"
         } | Out-Null
     }
 
@@ -890,7 +966,7 @@ try {
             $readB = @{ phase = 'exec'; sandboxId = $script:mcSandboxB; process = @{ commandLine = "sh -c 'cat /tmp/iso_marker 2>/dev/null || echo NO_MARKER'"; timeout = 30000 } }
             $rb = Invoke-StateAware -Request $readB
             Assert-True ($rb.ExitCode -eq 0) "read attempt in B exit 0"
-            Probe-ExecOutput ($rb.Stdout -match 'NO_MARKER') "B does not see A's marker (isolated /tmp)"
+            Assert-True ($rb.Stdout -match 'NO_MARKER') "B does not see A's marker (isolated /tmp)"
             Assert-True (-not ($rb.Stdout -match 'A-secret-content')) "A's content never leaks into B"
         } | Out-Null
     }
@@ -910,7 +986,7 @@ try {
             $req = @{ phase = 'exec'; sandboxId = $script:mcSandboxB; process = @{ commandLine = 'echo B-still-alive'; timeout = 30000 } }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "B exec after A deprovision exit 0 (daemon stayed up)"
-            Probe-ExecOutput ($r.Stdout -match 'B-still-alive') "B remains fully usable after A is gone"
+            Assert-True ($r.Stdout -match 'B-still-alive') "B remains fully usable after A is gone"
         } | Out-Null
     }
 
@@ -990,7 +1066,7 @@ try {
             $req = @{ phase = 'exec'; sandboxId = $script:recSandboxId; process = @{ commandLine = 'echo recovered-ok'; timeout = 30000 } }
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -eq 0) "exec on the respawned daemon exit 0"
-            Probe-ExecOutput ($r.Stdout -match 'recovered-ok') "respawned daemon executes commands normally"
+            Assert-True ($r.Stdout -match 'recovered-ok') "respawned daemon executes commands normally"
         } | Out-Null
     }
 

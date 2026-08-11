@@ -40,11 +40,12 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+use wslc_common::container_steps::OutStream;
 use wslc_common::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, StreamFrame, MAX_FRAME_SIZE,
 };
 
-use crate::session_manager::{SessionHandle, WorkerError};
+use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 
 /// Upper bound on concurrently-serviced client connections. At capacity the
 /// accept loop applies backpressure (a new connection waits for a slot) instead
@@ -407,7 +408,8 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
     Ok(())
 }
 
-/// Exec: validate-then-admit, then stream the run's outcome as [`StreamFrame`]s.
+/// Exec: validate-then-admit, then stream the run's stdout/stderr live as
+/// [`StreamFrame`]s, followed by a terminal frame.
 ///
 /// The sandbox is validated (exists + started) *before* the `Ok` admission is
 /// written, and — critically — admission is **atomic** with the start of the
@@ -417,9 +419,13 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
 /// unknown/not-started sandbox therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
-/// TODO(fill-in): bidirectional live stdio (client `Stdin` frames -> process,
-/// process stdout/stderr -> `Stdout`/`Stderr` frames). The skeleton runs the
-/// command to completion and emits only the terminal frame.
+/// Output streaming (process -> `Stdout`/`Stderr`) is live. Client `Stdin`
+/// frames are NOT forwarded: the WSLc SDK consumes all process IO handles once
+/// any `WslcSetProcessSettingsCallbacks` is registered (the callback path this
+/// live output streaming depends on), so `WslcGetProcessIOHandle(STDIN)` is
+/// unavailable. Piped stdin would require a handle-mode rearchitecture (no
+/// callbacks; `ReadFile` threads for stdout/stderr + `WriteFile` for stdin) and
+/// is deferred to Tier 2 (see the 2c plan).
 async fn handle_exec(
     mut pipe: NamedPipeServer,
     session: SessionHandle,
@@ -433,22 +439,78 @@ async fn handle_exec(
 /// Turn an exec **admission** outcome into the client's frame sequence, generic
 /// over the transport so the protocol can be exercised over an in-memory duplex
 /// in tests. On rejection it writes a single typed [`DaemonResponse::Err`]; on
-/// admission it writes `Ok` then awaits completion and writes exactly one
-/// terminal [`StreamFrame`] — `Exit` on success, `Error` on a run failure or a
-/// dropped completion channel.
+/// admission it writes `Ok`, then pumps live `Stdout`/`Stderr` frames as output
+/// arrives, and finally writes exactly one terminal [`StreamFrame`] — `Exit` on
+/// success, `Error` on a run failure or a dropped completion channel.
 async fn write_exec_result<S: AsyncWrite + Unpin>(
     pipe: &mut S,
-    admission: Result<oneshot::Receiver<Result<i32, WorkerError>>, WorkerError>,
+    admission: Result<ExecStream, WorkerError>,
 ) -> Result<()> {
-    let done = match admission {
-        Ok(done) => done,
+    let ExecStream { done, mut output } = match admission {
+        Ok(stream) => stream,
         Err(e) => {
             write_frame(pipe, &worker_err_response(e)).await?;
             return Ok(());
         }
     };
     write_frame(pipe, &DaemonResponse::Ok).await?;
-    let terminal = match done.await {
+
+    // Pump live output until the run completes, then write the terminal frame.
+    //
+    // Two completion signals, because the output channel does not always close:
+    //   - Normal path: the worker's `IoContext` (and the sink's sender) drop when
+    //     the run returns, so `output` closes *before* `done` fires; the biased
+    //     select drains every queued chunk first, then observes the close.
+    //   - Kill/leak path: a container killed without its exit callback leaks the
+    //     `IoContext` (deliberately), so the sink's sender never drops and
+    //     `output` never closes. There `done` is the only completion signal, so
+    //     we drain whatever is already queued and stop.
+    let mut done = done;
+    let terminal = loop {
+        tokio::select! {
+            biased;
+            chunk = output.recv() => match chunk {
+                Some(chunk) => {
+                    write_frame(pipe, &output_frame(chunk)).await?;
+                }
+                // Senders dropped: the run has completed and every chunk is
+                // flushed. Await the (already-resolved) exit code.
+                None => break exit_terminal(done.await),
+            },
+            result = &mut done => {
+                // Run finished but the output channel may still be open (leak
+                // path: a killed container whose exit callback never fired keeps
+                // the sink's sender alive). Close the receiver first so any
+                // leaked callback can enqueue nothing further — otherwise a
+                // container still producing output could keep `try_recv`
+                // returning chunks forever and the terminal frame would never be
+                // written. Then flush what is already queued and stop.
+                output.close();
+                while let Ok(chunk) = output.try_recv() {
+                    write_frame(pipe, &output_frame(chunk)).await?;
+                }
+                break exit_terminal(result);
+            }
+        }
+    };
+    write_frame(pipe, &terminal).await?;
+    Ok(())
+}
+
+/// Map a live-output chunk to its wire frame.
+fn output_frame((kind, data): (OutStream, Vec<u8>)) -> StreamFrame {
+    match kind {
+        OutStream::Stdout => StreamFrame::Stdout { data },
+        OutStream::Stderr => StreamFrame::Stderr { data },
+    }
+}
+
+/// Map a completed exec's result (or a dropped completion channel) to its
+/// terminal [`StreamFrame`].
+fn exit_terminal(
+    result: Result<Result<i32, WorkerError>, oneshot::error::RecvError>,
+) -> StreamFrame {
+    match result {
         Ok(Ok(code)) => StreamFrame::Exit { code },
         Ok(Err(e)) => StreamFrame::Error {
             message: e.to_string(),
@@ -456,9 +518,7 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
         Err(_) => StreamFrame::Error {
             message: "WSLc worker dropped the exec reply channel".to_string(),
         },
-    };
-    write_frame(pipe, &terminal).await?;
-    Ok(())
+    }
 }
 
 /// Map a worker `Result<()>` to an `Ok` / typed `Err` response.
@@ -502,7 +562,18 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T)
 mod tests {
     use super::*;
     use tokio::io::duplex;
+    use tokio::sync::mpsc;
     use wslc_common::daemon_protocol::ErrKind;
+
+    /// Admit an exec whose output channel is already closed (no live output),
+    /// so `write_exec_result` goes straight from `Ok` to the terminal frame.
+    fn admitted_no_output(
+        done: oneshot::Receiver<Result<i32, WorkerError>>,
+    ) -> Result<ExecStream, WorkerError> {
+        let (tx, output) = mpsc::channel(16);
+        drop(tx);
+        Ok(ExecStream { done, output })
+    }
 
     /// A rejected admission (unknown sandbox) round-trips as a single typed
     /// `DaemonResponse::Err { NotProvisioned }` through frame encode → transport
@@ -556,7 +627,9 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
         drop(done_tx);
 
-        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        write_exec_result(&mut server, admitted_no_output(done_rx))
+            .await
+            .unwrap();
         drop(server);
 
         let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
@@ -583,12 +656,133 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
         done_tx.send(Ok(7)).unwrap();
 
-        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        write_exec_result(&mut server, admitted_no_output(done_rx))
+            .await
+            .unwrap();
         drop(server);
 
         let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
         assert_eq!(admit, DaemonResponse::Ok);
         let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
         assert_eq!(terminal, StreamFrame::Exit { code: 7 });
+    }
+
+    /// Live output is streamed as `Stdout`/`Stderr` frames — in the order the
+    /// worker enqueued them — before the terminal `Exit`, so the client sees the
+    /// run's output incrementally rather than as one buffered blob.
+    #[tokio::test]
+    async fn live_output_streams_before_exit() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+
+        // Enqueue interleaved output, then the exit code, then close the channel
+        // (mirrors the worker: the sink's sender drops as the run returns).
+        out_tx
+            .try_send((OutStream::Stdout, b"hello ".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stderr, b"warn".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stdout, b"world".to_vec()))
+            .unwrap();
+        done_tx.send(Ok(0)).unwrap();
+        drop(out_tx);
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+            }),
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"hello ".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stderr {
+                data: b"warn".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"world".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 0 }
+        );
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    /// Leak path: the run completes (`done` fires) while the sink's sender is
+    /// still alive and would keep producing. `write_exec_result` must close the
+    /// receiver, flush only what was already queued, and write the terminal
+    /// frame — it must not stream chunks enqueued after completion nor hang.
+    #[tokio::test]
+    async fn leak_path_drains_queued_then_terminates() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+
+        // Two chunks already queued, the run reports its exit, and the sender is
+        // deliberately kept alive (the leaked `IoContext`).
+        out_tx
+            .try_send((OutStream::Stdout, b"queued".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stderr, b"tail".to_vec()))
+            .unwrap();
+        done_tx.send(Ok(3)).unwrap();
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // A post-completion enqueue attempt must fail because the receiver was
+        // closed, proving a leaked producer cannot extend the stream.
+        assert!(out_tx
+            .try_send((OutStream::Stdout, b"after".to_vec()))
+            .is_err());
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"queued".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stderr {
+                data: b"tail".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 3 }
+        );
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
     }
 }

@@ -109,6 +109,20 @@ fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
 // after adoption ownership passes to `exit_callback`; the kill path trades a
 // bounded, one-time leak for memory safety.
 
+/// Which standard stream a live-output chunk came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutStream {
+    Stdout,
+    Stderr,
+}
+
+/// Optional live-output sink invoked from the SDK's stdout/stderr callbacks in
+/// addition to the capped capture buffers. The daemon supplies one to stream a
+/// container's output to the client as bytes arrive; paths that only need the
+/// final captured blob (one-shot, detached init) leave it unset. It receives
+/// the full callback bytes, independent of the capped buffers' truncation.
+pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
+
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are
 /// `pub(crate)` so the one-shot runner's wait/collect helpers can read the
 /// captured bytes and exit signal.
@@ -116,6 +130,11 @@ pub struct IoContext {
     pub(crate) stdout: Arc<Mutex<Vec<u8>>>,
     pub(crate) stderr: Arc<Mutex<Vec<u8>>>,
     pub(crate) exited: Arc<(Mutex<bool>, Condvar)>,
+    /// Live sink for streaming output alongside the capped buffers; `None` when
+    /// only the final captured blob is needed. Its owning `Arc<IoContext>` is
+    /// released on the same schedule as the capture buffers, so on the
+    /// deliberate kill-path leak the sink (and its sender) is leaked too.
+    sink: Option<OutputSink>,
 }
 
 /// Per-stream cap on captured stdout/stderr, in bytes. The WSLc SDK streams
@@ -166,12 +185,22 @@ unsafe extern "C" fn io_callback(
     let bytes = std::slice::from_raw_parts(data, data_size as usize);
     match io_handle {
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDOUT => {
-            let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
-            append_capped(&mut buf, bytes);
+            {
+                let mut buf = ctx.stdout.lock().unwrap_or_else(|e| e.into_inner());
+                append_capped(&mut buf, bytes);
+            }
+            if let Some(sink) = ctx.sink.as_ref() {
+                sink(OutStream::Stdout, bytes);
+            }
         }
         WslcProcessIOHandle::WSLC_PROCESS_IO_HANDLE_STDERR => {
-            let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
-            append_capped(&mut buf, bytes);
+            {
+                let mut buf = ctx.stderr.lock().unwrap_or_else(|e| e.into_inner());
+                append_capped(&mut buf, bytes);
+            }
+            if let Some(sink) = ctx.sink.as_ref() {
+                sink(OutStream::Stderr, bytes);
+            }
         }
         _ => {}
     }
@@ -274,8 +303,9 @@ impl ProcessSettings {
         script_code: &str,
         env: &[String],
         working_directory: &str,
+        sink: Option<OutputSink>,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, true)
+        Self::build_inner(sdk, script_code, env, working_directory, true, sink)
     }
 
     /// Like [`build`](Self::build) but registers no stdio callbacks and shares no
@@ -290,7 +320,7 @@ impl ProcessSettings {
         env: &[String],
         working_directory: &str,
     ) -> Result<Self, ScriptResponse> {
-        Self::build_inner(sdk, script_code, env, working_directory, false)
+        Self::build_inner(sdk, script_code, env, working_directory, false, None)
     }
 
     unsafe fn build_inner(
@@ -299,6 +329,7 @@ impl ProcessSettings {
         env: &[String],
         working_directory: &str,
         register_callbacks: bool,
+        sink: Option<OutputSink>,
     ) -> Result<Self, ScriptResponse> {
         let mut raw = std::mem::zeroed::<WslcProcessSettings>();
         let hr = sdk.WslcInitProcessSettings(&mut raw);
@@ -310,6 +341,7 @@ impl ProcessSettings {
             stdout: Arc::new(Mutex::new(Vec::new())),
             stderr: Arc::new(Mutex::new(Vec::new())),
             exited: Arc::new((Mutex::new(false), Condvar::new())),
+            sink,
         });
 
         // Callbacks are registered only for the streamed path; a detached init
@@ -858,6 +890,10 @@ pub struct ExecOutcome {
 /// # Safety
 /// `sdk` must hold valid function pointers and `container` must be a live,
 /// started handle.
+// A thin FFI primitive whose parameters mirror the SDK's process inputs plus
+// the optional live-output sink; grouping them into a struct would only add an
+// indirection for a single call site.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn exec_in_container(
     sdk: &WslcSdk,
     container: WslcContainer,
@@ -865,12 +901,14 @@ pub unsafe fn exec_in_container(
     env: &[String],
     working_directory: &str,
     timeout_ms: u32,
+    sink: Option<OutputSink>,
     logger: &mut Logger,
 ) -> Result<ExecOutcome, ScriptResponse> {
     // `process_settings` owns every buffer the SDK reads at
     // `WslcCreateContainerProcess` time plus the I/O-capture context; it is held
     // as a stationary local until after the process exits below.
-    let mut process_settings = ProcessSettings::build(sdk, script_code, env, working_directory)?;
+    let mut process_settings =
+        ProcessSettings::build(sdk, script_code, env, working_directory, sink)?;
 
     let mut process: WslcProcess = ptr::null_mut();
     let mut err_msg = CoTaskMemPWSTR::null();

@@ -19,17 +19,17 @@
 //! Each phase drives the real WSLc SDK via the reusable steps in
 //! [`wslc_common::container_steps`]: `provision` ensures the session + resolves
 //! the image + creates a container with a keepalive init process; `start` boots
-//! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion; `stop` /
-//! `deprovision` stop + delete. Live bidirectional stdio streaming over the
-//! control pipe is still a later fill-in — `exec` currently returns the exit
-//! code only.
+//! it; `exec` runs a fresh `WslcCreateContainerProcess` to completion, streaming
+//! its stdout/stderr live to the pipe handler via an [`OutputSink`]; `stop` /
+//! `deprovision` stop + delete. The completion reply carries the exit code;
+//! output flows over the sink. (Client `Stdin` forwarding is a later fill-in.)
 
 use std::collections::HashMap;
 
 use anyhow::Result;
 use tokio::sync::{mpsc, oneshot};
 
-use wslc_common::container_steps::{self, ProcessSettings};
+use wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
 use wslc_common::daemon_protocol::{
     DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
 };
@@ -119,6 +119,10 @@ pub enum WorkerCommand {
     /// post-admission stream `Error`); `done` carries the run's exit code.
     Exec {
         config: ExecConfig,
+        /// Live-output sink the worker hands to `exec_in_container`; the SDK's
+        /// stdout/stderr callbacks push chunks through it to the pipe handler as
+        /// bytes arrive, alongside the capped capture buffers.
+        sink: OutputSink,
         admit: oneshot::Sender<Result<(), WorkerError>>,
         done: oneshot::Sender<Result<i32, WorkerError>>,
     },
@@ -134,6 +138,27 @@ pub enum WorkerCommand {
     ContainerCount { reply: oneshot::Sender<usize> },
     /// Release all containers + the session and stop the worker thread.
     Shutdown { reply: oneshot::Sender<()> },
+}
+
+/// A chunk of live process output streamed from the worker to the pipe handler:
+/// which stream it came from and the bytes (owned, so it can cross the channel).
+pub type OutputChunk = (OutStream, Vec<u8>);
+
+/// Bound on the number of unconsumed live-output chunks buffered between the
+/// SDK's I/O callback threads and the pipe handler. The channel is bounded (not
+/// unbounded) so a container emitting output faster than a slow client drains it
+/// cannot grow the queue without limit and OOM the persistent daemon, taking
+/// down every sandbox it owns — the same hazard the capture-buffer cap guards
+/// against. When the queue is full the sink applies backpressure (see
+/// [`SessionHandle::exec`]) rather than dropping bytes.
+const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
+
+/// An admitted exec: the completion receiver (the run's exit code) plus the
+/// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames.
+#[derive(Debug)]
+pub struct ExecStream {
+    pub done: oneshot::Receiver<Result<i32, WorkerError>>,
+    pub output: mpsc::Receiver<OutputChunk>,
 }
 
 /// A cheap, clonable handle async tasks use to drive the worker thread.
@@ -160,23 +185,37 @@ impl SessionHandle {
     /// Admit and run a command in a started container. Awaits the worker's
     /// **admission** decision first: on rejection (unknown/not-started sandbox)
     /// this returns the typed error *before* the caller writes any admission to
-    /// the client. On admission it returns the completion receiver, which
-    /// resolves to the run's exit code. Admission and the start of the run are
-    /// atomic on the worker thread, so no lifecycle command can invalidate the
-    /// checked state between the two.
-    pub async fn exec(
-        &self,
-        config: ExecConfig,
-    ) -> Result<oneshot::Receiver<Result<i32, WorkerError>>, WorkerError> {
+    /// the client. On admission it returns an [`ExecStream`] — the completion
+    /// receiver (the run's exit code) plus the live-output receiver, which the
+    /// caller drains into `Stdout`/`Stderr` frames as bytes arrive. Admission and
+    /// the start of the run are atomic on the worker thread, so no lifecycle
+    /// command can invalidate the checked state between the two.
+    pub async fn exec(&self, config: ExecConfig) -> Result<ExecStream, WorkerError> {
         let (admit, admit_rx) = oneshot::channel();
         let (done, done_rx) = oneshot::channel();
+        let (stream_tx, output) = mpsc::channel::<OutputChunk>(LIVE_OUTPUT_CHANNEL_CAPACITY);
+        // The sink is invoked from the SDK's I/O callback threads (native OS
+        // threads, never the async runtime). `blocking_send` on the bounded
+        // channel parks that thread when the queue is full, propagating
+        // backpressure to the container's stdout/stderr pipe — the container
+        // blocks producing until the pipe handler drains, so memory stays
+        // bounded and no output bytes are dropped. A closed receiver (client
+        // gone, or the leak-path `close()` in the pipe handler) makes the send
+        // return `Err`, so a leaked callback never parks forever.
+        let sink: OutputSink = Box::new(move |kind, bytes| {
+            let _ = stream_tx.blocking_send((kind, bytes.to_vec()));
+        });
         self.send(WorkerCommand::Exec {
             config,
+            sink,
             admit,
             done,
         })?;
         admit_rx.await.map_err(worker_gone)??;
-        Ok(done_rx)
+        Ok(ExecStream {
+            done: done_rx,
+            output,
+        })
     }
 
     /// Stop a running container.
@@ -377,7 +416,13 @@ impl Worker {
 
     /// Run a command in a sandbox whose existence/started state was already
     /// confirmed by [`validate_exec`]; `container` is that validated handle.
-    fn exec(&mut self, config: ExecConfig, container: WslcContainer) -> Result<i32, WorkerError> {
+    /// `sink` streams the run's stdout/stderr live to the pipe handler.
+    fn exec(
+        &mut self,
+        config: ExecConfig,
+        container: WslcContainer,
+        sink: OutputSink,
+    ) -> Result<i32, WorkerError> {
         let sdk = self
             .sdk
             .as_ref()
@@ -399,6 +444,7 @@ impl Worker {
                 &env,
                 &config.working_directory,
                 config.timeout_ms,
+                Some(sink),
                 &mut self.logger,
             )
         }
@@ -429,9 +475,8 @@ impl Worker {
                 config.timeout_ms
             )));
         }
-        // NOTE: outcome.stdout/stderr are captured but not yet forwarded — live
-        // stdio streaming over the control pipe is a later fill-in; the PR1
-        // contract returns the exit code only.
+        // outcome.stdout/stderr were captured (and already streamed live via the
+        // sink); the completion reply carries only the exit code.
         Ok(outcome.exit_code)
     }
 
@@ -541,6 +586,7 @@ pub fn spawn() -> Result<SessionHandle> {
                     }
                     WorkerCommand::Exec {
                         config,
+                        sink,
                         admit,
                         done,
                     } => {
@@ -557,7 +603,7 @@ pub fn spawn() -> Result<SessionHandle> {
                             // every other lifecycle command for its full timeout.
                             Ok(container) if admit.send(Ok(())).is_ok() => {
                                 let sandbox_id = config.sandbox_id.clone();
-                                let outcome = worker.exec(config, container);
+                                let outcome = worker.exec(config, container, sink);
                                 if let Err(orphaned) = done.send(outcome) {
                                     // The client handler is gone (e.g. its
                                     // post-admission Ok write failed) but the run
@@ -753,7 +799,7 @@ mod tests {
             .await
             .unwrap();
 
-        let code = handle
+        let mut exec = handle
             .exec(ExecConfig {
                 sandbox_id: id.clone(),
                 script_code: "echo hi".to_string(),
@@ -762,11 +808,17 @@ mod tests {
                 timeout_ms: 30_000,
             })
             .await
-            .unwrap()
-            .await
-            .unwrap()
             .unwrap();
+        // Drain the live output stream, then await the exit code.
+        let mut stdout = Vec::new();
+        while let Some((kind, data)) = exec.output.recv().await {
+            if kind == OutStream::Stdout {
+                stdout.extend_from_slice(&data);
+            }
+        }
+        let code = exec.done.await.unwrap().unwrap();
         assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&stdout).trim(), "hi");
 
         handle
             .stop(StopConfig {
