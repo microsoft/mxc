@@ -338,11 +338,20 @@ mod tests {
     #[test]
     fn double_init_is_safe() {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = init("0.0.0-test", "dev");
-        let _ = init("0.0.0-test", "dev");
+        let first = init("0.0.0-test", "dev");
+        let second = init("0.0.0-test", "dev");
+        assert_eq!(second, first);
         shutdown();
-        assert!(is_active(), "one retained registration must remain active");
+        assert_eq!(
+            is_active(),
+            first,
+            "one retained registration must remain active only when init succeeded"
+        );
         shutdown();
+        assert!(
+            !is_active(),
+            "the final release must leave the provider inactive"
+        );
     }
 
     #[test]
