@@ -128,6 +128,7 @@ seatbelt_common = { path = "backends/seatbelt/common" }
 wslc_common = { path = "backends/wslc/common" }
 isolation_session_bindings = { path = "backends/isolation_session/bindings" }
 mxc_pty = { path = "core/mxc_pty" }
+plm = { path = "host/plm" }
 flatbuffers = "25"
 sandbox_spec = { path = "core/generated/base_container_specification" }
 process_security_environment_spec = { path = "core/generated/process_security_environment_specification" }

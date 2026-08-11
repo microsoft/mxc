@@ -16,11 +16,15 @@ pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 #[cfg(target_os = "windows")]
+pub mod capture_output;
+#[cfg(target_os = "windows")]
 pub mod dispatcher;
 #[cfg(target_os = "windows")]
 pub mod fallback_detector;
 #[cfg(target_os = "windows")]
 pub mod filesystem_bfs;
+#[cfg(target_os = "windows")]
+pub mod guarded_capture;
 #[cfg(target_os = "windows")]
 pub mod job_object;
 #[cfg(target_os = "windows")]

@@ -29,6 +29,8 @@
 
 mod dispatch;
 mod error;
+#[cfg(target_os = "windows")]
+mod guarded_capture;
 mod platform;
 pub mod policy;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

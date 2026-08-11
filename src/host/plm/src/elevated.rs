@@ -381,6 +381,13 @@ pub struct GuardedSession {
     disarmed: bool,
 }
 
+// SAFETY: `GuardedSession` only holds a Windows process HANDLE (via
+// `OwnedHandle`) and a pipe `File`, both of which are process-wide and safe to
+// use from any thread — Windows HANDLEs have no thread affinity. This lets
+// callers (e.g. `mxc_engine`'s `GuardedCaptureSession` adapter) store the
+// session behind a `Box<dyn ... + Send>` DI boundary.
+unsafe impl Send for GuardedSession {}
+
 impl std::fmt::Debug for GuardedSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter

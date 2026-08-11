@@ -65,21 +65,26 @@ The PSEC probe requires:
 - `QueryProcessSecurityEnvironmentSupport`
 - `CloseProcessSecurityEnvironment`
 
-When `processContainer.captureDenials` is present, fallback is not possible:
-capture requires a PSEC handle to key the trace. The host must additionally
-expose the complete official V2 Learning Mode export set:
+When `processContainer.captureDenials` is present, MXC treats PSEC plus the
+official V2 Learning Mode exports as one native capture capability set:
 
 - `StartLearningModeTrace`
 - `StopLearningModeTrace`
 - `CloseLearningModeTrace`
 
-For capture, unsupported or earlier-contract hosts fail as
-`backend_unavailable`. Ordinary ProcessContainer execution still follows the
-fallback chain. Internal validation confirmed the earlier contract on build
-`26657.1002` is rejected for capture while schema 0.7 SBOX execution remains
-functional, and the full V2 contract on build `26663.1000` is accepted. These
-builds are validation points, not a public release-floor commitment; runtime
-probing is the source of truth.
+When that complete set is available, MXC uses PSEC with native V2 capture.
+Otherwise it retains the highest legacy containment tier that can fully honor
+the request (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it with
+the guarded WPR capture provider. The elevated guardian filters the host-wide
+trace to OS-observed process lifetime windows and returns only bounded
+canonical denial data; raw ETL does not cross into the SDK result. If no
+containment tier can honor the policy, or the guarded PLM helper is unavailable,
+the request fails as `backend_unavailable`.
+
+Internal validation confirmed the earlier contract on build `26657.1002` uses
+legacy containment rather than native capture, while the full V2 contract on
+build `26663.1000` is accepted. These builds are validation points, not a
+public release-floor commitment; runtime probing is the source of truth.
 
 The PSEC contract cannot represent `processContainer.leastPrivilege`, so
 ordinary schema 0.8 requests using that option use the transitional SBOX
