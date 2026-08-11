@@ -159,7 +159,7 @@ fn main() {
 
         // Generate host-local WHP snapshots at build time so even the first
         // runtime execution uses warm start. The runtime fallback in
-        // mxc_alpha_nanvix_runner.rs handles the case where snapshots are missing.
+        // nanvix_runner.rs handles the case where snapshots are missing.
         //
         // Skip on non-x86_64 hosts: `nanvixd.exe` is an x86_64 Windows binary
         // and launching it on (e.g.) ARM64 Windows fails with
@@ -186,7 +186,7 @@ fn main() {
                 // In offline mode the NANVIX_BIN directory is treated as an
                 // immutable, pre-fetched input — it may be a read-only or
                 // shared cache. Do not run nanvixd.exe to generate snapshots
-                // into it. The runtime fallback in mxc_alpha_nanvix_runner.rs cold-boots
+                // into it. The runtime fallback in nanvix_runner.rs cold-boots
                 // when snapshots are absent.
                 eprintln!(
                     "nanvix_binaries: offline — snapshots absent in NANVIX_BIN; \

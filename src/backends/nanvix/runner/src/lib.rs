@@ -3,7 +3,7 @@
 
 // NanVix runs on Windows and Linux only.  This predicate deliberately mirrors
 // the pre-existing gate on `mxc_alpha_wxc_common::microvm_staging`
-// (`src/core/mxc_alpha_wxc_common/src/lib.rs`), which this crate's core logic depends on
+// (`src/core/wxc_common/src/lib.rs`), which this crate's core logic depends on
 // and which does not exist on other platforms -- so this propagates an
 // existing platform constraint rather than introducing a new one.  On any
 // other platform the crate compiles to an empty library, which keeps the

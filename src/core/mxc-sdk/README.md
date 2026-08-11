@@ -1,4 +1,4 @@
-# `mxc-sdk`
+# `mxc_alpha_mxc_sdk`
 
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
 **in-process**, without ever allocating a pty.
@@ -12,7 +12,7 @@ sandboxed process — no pty is ever allocated.
 ## Usage
 
 ```rust,no_run
-use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
+use mxc_alpha_mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 
 // Describe what to restrict, turn it into a request, fill in the command.
 let policy = SandboxPolicy {
@@ -70,7 +70,7 @@ questions:
   launchability guarantee.
 
 ```rust,no_run
-use mxc_sdk::{available_backends, platform_support};
+use mxc_alpha_mxc_sdk::{available_backends, platform_support};
 
 // Will run()/spawn_sandbox() work here, and with which backends?
 let support = platform_support();
@@ -109,8 +109,8 @@ learning-mode capture: the runner records every access the policy does not
 grant and writes them to a JSON denials document.
 
 ```rust
-use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
-use mxc_sdk::SandboxPolicy;
+use mxc_alpha_mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
+use mxc_alpha_mxc_sdk::SandboxPolicy;
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
@@ -142,7 +142,7 @@ allocated; the streams are ordinary pipes.
 
 ```rust,no_run
 use std::io::{Read, Write};
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_alpha_mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
@@ -228,7 +228,7 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
   `Sandbox` (the same handle `spawn_sandbox` returns).
 
 ```rust,no_run
-use mxc_sdk::{run_state_aware_json, exec_sandbox};
+use mxc_alpha_mxc_sdk::{run_state_aware_json, exec_sandbox};
 
 // Envelope phase: provision returns { "result": { "sandboxId": ... } }.
 let provisioned = run_state_aware_json(
@@ -276,7 +276,7 @@ go through the same parser the executor uses — so a rejected value (e.g. a por
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
-use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+use mxc_alpha_mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
@@ -286,7 +286,7 @@ let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() 
 let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 request.set_script("python3 -c 'print(42)'").set_experimental(true);
 let output = run(request)?;
-# Ok::<(), mxc_sdk::Error>(())
+# Ok::<(), mxc_alpha_mxc_sdk::Error>(())
 ```
 
 Two WSLC-specific limits follow from the SDK's surface: the container has no

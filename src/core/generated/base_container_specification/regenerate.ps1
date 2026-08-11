@@ -81,7 +81,7 @@ $libRs = Join-Path $srcDir "lib.rs"
 Write-Host "Formatting with cargo fmt..." -ForegroundColor Cyan
 Push-Location src
 try {
-    & cargo fmt -p sandbox_spec
+    & cargo fmt -p mxc-alpha-windows-secenv-projection
     if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location

@@ -1,4 +1,4 @@
-# `process_security_environment_spec`
+# `mxc_alpha_process_security_environment_spec`
 
 Rust bindings **generated** from `external/windows-sdk/ProcessSecurityEnvironment.fbs`
 by the FlatBuffers compiler (`flatc`).
@@ -39,7 +39,7 @@ elided lifetimes that trip the `mismatched_lifetime_syntaxes` lint (Rust 1.89+);
 The schema describes a **Windows-only** OS contract, and the crate is consumed
 only under `[target.'cfg(target_os = "windows")'.dependencies]` by the
 AppContainer/Learning-Mode backends. It remains a workspace member for now,
-matching the existing generated `sandbox_spec` crate. The generated bindings
+matching the existing generated `mxc-alpha-windows-secenv-projection` crate. The generated bindings
 are pure Rust, so cross-platform workspace builds remain valid. Avoiding this
 minor non-Windows build cost can be considered separately from the V2 contract
 correctness work.

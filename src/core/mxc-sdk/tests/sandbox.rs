@@ -250,7 +250,7 @@ fn seatbelt_defaults_cwd_to_allowed_path_without_getcwd_leak() {
 // host selects.
 // They run a real sandbox, so they require an elevated, host-prepped Windows
 // host (see docs/host-prep.md) and are therefore `#[ignore]`d — run them with
-// `cargo test -p mxc-sdk -- --ignored` on such a host.
+// `cargo test -p mxc_alpha_mxc_sdk -- --ignored` on such a host.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
