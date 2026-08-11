@@ -22,6 +22,7 @@
 //! (d) Security review -- a sandboxed workload must not disable or redirect the
 //!     proxy via its own env, and logs must not leak proxy credentials.
 
+use url::Url;
 use wxc_common::models::{ProxyAddress, ProxyConfig};
 use wxc_common::proxy_env::{
     apply_cooperative_proxy_env, apply_proxy_env, is_managed_proxy_key, proxy_url_has_credentials,
@@ -893,4 +894,183 @@ fn whitespace_around_a_clean_url_stays_clean() {
             "{url:?} names no user and no password"
         );
     }
+}
+
+// The guard exists to agree with the parser that actually consumes this URL.
+// Every bypass found in review was the same failure -- the guard read one
+// string and `lxc-attach` received another -- so the strongest available
+// assertion is not another hand-picked example but a differential one: for any
+// input, if `url::Url::parse` finds userinfo, the guard must say so too.
+// `url` is the crate `ProxyAddress` itself parses with, so it is the oracle,
+// not a second opinion.
+#[test]
+fn the_guard_agrees_with_the_parser_that_will_actually_read_the_url() {
+    let corpus = [
+        "http://alice:hunter2@10.0.3.1:3128",
+        "http:alice:hunter2@10.0.3.1:3128",
+        "http:/alice:hunter2@10.0.3.1:3128",
+        "alice@proxy.example.com:3128",
+        " http://alice:hunter2@10.0.3.1:3128",
+        "http://alice:hunter2@10.0.3.1:3128 ",
+        "\thttp://alice:hunter2@10.0.3.1:3128",
+        "http://ali\tce:hunter2@10.0.3.1:3128",
+        "http://alice:hun\nter2@10.0.3.1:3128",
+        "http://alice:hunter2@10.0.3.1:3128\r",
+        "http:\\\\alice:hunter2@10.0.3.1:3128",
+        "http:/\\alice:hunter2@10.0.3.1:3128",
+        "http:\\/alice:hunter2@10.0.3.1:3128",
+        "HTTP://alice:hunter2@10.0.3.1:3128",
+        "HtTp://alice:hunter2@10.0.3.1:3128",
+        "http://alice%40x:hunter2@10.0.3.1:3128",
+        "http://alice:hunter2@@10.0.3.1:3128",
+        "http://@10.0.3.1:3128",
+        "https://alice:hunter2@10.0.3.1:3128",
+        "socks5://alice:hunter2@10.0.3.1:1080",
+        "http://alice@10.0.3.1:3128",
+        "http://alice:@10.0.3.1:3128",
+        "http://:hunter2@10.0.3.1:3128",
+        "http://10.0.3.1:3128",
+        "http://10.0.3.1:3128/path@notuserinfo",
+        "http://10.0.3.1:3128/?q=a@b",
+        "http://10.0.3.1:3128/#frag@ment",
+        "proxy.example.com:3128",
+        "10.0.3.1:3128",
+        "",
+        "http://[::1]:3128",
+        "http://alice:hunter2@[::1]:3128",
+    ];
+
+    let mut disagreements = Vec::new();
+    for raw in corpus {
+        // The parser is only an oracle for inputs it accepts.  Where it
+        // refuses outright, nothing reaches `lxc-attach` and there is no
+        // credential to leak, so it has no verdict to compare against.
+        let Ok(parsed) = Url::parse(raw) else {
+            continue;
+        };
+
+        let parser_sees_credentials = !parsed.username().is_empty() || parsed.password().is_some();
+        let guard_sees_credentials = proxy_url_has_credentials(raw);
+
+        if parser_sees_credentials && !guard_sees_credentials {
+            disagreements.push(format!(
+                "BYPASS: parser found userinfo (username={:?}, password={:?}) but the guard did not, for bytes {:?}",
+                parsed.username(),
+                parsed.password(),
+                raw.as_bytes()
+            ));
+        }
+    }
+
+    assert!(
+        disagreements.is_empty(),
+        "the guard disagreed with the parser that will read the URL:\n{}",
+        disagreements.join("\n")
+    );
+}
+
+// A guard that simply answered "credentials" to everything would satisfy the
+// differential test above while rejecting every legitimate proxy, so the
+// agreement has to hold in the other direction too.
+#[test]
+fn the_guard_does_not_invent_credentials_the_parser_cannot_see() {
+    let clean = [
+        "http://10.0.3.1:3128",
+        "https://proxy.example.com:8080",
+        "http://proxy.example.com",
+        "socks5://10.0.3.1:1080",
+        "http://[::1]:3128",
+        "http://10.0.3.1:3128/path",
+        "http://10.0.3.1:3128/path@notuserinfo",
+        "http://10.0.3.1:3128/?q=a@b",
+    ];
+
+    for raw in clean {
+        let parsed = Url::parse(raw).expect("corpus entry should parse");
+        assert!(
+            parsed.username().is_empty() && parsed.password().is_none(),
+            "corpus entry {raw:?} was supposed to be credential-free"
+        );
+        assert!(
+            !proxy_url_has_credentials(raw),
+            "the guard claimed {raw:?} carries credentials, but the parser sees none; \
+             a guard that over-reports rejects legitimate proxies"
+        );
+    }
+}
+
+// The fifth bypass, and the second one a differential test caught rather than
+// a guess. WHATWG treats a backslash as a slash for the special schemes, so
+// `http:\/alice:hunter2@host` introduces an authority exactly as `http://`
+// does. Counting only forward slashes left the authority as the single
+// character `\`, which carries no `@`, so the guard reported no credentials
+// and the redaction returned the password verbatim.
+#[test]
+fn a_backslash_introduces_an_authority_for_the_special_schemes() {
+    let bypasses = [
+        "http:\\/alice:hunter2@10.0.3.1:3128",
+        "http:/\\alice:hunter2@10.0.3.1:3128",
+        "http:\\\\alice:hunter2@10.0.3.1:3128",
+        "https:\\/alice:hunter2@10.0.3.1:3128",
+        "HTTP:\\/alice:hunter2@10.0.3.1:3128",
+    ];
+
+    for url in bypasses {
+        assert!(
+            proxy_url_has_credentials(url),
+            "a backslash hid the credentials in {:?} (bytes {:?})",
+            url,
+            url.as_bytes()
+        );
+        assert!(
+            !redact_proxy_url(url).contains("hunter2"),
+            "the redaction returned the password for {url:?}"
+        );
+    }
+}
+
+// The equivalence belongs to the special schemes only, which is what keeps the
+// guard from rejecting proxies that leak nothing. A backslash after a
+// non-special scheme is an opaque path to the parser, not an authority.
+#[test]
+fn a_backslash_still_ends_an_authority_it_does_not_only_begin_one() {
+    // The authority ends at the backslash, so the `@` belongs to the path and
+    // names no credential -- exactly as the parser reads it.
+    assert!(!proxy_url_has_credentials(
+        "http://10.0.3.1:3128\\path@notuserinfo"
+    ));
+    assert_eq!(
+        redact_proxy_url("http://10.0.3.1:3128\\path@notuserinfo"),
+        "http://10.0.3.1:3128\\path@notuserinfo"
+    );
+}
+
+// The backslash equivalence belongs to the special schemes and stops there,
+// which is what keeps the guard from rejecting a proxy that leaks nothing.
+// The parser reads `socks5:\/alice:hunter2@host` as an opaque path -- measured
+// directly, it reports `cannot_be_a_base = true`, an empty username, and no
+// host at all -- so it names no credential, and a value with no host could
+// never become a `ProxyAddress` in the first place. Applying the equivalence
+// everywhere would make the guard claim a credential the parser cannot see,
+// and rejection here is fatal: the caller destroys the container.
+#[test]
+fn a_backslash_after_a_non_special_scheme_is_a_path_not_an_authority() {
+    let opaque = "socks5:\\/alice:hunter2@10.0.3.1:1080";
+
+    let parsed = Url::parse(opaque).expect("the parser accepts it as an opaque path");
+    assert!(parsed.cannot_be_a_base());
+    assert!(parsed.username().is_empty() && parsed.password().is_none());
+    assert!(parsed.host_str().is_none());
+
+    assert!(
+        !proxy_url_has_credentials(opaque),
+        "the guard claimed a credential the parser cannot see"
+    );
+    assert_eq!(redact_proxy_url(opaque), opaque);
+
+    // The ordinary `//` form of the same non-special scheme is a real
+    // authority, and that one does carry a credential.
+    assert!(proxy_url_has_credentials(
+        "socks5://alice:hunter2@10.0.3.1:1080"
+    ));
 }

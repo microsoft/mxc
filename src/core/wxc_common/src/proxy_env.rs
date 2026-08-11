@@ -187,12 +187,24 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
         Some(colon) if is_uri_scheme(&url[..colon]) => url.split_at(colon),
         _ => (&url[..0], url),
     };
+    // For the special schemes, WHATWG reads a backslash exactly as a slash --
+    // both where an authority begins and where it ends. Reading only `/`
+    // truncated `http:\/alice:hunter2@host` to an authority of `\`, which
+    // carries no `@`, so the guard reported no credentials while the password
+    // still reached argv. The equivalence is deliberately not applied to other
+    // schemes, because the parser does not apply it there either, and a guard
+    // that over-reports rejects proxies that leak nothing.
+    let backslash_is_a_slash = is_special_scheme(scheme);
+    let introduces_authority = |c: char| c == '/' || (backslash_is_a_slash && c == '\\');
+    let ends_authority =
+        |c: char| matches!(c, '/' | '?' | '#') || (backslash_is_a_slash && c == '\\');
+
     let slashes = after_scheme
         .strip_prefix(':')
-        .map(|rest| 1 + (rest.len() - rest.trim_start_matches('/').len()))
+        .map(|rest| 1 + (rest.len() - rest.trim_start_matches(introduces_authority).len()))
         .unwrap_or(0);
     let (separator, rest) = after_scheme.split_at(slashes);
-    let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let auth_end = rest.find(ends_authority).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(auth_end);
     ProxyAuthority {
         scheme,
@@ -200,6 +212,20 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
         authority,
         tail,
     }
+}
+
+/// Whether `scheme` is one of the WHATWG "special" schemes, for which a
+/// backslash is equivalent to a slash.
+///
+/// The list is fixed by the URL Standard rather than open-ended, so naming it
+/// here matches the parser instead of guessing at it. Comparison ignores case
+/// because the parser lowercases the scheme before deciding, and
+/// `HTTP:\/alice:hunter2@host` is the same URL as its lowercase form.
+fn is_special_scheme(scheme: &str) -> bool {
+    let scheme = scheme.trim_start_matches(':');
+    ["http", "https", "ws", "wss", "ftp", "file"]
+        .iter()
+        .any(|special| scheme.eq_ignore_ascii_case(special))
 }
 
 /// Whether `candidate` satisfies the RFC 3986 scheme grammar,
