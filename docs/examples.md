@@ -31,33 +31,61 @@ For a more comprehensive list of examples, look in the examples\ directory.
 }
 ```
 
-### Networking
-
-The [planned schema 0.8.0 update](sandbox-policy/0.8.0/networking/schema-updates.md)
-uses `egress` and `ingress` sections. The current parser does not yet accept
-this shape. This example allows outbound TCP/443 to one CIDR, denies all other
-egress, and blocks private-network and host-loopback inbound connections:
-
-```jsonc
+### Network Restricted Execution
+```json
 {
+  "script": "import urllib.request\nurllib.request.urlopen('https://api.github.com')",
   "network": {
-    "egress": {
-      "default": "deny",
-      "allow": [
-        {
-          "to": [ { "cidr": "140.82.112.0/20" } ],
-          "ports": [ { "protocol": "tcp", "port": 443 } ]
-        }
-      ],
-      "deny": []
-    },
-    "ingress": {
-      "default": "deny",
-      "hostLoopback": "deny"
-    }
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["api.github.com"]
   }
 }
 ```
 
-See the [planned network policy](sandbox-policy/0.8.0/networking/networking.md) for the
-complete schema and backend support.
+### Network Proxy
+
+Route process-container traffic through a localhost proxy. Supported with the
+`processcontainer` containment backend only. Two mutually exclusive modes are available:
+
+**External proxy** — connect to an already-running localhost proxy:
+
+```json
+{
+  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+  "timeout": 30000,
+  "processContainer": {
+    "name": "CLI-Proxy",
+    "capabilities": ["internetClient"]
+  },
+  "network": {
+    "proxy": { "localhost": 8080 }
+  }
+}
+```
+
+**Builtin test server** — `wxc-exec` launches its own minimal HTTP CONNECT proxy on
+an OS-assigned port (for integration testing only, not production):
+
+```json
+{
+  "script": "python -c \"import urllib.request; print(urllib.request.urlopen('https://api.github.com').status)\"",
+  "timeout": 30000,
+  "processContainer": {
+    "name": "CLI-BuiltinProxy",
+    "capabilities": ["internetClient"]
+  },
+  "network": {
+    "proxy": { "builtinTestServer": true }
+  }
+}
+```
+
+When `builtinTestServer` is `true`, it must be the only key in the `proxy`
+object. Because it activates a deliberately-permissive, testing-only proxy
+(no auth, no body limits), it is **not** enabled by default: pass the
+`--allow-testing-features` flag to `wxc-exec`/`lxc-exec`/`mxc-exec-mac`. This
+is a separate axis from `--experimental` (which selects experimental backends
+and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
+spawn option, which must be set to `true` for a policy that uses
+`builtinTestServer`.
