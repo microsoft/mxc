@@ -1,6 +1,6 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan
+Status: implementation plan; Phase 1 implemented by PR #807
 
 Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 (2026-08-10)
@@ -9,9 +9,9 @@ Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 
 - Require every config to declare an exact registered version.
 - Deserialize each published version through its own immutable Rust wire types.
-- Support exact published contracts for `0.6.0-alpha`, `0.7.0-alpha`, and
-  `0.8.0-alpha`.
-- Use `0.9.0-dev` as the next mutable development contract.
+- Support exact published contracts for `0.6.0-alpha` and `0.7.0-alpha`.
+- Use the existing `0.8.0-alpha` version as the current mutable development
+  contract.
 - Keep `experimental` completely absent from published contracts.
 - Make the development contract's `experimental` structure recursively closed,
   while allowing that entire unpublished contract to change freely.
@@ -29,8 +29,9 @@ Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 - Introduce a JSON `Value` migration engine or a second schema-validation
   language in the runtime trust boundary.
 - Edit the existing immutable `0.6` or `0.7` stable schema files.
-- Move to `1.0.0-dev` as part of this work. The planned development line is
-  `0.9.0-dev`; `1.0.0` remains a later milestone.
+- Introduce another development version as part of the initial parser
+  conversion. `0.9.0-dev` is selected when `0.8.0-alpha` is published;
+  `1.0.0` remains a later milestone.
 
 ## Design note under discussion: experimental fields in published contracts
 
@@ -144,8 +145,7 @@ accepted JSON shape cannot change underneath its users.
 | --- | --- | --- |
 | Published | `0.6.0-alpha` | Stable one-shot config only |
 | Published | `0.7.0-alpha` | Stable one-shot config only |
-| Published | `0.8.0-alpha` | Stable one-shot config frozen from the stable surface at the base commit |
-| Development | `0.9.0-dev` | Mutable closed one-shot experimental and state-aware config |
+| Development | `0.8.0-alpha` | Mutable closed one-shot experimental and state-aware config |
 
 Published request types do not contain:
 
@@ -174,8 +174,7 @@ exact registry lookup
     |
     +-- 0.6.0-alpha --> published::v0_6_0_alpha::Request
     +-- 0.7.0-alpha --> published::v0_7_0_alpha::Request
-    +-- 0.8.0-alpha --> published::v0_8_0_alpha::Request
-    `-- 0.9.0-dev   --> dev one-shot or phase-specific state-aware request
+    `-- 0.8.0-alpha --> dev one-shot or phase-specific state-aware request
     |
     v
 typed adapter outside the immutable contract module
@@ -197,6 +196,8 @@ to `serde_json::Value` before structural validation.
 
 ### Phase 1: Add the contract crate and exact version probe
 
+Implemented by PR #807.
+
 Add:
 
 ```text
@@ -206,15 +207,14 @@ src/core/mxc_config_contract/
     lib.rs
     registry.rs
     version.rs
-    published/
-      mod.rs
-    dev/
-      mod.rs
 ```
 
 The crate depends only on Serde and `serde_json`, plus optional Schemars support
 when schema generation is added. It must not depend on `wxc_common`,
-`mxc_engine`, or any backend crate.
+`mxc_engine`, or any backend crate. This is intentionally a separate crate
+rather than a module in an existing runtime crate so Cargo enforces the
+dependency boundary. Any broader crates.io packaging work for the Rust SDK is a
+separate concern.
 
 Implement:
 
@@ -229,8 +229,21 @@ This step has no production parser integration and no behavior change.
 
 ### Phase 2: Implement the `0.6.0-alpha` contract
 
-Add a self-contained
-`published/v0_6_0_alpha.rs` from the documented stable `0.6` field set.
+Add a self-contained version directory from the documented stable `0.6` field
+set:
+
+```text
+published/
+  mod.rs
+  v0_6_0_alpha/
+    mod.rs
+    primitives.rs
+    network.rs
+    request.rs
+```
+
+Substantial published contracts use directory modules so their internal
+organization can grow without sharing field-bearing types across versions.
 
 Requirements:
 
@@ -263,23 +276,22 @@ every internal field. Do not use a catch-all `..`.
 Add semantic-equivalence tests that run representative `0.6` requests through
 the adapter and the existing conversion code.
 
-### Phase 4: Add `0.7.0-alpha` and `0.8.0-alpha`
+### Phase 4: Add `0.7.0-alpha`
 
-Create independent self-contained modules rather than sharing field-bearing
+Create an independent self-contained module rather than sharing field-bearing
 types.
 
 The `0.7` contract adds the documented differences from `0.6`, including
 annotations and the stable Seatbelt surface.
 
-The `0.8` contract freezes the stable, non-experimental surface at the base
-commit. Add cross-version fixtures proving that fields and values are accepted
-only by the versions that define them.
+Add cross-version fixtures proving that fields and values are accepted only by
+the versions that define them.
 
 The historical `0.6` and `0.7` schema files remain byte-for-byte unchanged.
 Document the bootstrap tightening where the typed contracts require an exact
 version and reject unknown fields more consistently than those advisory files.
 
-### Phase 5: Add the closed `0.9.0-dev` contract
+### Phase 5: Add the closed `0.8.0-alpha` development contract
 
 Separate the mutable development contract into:
 
@@ -334,7 +346,7 @@ Current base-commit inventory:
 - 50 unversioned stable configs
 - 1 config declaring retired `0.3.0-alpha`
 
-Experimental and state-aware configs move to `0.9.0-dev`. Stable configs are
+Experimental and state-aware configs move to `0.8.0-alpha`. Stable configs are
 classified and assigned an exact published version.
 
 Update Node, C#, Rust SDK, FFI, examples, tests, and `$schema` references.
@@ -347,7 +359,7 @@ This step is primarily mechanical and is suitable for delegation.
 Replace the major/minor range check with exact registry dispatch.
 
 Add `allow_development_contract` to parser load options. Initially, the
-existing `--experimental` option authorizes parsing `0.9.0-dev` as well as
+existing `--experimental` option authorizes parsing `0.8.0-alpha` as well as
 enabling experimental execution.
 
 Published versions reject `experimental` as an ordinary unknown field.
@@ -363,8 +375,7 @@ Extend `mxc_schema_gen` with commands such as:
 
 ```text
 mxc_schema_gen schema --version 0.8.0-alpha
-mxc_schema_gen schema --version 0.9.0-dev
-mxc_schema_gen publish --version 0.9.0-alpha --next-dev 1.0.0-dev
+mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-dev
 ```
 
 Generate versioned JSON Schemas, TypeScript wire-oracle types, and version
@@ -377,6 +388,11 @@ identities, and recorded digests cannot be modified or deleted. Reuse
 
 Replace `schemas/schema-version.json` and the regex-based version synchronization
 logic once all consumers use the generated registry.
+
+Do not extend the existing rolling-version synchronization gate to treat its
+current min/stable/dev constants as the exact-contract registry. Exact contracts
+are registered deliberately as their Rust modules are implemented; Phase 9
+replaces the old synchronization mechanism with generated registry metadata.
 
 ## Suggested ownership
 
@@ -398,6 +414,9 @@ Good tasks to delegate:
 - CI JavaScript updates
 
 ## Phase 1 detailed design
+
+Phase 1 was implemented by PR #807. The detailed design remains here as the
+record of the crate boundary and probe responsibilities.
 
 ### Phase 1 objective
 
@@ -438,16 +457,12 @@ src/core/mxc_config_contract/Cargo.toml
 src/core/mxc_config_contract/src/lib.rs
 src/core/mxc_config_contract/src/version.rs
 src/core/mxc_config_contract/src/registry.rs
-src/core/mxc_config_contract/src/published/mod.rs
-src/core/mxc_config_contract/src/dev/mod.rs
 ```
 
 Actions:
 
 - add `core/mxc_config_contract` to the workspace
-- add the future workspace path dependency
 - add only the initial Serde dependencies
-- declare the modules, leaving their substantive implementations empty
 - add crate-level documentation stating that this crate defines input
   contracts and must not depend on runtime or backend crates
 
@@ -503,8 +518,8 @@ Actions:
 - add the static `CONTRACTS` table
 - add descriptor lookup
 - add supported-version iteration
-- classify `0.6`, `0.7`, and `0.8` as published
-- classify `0.9.0-dev` as development
+- classify `0.6` and `0.7` as published
+- classify `0.8` as development
 
 Add consistency tests proving:
 
@@ -557,7 +572,6 @@ Actions:
 - document that `probe_version` validates only the declaration, not the
   selected contract's shape
 - document the exact-match behavior on `ContractVersion`
-- ensure `published` and `dev` expose no request types yet
 
 Done when a future consumer can use the crate without reaching into private
 implementation details.
@@ -586,8 +600,9 @@ introduced them.
 ### Cargo wiring
 
 Add `core/mxc_config_contract` to the workspace members in `src/Cargo.toml`.
-Declare a workspace path dependency for later consumers, but do not add it to
-`wxc_common` until the first adapter or shadow-dispatch change needs it.
+Declare the workspace path dependency when the first adapter, shadow-dispatch,
+or code-generation consumer needs it. Phase 1 has no consumer and therefore
+does not add the dependency preemptively.
 
 Initial crate dependencies:
 
@@ -611,8 +626,8 @@ pub use registry::{ContractDescriptor, ContractStatus, CONTRACTS};
 pub use version::{probe_version, ContractVersion, VersionProbeError};
 ```
 
-The empty `published` and `dev` modules may be declared but do not need public
-request types yet.
+The `published` module begins with the first published request type in Phase 2.
+The `dev` module is deferred until the development contract in Phase 5.
 
 ### Exact version model
 
@@ -622,7 +637,6 @@ pub enum ContractVersion {
     V0_6_0Alpha,
     V0_7_0Alpha,
     V0_8_0Alpha,
-    V0_9_0Dev,
 }
 ```
 
@@ -645,7 +659,6 @@ pub const ALL: &[ContractVersion] = &[
     ContractVersion::V0_6_0Alpha,
     ContractVersion::V0_7_0Alpha,
     ContractVersion::V0_8_0Alpha,
-    ContractVersion::V0_9_0Dev,
 ];
 ```
 
