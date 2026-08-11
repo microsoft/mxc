@@ -7,7 +7,7 @@ document are Windows 11**, and the minimum considered here is Windows 11 23H2.
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
-[sandbox policy spec](../sandbox-policy/v1/policy.md).
+[sandbox policy spec](../sandbox-policy/0.7.0/policy.md).
 
 ## Windows 11 releases
 

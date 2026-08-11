@@ -152,7 +152,7 @@ Core references:
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
 - `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
-- `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
+- `docs/sandbox-policy/0.7.0/policy.md` — sandbox policy 0.7.0 specification
 
 Per-backend guides:
 
