@@ -5,6 +5,6 @@ description: >-
 runs:
   using: composite
   steps:
-    - shell: pwsh
+    - shell: bash
       working-directory: ${{ github.workspace }}
-      run: Get-Content .azure-pipelines\.cargo\config.public.toml | Add-Content -Path .cargo\config.toml
+      run: cat .azure-pipelines/.cargo/config.public.toml >> .cargo/config.toml

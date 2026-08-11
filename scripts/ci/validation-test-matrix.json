@@ -352,25 +352,30 @@
         "os": "windows-prerelease-process-container",
         "backends": [
           "process-t1",
-          "isolation-session"
+          "process-t3",
+          "isolation-session",
+          "wslc"
         ]
       },
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "wslc"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "wslc"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
-          "process-t3"
+          "process-t3",
+          "wslc"
         ]
       },
       {
@@ -405,31 +410,27 @@
     "weekly": [],
     "enabled": [
       {
-        "os": "ubuntu-24.04",
+        "os": "windows-prerelease-process-container",
         "backends": [
-          "lxc",
-          "bubblewrap"
+          "wslc"
         ]
       },
       {
-        "os": "ubuntu-26.04",
+        "os": "windows-25h2",
         "backends": [
-          "lxc",
-          "bubblewrap"
+          "wslc"
         ]
       },
       {
-        "os": "rhel-10",
+        "os": "windows-24h2",
         "backends": [
-          "lxc",
-          "bubblewrap"
+          "wslc"
         ]
       },
       {
-        "os": "debian-13",
+        "os": "windows-23h2",
         "backends": [
-          "lxc",
-          "bubblewrap"
+          "wslc"
         ]
       }
     ]

@@ -97,10 +97,10 @@ jobs:
 
       # Runs the Bubblewrap executor characterization tests. lxc-exec was built
       # into src/target/<triple>/release above, where find_binary() locates it.
-      # - name: Test executor characterization (wxc_e2e_tests)
-      #   working-directory: src
-      #   run: cargo test --locked --release --target ${{ matrix.target }}
-      #        -p wxc_e2e_tests
+      - name: Test executor characterization (wxc_e2e_tests)
+        working-directory: src
+        run: cargo test --locked --release --target ${{ matrix.target }}
+             -p wxc_e2e_tests
 
       ###############
       ####################
