@@ -191,7 +191,7 @@ function Initialize-WslcHost {
 
     $previousEncoding = [Console]::OutputEncoding
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-    $output = wsl --status  2>&1 | Out-String
+    $output = wsl.exe --status  2>&1 | Out-String
     Write-Host $output
     [Console]::OutputEncoding = $previousEncoding
 
@@ -200,18 +200,21 @@ function Initialize-WslcHost {
         Write-Host "=== installing WSL ==="
 
         [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-        wsl --install  2>&1 | Write-Host
-        wsl --status  2>&1 | Write-Host
-        wsl --version 2>&1 | Write-Host
+        wsl.exe --install --web-download --no-distribution 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0) {
+            throw "WSL installation failed: $LASTEXITCODE"
+        }
+        wsl.exe --status  2>&1 | Write-Host
+        wsl.exe --version 2>&1 | Write-Host
         [Console]::OutputEncoding = $previousEncoding
     }
 
     Write-Host "=== updating WSL to pre-release ==="    
 
     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-    wsl --update --prerelease  2>&1 | Write-Host
-    wsl --status  2>&1 | Write-Host
-    wsl --version 2>&1 | Write-Host
+    wsl.exe --update --pre-release --web-download  2>&1 | Write-Host
+    wsl.exe --status  2>&1 | Write-Host
+    wsl.exe --version 2>&1 | Write-Host
     [Console]::OutputEncoding = $previousEncoding
 
     Write-Host "=== done. ===" 

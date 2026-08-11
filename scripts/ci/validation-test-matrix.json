@@ -417,14 +417,6 @@
     "weekly": [],
     "enabled": [
       {
-        "os": "windows-prerelease-process-container",
-        "backends": [
-          "process-t1",
-          "process-t3",
-          "isolation-session"
-        ]
-      },
-      {
         "os": "windows-25h2",
         "backends": [
           "wslc"
