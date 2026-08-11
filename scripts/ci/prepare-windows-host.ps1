@@ -209,6 +209,7 @@ function Initialize-WslcHost {
     #     wsl.exe --status  2>&1 | Write-Host
     #     wsl.exe --version 2>&1 | Write-Host
     #     [Console]::OutputEncoding = $previousEncoding
+    #
     }
 
     if ((Invoke-Wsl @('--version') -Quiet) -ne 0) {
