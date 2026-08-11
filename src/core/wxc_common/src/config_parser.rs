@@ -513,10 +513,9 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         // Redact once, up front, and use this in every diagnostic below. A
         // proxy URL commonly carries basic-auth credentials, and every error in
         // this block reaches the diagnostic/log stream. Redacting at each site
-        // instead invites exactly the miss this hoist removes: the host and
-        // port errors used to interpolate the raw URL, so a credential-bearing
-        // URL with no port leaked the password before the LXC credential guard
-        // downstream ever ran.
+        // instead leaves one missed site enough to leak the password, and
+        // these errors all fire before the LXC credential guard downstream
+        // runs.
         let redacted = crate::proxy_env::redact_proxy_url(&url_str);
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
@@ -3652,11 +3651,10 @@ mod tests {
         );
     }
 
-    // Raised in review: the credential guard runs after `convert_wire_proxy`,
-    // so a credential-bearing URL that fails an *earlier* check never reaches
-    // it.  The port error used to interpolate the raw URL, which leaked the
-    // password the guard downstream exists to keep out of the diagnostic
-    // stream.
+    // The credential guard runs after `convert_wire_proxy`, so a
+    // credential-bearing URL that fails an *earlier* check never reaches it.
+    // Those earlier errors have to redact on their own, or they leak the
+    // password the guard exists to keep out of the diagnostic stream.
     #[test]
     fn a_malformed_credential_bearing_proxy_url_does_not_leak_the_password() {
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com"},"enforcementMode":"firewall"}}"#;

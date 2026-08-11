@@ -177,11 +177,11 @@ struct ProxyAuthority<'a> {
 /// the authority. `alice@proxy.example.com:3128` is that case.
 ///
 /// This is the single parse shared by [`redact_proxy_url`] and
-/// [`proxy_url_has_credentials`]. They previously had one each, which is how
-/// they came to disagree: redaction handled the opaque form while the guard
-/// reported it as carrying no credentials. It is total rather than fallible
-/// for the same reason -- an input only one of them could parse is an input
-/// they can differ on.
+/// [`proxy_url_has_credentials`]: a parse each is a way for them to disagree
+/// about one URL, and redaction that hides a credential the guard does not
+/// flag is a silent bypass. It is total rather than fallible for the same
+/// reason -- an input only one of them could parse is an input they can
+/// differ on.
 fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
     let (scheme, after_scheme) = match url.find(':') {
         Some(colon) if is_uri_scheme(&url[..colon]) => url.split_at(colon),
@@ -217,13 +217,12 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
 /// Whether `candidate` satisfies the RFC 3986 scheme grammar,
 /// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
 ///
-/// Everything before the first colon used to be taken for a scheme on sight,
-/// which is wrong whenever the colon is a *port* separator instead. In
-/// `alice@proxy.example.com:3128` that read the scheme as
-/// `alice@proxy.example.com` and the authority as `3128`; an authority of
-/// `3128` carries no `@`, so the guard reported no credentials and redaction
-/// returned the string untouched, while the username still reached
-/// `lxc-attach` argv.
+/// A colon is not proof of a scheme -- it can separate a *port* instead.
+/// Taking everything before the first colon as the scheme would read
+/// `alice@proxy.example.com:3128` as scheme `alice@proxy.example.com` and
+/// authority `3128`, and an authority of `3128` carries no `@`: the guard
+/// would find no credentials and redaction would return the string
+/// untouched, while the username still reaches `lxc-attach` argv.
 ///
 /// `@` is not in the grammar and a prefix carrying userinfo always contains
 /// one, so refusing non-schemes is what sends the whole value through as an

@@ -441,12 +441,11 @@ impl LxcScriptRunner {
     /// opens the file for writing.
     ///
     /// `> /etc/hosts` truncates the moment it is opened, so every reason the
-    /// read could fail has to be settled first. The original form discarded
-    /// grep's status entirely: with `grep` absent, `/etc/hosts` unreadable, or
-    /// the binary killed, `$kept` came back empty, the redirect truncated the
-    /// file, and the closing `printf` exited 0 -- so the runner recorded a
-    /// successful pin over a hosts file it had just emptied of every entry the
-    /// image shipped.
+    /// read could fail has to be settled first. Discarding grep's status
+    /// leaves `$kept` empty whenever `grep` is absent, `/etc/hosts` is
+    /// unreadable, or the binary is killed -- the redirect then truncates the
+    /// file and the closing `printf` exits 0, recording a successful pin over
+    /// a hosts file emptied of every entry the image shipped.
     ///
     /// Only status 0 (lines kept) and status 1 (nothing kept) are outcomes.
     /// Status 1 is legitimate and common: an empty file, or a re-pin where
@@ -472,11 +471,11 @@ impl LxcScriptRunner {
     ///   the container's mount namespace -- which is a Rust-side change rather
     ///   than a shell one. What the `-h` test does close is the case that
     ///   needs no race at all: a workload reused across runs can *leave*
-    ///   `/etc/hosts` as a symlink, and a dangling one used to be the worst
-    ///   shape of all, because it failed `-e`, skipped the read, and then had
-    ///   its target created by the redirect -- a write to an attacker-named
-    ///   path, which on a writable host bind mount lands outside the
-    ///   container.
+    ///   `/etc/hosts` as a symlink. A dangling one is the worst shape,
+    ///   because it fails `-e` -- a read guarded on `-e` alone is skipped and
+    ///   the redirect then creates the link's target, a write to an
+    ///   attacker-named path, which on a writable host bind mount lands
+    ///   outside the container.
     fn hosts_read_prologue() -> String {
         format!(
             "if [ -h /etc/hosts ]; then \
@@ -609,11 +608,9 @@ mod tests {
             command.contains(&format!("grep -v '{}'", HOSTS_PIN_MARKER)),
             "the command must filter out every marked line; got: {command}"
         );
-        // This used to assert the command contained no `printf` at all, which
-        // worked only while `printf` was the sole way a line could be written.
-        // Re-emitting the *kept* lines now needs one, so the ban would fail on
-        // a command that adds nothing. The marker count below is the invariant
-        // the ban was standing in for, and states it directly: the marker's one
+        // Banning `printf` outright would fail here: re-emitting the *kept*
+        // lines needs one, on a command that writes no marked line. The
+        // marker count states the invariant directly -- the marker's one
         // appearance is inside the filter, so no marked line can be written.
         assert_eq!(
             command.matches(HOSTS_PIN_MARKER).count(),

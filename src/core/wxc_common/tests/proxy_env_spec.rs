@@ -497,20 +497,19 @@ fn userinfo_that_looks_like_the_redaction_marker_still_carries_credentials() {
     );
 }
 
-// This test used to assert that `not-a-url@at-all` carries no credentials, on
-// the premise that a string with no scheme separator has no authority to parse
-// and therefore no userinfo to find.  The premise confuses parseability with
-// safety.  Nothing downstream re-parses the value: `ProxyAddress::from_url`
-// stores it verbatim, `to_url` returns it verbatim, and it lands in
-// `lxc-attach` argv as written.
+// Parseability is not safety.  Nothing downstream re-parses the value:
+// `ProxyAddress::from_url` stores it verbatim, `to_url` returns it verbatim,
+// and it lands in `lxc-attach` argv as written -- so a string with no scheme
+// separator still carries whatever userinfo it appears to.
 //
 // The decisive shape is a bearer token used as the sole userinfo --
 // `token@proxy.example.com` has no colon and no scheme, so a predicate that
 // gives up without a scheme reports a live secret as clean.  Every
-// password-bearing form does contain a colon, which is why this looked safe.
+// password-bearing form does contain a colon, which is what makes a
+// colon-driven predicate look safe.
 //
-// What survives from the original test is the part that was actually right: a
-// port colon is not a scheme separator, and the guard must not fire on it.
+// A port colon is not a scheme separator either, and the guard must not fire
+// on one.  Both halves are asserted here.
 #[test]
 fn a_port_colon_is_not_userinfo_but_a_schemeless_token_is() {
     assert!(
@@ -554,12 +553,12 @@ fn redact_proxy_url_leaves_a_scheme_opaque_url_without_userinfo_alone() {
     assert_eq!(redact_proxy_url(input), input);
 }
 
-// The bypass the redactor already knew about and the guard did not.
 // `url::Url::parse` accepts `scheme:rest`, `ProxyAddress::from_url` is public
 // and stores whatever string it is handed, and `to_url` returns it verbatim --
 // so this shape reaches `--set-var` in `lxc-attach` argv, and argv is
-// world-readable through /proc/<pid>/cmdline.  The two functions used to parse
-// the URL separately, which is exactly how they came to disagree about it.
+// world-readable through /proc/<pid>/cmdline.  Redaction and the guard share
+// one parse, so neither can treat this form as credential-free while the
+// other hides it.
 #[test]
 fn a_scheme_opaque_url_with_userinfo_carries_credentials() {
     assert!(
@@ -811,11 +810,11 @@ fn the_guard_and_the_redaction_never_disagree_on_the_shapes_that_broke_them() {
     }
 }
 
-// A colon is not proof of a scheme. When it separates a port instead, every
-// character before it used to be swallowed as the scheme -- so the authority
-// of `alice@proxy.example.com:3128` was read as the bare port `3128`, which
-// carries no `@`, and the username was neither flagged nor hidden while still
-// reaching `lxc-attach` argv.
+// A colon is not proof of a scheme. When it separates a port instead, taking
+// every character before it as the scheme would read the authority of
+// `alice@proxy.example.com:3128` as the bare port `3128`, which carries no
+// `@` -- leaving the username neither flagged nor hidden while it still
+// reaches `lxc-attach` argv.
 #[test]
 fn a_schemeless_host_and_port_still_shows_its_userinfo() {
     assert!(
@@ -927,19 +926,19 @@ fn whitespace_around_a_clean_url_stays_clean() {
 }
 
 // The guard exists to agree with the parser that actually consumes this URL.
-// Every bypass found in review was the same failure -- the guard read one
-// string and `lxc-attach` received another -- so the assertion is differential:
+// Every bypass has one shape -- the guard reads one string and `lxc-attach`
+// receives another -- so the assertion is differential:
 // wherever `url::Url::parse` finds userinfo, the guard must find it too, and
 // wherever the parser finds none, the guard must not invent one. `url` is the
 // crate `ProxyAddress` itself parses with, so it is the oracle rather than a
 // second opinion.
 //
-// The corpus is *generated* rather than listed. A hand-written list already
-// failed twice: it missed the backslash authority introducer, and it missed
-// `::@`, where the second colon is a password rather than more emptiness.
-// Both were shapes nobody thought to write down. Crossing the dimensions
-// instead makes coverage a property of the dimensions, so a gap has to be a
-// missing *dimension* rather than a missing example.
+// The corpus is *generated* rather than listed. A hand-written list has to
+// name every shape in advance, and the easily-missed ones are real: the
+// backslash authority introducer, and `::@`, where the second colon is a
+// password rather than more emptiness. Crossing the dimensions instead makes
+// coverage a property of the dimensions, so a gap has to be a missing
+// *dimension* rather than a missing example.
 fn differential_corpus() -> Vec<String> {
     let schemes = [
         "http",

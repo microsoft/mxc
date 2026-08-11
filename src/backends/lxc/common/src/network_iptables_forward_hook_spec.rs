@@ -315,11 +315,8 @@ fn an_interface_without_a_master_entry_is_not_bridge_enslaved() {
     );
 }
 
-// This assertion is the reverse of what it used to be, and the reversal is the
-// fix.  It previously read a missing interface directory as "not enslaved",
-// which is how an unreadable sysfs came to be reported as directly routed.
-//
-// The two facts are independent: `discover_veth_interface` parses `lxc-info`,
+// A missing interface directory is not evidence that the interface is
+// unenslaved.  The two facts are independent: `discover_veth_interface` parses `lxc-info`,
 // not sysfs, so the veth can be known to exist while its sysfs entry is
 // missing, masked, or unreadable.  Absence of the directory is therefore a
 // failed lookup, not evidence about the topology.

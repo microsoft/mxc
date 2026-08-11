@@ -326,10 +326,11 @@ pub fn chain_name_for(container_name: &str) -> String {
 /// What a sysfs lookup was able to establish about a veth's topology.
 ///
 /// The third state is the point of this type. `Path::exists()` folds every
-/// metadata error into `false`, so a masked, unmounted, or permission-denied
-/// sysfs used to read as "directly routed" -- and that is the reading which
-/// downgrades a failed physdev hook from fatal to a warning. The lookup is
-/// independent of how the interface was discovered: `discover_veth_interface`
+/// metadata error into `false`, so a two-state check built on it would read a
+/// masked, unmounted, or permission-denied sysfs as "directly routed" -- and
+/// that is the reading which downgrades a failed physdev hook from fatal to a
+/// warning. The lookup is independent of how the interface was discovered:
+/// `discover_veth_interface`
 /// parses `lxc-info`, not sysfs, so a veth can be known to exist while its
 /// sysfs entry is unreadable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
