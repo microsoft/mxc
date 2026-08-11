@@ -140,23 +140,28 @@ Do not infer otherwise from the schema:
 
 See the parent doc on the last 4.
 
-## 2. Two enforcement paths: current vs downlevel
+## 2. Schema 0.8 selection and downlevel behavior
 
-Both (a) WFP filter writes and (b) per-container WinHTTP proxy configuration require a privileged context. How that privilege is obtained is the entire implementation story for this backend, and it splits by Windows build:
+Both WFP filter writes and per-container WinHTTP proxy configuration require a privileged context. Schema 0.8 selects
+the strongest usable process-creation contract through runtime probing.
 
-| Tier 1: the OS applies the policy in-process | Tier 2: downlevel (Windows 23H2) |
+| Current schema 0.8 selection | Downlevel (Windows 23H2) |
 |---|---|
-| On builds that expose the OS sandbox-creation API (`CreateProcessInSandbox`), the OS itself, in its own elevated context, applies the per-sandbox WFP filters and wires the WinHTTP proxy before the target process runs.<br><br>No MXC-side privileged component, no UAC. The filter lifetime is owned by the OS and bound to AppContainer. This is the preferred path and where new capabilities land first. | On builds without that API (Windows 23H2), model 1 uses per-sandbox WFP filters that MXC writes by elevating on each launch.<br><br>Downlevel supports cooperative proxy routing through environment variables, but it does not satisfy the model 2 enforcement guarantee. It does not provide per-container WinHTTP or scoped proxy-peer enforcement. |
+| Prefer PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support probe succeed. Fall back temporarily to SBOX (`CreateProcessInSandbox`) when PSEC is unavailable, then to AppContainer when neither BaseContainer contract is usable. | Neither PSEC nor SBOX (`CreateProcessInSandbox`) is available, so MXC uses the AppContainer fallback.<br><br>Until downlevel WFP support is implemented, model 1 provides coarse egress and ingress allow/deny postures only. Model 2 provides cooperative proxy routing through environment variables without proxy-only enforcement. |
 
 ### 2.1 Fail loud on version skew: never silently downgrade
 
-`CreateProcessInSandbox` could be different between builds as the network-policy surface grows over time. A machine can expose the API but not yet honor a specific policy field MXC asks for. MXC must not silently fall back to Tier 2 in that case: the two paths have different security and cleanup properties, and the operator would not know. The contract:
+PSEC and SBOX support varies between Windows builds as the network-policy
+surface grows. Runtime probing selects the contract, but MXC must not silently
+weaken the requested policy.
 
-- Fall back to Tier 2 only when the API is absent on the build, not when it is present but missing a requested field.
-- For a present-but-incomplete API, MXC rejects the launch with a typed error naming the missing capability.
+- Follow the PSEC, SBOX, and AppContainer fallback order only when the next path
+  can preserve the requested semantics.
+- Reject the launch with a typed error when no available path can enforce the
+  request.
 
-## 3. WFP is the enforcement primitive (both tiers)
+## 3. WFP enforcement
 
-**Admin requirement.** Adding WFP filters is admin-only. On Tier 1 the OS applies them in its own elevated context; on Tier 2 (Windows 23H2) MXC elevates on each launch to write the filters.
-
-**Cleanup.** Filters will need to have a lifetime ≤ sandbox lifetime. In both tiers the filters will need to be cleaned up when there are no more processes running in the container.
+The BaseContainer contracts apply WFP filters in the OS's elevated context and
+own their lifetime. Downlevel WFP installation, elevation, and cleanup are
+future work and are not part of the initial schema 0.8 downlevel support.

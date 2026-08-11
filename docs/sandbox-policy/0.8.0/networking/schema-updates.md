@@ -14,9 +14,10 @@ the shared policy.
 | `blockedHosts` | `egress.deny[].to[].cidr` | 0.8 uses IP/CIDR only and deny overrides allow |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
 | `allowLocalNetwork` | `ingress.default` | Controls LAN/private-network inbound |
-| No equivalent | `ingress.hostLoopback` | New host-loopback inbound control |
+| No equivalent | `ingress.hostLoopback` | New host-loopback connectivity control in either direction |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
-| `proxy.url` | No GA equivalent | Schema 0.8 accepts only HTTP/S loopback proxy URLs |
+| `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
+| `proxy.url` with a remote or non-loopback URL | No GA equivalent | Schema 0.8 accepts only loopback proxy URLs |
 
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 

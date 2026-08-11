@@ -63,8 +63,7 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
 #### Host Loopback and Inbound Policy
 
 **Default stance:** Host-loopback and LAN/private-network inbound traffic are
-blocked by default on all backends. WAN inbound is outside the GA policy and
-remains blocked.
+blocked by default on backends that enforce the GA network policy.
 
 This does not affect intra-container loopback. Processes inside the same sandbox may communicate with each other over localhost / 127.0.0.1 / ::1.
 
@@ -188,19 +187,23 @@ Ingress has no CIDR peers or port rules. `ingress.default` and
 
 **Limitation:** Enforcement requires an egress restriction at the OS level: WFP on Windows process containers, a network namespace plus iptables on the Linux backends, and a Seatbelt profile confining network-outbound to the loopback proxy port on macOS. Rich IP/CIDR/port allow-lists are expressible on Windows and the Linux backends but not on macOS, where Seatbelt restricts egress to the proxy port rather than filtering arbitrary destinations. A configuration a backend cannot enforce is rejected rather than run advisory, so "fully describes the workload's network view" always holds for an accepted configuration.
 
-### D2: Inbound is blocked by default and opt-in where supported
+### D2: Inbound and host-loopback are blocked by default
 
 **Decision:** GA defines outbound configuration and inbound control.
 `ingress.default: deny` blocks LAN/private-network inbound traffic, and
-`ingress.hostLoopback: deny` separately blocks host-loopback connectivity.
-The host-loopback value overrides `default` for that path. Intra-container
-loopback is always allowed.
+`ingress.hostLoopback: deny` separately blocks host-loopback connectivity in
+either direction. The host-loopback value overrides `default` for that path.
+Intra-container loopback is always allowed.
 
 **Why inbound is blocked by default:**
 
 - **Attack surface:** Allowing host-to-container inbound means the sandbox can run servers accessible from the host. For agentic workloads, this creates a risk of command-and-control servers, exfiltration channels, or lateral movement vectors.
 - **Opt-in model:** Customer scenarios that need host-to-container inbound (MCP servers in SSE/WebSocket mode accessed from host, language server daemons accessed from host IDE) must explicitly set `ingress.hostLoopback: allow`.
-- **GA enforcement:** `ingress.hostLoopback` is enforced on all backends, Windows process containers via loopback exemption rules scoped to the AppContainer SID, WSLc/LXC/Bubblewrap via iptables INPUT, and Seatbelt via its profile.
+- **GA enforcement:** Windows process containers use loopback exemption rules
+  scoped to the AppContainer SID, and WSLc/LXC/Bubblewrap use iptables INPUT.
+  Seatbelt maps `ingress.default` to its existing
+  `(allow network-inbound (local ip))` behavior but cannot enforce an
+  independent `hostLoopback` posture.
 
 **Seatbelt caveat:** On Seatbelt there is no private loopback, so a profile that blocks host-to-container ingress (`ingress.hostLoopback: deny`) also blocks the sandbox from binding loopback listeners at all, breaking intra-sandbox loopback servers. For intra-sandbox IPC on macOS, Unix-domain sockets in a sandbox-private path rather than TCP loopback could be used. That said, Unix-domain sockets come with their own security questions and should be outlined in a separate macOS doc if necessary.
 
@@ -336,7 +339,7 @@ Same model and enforcement as WSLc (model 2 achievable; iptables/nftables on the
 | Proxy routing (HTTP/S) | `HTTP_PROXY`/`HTTPS_PROXY` set to the loopback proxy; cooperating clients route there. | A minority of clients ignore the variables; their traffic is dropped by the egress restriction, not bypassed. |
 | IP/CIDR / port / protocol allow-lists | Not supported. | |
 | Per-sandbox scoping | Seatbelt profile per sandbox-exec invocation | |
-| Inbound | Seatbelt `network-inbound` rule | Local-IP listeners share the host network stack. |
+| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`; differing `default` and `hostLoopback` values are unsupported. |
 | DNS | Direct outbound DNS to an external resolver is blocked (egress confined to the proxy port); cooperating clients pass hostnames to the proxy, which resolves them. All others would be blocked. | |
 | Bypass resistance | Medium. Egress is profile-restricted to the proxy port, so raw-socket and direct-DNS attempts are denied. Weaker than a separate network namespace (Seatbelt shares the host network stack) and depends on a correct profile. | |
 
