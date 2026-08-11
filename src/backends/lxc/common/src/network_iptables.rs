@@ -539,10 +539,10 @@ impl NetworkIptablesManager {
 
     /// Whether the hook logic must treat `topology` as bridged.
     ///
-    /// Only a positive [`VethTopology::DirectlyRouted`] finding earns the
-    /// relaxed treatment, because that is the branch which downgrades a failed
-    /// physdev hook to a warning. An unknown topology has established nothing,
-    /// so it is handled as bridged and the failure stays fatal.
+    /// Bridged is the conservative answer, so it is what an absence of
+    /// evidence reaches. Only a positive [`VethTopology::DirectlyRouted`]
+    /// finding earns the other one, which is why this tests for that finding
+    /// rather than for [`VethTopology::Bridged`].
     fn treat_as_bridged(topology: VethTopology) -> bool {
         topology != VethTopology::DirectlyRouted
     }
