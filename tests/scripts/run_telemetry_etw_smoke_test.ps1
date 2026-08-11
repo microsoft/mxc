@@ -29,13 +29,9 @@ if ($wxcExe -match '\\release\\') {
     throw 'Release binaries are refused: telemetry smoke isolation depends on debug-only test overrides.'
 }
 $expectedBody = @'
-Would you like to send optional diagnostic data to Microsoft to help us understand how MXC is used, diagnose problems, and improve the product?
-
-If you choose Yes, MXC will send the MXC version and channel, containment backend, run outcome and exit code, run duration, bounded failure category, lifecycle phase, and random identifiers used to correlate events from the same app session or sandbox lifecycle.
-
-MXC does not send your command text, file paths, environment variables, standard input or output, usernames, credentials, or free-form error messages.
-
-Choosing No, closing this prompt, or not responding will keep telemetry off. If this consent request is never shown, telemetry also remains off. You can change or withdraw your choice later using MXC telemetry consent controls.
+Help improve MXC by sharing optional diagnostic data with Microsoft.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+You can change your choice at any time.
 '@ -replace "`r`n", "`n"
 
 $configFile = Join-Path $repoRoot 'tests\examples\28_telemetry_enabled.json'
@@ -100,9 +96,10 @@ function Invoke-CanonicalGrant {
         $presentation.prompt.locale -ne 'en-US' -or
         $presentation.prompt.title.text -ne 'Help improve Microsoft eXecution Container (MXC)' -or
         $presentation.prompt.body.text -ne $expectedBody -or
-        $presentation.prompt.affirmativeLabel.text -ne 'Yes, send optional diagnostic data' -or
-        $presentation.prompt.negativeLabel.text -ne 'No, do not send' -or
-        $presentation.prompt.learnMoreUrl -ne 'https://privacy.microsoft.com/privacystatement') {
+        $presentation.prompt.affirmativeLabel.text -ne 'Yes' -or
+        $presentation.prompt.negativeLabel.text -ne 'No' -or
+        $presentation.prompt.learnMoreLabel.text -ne 'Privacy Statement' -or
+        $presentation.prompt.learnMoreUrl -ne 'https://go.microsoft.com/fwlink/?linkid=521839') {
         throw 'The executor did not present the canonical telemetry consent resource.'
     }
 

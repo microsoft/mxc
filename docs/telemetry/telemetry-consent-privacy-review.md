@@ -1,7 +1,6 @@
 # Telemetry consent privacy review package
 
-**Status:** Approval pending. Privacy/legal approval is a release gate for
-consent resource version 1; this document does not record approval.
+**Status:** Consent resource version 1 wording approved by the privacy team.
 
 ## Product and purpose
 
@@ -57,13 +56,11 @@ record is not telemetry payload. Service-side diagnostic-data retention and
 access controls must be confirmed by the receiving Microsoft telemetry system
 owner as part of approval.
 
-## Reviewer decisions required
+## Remaining reviewer decisions
 
-1. Approve or revise resource version 1 wording.
-2. Confirm the listed included/excluded data categories.
-3. Confirm the Microsoft Privacy Statement link is sufficient.
-4. Confirm service-side retention, access, regional, and deletion requirements.
-5. Confirm whether additional locale or accessibility requirements apply at
+1. Confirm the listed included/excluded data categories.
+2. Confirm service-side retention, access, regional, and deletion requirements.
+3. Confirm whether additional locale or accessibility requirements apply at
    initial stable release.
 
 Any material wording or collected-field change after approval requires a new

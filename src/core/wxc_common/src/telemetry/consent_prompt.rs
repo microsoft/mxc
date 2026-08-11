@@ -56,27 +56,23 @@ pub const EN_US_CONSENT_PROMPT: ConsentPrompt = ConsentPrompt {
     },
     body: ConsentMessage {
         id: "telemetry-consent-body",
-        text: r#"Would you like to send optional diagnostic data to Microsoft to help us understand how MXC is used, diagnose problems, and improve the product?
-
-If you choose Yes, MXC will send the MXC version and channel, containment backend, run outcome and exit code, run duration, bounded failure category, lifecycle phase, and random identifiers used to correlate events from the same app session or sandbox lifecycle.
-
-MXC does not send your command text, file paths, environment variables, standard input or output, usernames, credentials, or free-form error messages.
-
-Choosing No, closing this prompt, or not responding will keep telemetry off. If this consent request is never shown, telemetry also remains off. You can change or withdraw your choice later using MXC telemetry consent controls."#,
+        text: r#"Help improve MXC by sharing optional diagnostic data with Microsoft.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+You can change your choice at any time."#,
     },
     affirmative_label: ConsentMessage {
         id: "telemetry-consent-affirmative-label",
-        text: "Yes, send optional diagnostic data",
+        text: "Yes",
     },
     negative_label: ConsentMessage {
         id: "telemetry-consent-negative-label",
-        text: "No, do not send",
+        text: "No",
     },
     learn_more_label: ConsentMessage {
         id: "telemetry-consent-learn-more-label",
-        text: "Microsoft Privacy Statement",
+        text: "Privacy Statement",
     },
-    learn_more_url: "https://privacy.microsoft.com/privacystatement",
+    learn_more_url: "https://go.microsoft.com/fwlink/?linkid=521839",
 };
 
 /// Resolve the best available resource for a requested BCP 47 locale.
@@ -118,7 +114,7 @@ mod tests {
         assert!(!prompt.learn_more_label.text.is_empty());
         assert_eq!(
             prompt.learn_more_url,
-            "https://privacy.microsoft.com/privacystatement"
+            "https://go.microsoft.com/fwlink/?linkid=521839"
         );
     }
 

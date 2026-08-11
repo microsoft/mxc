@@ -27,7 +27,7 @@ Current resource:
 - Resource version: `1`
 - Locale: `en-US`
 - Mandatory fallback: `en-US`
-- Privacy link: <https://privacy.microsoft.com/privacystatement>
+- Privacy link: <https://go.microsoft.com/fwlink/?linkid=521839>
 
 ### Title
 
@@ -35,27 +35,17 @@ Current resource:
 
 ### Body
 
-> Would you like to send optional diagnostic data to Microsoft to help us
-> understand how MXC is used, diagnose problems, and improve the product?
->
-> If you choose Yes, MXC will send the MXC version and channel, containment
-> backend, run outcome and exit code, run duration, bounded failure category,
-> lifecycle phase, and random identifiers used to correlate events from the
-> same app session or sandbox lifecycle.
->
-> MXC does not send your command text, file paths, environment variables,
-> standard input or output, usernames, credentials, or free-form error
-> messages.
->
-> Choosing No, closing this prompt, or not responding will keep telemetry off.
-> If this consent request is never shown, telemetry also remains off. You can
-> change or withdraw your choice later using MXC telemetry consent controls.
+> Help improve MXC by sharing optional diagnostic data with Microsoft.
+> If enabled, MXC sends diagnostic information about product usage,
+> performance, and reliability. MXC does not send your commands, file paths,
+> credentials, or other customer content.
+> You can change your choice at any time.
 
 ### Actions
 
-- Affirmative: **Yes, send optional diagnostic data**
-- Negative: **No, do not send**
-- Learn more: **Microsoft Privacy Statement**
+- Affirmative: **Yes**
+- Negative: **No**
+- Learn more: **Privacy Statement**
 
 Each field has a stable message ID. Locale lookup normalizes BCP 47 tags and
 falls back to `en-US`; complete messages are translated as units rather than

@@ -239,18 +239,15 @@ public sealed class MxcTelemetryTests : IDisposable
             Assert.Equal("Help improve Microsoft eXecution Container (MXC)", prompt.Title.Text);
             Assert.Equal(
                 """
-                Would you like to send optional diagnostic data to Microsoft to help us understand how MXC is used, diagnose problems, and improve the product?
-
-                If you choose Yes, MXC will send the MXC version and channel, containment backend, run outcome and exit code, run duration, bounded failure category, lifecycle phase, and random identifiers used to correlate events from the same app session or sandbox lifecycle.
-
-                MXC does not send your command text, file paths, environment variables, standard input or output, usernames, credentials, or free-form error messages.
-
-                Choosing No, closing this prompt, or not responding will keep telemetry off. If this consent request is never shown, telemetry also remains off. You can change or withdraw your choice later using MXC telemetry consent controls.
+                Help improve MXC by sharing optional diagnostic data with Microsoft.
+                If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+                You can change your choice at any time.
                 """.ReplaceLineEndings("\n"),
                 prompt.Body.Text);
-            Assert.Equal("Yes, send optional diagnostic data", prompt.AffirmativeLabel.Text);
-            Assert.Equal("No, do not send", prompt.NegativeLabel.Text);
-            Assert.Equal("https://privacy.microsoft.com/privacystatement", prompt.LearnMoreUrl);
+            Assert.Equal("Yes", prompt.AffirmativeLabel.Text);
+            Assert.Equal("No", prompt.NegativeLabel.Text);
+            Assert.Equal("Privacy Statement", prompt.LearnMoreLabel.Text);
+            Assert.Equal("https://go.microsoft.com/fwlink/?linkid=521839", prompt.LearnMoreUrl);
             return TelemetryConsentDecision.Yes;
         });
         Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);

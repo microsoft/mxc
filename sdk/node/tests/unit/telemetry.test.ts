@@ -22,10 +22,10 @@ const prompt: TelemetryConsentPrompt = {
   locale: 'en-US',
   title: { id: 'telemetry.consent.title', text: 'Help improve Microsoft eXecution Container (MXC)' },
   body: { id: 'telemetry.consent.body', text: 'canonical body' },
-  affirmativeLabel: { id: 'telemetry.consent.yes', text: 'Yes, send optional diagnostic data' },
-  negativeLabel: { id: 'telemetry.consent.no', text: 'No, do not send' },
-  learnMoreLabel: { id: 'telemetry.consent.learnMore', text: 'Microsoft Privacy Statement' },
-  learnMoreUrl: 'https://privacy.microsoft.com/privacystatement',
+  affirmativeLabel: { id: 'telemetry.consent.yes', text: 'Yes' },
+  negativeLabel: { id: 'telemetry.consent.no', text: 'No' },
+  learnMoreLabel: { id: 'telemetry.consent.learnMore', text: 'Privacy Statement' },
+  learnMoreUrl: 'https://go.microsoft.com/fwlink/?linkid=521839',
 };
 
 function status(
