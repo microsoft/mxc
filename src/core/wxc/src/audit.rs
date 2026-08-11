@@ -116,14 +116,20 @@ fn wait_with_output_timeout(
         let _ = child.wait();
         return Err("public plm.exe stderr was not captured".to_string());
     };
-    let stdout_reader = std::thread::Builder::new()
+    let stdout_reader = match std::thread::Builder::new()
         .name("plm-audit-stdout".to_string())
         .spawn(move || {
             let mut bytes = Vec::new();
             let mut stdout = stdout;
             stdout.read_to_end(&mut bytes).map(|_| bytes)
-        })
-        .map_err(|error| format!("failed to start plm stdout reader: {error}"))?;
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to start plm stdout reader: {error}"));
+        }
+    };
     let stderr_reader = match std::thread::Builder::new()
         .name("plm-audit-stderr".to_string())
         .spawn(move || {

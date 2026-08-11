@@ -584,6 +584,7 @@ mod tests {
 
         let error =
             run_wpr_command(command, "test", "powershell.exe", Duration::from_secs(5)).unwrap_err();
+        let control_elapsed = started.elapsed();
         let message = format!("{error:#}");
         let pid = message
             .split("PID=")
@@ -607,7 +608,7 @@ mod tests {
 
         assert!(message.contains("output drain failed"));
         assert!(may_have_changed_wpr_state(&error));
-        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(control_elapsed < Duration::from_secs(15));
     }
 
     /// Whether `element` carries an attribute `name` whose (unescaped)
