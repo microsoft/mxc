@@ -40,46 +40,58 @@ $requiredBinaries = @(
     'IsolationProxy.exe',
     'IsoSessionCli.exe'
 )
+$requiredWinmds = @(
+    'windows.ai.isolationsession.winmd',
+    'windows.ai.isolationsession.preview.winmd'
+)
+$expectedFiles = @($requiredBinaries + $requiredWinmds)
+$expectedFileLookup = @{}
+foreach ($name in $expectedFiles) {
+    $expectedFileLookup[$name.ToLowerInvariant()] = $name
+}
 
 $foundByName = @{}
 Get-ChildItem -LiteralPath $DropRoot -Recurse -File | ForEach-Object {
     $key = $_.Name.ToLowerInvariant()
-    if ($requiredBinaries.ToLowerInvariant().Contains($key)) {
+    if ($expectedFileLookup.ContainsKey($key)) {
         if ($foundByName.ContainsKey($key)) {
-            throw "Downloaded drop contains more than one '$($_.Name)'."
+            throw "Downloaded drop contains more than one '$($expectedFileLookup[$key])'."
         }
         $foundByName[$key] = $_
     }
 }
 
 $missing = @(
-    $requiredBinaries | Where-Object {
+    $expectedFiles | Where-Object {
         -not $foundByName.ContainsKey($_.ToLowerInvariant())
     })
 if ($missing.Count -gt 0) {
-    throw "OS drop is missing required IsoSession binaries: $($missing -join ', ')."
+    throw "OS drop is missing required IsoSession files: $($missing -join ', ')."
 }
 
 $stageDir = Join-Path $OutDir "bin\$ArchTag"
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+$dropRootPath = (Resolve-Path -LiteralPath $DropRoot).Path.TrimEnd('\')
 
-$files = foreach ($name in $requiredBinaries) {
+$files = foreach ($name in $expectedFiles) {
     $source = $foundByName[$name.ToLowerInvariant()]
     $destination = Join-Path $stageDir $name
     Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
     $item = Get-Item -LiteralPath $destination
+    $relativeSourcePath = $source.FullName.Substring($dropRootPath.Length).TrimStart('\')
 
     [ordered]@{
         name = $name
+        kind = if ($requiredWinmds -contains $name) { 'winmd' } else { 'binary' }
         sizeBytes = $item.Length
         sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
         fileVersion = $item.VersionInfo.FileVersion
-        sourcePath = $source.FullName
+        relativeSourcePath = $relativeSourcePath
     }
 }
 
 $manifest = [ordered]@{
-    schema = 'mxc.isosession-os-binaries/1'
+    schema = 'mxc.isosession-os-binaries/2'
     generatedUtc = (Get-Date).ToUniversalTime().ToString('o')
     osBranch = $OsBranch
     buildGuid = $BuildGuid.ToString()
@@ -94,5 +106,5 @@ $manifestPath = Join-Path $OutDir 'source-manifest.json'
 $manifest | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
-Write-Host "Staged $($requiredBinaries.Count) IsoSession binaries in '$stageDir'."
+Write-Host "Staged $($expectedFiles.Count) IsoSession files in '$stageDir'."
 Write-Host "Source manifest: $manifestPath"

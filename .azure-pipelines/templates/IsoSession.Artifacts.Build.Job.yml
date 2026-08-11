@@ -6,20 +6,12 @@ parameters:
   type: string
 - name: flavor
   type: string
-- name: rid
-  type: string
 - name: buildGuid
   type: string
 - name: monthId
   type: string
 - name: patch
   type: number
-- name: basePackageFeedUrl
-  type: string
-- name: basePackageId
-  type: string
-- name: basePackageVersion
-  type: string
 - name: osBranch
   type: string
 - name: dropNameOverride
@@ -40,18 +32,16 @@ parameters:
 
 jobs:
 - job: build_isosession_${{ parameters.archTag }}
-  displayName: Build IsoSession artifacts (${{ parameters.archTag }})
+  displayName: Build IsoSession inputs (${{ parameters.archTag }})
   timeoutInMinutes: 90
   variables:
     workDirectory: $(Pipeline.Workspace)/isosession/${{ parameters.archTag }}
     dropClientDirectory: $(workDirectory)/drop-client
     payloadDirectory: $(workDirectory)/payload
     payloadBinDirectory: $(payloadDirectory)/bin/${{ parameters.archTag }}
-    basePackageDirectory: $(workDirectory)/base-package
-    nugetOutputDirectory: $(workDirectory)/nuget
     installerOutputDirectory: $(workDirectory)/installer
     artifactDirectory: $(Build.SourcesDirectory)/out/isosession/${{ parameters.archTag }}
-    artifactName: isosession-artifacts-${{ parameters.archTag }}
+    artifactName: isosession-intermediate-${{ parameters.archTag }}
 
   steps:
   - checkout: self
@@ -62,26 +52,19 @@ jobs:
           throw 'A Windows OS BNS BuildGuid must be supplied.'
       }
       [void][guid]::Parse('${{ parameters.buildGuid }}')
-      if ('${{ parameters.monthId }}' -notmatch '^\d{4}\.\d{2}$') {
-          throw 'monthId must use YYYY.MM format.'
+      $releaseHelper = '$(Build.SourcesDirectory)\packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
+      $release = & $releaseHelper -MonthId '${{ parameters.monthId }}' -Patch ${{ parameters.patch }}
+      if ('${{ parameters.archTag }}' -eq 'x64' -and '${{ parameters.flavor }}' -ne 'amd64fre') {
+          throw 'x64 must use the amd64fre flavor.'
       }
-      if ([int]${{ parameters.patch }} -lt 0) {
-          throw 'patch must be non-negative.'
+      if ('${{ parameters.archTag }}' -eq 'arm64' -and '${{ parameters.flavor }}' -ne 'arm64fre') {
+          throw 'arm64 must use the arm64fre flavor.'
       }
-      $expectedVersion = '0.' + '${{ parameters.monthId }}'.Replace('.', '') + '.0'
-      if ('${{ parameters.basePackageVersion }}' -ne $expectedVersion) {
-          throw "basePackageVersion must be $expectedVersion for monthId ${{ parameters.monthId }}."
-      }
-      if ('${{ parameters.basePackageFeedUrl }}' -like 'REPLACE-*') {
-          throw 'A restricted Azure Artifacts feed URL must be supplied.'
-      }
-      if ('${{ parameters.archTag }}' -eq 'x64' -and '${{ parameters.rid }}' -ne 'win-x64') {
-          throw 'x64 must use the win-x64 RID.'
-      }
-      if ('${{ parameters.archTag }}' -eq 'arm64' -and '${{ parameters.rid }}' -ne 'win-arm64') {
-          throw 'arm64 must use the win-arm64 RID.'
-      }
-  displayName: Validate pipeline parameters
+      New-Item -ItemType Directory -Force -Path '$(workDirectory)' | Out-Null
+      $release | ConvertTo-Json -Depth 10 |
+          Set-Content -LiteralPath '$(workDirectory)\release-contract.json' -Encoding UTF8
+      Write-Host "Validated release $($release.canonicalRelease) -> NuGet $($release.nugetVersion) / MSI $($release.msiVersion)"
+  displayName: Validate pipeline parameters and write release contract
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -93,7 +76,7 @@ jobs:
       New-Item -ItemType Directory -Force -Path '$(dropClientDirectory)' | Out-Null
       Invoke-WebRequest `
           -Uri "$serviceRoot/_apis/drop/client/exe" `
-          -Headers @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" } `
+          -Headers @{ Authorization = "******" } `
           -OutFile $zipPath `
           -UseBasicParsing
       Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -161,37 +144,6 @@ jobs:
             "Parameters": {}
           }
         ]
-
-  - task: NuGetToolInstaller@1
-    displayName: Install NuGet client
-
-  - task: NuGetAuthenticate@1
-    displayName: Authenticate Azure Artifacts
-
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
-      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Get-BaseIsoSessionPackage.ps1' `
-          -NuGetExe $nugetExe `
-          -FeedUrl '${{ parameters.basePackageFeedUrl }}' `
-          -PackageId '${{ parameters.basePackageId }}' `
-          -Version '${{ parameters.basePackageVersion }}' `
-          -OutDir '$(basePackageDirectory)'
-  displayName: Download restricted metadata base package
-
-  - powershell: |
-      $ErrorActionPreference = 'Stop'
-      $nupkg = & '$(Build.SourcesDirectory)/packaging/isolation-session/nuget/pack.ps1' `
-          -BinDir '$(payloadBinDirectory)' `
-          -BaseNupkg '$(baseIsoSessionNupkg)' `
-          -OutDir '$(nugetOutputDirectory)' `
-          -ArchTag '${{ parameters.archTag }}' `
-          -MonthId '${{ parameters.monthId }}'
-      if (-not $nupkg -or -not (Test-Path -LiteralPath $nupkg -PathType Leaf)) {
-          throw 'The architecture-specific IsoSession NuGet was not produced.'
-      }
-      Write-Host "##vso[task.setvariable variable=packagedNupkg]$nupkg"
-  displayName: Package IsoSession NuGet (${{ parameters.rid }})
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -311,6 +263,7 @@ jobs:
           [ordered]@{
               name = $file.Name
               path = $file.FullName
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
               status = $signature.Status.ToString()
               signer = $signature.SignerCertificate.Subject
               thumbprint = $signature.SignerCertificate.Thumbprint
@@ -323,7 +276,14 @@ jobs:
   - powershell: |
       $ErrorActionPreference = 'Stop'
       New-Item -ItemType Directory -Force -Path '$(artifactDirectory)' | Out-Null
-      Copy-Item -LiteralPath '$(packagedNupkg)' -Destination '$(artifactDirectory)'
+      Copy-Item -LiteralPath '$(payloadDirectory)\bin' -Destination '$(artifactDirectory)' -Recurse -Force
+      Copy-Item -LiteralPath '$(payloadDirectory)\source-manifest.json' `
+          -Destination '$(artifactDirectory)\source-manifest.json'
+      Copy-Item -LiteralPath '$(workDirectory)\release-contract.json' `
+          -Destination '$(artifactDirectory)\release-contract.json'
+      Copy-Item -LiteralPath '$(workDirectory)\signature-verification.json' `
+          -Destination '$(artifactDirectory)\signature-verification.json'
+
       $month = '${{ parameters.monthId }}'.Replace('.', '_')
       foreach ($name in @(
           "IsoSession_${month}_${{ parameters.archTag }}.msi",
@@ -334,23 +294,9 @@ jobs:
           if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
               throw "Required packaged output missing: $source"
           }
-          Copy-Item -LiteralPath $source -Destination '$(artifactDirectory)'
+          Copy-Item -LiteralPath $source -Destination '$(artifactDirectory)' -Force
       }
-      Copy-Item -LiteralPath '$(payloadDirectory)/source-manifest.json' `
-          -Destination '$(artifactDirectory)/source-manifest.json'
-      Copy-Item -LiteralPath '$(workDirectory)/signature-verification.json' `
-          -Destination '$(artifactDirectory)/signature-verification.json'
-
-      & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/New-IsoSessionArtifactManifest.ps1' `
-          -SourceManifest '$(artifactDirectory)/source-manifest.json' `
-          -ArtifactDirectory '$(artifactDirectory)' `
-          -MonthId '${{ parameters.monthId }}' `
-          -Patch ${{ parameters.patch }} `
-          -ArchTag '${{ parameters.archTag }}' `
-          -BasePackageId '${{ parameters.basePackageId }}' `
-          -BasePackageVersion '${{ parameters.basePackageVersion }}' `
-          -SigningMode test
-  displayName: Assemble artifact and provenance manifests
+  displayName: Assemble intermediate artifacts
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: Publish $(artifactName)

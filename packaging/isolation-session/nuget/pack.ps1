@@ -1,394 +1,392 @@
+#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Repackage the IsoSession SDK NuGet to additively carry the runtime shim
-    (IsoSessionApp.dll) and its side-by-side manifest (IsoSession.manifest),
-    on top of the existing metadata-only package, producing an
-    architecture-suffixed package for the requested ArchTag.
+    Build the pipeline-owned multi-architecture IsoSession SDK NuGet.
 
 .DESCRIPTION
     Copyright (c) Microsoft Corporation. All rights reserved.
 
-    This is the MXC-side packaging step for the IsoSession artifact plan. It
-    takes an existing metadata-only SDK nupkg as the base and injects two
-    entries under runtimes/<rid>/native/, where <rid> is the NuGet runtime
-    identifier for the requested -ArchTag (x64 -> win-x64, arm64 -> win-arm64):
+    Creates Microsoft.Windows.AI.IsolationSession.SDK from source inputs owned
+    by this repository's pipeline:
 
-        IsoSessionApp.dll   -- the in-proc WinRT activation shim (from BinDir)
-        IsoSession.manifest -- SxS manifest with the <iso:instance> MonthId
-                               marker (stamped from IsoSession.manifest.template)
+      - metadata/windows.ai.isolationsession.winmd
+      - metadata/windows.ai.isolationsession.preview.winmd
+      - metadata/GENERATION_INFO.toml
+      - metadata/RELEASE_INFO.json
+      - runtimes/win-x64/native/IsoSessionApp.dll
+      - runtimes/win-x64/native/IsoSession.manifest
+      - runtimes/win-arm64/native/IsoSessionApp.dll
+      - runtimes/win-arm64/native/IsoSession.manifest
 
-    The output package ID is architecture-suffixed (e.g.
-    "Microsoft.Windows.AI.IsolationSession.SDK.x64" or ".arm64") so that x64
-    and arm64 runtime payloads can be published and restored side by side
-    without colliding.
-
-    The base package's metadata/ entries (both .winmd files and
-    GENERATION_INFO.toml) are copied byte-for-byte, so MXC bindings build.rs
-    invariants stay green: the winmd_sha256, the {id}.{version}.nupkg
-    filename, and the instance <-> version-minor coupling are all preserved.
-    Extra runtimes/ entries are ignored by build.rs's gate.
-
-    Design rationale for the additive approach: the .winmd files are build
-    artifacts that are never committed to the OS repo, so we cannot re-run a
-    clean `nuget pack` from source here.  Starting from the already-published
-    metadata-only nupkg guarantees the hash-gated metadata is untouched.
-
-    Validation is strict: the base package's <version> (nuspec) and its
-    embedded GENERATION_INFO.toml `instance` value must both match -MonthId
-    exactly, or this script throws. A silent mismatch here would ship a
-    runtime shim under the wrong month's identity, which downstream MXC/
-    IsoSessionApp instance matching would fail on in a much more confusing way
-    at execution time -- so we fail fast at pack time instead.
-
-.PARAMETER BinDir
-    Build output directory containing IsoSessionApp.dll (e.g. _NTTREE).
-
-.PARAMETER BaseNupkg
-    Path to the existing metadata-only SDK nupkg to extend. Never modified
-    in place; a copy is made before any mutation.
-
-.PARAMETER OutDir
-    Directory to write the repackaged nupkg into.
-
-.PARAMETER ArchTag
-    Target architecture for the runtime payload. Must be 'x64' or 'arm64'.
-    Selects both the NuGet runtime identifier (RID) the shim/manifest are
-    injected under and the architecture suffix appended to the output
-    package ID.
-
-.PARAMETER MonthId
-    Runtime instance / MonthId to stamp into the manifest (default 2026.06).
-    Must match the base package's nuspec <version> (0.<MonthId minus dots>.0)
-    and the base package's embedded GENERATION_INFO.toml `instance` value --
-    this script throws if either disagrees.
-
-.PARAMETER ManifestTemplate
-    Path to IsoSession.manifest.template (default: alongside this script).
-
-.EXAMPLE
-    .\pack.ps1 -BinDir $env:_NTTREE `
-               -BaseNupkg C:\mxc\external\windows-sdk\isolation-session\Microsoft.Windows.AI.IsolationSession.SDK.0.202606.0.nupkg `
-               -OutDir .\out `
-               -ArchTag x64 `
-               -MonthId 2026.06
-
-.EXAMPLE
-    .\pack.ps1 -BinDir $env:_NTTREE `
-               -BaseNupkg .\Microsoft.Windows.AI.IsolationSession.SDK.0.202606.0.nupkg `
-               -OutDir .\out `
-               -ArchTag arm64 `
-               -MonthId 2026.06
+    The package version is derived from the canonical release contract:
+    MonthId (runtime instance) stays YYYY.MM, while the NuGet version carries
+    the in-month patch as 0.YYYYMM.<patch>.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$BinDir,
+    [string]$X64BinDir,
 
     [Parameter(Mandatory = $true)]
-    [string]$BaseNupkg,
+    [string]$Arm64BinDir,
+
+    [Parameter(Mandatory = $true)]
+    [string]$MetadataDir,
+
+    [Parameter(Mandatory = $true)]
+    [string]$ReleaseMetadataPath,
 
     [Parameter(Mandatory = $true)]
     [string]$OutDir,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('x64', 'arm64')]
-    [string]$ArchTag,
+    [ValidatePattern('^\d{4}\.\d{2}$')]
+    [string]$MonthId,
 
-    [string]$MonthId = "2026.06",
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(0, 65535)]
+    [int]$Patch,
 
-    [string]$ManifestTemplate = (Join-Path $PSScriptRoot "IsoSession.manifest.template")
+    [string]$ManifestTemplate = (Join-Path $PSScriptRoot 'IsoSession.manifest.template')
 )
 
-$ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
-
-# --- Explicit ArchTag -> NuGet RID mapping ---------------------------------
-# Single source of truth for the architecture <-> runtime-identifier
-# coupling used throughout this script. Add new architectures here only.
-$archRidMap = @{
-    "x64"   = "win-x64"
-    "arm64" = "win-arm64"
-}
-$rid = $archRidMap[$ArchTag]
-if (-not $rid) {
-    # Unreachable given [ValidateSet], but keeps the mapping self-defending
-    # if the set and the map ever drift apart.
-    throw "No RID mapping registered for ArchTag '$ArchTag'."
-}
-
-# --- Validate inputs -------------------------------------------------------
-
-if ($MonthId -notmatch '^\d{4}\.\d{2}$') {
-    throw "MonthId '$MonthId' is not in YYYY.MM format (e.g. 2026.06)."
-}
-
-$appDll = Join-Path $BinDir "IsoSessionApp.dll"
-if (-not (Test-Path -LiteralPath $appDll)) {
-    throw "IsoSessionApp.dll not found in BinDir: $appDll"
-}
-
-if (-not (Test-Path -LiteralPath $BaseNupkg)) {
-    throw "Base nupkg not found: $BaseNupkg"
-}
-
-if (-not (Test-Path -LiteralPath $ManifestTemplate)) {
-    throw "Manifest template not found: $ManifestTemplate"
-}
-
-$strippedInstance = $MonthId.Replace('.', '')
-$expectedVersion = "0.$strippedInstance.0"
-
-New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
-
-Write-Host "ArchTag:    $ArchTag"
-Write-Host "RID:        $rid"
-Write-Host "MonthId:    $MonthId"
-Write-Host "App shim:   $appDll"
-Write-Host "Base nupkg: $BaseNupkg"
-
-# --- Stamp the manifest ----------------------------------------------------
-
-# Read as text, substitute the placeholder, and re-encode as UTF-8 (no BOM)
-# via .NET so the exact bytes are controlled (Set-Content/Out-File can inject a
-# BOM or rewrite line endings -- both consumers use naive byte parsers).
-$manifestText = [System.IO.File]::ReadAllText($ManifestTemplate)
-$manifestText = $manifestText.Replace('$(MonthId)', $MonthId)
-$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-$manifestBytes = $utf8NoBom.GetBytes($manifestText)
-
-# --- Helpers ----------------------------------------------------------------
+$ErrorActionPreference = 'Stop'
 
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
-# (Re)write a zip entry from a byte[]. Deletes an existing entry first so
-# Update mode replaces rather than duplicates.
-function Set-ZipEntry {
+$releaseInfoScript = Join-Path (Split-Path $PSScriptRoot -Parent) 'common\Get-IsoSessionReleaseInfo.ps1'
+$sdkGenerationInfoPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..\..')).Path `
+    'external\windows-sdk\isolation-session\GENERATION_INFO.toml'
+
+if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
+    throw "Release helper not found: '$releaseInfoScript'."
+}
+if (-not (Test-Path -LiteralPath $sdkGenerationInfoPath -PathType Leaf)) {
+    throw "SDK generation provenance file not found: '$sdkGenerationInfoPath'."
+}
+if (-not (Test-Path -LiteralPath $ManifestTemplate -PathType Leaf)) {
+    throw "Manifest template not found: '$ManifestTemplate'."
+}
+if (-not (Test-Path -LiteralPath $ReleaseMetadataPath -PathType Leaf)) {
+    throw "Release metadata file not found: '$ReleaseMetadataPath'."
+}
+
+$releaseInfo = & $releaseInfoScript -MonthId $MonthId -Patch $Patch
+$releaseMetadataRaw = Get-Content -LiteralPath $ReleaseMetadataPath -Raw
+$releaseMetadata = $releaseMetadataRaw | ConvertFrom-Json
+
+function Test-RequiredDirectory {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "$Label directory not found: '$Path'."
+    }
+}
+
+function Get-RequiredFileBytes {
+    param(
+        [string]$Path,
+        [string]$Label
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "$Label file not found: '$Path'."
+    }
+    [System.IO.File]::ReadAllBytes($Path)
+}
+
+function Get-Sha256Hex {
+    param([byte[]]$Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        [System.BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Add-TextEntry {
+    param(
+        [System.IO.Compression.ZipArchive]$Archive,
+        [string]$EntryName,
+        [string]$Text
+    )
+
+    $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    $entry = $Archive.CreateEntry($EntryName)
+    $stream = $entry.Open()
+    try {
+        $bytes = $utf8NoBom.GetBytes($Text)
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Add-BytesEntry {
     param(
         [System.IO.Compression.ZipArchive]$Archive,
         [string]$EntryName,
         [byte[]]$Bytes
     )
-    $existing = $Archive.GetEntry($EntryName)
-    if ($existing) { $existing.Delete() }
+
     $entry = $Archive.CreateEntry($EntryName)
     $stream = $entry.Open()
-    try { $stream.Write($Bytes, 0, $Bytes.Length) }
-    finally { $stream.Dispose() }
+    try {
+        $stream.Write($Bytes, 0, $Bytes.Length)
+    }
+    finally {
+        $stream.Dispose()
+    }
 }
 
-# Read a zip entry to a string.
 function Get-ZipEntryText {
     param(
         [System.IO.Compression.ZipArchive]$Archive,
         [string]$EntryName
     )
+
     $entry = $Archive.GetEntry($EntryName)
-    if (-not $entry) { return $null }
-    $reader = New-Object System.IO.StreamReader($entry.Open())
-    try { return $reader.ReadToEnd() }
-    finally { $reader.Dispose() }
+    if (-not $entry) {
+        return $null
+    }
+
+    $reader = [System.IO.StreamReader]::new($entry.Open())
+    try {
+        $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
 }
 
-# Read a zip entry to a byte[] (used for tamper-evidence hashing of the
-# preserved metadata entries).
-function Get-ZipEntryBytes {
+function Get-GenerationInfoValue {
     param(
-        [System.IO.Compression.ZipArchive]$Archive,
-        [string]$EntryName
+        [string]$Content,
+        [string]$Name
     )
-    $entry = $Archive.GetEntry($EntryName)
-    if (-not $entry) { return $null }
-    $stream = $entry.Open()
-    try {
-        $ms = New-Object System.IO.MemoryStream
-        try {
-            $stream.CopyTo($ms)
-            return $ms.ToArray()
-        }
-        finally { $ms.Dispose() }
+
+    $match = [regex]::Match($Content, "(?m)^\s*$([regex]::Escape($Name))\s*=\s*`"([^`"]+)`"")
+    if (-not $match.Success) {
+        throw "GENERATION_INFO.toml is missing '$Name'."
     }
-    finally { $stream.Dispose() }
+    $match.Groups[1].Value.Trim()
 }
 
-function Get-Sha256Hex {
-    param([byte[]]$Bytes)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return [System.BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
+function Get-ReleaseWinmdRecord {
+    param(
+        [object]$Metadata,
+        [string]$WinmdName
+    )
+
+    $record = @($Metadata.source.winmds | Where-Object { $_.name -eq $WinmdName })
+    if ($record.Count -ne 1) {
+        throw "Release metadata must contain exactly one winmd record for '$WinmdName'."
     }
-    finally { $sha.Dispose() }
+    $record[0]
 }
 
-# --- Strict pre-flight validation against the base nupkg -------------------
-# Read (but do not yet mutate) the base nupkg to validate the version and
-# GENERATION_INFO instance agree with -MonthId. Any mismatch here is a hard
-# failure: packing a mismatched instance would silently ship a runtime shim
-# under the wrong month identity.
+Test-RequiredDirectory -Path $X64BinDir -Label 'x64 runtime'
+Test-RequiredDirectory -Path $Arm64BinDir -Label 'arm64 runtime'
+Test-RequiredDirectory -Path $MetadataDir -Label 'metadata'
 
-$baseZip = [System.IO.Compression.ZipFile]::OpenRead($BaseNupkg)
-$baseNuspecEntryName = $null
-$baseNuspecText = $null
-$baseWinmdHashes = @{}
-$baseGenerationInfoHash = $null
-$basePackageId = $null
-try {
-    $baseNuspecEntry = $baseZip.Entries | Where-Object { $_.FullName -like "*.nuspec" } | Select-Object -First 1
-    if (-not $baseNuspecEntry) {
-        throw "Base nupkg '$BaseNupkg' does not contain a .nuspec entry."
-    }
-    $baseNuspecEntryName = $baseNuspecEntry.FullName
-    $baseNuspecText = Get-ZipEntryText -Archive $baseZip -EntryName $baseNuspecEntryName
+$x64AppDllPath = Join-Path $X64BinDir 'IsoSessionApp.dll'
+$arm64AppDllPath = Join-Path $Arm64BinDir 'IsoSessionApp.dll'
+$winmdPath = Join-Path $MetadataDir 'windows.ai.isolationsession.winmd'
+$previewWinmdPath = Join-Path $MetadataDir 'windows.ai.isolationsession.preview.winmd'
 
-    $idMatch = [regex]::Match($baseNuspecText, '<id>([^<]+)</id>')
-    if (-not $idMatch.Success) {
-        throw "Base nuspec '$baseNuspecEntryName' has no <id> element."
-    }
-    $basePackageId = $idMatch.Groups[1].Value.Trim()
+$x64AppDllBytes = Get-RequiredFileBytes -Path $x64AppDllPath -Label 'x64 runtime'
+$arm64AppDllBytes = Get-RequiredFileBytes -Path $arm64AppDllPath -Label 'arm64 runtime'
+$winmdBytes = Get-RequiredFileBytes -Path $winmdPath -Label 'primary WinMD'
+$previewWinmdBytes = Get-RequiredFileBytes -Path $previewWinmdPath -Label 'preview WinMD'
 
-    $versionMatch = [regex]::Match($baseNuspecText, '<version>([^<]+)</version>')
-    if (-not $versionMatch.Success) {
-        throw "Base nuspec '$baseNuspecEntryName' has no <version> element."
-    }
-    $baseVersion = $versionMatch.Groups[1].Value.Trim()
-    if ($baseVersion -ne $expectedVersion) {
-        throw ("Base nupkg version '$baseVersion' does not match MonthId '$MonthId' " +
-               "(expected '$expectedVersion'). Refusing to pack a mismatched instance.")
-    }
-
-    $genInfoEntry = $baseZip.Entries | Where-Object { $_.FullName -eq "metadata/GENERATION_INFO.toml" } | Select-Object -First 1
-    if (-not $genInfoEntry) {
-        throw "Base nupkg '$BaseNupkg' is missing 'metadata/GENERATION_INFO.toml'."
-    }
-    $genInfoText = Get-ZipEntryText -Archive $baseZip -EntryName $genInfoEntry.FullName
-    $instanceMatch = [regex]::Match($genInfoText, '(?m)^\s*instance\s*=\s*"([^"]+)"')
-    if (-not $instanceMatch.Success) {
-        throw "metadata/GENERATION_INFO.toml in '$BaseNupkg' has no `instance` field."
-    }
-    $genInfoInstance = $instanceMatch.Groups[1].Value.Trim()
-    if ($genInfoInstance -ne $MonthId) {
-        throw ("Base nupkg GENERATION_INFO.toml instance '$genInfoInstance' does not match " +
-               "MonthId '$MonthId'. Refusing to pack a mismatched instance.")
-    }
-    $baseGenerationInfoHash = Get-Sha256Hex -Bytes (Get-ZipEntryBytes -Archive $baseZip -EntryName $genInfoEntry.FullName)
-
-    # Record byte hashes of every metadata/*.winmd entry so we can assert
-    # after repackaging that they were preserved byte-for-byte.
-    $baseZip.Entries |
-        Where-Object { $_.FullName -like "metadata/*.winmd" } |
-        ForEach-Object {
-            $baseWinmdHashes[$_.FullName] = Get-Sha256Hex -Bytes (Get-ZipEntryBytes -Archive $baseZip -EntryName $_.FullName)
-        }
-    if ($baseWinmdHashes.Count -eq 0) {
-        throw "Base nupkg '$BaseNupkg' contains no metadata/*.winmd entries."
-    }
+if ($releaseMetadata.release.canonicalRelease -ne $releaseInfo.canonicalRelease) {
+    throw "Release metadata canonical release '$($releaseMetadata.release.canonicalRelease)' does not match '$($releaseInfo.canonicalRelease)'."
 }
-finally {
-    $baseZip.Dispose()
+if ($releaseMetadata.release.monthId -ne $releaseInfo.monthId -or
+    [int]$releaseMetadata.release.patch -ne $releaseInfo.patch) {
+    throw 'Release metadata monthId/patch do not match the requested release contract.'
+}
+if ($releaseMetadata.package.id -ne $releaseInfo.packageId) {
+    throw "Release metadata package id '$($releaseMetadata.package.id)' does not match '$($releaseInfo.packageId)'."
+}
+if ($releaseMetadata.package.version -ne $releaseInfo.nugetVersion) {
+    throw "Release metadata package version '$($releaseMetadata.package.version)' does not match '$($releaseInfo.nugetVersion)'."
+}
+if ($releaseMetadata.package.fileName -ne $releaseInfo.nugetPackageFileName) {
+    throw "Release metadata package file name '$($releaseMetadata.package.fileName)' does not match '$($releaseInfo.nugetPackageFileName)'."
 }
 
-Write-Host "Base package id:   $basePackageId"
-Write-Host "Base package ver:  $expectedVersion (validated against MonthId)"
-Write-Host "GENERATION_INFO instance validated: $MonthId"
-Write-Host ("Preserved metadata/*.winmd entries: {0}" -f ($baseWinmdHashes.Keys -join ', '))
+$primaryWinmdMetadata = Get-ReleaseWinmdRecord -Metadata $releaseMetadata -WinmdName 'windows.ai.isolationsession.winmd'
+$previewWinmdMetadata = Get-ReleaseWinmdRecord -Metadata $releaseMetadata -WinmdName 'windows.ai.isolationsession.preview.winmd'
+if ($primaryWinmdMetadata.sha256 -ne (Get-Sha256Hex -Bytes $winmdBytes)) {
+    throw 'Release metadata primary WinMD hash does not match the staged WinMD bytes.'
+}
+if ($previewWinmdMetadata.sha256 -ne (Get-Sha256Hex -Bytes $previewWinmdBytes)) {
+    throw 'Release metadata preview WinMD hash does not match the staged WinMD bytes.'
+}
 
-# --- Assemble the architecture-suffixed package -----------------------------
+$sdkGenerationInfo = Get-Content -LiteralPath $sdkGenerationInfoPath -Raw
+$windowsBindgenVersion = Get-GenerationInfoValue -Content $sdkGenerationInfo -Name 'windows_bindgen_version'
+$targetWindowsCrate = Get-GenerationInfoValue -Content $sdkGenerationInfo -Name 'target_windows_crate'
+$sourceGeneratedDate = Get-GenerationInfoValue -Content $sdkGenerationInfo -Name 'generated_date'
 
-$archPackageId = "$basePackageId.$ArchTag"
-$outNupkgName = "$archPackageId.$expectedVersion.nupkg"
-$outNupkg = Join-Path $OutDir $outNupkgName
-Write-Host "Out nupkg:  $outNupkg"
+$manifestText = [System.IO.File]::ReadAllText($ManifestTemplate).Replace('$(MonthId)', $MonthId)
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+$manifestBytes = $utf8NoBom.GetBytes($manifestText)
+$generationInfo = @"
+# Generated by the MXC IsoSession pipeline. Do not edit by hand.
 
-Copy-Item -LiteralPath $BaseNupkg -Destination $outNupkg -Force
+[tool]
+windows_bindgen_version = "$windowsBindgenVersion"
+target_windows_crate = "$targetWindowsCrate"
+generated_date = "$sourceGeneratedDate"
 
-$zip = [System.IO.Compression.ZipFile]::Open($outNupkg, [System.IO.Compression.ZipArchiveMode]::Update)
-try {
-    Set-ZipEntry -Archive $zip -EntryName "runtimes/$rid/native/IsoSessionApp.dll" `
-        -Bytes ([System.IO.File]::ReadAllBytes($appDll))
-    Set-ZipEntry -Archive $zip -EntryName "runtimes/$rid/native/IsoSession.manifest" `
-        -Bytes $manifestBytes
-
-    # --- Patch [Content_Types].xml so the package stays a valid OPC part set.
-    $ctName = "[Content_Types].xml"
-    $ct = Get-ZipEntryText -Archive $zip -EntryName $ctName
-    if ($ct) {
-        foreach ($ext in @("dll", "manifest")) {
-            if ($ct -notmatch "Extension=`"$ext`"") {
-                $ct = $ct -replace '(</Types>)', ("  <Default Extension=`"$ext`" ContentType=`"application/octet`" />`r`n`$1")
-            }
-        }
-        Set-ZipEntry -Archive $zip -EntryName $ctName -Bytes $utf8NoBom.GetBytes($ct)
-    }
-
-    # --- Patch the .nuspec: architecture-suffixed id, registered runtime
-    #     files under the selected RID, and refreshed summary prose.
-    $nuspec = $baseNuspecText
-
-    $nuspec = $nuspec -replace '<id>[^<]+</id>', "<id>$archPackageId</id>"
-
-    $runtimeDllEntry = "runtimes\$rid\native\IsoSessionApp.dll"
-    $runtimeManifestEntry = "runtimes\$rid\native\IsoSession.manifest"
-    if ($nuspec -notmatch [regex]::Escape($runtimeDllEntry)) {
-        $runtimeFiles = @"
-    <file src="payload\$runtimeDllEntry" target="runtimes\$rid\native" />
-    <file src="payload\$runtimeManifestEntry" target="runtimes\$rid\native" />
+[metadata]
+winmd = "windows.ai.isolationsession.winmd"
+winmd_preview = "windows.ai.isolationsession.preview.winmd"
+instance = "$($releaseInfo.runtimeInstance)"
+canonical_release = "$($releaseInfo.canonicalRelease)"
+nuget_version = "$($releaseInfo.nugetVersion)"
+runtime_dir = "%ProgramFiles%\\Microsoft\\Agentic Runtime\\$MonthId"
+build_guid = "$($releaseMetadata.source.buildGuid)"
+os_branch = "$($releaseMetadata.source.osBranch)"
+x64_drop_name = "$($releaseMetadata.source.payloads.x64.dropName)"
+x64_flavor = "$($releaseMetadata.source.payloads.x64.flavor)"
+arm64_drop_name = "$($releaseMetadata.source.payloads.arm64.dropName)"
+arm64_flavor = "$($releaseMetadata.source.payloads.arm64.flavor)"
+winmd_sha256 = "$($primaryWinmdMetadata.sha256)"
+winmd_preview_sha256 = "$($previewWinmdMetadata.sha256)"
+generated_utc = "$(Get-Date).ToUniversalTime().ToString('o')"
 "@
-        $nuspec = $nuspec -replace '(\s*</files>)', ("`r`n$runtimeFiles`$1")
-    }
 
-    $nuspec = $nuspec -replace '<summary>[^<]*</summary>',
-        ("<summary>SDK for the Windows.AI.IsolationSession API ($ArchTag): build-time metadata " +
-         "(winmd + provenance) plus the in-proc runtime shim (IsoSessionApp.dll) and its SxS " +
-         "manifest for the $rid runtime.</summary>")
+$nuspec = @"
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+  <metadata>
+    <id>$($releaseInfo.packageId)</id>
+    <version>$($releaseInfo.nugetVersion)</version>
+    <title>Windows AI Isolation Session SDK</title>
+    <authors>Microsoft</authors>
+    <owners>Microsoft</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>Pipeline-generated SDK for Windows.AI.IsolationSession. Contains both WinMD metadata files plus signed win-x64 and win-arm64 IsoSessionApp runtime shims.</description>
+    <summary>Windows.AI.IsolationSession SDK: metadata for Windows.AI.IsolationSession and Windows.AI.IsolationSession.Preview plus win-x64 and win-arm64 runtime assets.</summary>
+    <tags>Windows IsolationSession WinRT WinMD MXC AgenticRuntime sdk</tags>
+    <readme>README.md</readme>
+  </metadata>
+</package>
+"@
 
-    Set-ZipEntry -Archive $zip -EntryName $baseNuspecEntryName -Bytes $utf8NoBom.GetBytes($nuspec)
+$contentTypes = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
+  <Default Extension="nuspec" ContentType="application/octet" />
+  <Default Extension="winmd" ContentType="application/octet" />
+  <Default Extension="toml" ContentType="application/octet" />
+  <Default Extension="json" ContentType="application/json" />
+  <Default Extension="dll" ContentType="application/octet" />
+  <Default Extension="manifest" ContentType="application/octet" />
+  <Default Extension="md" ContentType="text/markdown" />
+</Types>
+"@
+
+$rels = @"
+<?xml version="1.0" encoding="utf-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Type="http://schemas.microsoft.com/packaging/2010/07/manifest" Target="/$($releaseInfo.packageId).nuspec" Id="R0" />
+</Relationships>
+"@
+
+$readme = @"
+# IsolationSession SDK
+
+This package is generated by the MXC IsoSession artifact pipeline.
+
+- Release: $($releaseInfo.canonicalRelease)
+- MonthId: $MonthId
+- NuGet version: $($releaseInfo.nugetVersion)
+- MSI version: $($releaseInfo.msiVersion)
+"@
+
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
+$outNupkg = Join-Path $OutDir $releaseInfo.nugetPackageFileName
+if (Test-Path -LiteralPath $outNupkg -PathType Leaf) {
+    Remove-Item -LiteralPath $outNupkg -Force
+}
+
+$zip = [System.IO.Compression.ZipFile]::Open($outNupkg, [System.IO.Compression.ZipArchiveMode]::Create)
+try {
+    Add-TextEntry -Archive $zip -EntryName 'README.md' -Text $readme
+    Add-BytesEntry -Archive $zip -EntryName 'metadata/windows.ai.isolationsession.winmd' -Bytes $winmdBytes
+    Add-BytesEntry -Archive $zip -EntryName 'metadata/windows.ai.isolationsession.preview.winmd' -Bytes $previewWinmdBytes
+    Add-TextEntry -Archive $zip -EntryName 'metadata/GENERATION_INFO.toml' -Text $generationInfo
+    Add-BytesEntry -Archive $zip -EntryName 'metadata/RELEASE_INFO.json' -Bytes ([System.IO.File]::ReadAllBytes($ReleaseMetadataPath))
+    Add-BytesEntry -Archive $zip -EntryName 'runtimes/win-x64/native/IsoSessionApp.dll' -Bytes $x64AppDllBytes
+    Add-BytesEntry -Archive $zip -EntryName 'runtimes/win-x64/native/IsoSession.manifest' -Bytes $manifestBytes
+    Add-BytesEntry -Archive $zip -EntryName 'runtimes/win-arm64/native/IsoSessionApp.dll' -Bytes $arm64AppDllBytes
+    Add-BytesEntry -Archive $zip -EntryName 'runtimes/win-arm64/native/IsoSession.manifest' -Bytes $manifestBytes
+    Add-TextEntry -Archive $zip -EntryName '_rels/.rels' -Text $rels
+    Add-TextEntry -Archive $zip -EntryName '[Content_Types].xml' -Text $contentTypes
+    Add-TextEntry -Archive $zip -EntryName "$($releaseInfo.packageId).nuspec" -Text $nuspec
 }
 finally {
     $zip.Dispose()
 }
 
-# --- Post-build verification -------------------------------------------------
-# Re-open the produced package read-only and assert:
-#   1. Every expected entry (metadata + the new runtime entries + nuspec) is
-#      present.
-#   2. The metadata/*.winmd and metadata/GENERATION_INFO.toml bytes are
-#      unchanged from the base package (tamper-evidence for the hash-gated
-#      MXC build.rs invariants).
-
 $verify = [System.IO.Compression.ZipFile]::OpenRead($outNupkg)
 try {
     $expectedEntries = @(
-        "metadata/GENERATION_INFO.toml",
-        "runtimes/$rid/native/IsoSessionApp.dll",
-        "runtimes/$rid/native/IsoSession.manifest",
-        $baseNuspecEntryName
-    ) + @($baseWinmdHashes.Keys)
-
+        'metadata/windows.ai.isolationsession.winmd',
+        'metadata/windows.ai.isolationsession.preview.winmd',
+        'metadata/GENERATION_INFO.toml',
+        'metadata/RELEASE_INFO.json',
+        'runtimes/win-x64/native/IsoSessionApp.dll',
+        'runtimes/win-x64/native/IsoSession.manifest',
+        'runtimes/win-arm64/native/IsoSessionApp.dll',
+        'runtimes/win-arm64/native/IsoSession.manifest',
+        'README.md',
+        '_rels/.rels',
+        '[Content_Types].xml',
+        "$($releaseInfo.packageId).nuspec"
+    )
     $missingEntries = @($expectedEntries | Where-Object { -not $verify.GetEntry($_) })
     if ($missingEntries.Count -gt 0) {
-        throw "Repackaged nupkg '$outNupkg' is missing expected entries: $($missingEntries -join ', ')"
+        throw "Generated package is missing expected entries: $($missingEntries -join ', ')."
     }
 
-    $genInfoBytesAfter = Get-ZipEntryBytes -Archive $verify -EntryName "metadata/GENERATION_INFO.toml"
-    $genInfoHashAfter = Get-Sha256Hex -Bytes $genInfoBytesAfter
-    if ($genInfoHashAfter -ne $baseGenerationInfoHash) {
-        throw "metadata/GENERATION_INFO.toml bytes changed during repackaging (sha256 mismatch)."
+    $nuspecText = Get-ZipEntryText -Archive $verify -EntryName "$($releaseInfo.packageId).nuspec"
+    if ($nuspecText -notmatch '<id>Microsoft\.Windows\.AI\.IsolationSession\.SDK</id>') {
+        throw 'Generated nuspec id does not match the canonical package id.'
+    }
+    if ($nuspecText -notmatch [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) {
+        throw 'Generated nuspec version does not match the canonical NuGet version.'
     }
 
-    foreach ($winmdName in $baseWinmdHashes.Keys) {
-        $hashAfter = Get-Sha256Hex -Bytes (Get-ZipEntryBytes -Archive $verify -EntryName $winmdName)
-        if ($hashAfter -ne $baseWinmdHashes[$winmdName]) {
-            throw "$winmdName bytes changed during repackaging (sha256 mismatch)."
+    foreach ($rid in @('win-x64', 'win-arm64')) {
+        $runtimeManifest = Get-ZipEntryText -Archive $verify -EntryName "runtimes/$rid/native/IsoSession.manifest"
+        if ($runtimeManifest -notmatch [regex]::Escape("name=`"$MonthId`"")) {
+            throw "Runtime manifest for $rid was not stamped with MonthId '$MonthId'."
         }
     }
 
-    Write-Host "`nRepackaged nupkg: $outNupkg" -ForegroundColor Cyan
-    Write-Host "Package id:  $archPackageId" -ForegroundColor Cyan
-    Write-Host "Version:     $expectedVersion" -ForegroundColor Cyan
-    Write-Host "RID:         $rid" -ForegroundColor Cyan
-    Write-Host "Verified metadata bytes unchanged (winmd + GENERATION_INFO.toml)." -ForegroundColor Cyan
-    Write-Host "Entries:" -ForegroundColor Cyan
-    $verify.Entries | Select-Object FullName, Length | Format-Table -AutoSize | Out-String | Write-Host
+    $packageReleaseMetadata = Get-ZipEntryText -Archive $verify -EntryName 'metadata/RELEASE_INFO.json' |
+        ConvertFrom-Json
+    if ($packageReleaseMetadata.package.version -ne $releaseInfo.nugetVersion) {
+        throw 'Embedded release metadata does not match the canonical NuGet version.'
+    }
+
+    Write-Host "Created IsoSession SDK NuGet: $outNupkg" -ForegroundColor Cyan
+    Write-Host "Release: $($releaseInfo.canonicalRelease)" -ForegroundColor Cyan
 }
 finally {
     $verify.Dispose()

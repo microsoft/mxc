@@ -40,7 +40,9 @@ if ($verb -eq 'get') {
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
         'IsolationProxy.exe',
-        'IsoSessionCli.exe'
+        'IsoSessionCli.exe',
+        'windows.ai.isolationsession.winmd',
+        'windows.ai.isolationsession.preview.winmd'
     )) {
         Set-Content -LiteralPath (Join-Path $destination $name) -Value $name
     }
@@ -61,8 +63,12 @@ exit 9
     if ($manifest.dropName -ne 'wdg/test/arm64fre/BIN/newest') {
         throw "Resolver did not select the newest finalized drop: $($manifest.dropName)"
     }
-    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 6) {
+    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 8) {
         throw 'Download manifest did not contain the expected ARM64 payload.'
+    }
+    $winmdEntry = $manifest.files | Where-Object { $_.name -eq 'windows.ai.isolationsession.winmd' }
+    if (-not $winmdEntry -or $winmdEntry.kind -ne 'winmd') {
+        throw 'Download manifest did not classify the WinMD payload correctly.'
     }
 
     Write-Host 'IsoSession filtered download tests passed.'

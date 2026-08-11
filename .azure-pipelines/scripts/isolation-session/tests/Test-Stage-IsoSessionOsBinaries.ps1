@@ -15,7 +15,9 @@ try {
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
         'IsolationProxy.exe',
-        'IsoSessionCli.exe'
+        'IsoSessionCli.exe',
+        'windows.ai.isolationsession.winmd',
+        'windows.ai.isolationsession.preview.winmd'
     )
     foreach ($name in $required) {
         [System.IO.File]::WriteAllText((Join-Path $dropRoot $name), "test-$name")
@@ -40,6 +42,11 @@ try {
         ConvertFrom-Json
     if ($manifest.arch -ne 'arm64' -or $manifest.files.Count -ne $required.Count) {
         throw 'Source manifest did not contain the expected architecture and files.'
+    }
+    $winmdEntry = $manifest.files | Where-Object { $_.name -eq 'windows.ai.isolationsession.preview.winmd' }
+    if (-not $winmdEntry -or $winmdEntry.kind -ne 'winmd' -or
+        $winmdEntry.relativeSourcePath -ne 'windows.ai.isolationsession.preview.winmd') {
+        throw 'WinMD provenance was not recorded in the expected relative-path form.'
     }
 
     Remove-Item -LiteralPath (Join-Path $dropRoot 'IsoSessionCli.exe') -Force

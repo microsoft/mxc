@@ -141,6 +141,7 @@ function Get-GeneratedVars([string]$arch, [string]$binDir, [string]$outDir, [str
 
 try {
     $monthId = '2026.09'
+    $patch = 5
     $x64OutA = Join-Path $genOutDir 'x64-run1'
     $x64OutB = Join-Path $genOutDir 'x64-run2'
     $arm64Out = Join-Path $genOutDir 'arm64-run1'
@@ -172,6 +173,22 @@ try {
     $arm64SubDir = Get-DefineValue $arm64Vars 'InstallSubDir'
     Assert-True ($x64SubDir -eq 'Microsoft\Agentic Runtime\2026.09') "x64 InstallSubDir follows the MonthId runtime contract ($x64SubDir)"
     Assert-True ($arm64SubDir -eq $x64SubDir) "arm64 InstallSubDir matches x64 ($arm64SubDir)"
+
+    $releaseOut = Join-Path $genOutDir 'release-check'
+    $releaseResult = Invoke-MakeInstaller -scriptArgs @(
+        '-Arch', 'x64',
+        '-BinDir', $payloadX64,
+        '-MonthId', $monthId,
+        '-Patch', $patch,
+        '-OutDir', $releaseOut,
+        '-MsiOnly')
+    if ($releaseResult.ExitCode -ne 0) {
+        throw "makeinstaller.ps1 release-check failed unexpectedly (exit $($releaseResult.ExitCode)):`n$($releaseResult.StdOut)`n$($releaseResult.StdErr)"
+    }
+    $releaseVars = Get-Content (Join-Path $releaseOut 'IsoSessionVars_2026_09_x64.wxi') -Raw
+    Assert-True ((Get-DefineValue $releaseVars 'Version') -eq '26.9.5.0') 'Patch propagates into the MSI/bundle version'
+    Assert-True ($releaseResult.StdOut -match [regex]::Escape('Release:          2026.09.5')) 'Release contract is reported in installer output'
+    Assert-True ($releaseResult.StdOut -match [regex]::Escape('NuGet Version:    0.202609.5')) 'NuGet version derived from the shared release contract is reported'
 } finally {
     Remove-Item -Recurse -Force $genOutDir -ErrorAction SilentlyContinue
 }

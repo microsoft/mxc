@@ -26,18 +26,6 @@ parameters:
   displayName: In-month patch number
   type: number
   default: 0
-- name: basePackageFeedUrl
-  displayName: Restricted Azure Artifacts NuGet v3 feed URL
-  type: string
-  default: 'REPLACE-WITH-RESTRICTED-FEED-URL'
-- name: basePackageId
-  displayName: Metadata-only base package ID
-  type: string
-  default: Microsoft.Windows.AI.IsolationSession.SDK
-- name: basePackageVersion
-  displayName: Metadata-only base package version
-  type: string
-  default: '0.202608.0'
 - name: osBranch
   displayName: Windows OS branch recorded in provenance
   type: string
@@ -50,6 +38,14 @@ parameters:
   displayName: Exact ARM64 BIN drop name (optional)
   type: string
   default: ' '
+- name: publishToRestrictedFeed
+  displayName: Publish the aggregated SDK NuGet to Azure Artifacts
+  type: boolean
+  default: false
+- name: publishFeedUrl
+  displayName: Azure Artifacts NuGet v3 feed URL for the final SDK package
+  type: string
+  default: https://pkgs.dev.azure.com/microsoft/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
 
 variables:
 - group: MXC-ESRP-Signing
@@ -73,13 +69,9 @@ extends:
         parameters:
           archTag: x64
           flavor: amd64fre
-          rid: win-x64
           buildGuid: ${{ parameters.buildGuid }}
           monthId: ${{ parameters.monthId }}
           patch: ${{ parameters.patch }}
-          basePackageFeedUrl: ${{ parameters.basePackageFeedUrl }}
-          basePackageId: ${{ parameters.basePackageId }}
-          basePackageVersion: ${{ parameters.basePackageVersion }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.x64DropNameOverride }}
           ESRPInfo:
@@ -94,13 +86,9 @@ extends:
         parameters:
           archTag: arm64
           flavor: arm64fre
-          rid: win-arm64
           buildGuid: ${{ parameters.buildGuid }}
           monthId: ${{ parameters.monthId }}
           patch: ${{ parameters.patch }}
-          basePackageFeedUrl: ${{ parameters.basePackageFeedUrl }}
-          basePackageId: ${{ parameters.basePackageId }}
-          basePackageVersion: ${{ parameters.basePackageVersion }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.arm64DropNameOverride }}
           ESRPInfo:
@@ -110,3 +98,87 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
+
+      - job: aggregate_isosession_artifacts
+        displayName: Aggregate IsoSession release outputs
+        dependsOn:
+        - build_isosession_x64
+        - build_isosession_arm64
+        variables:
+          stagingDirectory: $(Pipeline.Workspace)/isosession/final
+          artifactDirectory: $(Build.SourcesDirectory)/out/isosession/final
+          artifactName: isosession-artifacts
+        steps:
+        - checkout: self
+
+        - task: DownloadPipelineArtifact@2
+          displayName: Download x64 intermediate artifact
+          inputs:
+            artifact: isosession-intermediate-x64
+            path: $(stagingDirectory)\x64
+
+        - task: DownloadPipelineArtifact@2
+          displayName: Download arm64 intermediate artifact
+          inputs:
+            artifact: isosession-intermediate-arm64
+            path: $(stagingDirectory)\arm64
+
+        - powershell: |
+            $ErrorActionPreference = 'Stop'
+            & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Aggregate-IsoSessionArtifacts.ps1' `
+                -X64ArtifactDirectory '$(stagingDirectory)\x64' `
+                -Arm64ArtifactDirectory '$(stagingDirectory)\arm64' `
+                -OutDir '$(artifactDirectory)' `
+                -MonthId '${{ parameters.monthId }}' `
+                -Patch ${{ parameters.patch }} `
+                -SigningMode test
+          displayName: Build aggregate NuGet and manifests
+
+        - task: 1ES.PublishPipelineArtifact@1
+          displayName: Publish $(artifactName)
+          inputs:
+            path: $(artifactDirectory)
+            artifactName: $(artifactName)
+
+    - ${{ if eq(parameters.publishToRestrictedFeed, true) }}:
+      - stage: Publish_IsoSession_SDK
+        displayName: Publish IsoSession SDK NuGet
+        dependsOn: Build_IsoSession_Artifacts
+        jobs:
+        - deployment: publish_isosession_sdk
+          displayName: Publish restricted SDK package
+          environment: IsoSession-Restricted-Feed
+          strategy:
+            runOnce:
+              deploy:
+                steps:
+                - checkout: self
+
+                - task: NuGetToolInstaller@1
+                  displayName: Install NuGet client
+
+                - task: NuGetAuthenticate@1
+                  displayName: Authenticate Azure Artifacts
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download aggregated IsoSession artifact
+                  inputs:
+                    artifact: isosession-artifacts
+                    path: $(Pipeline.Workspace)\isosession-publish
+
+                - powershell: |
+                    $ErrorActionPreference = 'Stop'
+                    if ([string]::IsNullOrWhiteSpace('${{ parameters.publishFeedUrl }}')) {
+                        throw 'publishFeedUrl must be supplied when publishToRestrictedFeed=true.'
+                    }
+                    $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
+                    $package = Get-ChildItem -LiteralPath '$(Pipeline.Workspace)\isosession-publish' -File -Filter '*.nupkg' |
+                        Select-Object -First 1
+                    if (-not $package) {
+                        throw 'The aggregated artifact does not contain a NuGet package to publish.'
+                    }
+                    & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Publish-IsoSessionNuGet.ps1' `
+                        -NuGetExe $nugetExe `
+                        -PackagePath $package.FullName `
+                        -FeedUrl '${{ parameters.publishFeedUrl }}'
+                  displayName: Publish the final SDK NuGet

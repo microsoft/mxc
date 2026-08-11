@@ -3,9 +3,6 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$SourceManifest,
-
-    [Parameter(Mandatory = $true)]
     [string]$ArtifactDirectory,
 
     [Parameter(Mandatory = $true)]
@@ -16,16 +13,6 @@ param(
     [ValidateRange(0, 65535)]
     [int]$Patch,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateSet('x64', 'arm64')]
-    [string]$ArchTag,
-
-    [Parameter(Mandatory = $true)]
-    [string]$BasePackageId,
-
-    [Parameter(Mandatory = $true)]
-    [string]$BasePackageVersion,
-
     [ValidateSet('test', 'production', 'unsigned')]
     [string]$SigningMode = 'test',
 
@@ -35,19 +22,130 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-if (-not (Test-Path -LiteralPath $SourceManifest -PathType Leaf)) {
-    throw "Source manifest not found: '$SourceManifest'."
-}
 if (-not (Test-Path -LiteralPath $ArtifactDirectory -PathType Container)) {
     throw "Artifact directory not found: '$ArtifactDirectory'."
 }
 
-$source = Get-Content -LiteralPath $SourceManifest -Raw | ConvertFrom-Json
+$repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
+$releaseInfoScript = Join-Path $repoRoot 'packaging\isolation-session\common\Get-IsoSessionReleaseInfo.ps1'
+if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
+    throw "Release helper not found: '$releaseInfoScript'."
+}
+
+$releaseInfo = & $releaseInfoScript -MonthId $MonthId -Patch $Patch
+$releaseMetadataPath = Join-Path $ArtifactDirectory 'release-metadata.json'
+if (-not (Test-Path -LiteralPath $releaseMetadataPath -PathType Leaf)) {
+    throw "Release metadata not found: '$releaseMetadataPath'."
+}
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+function Get-Sha256Hex {
+    param([byte[]]$Bytes)
+
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        [System.BitConverter]::ToString($sha.ComputeHash($Bytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-ZipEntryText {
+    param(
+        [System.IO.Compression.ZipArchive]$Archive,
+        [string]$EntryName
+    )
+
+    $entry = $Archive.GetEntry($EntryName)
+    if (-not $entry) {
+        return $null
+    }
+    $reader = [System.IO.StreamReader]::new($entry.Open())
+    try {
+        $reader.ReadToEnd()
+    }
+    finally {
+        $reader.Dispose()
+    }
+}
+
+function Get-ZipEntryBytes {
+    param(
+        [System.IO.Compression.ZipArchive]$Archive,
+        [string]$EntryName
+    )
+
+    $entry = $Archive.GetEntry($EntryName)
+    if (-not $entry) {
+        return $null
+    }
+    $stream = $entry.Open()
+    try {
+        $memory = [System.IO.MemoryStream]::new()
+        try {
+            $stream.CopyTo($memory)
+            $memory.ToArray()
+        }
+        finally {
+            $memory.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Assert-BytesEqual {
+    param(
+        [byte[]]$Expected,
+        [byte[]]$Actual,
+        [string]$Label
+    )
+
+    if ($Expected.Length -ne $Actual.Length -or (Compare-Object $Expected $Actual -SyncWindow 0)) {
+        throw "$Label bytes differ."
+    }
+}
+
+function Get-ReleaseWinmdRecord {
+    param(
+        [object]$Metadata,
+        [string]$WinmdName
+    )
+
+    $record = @($Metadata.source.winmds | Where-Object { $_.name -eq $WinmdName })
+    if ($record.Count -ne 1) {
+        throw "Release metadata must contain exactly one winmd record for '$WinmdName'."
+    }
+    $record[0]
+}
+
+function Get-InstallerRecord {
+    param(
+        [object]$Metadata,
+        [string]$Arch,
+        [string]$Kind
+    )
+
+    $archRecord = $Metadata.installers.$Arch
+    if (-not $archRecord) {
+        throw "Release metadata is missing installer data for '$Arch'."
+    }
+    $record = $archRecord.$Kind
+    if (-not $record) {
+        throw "Release metadata is missing '$Kind' data for '$Arch'."
+    }
+    $record
+}
+
+$artifactRootPath = (Resolve-Path -LiteralPath $ArtifactDirectory).Path.TrimEnd('\')
 $files = @(
-    Get-ChildItem -LiteralPath $ArtifactDirectory -File |
-        Where-Object { $_.Extension -in @('.nupkg', '.msi', '.exe', '.manifest') } |
-        Sort-Object Name |
+    Get-ChildItem -LiteralPath $ArtifactDirectory -Recurse -File |
+        Sort-Object FullName |
         ForEach-Object {
+            $relativePath = $_.FullName.Substring($artifactRootPath.Length).TrimStart('\')
             $signature = $null
             if ($_.Extension -in @('.msi', '.exe')) {
                 $authenticode = Get-AuthenticodeSignature -LiteralPath $_.FullName
@@ -64,22 +162,30 @@ $files = @(
 
             [ordered]@{
                 name = $_.Name
+                relativePath = $relativePath
                 sizeBytes = $_.Length
                 sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
                 authenticode = $signature
             }
         })
 
-if ($files.Count -lt 3) {
-    throw "Expected NuGet, MSI, and EXE outputs in '$ArtifactDirectory'."
-}
-
 $nupkgs = @(Get-ChildItem -LiteralPath $ArtifactDirectory -File -Filter '*.nupkg')
 if ($nupkgs.Count -ne 1) {
     throw "Expected exactly one NuGet package in '$ArtifactDirectory'; found $($nupkgs.Count)."
 }
+if ($nupkgs[0].Name -ne $releaseInfo.nugetPackageFileName) {
+    throw "NuGet package '$($nupkgs[0].Name)' does not match '$($releaseInfo.nugetPackageFileName)'."
+}
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
+$standaloneReleaseMetadataBytes = [System.IO.File]::ReadAllBytes($releaseMetadataPath)
+$releaseMetadata = Get-Content -LiteralPath $releaseMetadataPath -Raw | ConvertFrom-Json
+if ($releaseMetadata.release.canonicalRelease -ne $releaseInfo.canonicalRelease) {
+    throw 'Release metadata canonical release does not match the expected release contract.'
+}
+if ($releaseMetadata.package.version -ne $releaseInfo.nugetVersion) {
+    throw 'Release metadata package version does not match the expected NuGet version.'
+}
+
 $packageZip = [System.IO.Compression.ZipFile]::OpenRead($nupkgs[0].FullName)
 try {
     $nuspecEntry = $packageZip.Entries |
@@ -88,42 +194,112 @@ try {
     if (-not $nuspecEntry) {
         throw "NuGet package '$($nupkgs[0].Name)' contains no nuspec."
     }
-    $reader = New-Object System.IO.StreamReader($nuspecEntry.Open())
-    try {
-        $nuspec = $reader.ReadToEnd()
+
+    $nuspec = Get-ZipEntryText -Archive $packageZip -EntryName $nuspecEntry.FullName
+    $packageReleaseMetadataBytes = Get-ZipEntryBytes -Archive $packageZip -EntryName 'metadata/RELEASE_INFO.json'
+    if (-not $packageReleaseMetadataBytes) {
+        throw "NuGet package '$($nupkgs[0].Name)' is missing metadata/RELEASE_INFO.json."
     }
-    finally {
-        $reader.Dispose()
+    Assert-BytesEqual -Expected $standaloneReleaseMetadataBytes `
+        -Actual $packageReleaseMetadataBytes `
+        -Label 'Standalone and embedded release metadata'
+
+    $generationInfo = Get-ZipEntryText -Archive $packageZip -EntryName 'metadata/GENERATION_INFO.toml'
+    if (-not $generationInfo) {
+        throw "NuGet package '$($nupkgs[0].Name)' is missing metadata/GENERATION_INFO.toml."
+    }
+
+    $packageIdMatch = [regex]::Match($nuspec, '<id>([^<]+)</id>')
+    $packageVersionMatch = [regex]::Match($nuspec, '<version>([^<]+)</version>')
+    if (-not $packageIdMatch.Success -or -not $packageVersionMatch.Success) {
+        throw "NuGet package '$($nupkgs[0].Name)' has no package id or version."
+    }
+    if ($packageIdMatch.Groups[1].Value -ne $releaseInfo.packageId) {
+        throw 'NuGet package id does not match the canonical package id.'
+    }
+    if ($packageVersionMatch.Groups[1].Value -ne $releaseInfo.nugetVersion) {
+        throw 'NuGet package version does not match the canonical NuGet version.'
+    }
+
+    foreach ($rid in @('win-x64', 'win-arm64')) {
+        $runtimeManifest = Get-ZipEntryText -Archive $packageZip -EntryName "runtimes/$rid/native/IsoSession.manifest"
+        if (-not $runtimeManifest) {
+            throw "NuGet package is missing runtimes/$rid/native/IsoSession.manifest."
+        }
+        if ($runtimeManifest -notmatch [regex]::Escape("name=`"$MonthId`"")) {
+            throw "Runtime manifest for $rid does not carry MonthId '$MonthId'."
+        }
+    }
+
+    if ($generationInfo -notmatch [regex]::Escape("instance = `"$MonthId`"")) {
+        throw 'GENERATION_INFO.toml does not carry the expected runtime instance.'
+    }
+    if ($generationInfo -notmatch [regex]::Escape("canonical_release = `"$($releaseInfo.canonicalRelease)`"")) {
+        throw 'GENERATION_INFO.toml does not carry the expected canonical release.'
+    }
+    if ($generationInfo -notmatch [regex]::Escape("nuget_version = `"$($releaseInfo.nugetVersion)`"")) {
+        throw 'GENERATION_INFO.toml does not carry the expected NuGet version.'
+    }
+
+    $primaryWinmdHash = Get-Sha256Hex -Bytes (Get-ZipEntryBytes -Archive $packageZip -EntryName 'metadata/windows.ai.isolationsession.winmd')
+    $previewWinmdHash = Get-Sha256Hex -Bytes (Get-ZipEntryBytes -Archive $packageZip -EntryName 'metadata/windows.ai.isolationsession.preview.winmd')
+    if ($primaryWinmdHash -ne (Get-ReleaseWinmdRecord -Metadata $releaseMetadata -WinmdName 'windows.ai.isolationsession.winmd').sha256) {
+        throw 'Embedded primary WinMD hash does not match release metadata.'
+    }
+    if ($previewWinmdHash -ne (Get-ReleaseWinmdRecord -Metadata $releaseMetadata -WinmdName 'windows.ai.isolationsession.preview.winmd').sha256) {
+        throw 'Embedded preview WinMD hash does not match release metadata.'
     }
 }
 finally {
     $packageZip.Dispose()
 }
 
-$packageIdMatch = [regex]::Match($nuspec, '<id>([^<]+)</id>')
-$packageVersionMatch = [regex]::Match($nuspec, '<version>([^<]+)</version>')
-if (-not $packageIdMatch.Success -or -not $packageVersionMatch.Success) {
-    throw "NuGet package '$($nupkgs[0].Name)' has no package id or version."
+foreach ($arch in @('x64', 'arm64')) {
+    foreach ($kind in @('msi', 'bundle', 'clientManifest')) {
+        $record = Get-InstallerRecord -Metadata $releaseMetadata -Arch $arch -Kind $kind
+        $path = Join-Path $ArtifactDirectory $record.fileName
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Artifact missing from release metadata: '$path'."
+        }
+        $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -ne $record.sha256) {
+            throw "Artifact '$($record.fileName)' hash does not match release metadata."
+        }
+    }
+
+    $provenanceDirectory = Join-Path $ArtifactDirectory "provenance\$arch"
+    foreach ($name in @('source-manifest.json', 'signature-verification.json', 'release-contract.json')) {
+        $provenancePath = Join-Path $provenanceDirectory $name
+        if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
+            throw "Expected provenance file missing: '$provenancePath'."
+        }
+    }
+}
+
+$signatureEvidence = [ordered]@{
+    x64 = Get-Content -LiteralPath (Join-Path $ArtifactDirectory 'provenance\x64\signature-verification.json') -Raw |
+        ConvertFrom-Json
+    arm64 = Get-Content -LiteralPath (Join-Path $ArtifactDirectory 'provenance\arm64\signature-verification.json') -Raw |
+        ConvertFrom-Json
 }
 
 $manifest = [ordered]@{
-    schema = 'mxc.isosession-artifacts/1'
+    schema = 'mxc.isosession-artifacts/2'
     generatedUtc = (Get-Date).ToUniversalTime().ToString('o')
-    release = [ordered]@{
-        monthId = $MonthId
-        patch = $Patch
-        arch = $ArchTag
-    }
-    source = $source
+    release = $releaseInfo
+    source = $releaseMetadata.source
     nuget = [ordered]@{
-        basePackageId = $BasePackageId
-        basePackageVersion = $BasePackageVersion
-        outputPackageId = $packageIdMatch.Groups[1].Value
-        outputPackageVersion = $packageVersionMatch.Groups[1].Value
+        packageId = $releaseMetadata.package.id
+        packageVersion = $releaseMetadata.package.version
+        packageFileName = $releaseMetadata.package.fileName
+        releaseMetadataEntry = 'metadata/RELEASE_INFO.json'
+        generationInfoEntry = 'metadata/GENERATION_INFO.toml'
     }
+    installers = $releaseMetadata.installers
     signing = [ordered]@{
         mode = $SigningMode
         productionReady = ($SigningMode -eq 'production')
+        evidence = $signatureEvidence
     }
     redistribution = [ordered]@{
         winMdApprovalDocumented = [bool]$RedistributionApproved
@@ -139,6 +315,6 @@ $manifest = [ordered]@{
 }
 
 $outputPath = Join-Path $ArtifactDirectory 'artifact-manifest.json'
-$manifest | ConvertTo-Json -Depth 10 |
+$manifest | ConvertTo-Json -Depth 20 |
     Set-Content -LiteralPath $outputPath -Encoding UTF8
 Write-Host "Artifact manifest: $outputPath"

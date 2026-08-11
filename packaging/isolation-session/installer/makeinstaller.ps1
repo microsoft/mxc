@@ -75,6 +75,7 @@ $ErrorActionPreference = 'Stop'
 
 # Resolve script directory (works regardless of caller's working directory)
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Definition }
+$releaseInfoScript = Join-Path (Split-Path $scriptDir -Parent) 'common\Get-IsoSessionReleaseInfo.ps1'
 
 if (-not $OutDir) {
     $OutDir = Join-Path $scriptDir "obj\out\$Arch"
@@ -147,15 +148,16 @@ if ($missingSourceFiles.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------------------
-# Derive version and deterministic GUIDs from MonthId
+# Derive version and deterministic GUIDs from the shared release contract
 # ---------------------------------------------------------------------------
 
-$yearFull = [int]($MonthId.Split('.')[0])
-$month = [int]($MonthId.Split('.')[1])
-$yearShort = $yearFull % 100
+if (-not (Test-Path -LiteralPath $releaseInfoScript -PathType Leaf)) {
+    Write-Error "INSTALLER NOT CREATED: release helper not found at '$releaseInfoScript'."
+    exit 1
+}
 
-# MSI/Bundle Version: YY.M.Patch.0 (version fields are 0-65535)
-$msiVersion = "$yearShort.$month.$Patch.0"
+$releaseInfo = & $releaseInfoScript -MonthId $MonthId -Patch $Patch
+$msiVersion = $releaseInfo.msiVersion
 
 # RFC 4122 DNS namespace, used as the base for all deterministic UUID v5 values.
 $namespace = "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
@@ -196,13 +198,15 @@ $clientClsid = New-DeterministicGuid "IsoSession:ClientClsid:$MonthId"
 $proxyConnectionClsid = New-DeterministicGuid "IsoSession:ProxyClsid:$MonthId"
 
 # Derived names
-$monthUnderscore = $MonthId.Replace('.', '_')
+$monthUnderscore = $releaseInfo.monthUnderscore
 $serviceName = "IsolationSession_$monthUnderscore"
 $installSubDir = "Microsoft\Agentic Runtime\$MonthId"
 
 Write-Host "Arch:             $Arch"
 Write-Host "MonthId:          $MonthId"
 Write-Host "Patch:            $Patch"
+Write-Host "Release:          $($releaseInfo.canonicalRelease)"
+Write-Host "NuGet Version:    $($releaseInfo.nugetVersion)"
 Write-Host "Version:          $msiVersion"
 Write-Host "MSI UpgradeCode:  $upgradeCode"
 Write-Host "Bundle UpgradeCode: $bundleUpgradeCode"

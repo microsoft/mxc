@@ -21,20 +21,27 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 `1ES.IsoSession.Artifacts.yml` is a manually queued 1ES pipeline that:
 
 1. Resolves x64 and ARM64 Windows `BIN` drops from a BNS `BuildGuid`.
-2. Downloads only the required IsolationSession binaries.
-3. Extends a restricted metadata-only SDK NuGet into separate `.x64` and
-   `.arm64` packages.
-4. Builds native MSI and bootstrapper EXE installers for both architectures.
-5. Applies the existing IsolationSession test-signing policy and publishes
-   pipeline artifacts.
+2. Downloads the required IsolationSession binaries plus both
+   `Windows.AI.IsolationSession` WinMD files.
+3. Builds and test-signs x64 and ARM64 MSI/bootstrapper EXE artifacts in
+   parallel.
+4. Aggregates the signed payloads into one multi-architecture
+   `Microsoft.Windows.AI.IsolationSession.SDK` NuGet.
+5. Publishes per-architecture intermediate artifacts plus a final aggregated
+   artifact containing release metadata, provenance, and the aggregate
+   manifest.
 
-Queue parameters include `buildGuid`, `monthId`, `patch`, and the restricted
-Azure Artifacts feed coordinates for the base metadata package. The base
-package version must be `0.<YYYYMM>.0` for the selected `monthId`.
+Queue parameters include `buildGuid`, `monthId`, `patch`, and the optional
+internal-feed publication controls. The canonical release contract is
+`monthId + patch`, rendered as NuGet `0.YYYYMM.patch` and MSI/bundle
+`YY.M.patch.0`.
 
-This pipeline does not publish publicly. The generated NuGets retain WinMD
-metadata whose redistribution requires documented approval, and test-signed
-artifacts must be production-signed before release.
+This pipeline does not publish publicly. WinMD redistribution still requires
+documented approval, and test-signed artifacts must be production-signed
+before release. The opt-in feed publication stage is disabled by default and
+uses `NuGetAuthenticate@1` with the build identity instead of a PAT. Its
+default publish destination is the existing private Dart feed
+`Mxc-Azure-Feed`.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull

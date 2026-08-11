@@ -64,15 +64,18 @@ dotnet build Microsoft.Mxc.Sdk.slnx
 
 `.azure-pipelines/1ES.IsoSession.Artifacts.yml` is a manually queued 1ES
 pipeline that accepts a Windows OS `BuildGuid`, `MonthId`, and `Patch`. It
-performs a filtered download of the six required IsolationSession binaries
-from the OS `BIN` artifact drop, then produces separate x64 and ARM64 NuGet,
-MSI, and bootstrapper EXE pipeline artifacts.
+performs filtered drop acquisition for the six required IsolationSession
+binaries plus both IsolationSession WinMDs, then builds signed x64 and ARM64
+MSI/bootstrapper outputs in parallel and aggregates them into one
+multi-architecture `Microsoft.Windows.AI.IsolationSession.SDK` NuGet.
 
 Maintained packaging inputs live under `packaging/isolation-session/`. The
-metadata-only base NuGet comes from a restricted Azure Artifacts feed and must
-match the selected `MonthId`. The initial pipeline uses test signing and does
-not publish publicly; WinMD redistribution approval and production signing are
-required before release.
+canonical release contract is `MonthId + Patch`, rendered as NuGet
+`0.YYYYMM.patch` and MSI/bundle `YY.M.patch.0`. The initial pipeline uses test
+signing, emits aggregate provenance and release metadata, and exposes an
+opt-in internal-feed publication stage through `NuGetAuthenticate@1`. WinMD
+redistribution approval and production signing are still required before any
+public release.
 
 ### Lint and format
 
@@ -112,6 +115,7 @@ tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, req
 .azure-pipelines\scripts\isolation-session\tests\Test-Get-IsoSessionOsBinaries.ps1
 .azure-pipelines\scripts\isolation-session\tests\Test-New-IsoSessionArtifactManifest.ps1
 .azure-pipelines\scripts\isolation-session\tests\Test-IsoSessionArtifactFlow.ps1
+.azure-pipelines\scripts\isolation-session\tests\Test-Publish-IsoSessionNuGet.ps1
 packaging\isolation-session\nuget\tests\Test-Pack.ps1
 packaging\isolation-session\installer\tests\Test-MakeInstaller.ps1
 
