@@ -184,29 +184,35 @@ function Initialize-WslcHost {
     $wsl = Get-Command wsl.exe -ErrorAction SilentlyContinue
     if ($wsl) {
         Write-Host "wsl.exe: $($wsl.Source)"
-        wsl --status  2>&1 | Write-Host
-        wsl --version 2>&1 | Write-Host
-        Write-Host "wsl --status exit code: $LASTEXITCODE"
     } else {
         Write-Host "wsl.exe NOT found on PATH"
         Exit-WithError 'WSL2 is not installed on this runner. The runner image must include WSL2 for this backend.'
     }
 
-    Write-Host "=== installing WSL ==="
+    $previousEncoding = [Console]::OutputEncoding
+    [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+    $output = wsl --status  2>&1 | Out-String
+    Write-Host $output
+    [Console]::OutputEncoding = $previousEncoding
 
-    wsl --install  2>&1 | Write-Host
-    Write-Host "=== post-install status check ==="
-    wsl --status  2>&1 | Write-Host
-    Write-Host "=== post-install version check ==="
-    wsl --version 2>&1 | Write-Host
+    # if unicode output mentions wsl.exe --install, skip version check for now
+    if ($output -match 'wsl.exe --install') {
+        Write-Host "=== installing WSL ==="
+
+        [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
+        wsl --install  2>&1 | Write-Host
+        wsl --status  2>&1 | Write-Host
+        wsl --version 2>&1 | Write-Host
+        [Console]::OutputEncoding = $previousEncoding
+    }
 
     Write-Host "=== updating WSL to pre-release ==="    
 
+    [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
     wsl --update --prerelease  2>&1 | Write-Host
-    Write-Host "=== post-update status check ==="
     wsl --status  2>&1 | Write-Host
-    Write-Host "=== post-update version check ==="
     wsl --version 2>&1 | Write-Host
+    [Console]::OutputEncoding = $previousEncoding
 
     Write-Host "=== done. ===" 
 }
