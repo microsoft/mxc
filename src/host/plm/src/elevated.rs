@@ -1137,6 +1137,9 @@ fn launch_elevated_child(
     pipe_name: &str,
     owner_pid: Option<u32>,
 ) -> Result<HANDLE> {
+    let working_directory = executable
+        .parent()
+        .context("elevated PLM executable path has no parent directory")?;
     let parameters = build_internal_parameters(
         operation,
         pipe_name,
@@ -1146,12 +1149,14 @@ fn launch_elevated_child(
     let verb = to_wide("runas");
     let executable = to_wide(executable.as_os_str());
     let parameters = to_wide(parameters);
+    let working_directory = to_wide(working_directory.as_os_str());
     let mut info = SHELLEXECUTEINFOW {
         cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
         fMask: SEE_MASK_NOCLOSEPROCESS,
         lpVerb: PCWSTR(verb.as_ptr()),
         lpFile: PCWSTR(executable.as_ptr()),
         lpParameters: PCWSTR(parameters.as_ptr()),
+        lpDirectory: PCWSTR(working_directory.as_ptr()),
         nShow: SW_HIDE,
         ..Default::default()
     };

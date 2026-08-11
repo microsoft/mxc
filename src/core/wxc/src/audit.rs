@@ -19,6 +19,9 @@
 
 use wxc_common::logger::Logger;
 
+const PLM_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const PLM_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
 /// same install directory. Returns `None` when the current exe path
 /// can't be resolved.
@@ -93,12 +96,97 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("failed to spawn public plm.exe: {error}"))
-        .and_then(|child| {
-            child
-                .wait_with_output()
-                .map_err(|error| format!("failed to wait for public plm.exe: {error}"))
-        });
+        .and_then(|child| wait_with_output_timeout(child, PLM_ANALYSIS_TIMEOUT));
     report_plm_output(output, logger, verbose)
+}
+
+fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::Read as _;
+
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("public plm.exe stdout was not captured".to_string());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("public plm.exe stderr was not captured".to_string());
+    };
+    let stdout_reader = std::thread::Builder::new()
+        .name("plm-audit-stdout".to_string())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stdout = stdout;
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        })
+        .map_err(|error| format!("failed to start plm stdout reader: {error}"))?;
+    let stderr_reader = match std::thread::Builder::new()
+        .name("plm-audit-stderr".to_string())
+        .spawn(move || {
+            let mut bytes = Vec::new();
+            let mut stderr = stderr;
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(format!("failed to start plm stderr reader: {error}"));
+        }
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(PLM_WAIT_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                child.kill().map_err(|error| {
+                    format!(
+                        "public plm.exe exceeded the {} second audit-analysis timeout, \
+                         but termination failed: {error}",
+                        timeout.as_secs()
+                    )
+                })?;
+                child.wait().map_err(|error| {
+                    format!(
+                        "public plm.exe exceeded the {} second audit-analysis timeout, \
+                         was terminated, but could not be reaped: {error}",
+                        timeout.as_secs()
+                    )
+                })?;
+                return Err(format!(
+                    "public plm.exe exceeded the {} second audit-analysis timeout and was terminated",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to poll public plm.exe: {error}"));
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "public plm.exe stdout reader panicked".to_string())?
+        .map_err(|error| format!("failed to read public plm.exe stdout: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "public plm.exe stderr reader panicked".to_string())?
+        .map_err(|error| format!("failed to read public plm.exe stderr: {error}"))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn report_plm_output(
@@ -211,5 +299,38 @@ impl AuditTraceGuard {
             let _ = writeln!(logger, "[audit] {message}");
             message
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    #[test]
+    fn analysis_watchdog_terminates_timed_out_child() {
+        let child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn long-running child");
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child.id()) }
+            .expect("open child synchronization handle");
+
+        let error = wait_with_output_timeout(child, std::time::Duration::from_millis(50))
+            .expect_err("watchdog should time out");
+        assert!(error.contains("timeout"));
+        assert_eq!(
+            unsafe { WaitForSingleObject(process, 1_000) },
+            WAIT_OBJECT_0,
+            "timed-out child should be terminated and reaped"
+        );
+        unsafe {
+            let _ = CloseHandle(process);
+        }
     }
 }
