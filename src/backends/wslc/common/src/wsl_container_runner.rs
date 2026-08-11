@@ -148,6 +148,13 @@ fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) -> std::io::Result
 /// misbehaving runtime can't park teardown forever.
 const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// VM/session boot budget, in milliseconds. This is the deadline for bringing
+/// the WSL session up, and is deliberately independent of the per-command
+/// `scriptTimeout` (the command runtime deadline is enforced separately at the
+/// wait, see [`wait_timeout_ms`]). A short `scriptTimeout` must not be able to
+/// abort a cold VM boot.
+const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
+
 /// Lock a mutex, tolerating poisoning: every mutex here guards plain output
 /// state with no invariant a panicking writer could break.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -759,11 +766,9 @@ impl WSLContainerRunner {
                 return Err(sdk_error("WslcSetSessionSettingsMemory failed", hr, ""));
             }
         }
-        if request.script_timeout > 0 {
-            let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, request.script_timeout);
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
-            }
+        let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, SESSION_BOOT_TIMEOUT_MS);
+        if hr != S_OK {
+            return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
         }
         if self.config.gpu {
             let hr = sdk.WslcSetSessionSettingsFeatureFlags(
@@ -1462,25 +1467,27 @@ impl WSLContainerRunner {
         // therefore only ever sees `"tcp"` today, but the explicit branch is
         // retained so this code keeps compiling cleanly if/when the parser
         // starts accepting UDP after an SDK update.
-        if !self.config.port_mappings.is_empty() {
-            let mappings: Vec<WslcContainerPortMapping> = self
-                .config
-                .port_mappings
-                .iter()
-                .map(|pm| WslcContainerPortMapping {
-                    windowsPort: pm.windows_port,
-                    containerPort: pm.container_port,
-                    protocol: if pm.protocol == "udp" {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                    } else {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                    },
-                    // Default bind address (typically loopback/0.0.0.0 per
-                    // SDK config). Not exposed in the MXC config today.
-                    windowsAddress: ptr::null_mut(),
-                })
-                .collect();
-
+        // Built at function scope: these arrays must outlive
+        // `WslcCreateContainer` below, which is the call that actually consumes
+        // the pointers handed to `WslcSetContainerSettingsPortMappings`.
+        let mappings: Vec<WslcContainerPortMapping> = self
+            .config
+            .port_mappings
+            .iter()
+            .map(|pm| WslcContainerPortMapping {
+                windowsPort: pm.windows_port,
+                containerPort: pm.container_port,
+                protocol: if pm.protocol == "udp" {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
+                } else {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
+                },
+                // Default bind address (typically loopback/0.0.0.0 per
+                // SDK config). Not exposed in the MXC config today.
+                windowsAddress: ptr::null_mut(),
+            })
+            .collect();
+        if !mappings.is_empty() {
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut container_settings,
                 mappings.as_ptr(),
@@ -1520,17 +1527,18 @@ impl WSLContainerRunner {
             })
             .collect();
 
-        if !mounts.is_empty() {
-            let volumes: Vec<WslcContainerVolume> = wide_paths
-                .iter()
-                .zip(mounts.iter())
-                .map(|((win, ctr), m)| WslcContainerVolume {
-                    windowsPath: win.as_ptr(),
-                    containerPath: ctr.as_ptr() as PCSTR,
-                    readOnly: if m.read_only { 1 } else { 0 },
-                })
-                .collect();
-
+        // Built at function scope alongside `wide_paths`: these structs point
+        // into `wide_paths` and must outlive `WslcCreateContainer` below.
+        let volumes: Vec<WslcContainerVolume> = wide_paths
+            .iter()
+            .zip(mounts.iter())
+            .map(|((win, ctr), m)| WslcContainerVolume {
+                windowsPath: win.as_ptr(),
+                containerPath: ctr.as_ptr() as PCSTR,
+                readOnly: if m.read_only { 1 } else { 0 },
+            })
+            .collect();
+        if !volumes.is_empty() {
             let hr = sdk.WslcSetContainerSettingsVolumes(
                 &mut container_settings,
                 volumes.as_ptr(),

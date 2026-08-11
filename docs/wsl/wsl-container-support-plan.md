@@ -267,7 +267,7 @@ Implements `ScriptRunner` trait. Orchestrates the full lifecycle using WSLC SDK:
 **I/O and process behavior:**
 - `WSLContainerRunner` captures stdout/stderr from native Win32 HANDLEs returned by `WslcProcessGetIOHandles()` and returns them in `ScriptResponse`, matching the current `AppContainerScriptRunner` behavior
 - The exit code is retrieved via `WslcProcessGetExitCode()` after the process exit event signals
-- The `timeout` config field is enforced via `WslcSetSessionSettingsTimeout()` at the session level, plus a Rust-side watchdog that calls `WslcStopContainer(WSLC_SIGNAL_SIGKILL)` if needed
+- `WslcSetSessionSettingsTimeout()` receives a fixed session **boot** budget (`SESSION_BOOT_TIMEOUT_MS`, 180s) — the deadline for bringing the WSL session up — and is deliberately independent of `scriptTimeout`, so a short command timeout cannot abort a cold VM boot. The `scriptTimeout` config field (the per-command runtime deadline) is enforced separately at the process wait (`wait_timeout_ms`), plus a Rust-side watchdog that calls `WslcStopContainer(WSLC_SIGNAL_SIGKILL)` if needed
 
 **Path translation (Windows host → Linux container):**
 - Volume mounts use `WslcSetContainerSettingsVolumes()` which accepts `WslcContainerVolume` structs with explicit `windowsPath` (PCWSTR) and `containerPath` (PCSTR) fields
