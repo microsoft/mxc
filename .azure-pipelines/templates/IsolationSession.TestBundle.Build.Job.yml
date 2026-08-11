@@ -94,15 +94,15 @@ jobs:
     inputs:
       version: '20.x'
 
-  # Populate sdk/node/bin/x64 with the freshly-built wxc-exec.exe so the SDK
-  # resolves its binary at runtime.  (build.bat does this; the pipeline
-  # must replicate it since we only build wxc-exec, not the full repo.)
+  # Populate the local win32-x64 package with the freshly-built wxc-exec.exe
+  # so the SDK resolves its binary at runtime. (build.bat does this; the
+  # pipeline must replicate it since we only build wxc-exec, not the full repo.)
   - powershell: |
-      $sdkBin = "$(Build.SourcesDirectory)/sdk/node/bin/x64"
-      New-Item -ItemType Directory -Force -Path $sdkBin | Out-Null
-      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkBin/"
-      Write-Host "  -> sdk/node/bin/x64/wxc-exec.exe"
-    displayName: 'Stage wxc-exec into SDK bin'
+      $sdkPackage = "$(Build.SourcesDirectory)/sdk/node/platform-packages/win32-x64"
+      New-Item -ItemType Directory -Force -Path $sdkPackage | Out-Null
+      Copy-Item "$(CARGO_TARGET_DIR)/x86_64-pc-windows-msvc/release/wxc-exec.exe" "$sdkPackage/"
+      Write-Host "  -> sdk/node/platform-packages/win32-x64/wxc-exec.exe"
+    displayName: 'Stage wxc-exec into SDK platform package'
 
   - script: npm ci && npm run build
     displayName: 'Build SDK (@microsoft/mxc-sdk)'
