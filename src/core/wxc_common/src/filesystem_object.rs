@@ -239,20 +239,25 @@ fn resolve_object(_path: &Path) -> PathResolution {
 
 /// Compare two paths by filesystem-object identity.
 pub fn compare_existing_filesystem_objects(a: &Path, b: &Path) -> ExistingObjectComparison {
-    match (resolve_object(a), resolve_object(b)) {
+    compare_resolved_filesystem_objects(resolve_object(a), resolve_object(b))
+}
+
+fn compare_resolved_filesystem_objects(
+    a: PathResolution,
+    b: PathResolution,
+) -> ExistingObjectComparison {
+    match (a, b) {
         (PathResolution::Object(a), PathResolution::Object(b)) if a == b => {
             ExistingObjectComparison::Same
         }
-        #[cfg(windows)]
+        // Unknown must take precedence over Absent on every platform. Treating
+        // an unexaminable path as merely different would let callers proceed
+        // without proving that the policy paths refer to distinct objects.
         (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
             ExistingObjectComparison::Unknown
         }
         (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
             ExistingObjectComparison::Different
-        }
-        #[cfg(not(windows))]
-        (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
-            ExistingObjectComparison::Unknown
         }
         (PathResolution::Object(_), PathResolution::Object(_)) => {
             ExistingObjectComparison::Different
@@ -428,6 +433,18 @@ pub fn normalize_object_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_resolution_takes_precedence_over_absent() {
+        assert_eq!(
+            compare_resolved_filesystem_objects(PathResolution::Absent, PathResolution::Unknown),
+            ExistingObjectComparison::Unknown
+        );
+        assert_eq!(
+            compare_resolved_filesystem_objects(PathResolution::Unknown, PathResolution::Absent),
+            ExistingObjectComparison::Unknown
+        );
+    }
     use crate::logger::{Logger, Mode};
 
     fn policy(rw: &[&str], ro: &[&str], dn: &[&str]) -> ContainerPolicy {

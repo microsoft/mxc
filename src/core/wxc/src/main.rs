@@ -1250,7 +1250,9 @@ fn main() {
                     .iter()
                     .map(std::ffi::OsString::as_os_str)
                     .collect();
-                if !run_plm_command(&borrowed, &mut logger, cli.audit_verbose) {
+                if run_plm_command(&borrowed, &mut logger, cli.audit_verbose) {
+                    eprintln!("[audit] artifacts written to {}", capture.log_dir.display());
+                } else {
                     let _ = writeln!(logger, "[audit] PLM trace analysis failed");
                 }
             }

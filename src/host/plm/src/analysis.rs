@@ -65,9 +65,10 @@ pub fn legacy_config_inputs(
     for denial in denials {
         match denial.resource_type {
             ResourceType::File => {
-                if !is_local_drive_path(&denial.resource)
-                    || is_current_directory_path(&denial.resource, current_directory)
-                {
+                let Some(file_path) = normalize_legacy_file_path(&denial.resource) else {
+                    continue;
+                };
+                if is_current_directory_path(&file_path, current_directory) {
                     continue;
                 }
                 let access_mask = match denial.access_type {
@@ -76,7 +77,7 @@ pub fn legacy_config_inputs(
                     AccessType::Execute => 0x20,
                     AccessType::Unknown => continue,
                 };
-                let key = denial.resource.to_ascii_lowercase();
+                let key = file_path.to_ascii_lowercase();
                 if let Some(index) = file_event_indices.get(&key).copied() {
                     events[index].access_mask |= access_mask;
                 } else {
@@ -85,7 +86,7 @@ pub fn legacy_config_inputs(
                         time_created: chrono::Utc::now(),
                         process_id: denial.pid,
                         thread_id: 0,
-                        file_path: denial.resource.clone(),
+                        file_path,
                         access_mask,
                     });
                 }
@@ -122,6 +123,27 @@ pub fn legacy_config_inputs(
     }
 
     (events, capabilities)
+}
+
+fn normalize_legacy_file_path(path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty()
+        || path.chars().any(|character| {
+            character.is_control() || matches!(character, '<' | '>' | '"' | '|' | '?' | '*')
+        })
+    {
+        return None;
+    }
+    let without_trailing_separator = path.trim_end_matches(['\\', '/']);
+    let normalized = if without_trailing_separator.len() == 2
+        && without_trailing_separator.as_bytes()[0].is_ascii_alphabetic()
+        && without_trailing_separator.as_bytes()[1] == b':'
+    {
+        format!("{without_trailing_separator}\\")
+    } else {
+        without_trailing_separator.to_string()
+    };
+    is_local_drive_path(&normalized).then_some(normalized)
 }
 
 fn is_local_drive_path(path: &str) -> bool {
@@ -222,6 +244,41 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].file_path, r"C:\work\repo2\data.txt");
+    }
+
+    #[test]
+    fn legacy_inputs_reject_invalid_paths() {
+        let denials = [
+            denial("C:\\bad\\*.txt", ResourceType::File, AccessType::Write),
+            denial("C:\\bad\\line\nfeed", ResourceType::File, AccessType::Read),
+            denial(
+                "C:\\bad\\pipe|name",
+                ResourceType::File,
+                AccessType::Execute,
+            ),
+        ];
+
+        let (events, _) = legacy_config_inputs(&denials, None);
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn legacy_inputs_normalize_before_deduplication() {
+        let denials = [
+            denial(
+                "  C:\\data\\folder\\  ",
+                ResourceType::File,
+                AccessType::Read,
+            ),
+            denial("c:\\DATA\\folder", ResourceType::File, AccessType::Write),
+        ];
+
+        let (events, _) = legacy_config_inputs(&denials, None);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].file_path, "C:\\data\\folder");
+        assert_eq!(events[0].access_mask, 0x3);
     }
 
     #[test]

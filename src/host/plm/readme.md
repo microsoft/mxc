@@ -8,7 +8,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 ## How it works
 
-1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC once to launch a retained restricted child. That child acquires the host-wide singleton, starts WPR with the embedded profile, and remains alive through stop or cancellation.
+1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC once to launch a retained restricted child. That child acquires the host-wide singleton, starts WPR with the embedded profile, and remains alive through explicit stop or uncertain teardown.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
 3. **Stop** — the retained child returns ETL bytes and status over the original authenticated named pipe. The unelevated parent owns the trace, log, and config destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
 4. **Emit** — canonical findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
@@ -23,7 +23,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 | `src/main.rs`           | `clap` dispatch for `plm stop` / `plm log` / `plm extract-caps`                    |
 | `src/elevated.rs`       | Retained `runas` guardian, singleton/WPR ownership, authenticated control pipe, ETL transfer |
 | `src/elevated_protocol.rs` | Bounded success/error/ETL framing shared across the privilege boundary          |
-| `src/start.rs`          | Fixed `wpr -start …!AccessFailureProfile -filemode` and guardian cleanup cancel   |
+| `src/start.rs`          | Bounded fixed `wpr -start …!AccessFailureProfile -filemode` and shared WPR command monitoring |
 | `src/stop.rs`           | Existing-ETL analysis + FS/capability merge                                       |
 | `src/log.rs`            | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config      |
 | `src/analysis.rs`       | Canonical ETL analysis, denials JSON emission, and temporary config-generator adapter |
@@ -31,6 +31,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 | `src/extract_caps.rs`   | DACL ACE blob decoder; resolves capability SIDs via `DeriveCapabilitySidsFromName` |
 | `src/config.rs`         | JSON load/mutate; FS + capability merge into containment-backend section          |
 | `src/coordination.rs`   | Cross-process singleton named-mutex and Ctrl-handler coordination                  |
+| `src/secure_scratch.rs` | Pinned, access-controlled ProgramData scratch directory and recovery marker        |
 | `src/wpr_path.rs`       | Resolves `wpr.exe` to its absolute `%SystemRoot%\System32` path (PATH-spoof-safe) |
 | `src/profile_gen.rs`    | Inline, non-overridable WPR profile (`EMBEDDED_WPRP`)                              |
 
@@ -45,6 +46,7 @@ Only one hidden guarded `start` operation is launched with `ShellExecuteExW("run
 - keeps its scratch internal and temporary under an OS-resolved trusted local location with restrictive ACL/integrity handling;
 - rejects remote pipes and pipe squatting (`PIPE_REJECT_REMOTE_CLIENTS` and `FILE_FLAG_FIRST_PIPE_INSTANCE`);
 - authenticates the pipe server PID, while the parent authenticates the child PID returned by `ShellExecuteExW`;
+- requires the invoking and elevating Windows identities to match, rejecting over-the-shoulder elevation before capture because the returned ETL is system-wide;
 - acquires and retains `Global\Mxc_Plm_Audit` before touching WPR;
 - creates that mutex with a protected administrator/SYSTEM-owned descriptor
   and rejects an untrusted pre-existing object;
@@ -54,9 +56,15 @@ Only one hidden guarded `start` operation is launched with `ShellExecuteExW("run
 - never auto-cancels stale or otherwise unverified WPR state: if the protected
   recovery marker remains and start conflicts, PLM fails closed so an
   administrator can inspect/clean the host without risking an unrelated trace;
+- applies a 10-minute timeout to WPR start and stop operations and terminates a
+  WPR control process that exceeds that bound;
 - uses bounded framing for explicit success, stopped, error, and ETL responses;
 - receives STOP on the original authenticated pipe, runs `wpr -stop`, marks the lifecycle stopped before ETL transfer, and releases the singleton only when the child exits;
-- cancels its own armed trace if the owner or authenticated pipe disappears before WPR stops.
+- preserves the recovery marker and leaves WPR untouched if the owner,
+  authenticated pipe, or guardian monitoring fails before an explicit stop.
+  This avoids a check-then-act race in which host-wide `wpr -cancel` could
+  terminate a replacement recording; an administrator must inspect the marker
+  and recover WPR state manually.
 
 There is no public or hidden standalone elevated stop/cancel entry point and no parent-to-child singleton handoff.
 
@@ -73,6 +81,8 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
 ```
 
 The retained guardian transfers its ETL to the unelevated caller before this command is launched. `--exit-code` is copied into the canonical `denials.json` summary.
+
+When `--log-dir` is omitted, artifacts are written beneath `%LOCALAPPDATA%\Microsoft\MXC\PLM\logs\<timestamp>_pid<pid>`; if `%LOCALAPPDATA%` is unavailable, PLM falls back to the equivalent directory beneath `%TEMP%`. `--verbose-logging` prints per-event and per-ACE diagnostics while the trace is analyzed.
 
 `--config-path` temporarily preserves the existing adjusted-config behavior. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it independently. The write is atomic so a downstream enforcing run never observes a truncated policy.
 

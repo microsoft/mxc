@@ -17,7 +17,6 @@ use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
-use std::process::Stdio;
 use std::sync::atomic::AtomicIsize;
 use std::time::{Duration, Instant};
 
@@ -26,6 +25,9 @@ use windows::Win32::Foundation::{
     CloseHandle, ERROR_BROKEN_PIPE, ERROR_CANCELLED, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
     ERROR_PIPE_LISTENING, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED,
     WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+use windows::Win32::Security::{
+    GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
@@ -36,7 +38,8 @@ use windows::Win32::System::Pipes::{
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
-    OpenProcessToken, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    OpenProcessToken, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
@@ -48,6 +51,7 @@ use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
+const TRANSFER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SW_HIDE: i32 = 0;
 const HANDSHAKE_READY: u8 = 0xa5;
 const CONTROL_STOP: u8 = 1;
@@ -81,7 +85,7 @@ pub enum Operation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardAction {
     None,
-    Cancel,
+    Preserve,
     RejectStart,
 }
 
@@ -92,7 +96,7 @@ enum GuardState {
     OwnerExitedDuringStart,
     Armed,
     Disarmed,
-    Cancelled,
+    Abandoned,
 }
 
 #[derive(Debug)]
@@ -128,8 +132,8 @@ impl GuardLifecycle {
                 GuardAction::None
             }
             GuardState::Armed => {
-                self.state = GuardState::Cancelled;
-                GuardAction::Cancel
+                self.state = GuardState::Abandoned;
+                GuardAction::Preserve
             }
             _ => GuardAction::None,
         }
@@ -142,8 +146,8 @@ impl GuardLifecycle {
                 GuardAction::None
             }
             GuardState::OwnerExitedDuringStart => {
-                self.state = GuardState::Cancelled;
-                GuardAction::Cancel
+                self.state = GuardState::Abandoned;
+                GuardAction::Preserve
             }
             _ => GuardAction::RejectStart,
         }
@@ -155,7 +159,7 @@ impl GuardLifecycle {
                 self.state = GuardState::Disarmed;
                 GuardAction::None
             }
-            GuardState::Cancelled => GuardAction::Cancel,
+            GuardState::Abandoned => GuardAction::Preserve,
             _ => GuardAction::RejectStart,
         }
     }
@@ -163,18 +167,18 @@ impl GuardLifecycle {
     fn on_pipe_break(&mut self) -> GuardAction {
         match self.state {
             GuardState::Armed => {
-                self.state = GuardState::Cancelled;
-                GuardAction::Cancel
+                self.state = GuardState::Abandoned;
+                GuardAction::Preserve
             }
             _ => GuardAction::None,
         }
     }
 
-    fn cancel_started_trace(&mut self) -> GuardAction {
+    fn abandon_started_trace(&mut self) -> GuardAction {
         match self.state {
             GuardState::Ready | GuardState::OwnerExitedDuringStart | GuardState::Armed => {
-                self.state = GuardState::Cancelled;
-                GuardAction::Cancel
+                self.state = GuardState::Abandoned;
+                GuardAction::Preserve
             }
             _ => GuardAction::None,
         }
@@ -182,32 +186,26 @@ impl GuardLifecycle {
 
     fn defer_cleanup(&mut self) {
         if self.state == GuardState::Armed {
-            self.state = GuardState::Cancelled;
+            self.state = GuardState::Abandoned;
         }
     }
 }
 
 struct GuardedOwner {
     owner: OwnedHandle,
-    _singleton: SingletonGuard,
     recovery_marker: RecoveryMarker,
+    _singleton: SingletonGuard,
     lifecycle: GuardLifecycle,
 }
 
 impl GuardedOwner {
-    fn open(owner_pid: u32) -> Result<Self> {
+    fn open(owner: OwnedHandle) -> Result<Self> {
         let singleton = SingletonGuard::acquire()?;
         let recovery_marker = RecoveryMarker::acquire()?;
-        let owner = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, owner_pid) } {
-            Ok(owner) => OwnedHandle(owner),
-            Err(error) => {
-                return Err(error).context("failed to open guarded PLM owner process");
-            }
-        };
         let mut guarded = Self {
             owner,
-            _singleton: singleton,
             recovery_marker,
+            _singleton: singleton,
             lifecycle: GuardLifecycle::new(),
         };
         if guarded.lifecycle.ready(!guarded.has_exited()?) != GuardAction::None {
@@ -230,9 +228,8 @@ impl GuardedOwner {
         }
         match self.lifecycle.on_start_succeeded() {
             GuardAction::None => {}
-            GuardAction::Cancel => {
-                self.cancel_after_owner_exit()
-                    .context("failed to cancel PLM trace after owner exit during start")?;
+            GuardAction::Preserve => {
+                self.preserve_uncertain_trace();
                 anyhow::bail!("guarded PLM owner exited during WPR start");
             }
             GuardAction::RejectStart => {
@@ -240,9 +237,8 @@ impl GuardedOwner {
             }
         }
         if self.has_exited()? {
-            if self.lifecycle.on_owner_exit() == GuardAction::Cancel {
-                self.cancel_after_owner_exit()
-                    .context("failed to cancel PLM trace after owner exit following start")?;
+            if self.lifecycle.on_owner_exit() == GuardAction::Preserve {
+                self.preserve_uncertain_trace();
             }
             anyhow::bail!("guarded PLM owner exited immediately after WPR start");
         }
@@ -251,21 +247,28 @@ impl GuardedOwner {
 
     fn wait_for_control(&mut self, pipe: &mut std::fs::File) -> Result<()> {
         loop {
-            if self.has_exited()? {
-                if self.lifecycle.on_owner_exit() == GuardAction::Cancel {
-                    self.cancel_after_owner_exit()
-                        .context("failed to cancel PLM trace after guarded owner exit")?;
+            let owner_exited = match self.has_exited() {
+                Ok(exited) => exited,
+                Err(error) => return Err(self.fail_after_monitor_error(error)),
+            };
+            if owner_exited {
+                if self.lifecycle.on_owner_exit() == GuardAction::Preserve {
+                    self.preserve_uncertain_trace();
                 }
                 anyhow::bail!("guarded PLM owner exited before stop");
             }
 
-            match pipe_state(pipe)? {
+            let state = match pipe_state(pipe) {
+                Ok(state) => state,
+                Err(error) => return Err(self.fail_after_monitor_error(error)),
+            };
+            match state {
                 PipeState::Empty => {
                     std::thread::sleep(POLL_INTERVAL);
                     continue;
                 }
                 PipeState::Closed(error) => {
-                    self.cancel_for_pipe_break()?;
+                    self.preserve_after_pipe_break();
                     anyhow::bail!(
                         "guarded PLM control pipe closed before stop (PeekNamedPipe error {error})"
                     );
@@ -280,7 +283,7 @@ impl GuardedOwner {
                         return run_guarded_stop(pipe, self);
                     }
                     Err(error) => {
-                        self.cancel_for_pipe_break()?;
+                        self.preserve_after_pipe_break();
                         return Err(error);
                     }
                 },
@@ -289,38 +292,47 @@ impl GuardedOwner {
                 }
                 Ok(_) => unreachable!("one-byte control read returned too many bytes"),
                 Err(error) => {
-                    self.cancel_for_pipe_break()?;
+                    self.preserve_after_pipe_break();
                     return Err(error).context("guarded PLM control pipe failed before stop");
                 }
             }
         }
     }
 
-    fn cancel_for_pipe_break(&mut self) -> Result<()> {
-        if self.lifecycle.on_pipe_break() != GuardAction::Cancel {
-            return Ok(());
+    fn preserve_after_pipe_break(&mut self) {
+        if self.lifecycle.on_pipe_break() == GuardAction::Preserve {
+            self.preserve_uncertain_trace();
         }
-        cancel_trace(&mut self.recovery_marker)
     }
 
-    fn cancel_after_start_error(&mut self) {
-        if self.lifecycle.cancel_started_trace() == GuardAction::Cancel {
-            let _ = cancel_trace(&mut self.recovery_marker);
+    fn preserve_after_start_error(&mut self) {
+        if self.lifecycle.abandon_started_trace() == GuardAction::Preserve {
+            self.preserve_uncertain_trace();
         }
     }
 
     fn mark_stopped(&mut self) -> Result<()> {
         match self.lifecycle.disarm() {
             GuardAction::None => Ok(()),
-            GuardAction::Cancel => anyhow::bail!("guarded cleanup won the stop race"),
+            GuardAction::Preserve => anyhow::bail!("guarded cleanup won the stop race"),
             GuardAction::RejectStart => {
                 anyhow::bail!("guarded PLM stop arrived in an invalid state")
             }
         }
     }
 
-    fn cancel_after_owner_exit(&mut self) -> Result<()> {
-        cancel_trace(&mut self.recovery_marker)
+    fn preserve_uncertain_trace(&mut self) {
+        self.recovery_marker.preserve();
+    }
+
+    fn fail_after_monitor_error(&mut self, error: anyhow::Error) -> anyhow::Error {
+        if self.lifecycle.abandon_started_trace() == GuardAction::Preserve {
+            self.preserve_uncertain_trace();
+        }
+        error.context(
+            "guarded PLM monitoring failed; preserved recovery marker and left WPR state \
+             untouched to avoid cancelling an unrelated host recording",
+        )
     }
 }
 
@@ -347,9 +359,10 @@ impl Drop for OwnedHandle {
 
 /// Live authenticated connection to the elevated START child.
 ///
-/// [`Self::cancel`] closes an armed session and reports whether the child
-/// successfully cancelled the trace. Dropping remains a last-resort cleanup
-/// path for unwinding. [`Self::stop`] asks the same retained child to stop WPR
+/// [`Self::cancel`] closes an armed session and reports that WPR state may
+/// require administrator recovery. Unexpected teardown never issues the
+/// host-wide `wpr -cancel`, because it cannot atomically prove that the active
+/// recording is still PLM's. [`Self::stop`] asks the retained child to stop WPR
 /// and transfer the ETL, avoiding a second elevation prompt.
 pub struct GuardedSession {
     pipe: Option<std::fs::File>,
@@ -374,8 +387,14 @@ impl GuardedSession {
         }
         self.pipe.take();
         self.disarmed = true;
-        wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION)
-            .context("guarded PLM cancellation failed")
+        let exit_code = wait_for_child_termination(self.process.0, WAIT_TIMEOUT_DURATION).context(
+            "guarded PLM session could not confirm guardian termination after abandoning WPR state",
+        )?;
+        eprintln!(
+            "[plm] guarded session ended without an explicit stop (guardian exit code \
+             {exit_code}); the recovery marker was preserved and WPR state was left untouched"
+        );
+        Ok(())
     }
 
     pub fn stop(&mut self, trace_destination: &Path) -> Result<()> {
@@ -536,7 +555,7 @@ fn launch_connected_child(
     Ok((pipe_file, process, deadline))
 }
 
-fn wait_for_child_exit(process: HANDLE, timeout: Duration) -> Result<()> {
+fn wait_for_child_termination(process: HANDLE, timeout: Duration) -> Result<u32> {
     let wait_ms = timeout.as_millis().min(u32::MAX as u128) as u32;
     let wait = unsafe { WaitForSingleObject(process, wait_ms) };
     if wait == WAIT_TIMEOUT {
@@ -548,6 +567,11 @@ fn wait_for_child_exit(process: HANDLE, timeout: Duration) -> Result<()> {
     let mut exit_code = 0u32;
     unsafe { GetExitCodeProcess(process, &mut exit_code) }
         .context("GetExitCodeProcess failed for elevated PLM child")?;
+    Ok(exit_code)
+}
+
+fn wait_for_child_exit(process: HANDLE, timeout: Duration) -> Result<()> {
+    let exit_code = wait_for_child_termination(process, timeout)?;
     if exit_code != 0 {
         anyhow::bail!("elevated PLM child exited with code {exit_code}");
     }
@@ -574,7 +598,10 @@ pub fn run_child(
         .write(true)
         .open(pipe_name)
         .with_context(|| format!("failed to connect to PLM control pipe {pipe_name}"))?;
-    authenticate_server(&pipe, server_pid)?;
+    if owner_pid != Some(server_pid) {
+        anyhow::bail!("guarded PLM owner PID must match the authenticated pipe server PID");
+    }
+    let owner = authenticate_server(&pipe, server_pid)?;
     let mut ready = [0u8; 1];
     pipe.read_exact(&mut ready)
         .context("failed to receive PLM control-pipe readiness")?;
@@ -584,10 +611,7 @@ pub fn run_child(
     if operation != Operation::Start || owner_pid.is_none() {
         anyhow::bail!("elevated start requires a guarded owner PID");
     }
-    run_guarded_start_child(
-        &mut pipe,
-        owner_pid.context("guarded start owner PID disappeared")?,
-    )
+    run_guarded_start_child(&mut pipe, owner)
 }
 
 struct SingletonGuard;
@@ -620,8 +644,8 @@ impl Drop for SingletonGuard {
     }
 }
 
-fn run_guarded_start_child(pipe: &mut std::fs::File, owner_pid: u32) -> Result<()> {
-    let mut owner = match GuardedOwner::open(owner_pid) {
+fn run_guarded_start_child(pipe: &mut std::fs::File, owner_handle: OwnedHandle) -> Result<()> {
+    let mut owner = match GuardedOwner::open(owner_handle) {
         Ok(owner) => owner,
         Err(error) => {
             write_error_response(pipe, &error)?;
@@ -633,12 +657,12 @@ fn run_guarded_start_child(pipe: &mut std::fs::File, owner_pid: u32) -> Result<(
         return Err(error);
     }
     if let Err(error) = owner.finish_start() {
-        owner.cancel_after_start_error();
+        owner.preserve_after_start_error();
         write_error_response(pipe, &error)?;
         return Err(error);
     }
     if let Err(error) = write_header(pipe, ResponseKind::Success, 0).and_then(|_| pipe.flush()) {
-        let _ = owner.cancel_for_pipe_break();
+        owner.preserve_after_pipe_break();
         return Err(error).context("failed to return guarded PLM start success");
     }
     owner.wait_for_control(pipe)
@@ -651,6 +675,13 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
             owner.recovery_marker.recovered();
             Ok(())
         }
+        Err(error) if crate::start::may_have_changed_wpr_state(&error) => {
+            owner.recovery_marker.preserve();
+            Err(error).context(
+                "WPR start failed after the control process launched; preserved the recovery \
+                 marker because the host trace state may have changed",
+            )
+        }
         Err(error) if stale => Err(error).context(
             "WPR start failed while a protected stale-recovery marker exists; \
              refusing to cancel an unverified WPR session",
@@ -659,17 +690,10 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
     }
 }
 
-fn cancel_trace(marker: &mut RecoveryMarker) -> Result<()> {
-    marker.preserve();
-    crate::start::cancel_existing_wpr_trace()?;
-    marker.recovered();
-    Ok(())
-}
-
 fn run_guarded_stop(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Result<()> {
     let result = run_guarded_stop_with_stopped(pipe, owner);
     if let Err(error) = result {
-        owner.cancel_after_start_error();
+        owner.preserve_after_start_error();
         write_error_response(pipe, &error)?;
         return Err(error);
     }
@@ -688,105 +712,40 @@ fn run_guarded_stop_with_stopped(pipe: &mut std::fs::File, owner: &mut GuardedOw
 }
 
 fn run_monitored_wpr_stop(
-    pipe: &mut std::fs::File,
+    _pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
     trace_path: &Path,
 ) -> Result<()> {
+    owner.recovery_marker.preserve();
     let mut command = crate::wpr_path::wpr_command();
     let resolved = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
-        .arg("-stop")
-        .arg(trace_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {error}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("failed to capture wpr -stop stdout")?;
-    let stderr = child
-        .stderr
-        .take()
-        .context("failed to capture wpr -stop stderr")?;
-    let stdout_reader = spawn_output_reader(stdout);
-    let stderr_reader = spawn_output_reader(stderr);
-    let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
-    // Once STOP is accepted, finish it even if the owner or pipe disappears.
-    // Killing an in-flight `wpr -stop` and then cancelling could race a newly
-    // started unrelated WPR session after the original stop already succeeded.
-    let mut stop_unattended = false;
-
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                terminate_child(&mut child);
-                owner.lifecycle.defer_cleanup();
-                owner.recovery_marker.preserve();
-                return Err(error).context("failed to poll wpr -stop");
-            }
-        }
-        if !stop_unattended {
-            match owner.has_exited() {
-                Ok(true) => stop_unattended = true,
-                Ok(false) => {}
-                Err(_) => stop_unattended = true,
-            }
-
-            match pipe_state(pipe) {
-                Ok(PipeState::Empty) => {}
-                Ok(PipeState::Data(_) | PipeState::Closed(_)) | Err(_) => stop_unattended = true,
-            }
-        }
-        if Instant::now() >= deadline {
-            terminate_child(&mut child);
-            owner.lifecycle.defer_cleanup();
-            owner.recovery_marker.preserve();
-            anyhow::bail!("timed out waiting for wpr -stop; deferred cleanup to the next guardian");
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    };
-
-    let stdout = join_output_reader(stdout_reader, "stdout")?;
-    let stderr = join_output_reader(stderr_reader, "stderr")?;
-    if !status.success() {
-        return Err(crate::start::describe_wpr_failure(
-            "stop",
-            &std::process::Output {
-                status,
-                stdout,
-                stderr,
-            },
-        ));
-    }
+    command.arg("-stop").arg(trace_path);
+    let result = crate::start::run_wpr_command(command, "stop", &resolved, WAIT_TIMEOUT_DURATION);
+    let lifecycle = &mut owner.lifecycle;
+    let recovery_marker = &mut owner.recovery_marker;
+    let _output = handle_wpr_stop_result(result, lifecycle, || recovery_marker.preserve())?;
+    owner.recovery_marker.recovered();
     Ok(())
 }
 
-fn spawn_output_reader(
-    mut stream: impl Read + Send + 'static,
-) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
-    std::thread::spawn(move || {
-        let mut output = Vec::new();
-        stream.read_to_end(&mut output)?;
-        Ok(output)
-    })
-}
-
-fn join_output_reader(
-    reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
-    stream: &str,
-) -> Result<Vec<u8>> {
-    reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("wpr -stop {stream} reader panicked"))?
-        .with_context(|| format!("failed to read wpr -stop {stream}"))
-}
-
-fn terminate_child(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn handle_wpr_stop_result(
+    result: Result<std::process::Output>,
+    lifecycle: &mut GuardLifecycle,
+    preserve_marker: impl FnOnce(),
+) -> Result<std::process::Output> {
+    match result {
+        Ok(output) if output.status.success() => Ok(output),
+        Ok(output) => {
+            lifecycle.defer_cleanup();
+            preserve_marker();
+            Err(crate::start::describe_wpr_failure("stop", &output))
+        }
+        Err(error) => {
+            lifecycle.defer_cleanup();
+            preserve_marker();
+            Err(error).context("wpr -stop failed; deferred cleanup to the next guardian")
+        }
+    }
 }
 
 fn write_error_response(pipe: &mut std::fs::File, error: &anyhow::Error) -> Result<()> {
@@ -834,7 +793,7 @@ fn copy_exact_len(reader: &mut impl Read, writer: &mut impl Write, len: u64) -> 
     Ok(())
 }
 
-fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<()> {
+fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<OwnedHandle> {
     let mut actual_pid = 0u32;
     unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut actual_pid) }
         .context("GetNamedPipeServerProcessId failed")?;
@@ -844,7 +803,64 @@ fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<()> {
         );
     }
 
+    let owner = unsafe {
+        OpenProcess(
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            actual_pid,
+        )
+    }
+    .context("failed to bind guarded PLM owner process after pipe authentication")?;
+    let owner = OwnedHandle(owner);
+    validate_same_requesting_user(owner.0)?;
+    Ok(owner)
+}
+
+fn validate_same_requesting_user(owner: HANDLE) -> Result<()> {
+    let owner_sid = process_user_sid(owner).context("failed to resolve guarded PLM owner SID")?;
+    let elevated_sid = process_user_sid(unsafe { GetCurrentProcess() })
+        .context("failed to resolve elevated PLM guardian SID")?;
+    validate_matching_sids(&owner_sid, &elevated_sid)
+}
+
+fn validate_matching_sids(owner_sid: &[u8], elevated_sid: &[u8]) -> Result<()> {
+    if owner_sid != elevated_sid {
+        anyhow::bail!(
+            "guarded PLM requires the invoking and elevating Windows identities to match; \
+             over-the-shoulder elevation is rejected because the system-wide ETL is returned \
+             to the invoking user"
+        );
+    }
     Ok(())
+}
+
+fn process_user_sid(process: HANDLE) -> Result<Vec<u8>> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
+        .context("OpenProcessToken failed")?;
+    let token = OwnedHandle(token);
+    let mut required = 0u32;
+    let _ = unsafe { GetTokenInformation(token.0, TokenUser, None, 0, &mut required) };
+    if required == 0 {
+        anyhow::bail!("GetTokenInformation(TokenUser) returned no required size");
+    }
+    let mut buffer = vec![0u8; required as usize];
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenUser,
+            Some(buffer.as_mut_ptr().cast()),
+            required,
+            &mut required,
+        )
+    }
+    .context("GetTokenInformation(TokenUser) failed")?;
+    let token_user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    let sid_len = unsafe { GetLengthSid(token_user.User.Sid) } as usize;
+    if sid_len == 0 {
+        anyhow::bail!("GetLengthSid returned zero for guarded PLM identity");
+    }
+    Ok(unsafe { std::slice::from_raw_parts(token_user.User.Sid.0.cast::<u8>(), sid_len) }.to_vec())
 }
 
 fn pipe_state(pipe: &std::fs::File) -> Result<PipeState> {
@@ -1000,7 +1016,7 @@ fn copy_exact_polling(
     mut remaining: u64,
     deadline: Instant,
 ) -> Result<()> {
-    let mut buffer = vec![0u8; 64 * 1024];
+    let mut buffer = vec![0u8; 1024 * 1024];
     while remaining != 0 {
         let amount = remaining.min(buffer.len() as u64) as usize;
         let read = read_some_polling(pipe, &mut buffer[..amount], process, deadline)?;
@@ -1041,7 +1057,7 @@ fn read_some_polling(
         match pipe_state(pipe)? {
             PipeState::Empty => {
                 ensure_child_running(process, deadline)?;
-                std::thread::sleep(POLL_INTERVAL);
+                std::thread::sleep(TRANSFER_POLL_INTERVAL);
             }
             PipeState::Closed(_) => return Ok(0),
             PipeState::Data(available) => {
@@ -1053,7 +1069,7 @@ fn read_some_polling(
                     return Ok(read);
                 }
                 ensure_child_running(process, deadline)?;
-                std::thread::sleep(POLL_INTERVAL);
+                std::thread::sleep(TRANSFER_POLL_INTERVAL);
             }
         }
     }
@@ -1117,8 +1133,8 @@ fn create_pipe(pipe_name: &str) -> Result<HANDLE> {
             open_mode,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
             1,
-            64 * 1024,
-            64 * 1024,
+            1024 * 1024,
+            1024 * 1024,
             0,
             None,
         )
@@ -1244,6 +1260,7 @@ fn to_wide(value: impl AsRef<OsStr>) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::process::ExitStatusExt;
 
     #[test]
     fn guarded_start_requires_readiness_before_start() {
@@ -1257,7 +1274,7 @@ mod tests {
     }
 
     #[test]
-    fn owner_already_dead_rejects_start_without_cancel() {
+    fn owner_already_dead_rejects_start_without_cleanup() {
         let mut lifecycle = GuardLifecycle::new();
 
         assert_eq!(lifecycle.ready(false), GuardAction::RejectStart);
@@ -1266,25 +1283,24 @@ mod tests {
     }
 
     #[test]
-    fn owner_death_during_start_cancels_after_start() {
+    fn owner_death_during_start_preserves_recovery_state() {
         let mut lifecycle = GuardLifecycle::new();
-
         assert_eq!(lifecycle.ready(true), GuardAction::None);
         assert_eq!(lifecycle.on_owner_exit(), GuardAction::None);
-        assert_eq!(lifecycle.on_start_succeeded(), GuardAction::Cancel);
-        assert_eq!(lifecycle.state, GuardState::Cancelled);
+        assert_eq!(lifecycle.on_start_succeeded(), GuardAction::Preserve);
+        assert_eq!(lifecycle.state, GuardState::Abandoned);
     }
 
     #[test]
-    fn owner_death_after_start_cancels_once() {
+    fn owner_death_after_start_preserves_recovery_state_once() {
         let mut lifecycle = armed_lifecycle();
 
-        assert_eq!(lifecycle.on_owner_exit(), GuardAction::Cancel);
+        assert_eq!(lifecycle.on_owner_exit(), GuardAction::Preserve);
         assert_eq!(lifecycle.on_owner_exit(), GuardAction::None);
     }
 
     #[test]
-    fn stopped_state_prevents_cancel_and_post_stop_interference() {
+    fn stopped_state_prevents_abandonment_and_post_stop_interference() {
         let mut lifecycle = armed_lifecycle();
 
         assert_eq!(lifecycle.disarm(), GuardAction::None);
@@ -1299,17 +1315,42 @@ mod tests {
 
         // A failed stop never marks the lifecycle stopped.
         assert_eq!(lifecycle.state, GuardState::Armed);
-        assert_eq!(lifecycle.on_pipe_break(), GuardAction::Cancel);
+        assert_eq!(lifecycle.on_pipe_break(), GuardAction::Preserve);
     }
 
     #[test]
-    fn uncertain_stop_defers_cleanup_without_late_cancel() {
+    fn uncertain_stop_defers_cleanup_without_late_interference() {
         let mut lifecycle = armed_lifecycle();
 
         lifecycle.defer_cleanup();
-        assert_eq!(lifecycle.state, GuardState::Cancelled);
-        assert_eq!(lifecycle.cancel_started_trace(), GuardAction::None);
+        assert_eq!(lifecycle.state, GuardState::Abandoned);
+        assert_eq!(lifecycle.abandon_started_trace(), GuardAction::None);
         assert_eq!(lifecycle.on_pipe_break(), GuardAction::None);
+    }
+
+    #[test]
+    fn wpr_stop_failures_abandon_lifecycle_and_preserve_marker() {
+        let failures = [
+            Err(anyhow::anyhow!("simulated stop failure")),
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(42),
+                stdout: b"stop stdout".to_vec(),
+                stderr: b"stop stderr".to_vec(),
+            }),
+        ];
+
+        for failure in failures {
+            let mut lifecycle = GuardLifecycle::new();
+            assert_eq!(lifecycle.ready(true), GuardAction::None);
+            assert_eq!(lifecycle.on_start_succeeded(), GuardAction::None);
+            let marker_preserved = std::cell::Cell::new(false);
+
+            handle_wpr_stop_result(failure, &mut lifecycle, || marker_preserved.set(true))
+                .unwrap_err();
+
+            assert_eq!(lifecycle.state, GuardState::Abandoned);
+            assert!(marker_preserved.get());
+        }
     }
 
     #[test]
@@ -1429,10 +1470,10 @@ mod tests {
     }
 
     #[test]
-    fn pipe_break_cancels_armed_session_once() {
+    fn pipe_break_preserves_recovery_state_once() {
         let mut lifecycle = armed_lifecycle();
 
-        assert_eq!(lifecycle.on_pipe_break(), GuardAction::Cancel);
+        assert_eq!(lifecycle.on_pipe_break(), GuardAction::Preserve);
         assert_eq!(lifecycle.on_pipe_break(), GuardAction::None);
     }
 
@@ -1524,6 +1565,47 @@ mod tests {
             r"\\.\pipe\mxc-plm-elevated-00112233445566778899aabbccddee/g",
         ] {
             assert!(validate_pipe_name(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn current_process_matches_its_own_requesting_identity() {
+        validate_same_requesting_user(unsafe { GetCurrentProcess() }).unwrap();
+    }
+
+    #[test]
+    fn different_requesting_identity_is_rejected() {
+        let error = validate_matching_sids(&[1, 2, 3], &[1, 2, 4]).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("invoking and elevating Windows identities to match"));
+    }
+
+    #[test]
+    fn abandoning_session_accepts_clean_and_error_guardian_exits() {
+        for expected_exit_code in [0, 42] {
+            let mut child = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", &format!("exit {expected_exit_code}")])
+                .spawn()
+                .unwrap();
+            let handle = unsafe {
+                OpenProcess(
+                    PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                    false,
+                    child.id(),
+                )
+            }
+            .unwrap();
+            let mut session = GuardedSession {
+                pipe: None,
+                process: OwnedHandle(handle),
+                disarmed: false,
+            };
+
+            session.cancel().unwrap();
+            assert!(session.disarmed);
+            assert_eq!(child.wait().unwrap().code(), Some(expected_exit_code));
         }
     }
 

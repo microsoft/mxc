@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::core::{HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, HANDLE, HLOCAL,
+    CloseHandle, LocalFree, ERROR_ALREADY_EXISTS, ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND,
+    ERROR_PATH_NOT_FOUND, HANDLE, HLOCAL,
 };
 use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -286,7 +287,15 @@ impl SecureScratch {
         self.directory_handle.take();
         let wide = wide_path(&self.directory);
         // SAFETY: `wide` is a NUL-terminated path to the one known directory.
-        let _ = unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) };
+        if let Err(error) = unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) } {
+            let raw = (error.code().0 as u32) & 0xffff;
+            if raw != ERROR_FILE_NOT_FOUND.0 && raw != ERROR_PATH_NOT_FOUND.0 {
+                eprintln!(
+                    "[plm] failed to remove secure scratch directory {}: {error}",
+                    self.directory.display()
+                );
+            }
+        }
     }
 }
 
@@ -684,7 +693,15 @@ fn read_protected_file(path: &Path) -> Result<Vec<u8>> {
 fn delete_known_leaf(path: &Path) {
     let wide = wide_path(path);
     // SAFETY: `wide` is a NUL-terminated path to one known leaf file.
-    let _ = unsafe { DeleteFileW(PCWSTR(wide.as_ptr())) };
+    if let Err(error) = unsafe { DeleteFileW(PCWSTR(wide.as_ptr())) } {
+        let raw = (error.code().0 as u32) & 0xffff;
+        if raw != ERROR_FILE_NOT_FOUND.0 && raw != ERROR_PATH_NOT_FOUND.0 {
+            eprintln!(
+                "[plm] failed to remove secure scratch file {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 fn scratch_name(random: &[u8; 16]) -> String {
