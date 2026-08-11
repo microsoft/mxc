@@ -32,6 +32,112 @@ Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 - Move to `1.0.0-dev` as part of this work. The planned development line is
   `0.9.0-dev`; `1.0.0` remains a later milestone.
 
+## Design note under discussion: experimental fields in published contracts
+
+> **Status: recorded discussion, not part of the plan of record.**
+>
+> The goals, target contracts, and phases below still describe the earlier
+> assumption that published contracts exclude `experimental`. Do not implement
+> the alternative in this section until the requirement is ratified and the
+> normative parts of this plan are updated.
+
+A proposed requirement allows a published config contract (and therefore a
+stable schema artifact) to include explicitly selected experimental fields.
+The `experimental` object and every nested experimental object would remain
+recursively closed. A later published version could promote a feature by moving
+it from `experimental.<feature>` to a top-level `<feature>` field.
+
+This separates three concepts that the current plan partly conflates:
+
+| Concept | Meaning |
+| --- | --- |
+| Contract status | Whether a complete accepted JSON shape is mutable development work or an immutable published contract |
+| Feature status | Whether a field is experimental or part of the top-level stable surface |
+| Execution gate | Whether using the feature requires `--experimental` or another explicit opt-in |
+
+Under this requirement, publishing would freeze the **entire accepted shape**,
+including any experimental subtree included in that version. Published would
+mean immutable syntax, not that every field in the contract is a mature
+top-level feature.
+
+For example:
+
+```text
+0.8.0-alpha accepts: experimental.foo
+0.9.0-alpha accepts: foo
+```
+
+The two immutable contract modules would retain their respective paths while
+their mutable adapters normalize both into the same canonical runtime field:
+
+```text
+v0.8 experimental.foo --\
+                         +--> CanonicalRequest.foo
+v0.9 foo ----------------/
+```
+
+This works naturally with exact version dispatch and avoids putting a
+version-sensitive alias on one rolling wire type. The old path remains accepted
+only while its published contract remains supported; the newer contract may
+reject it and accept only the promoted top-level path.
+
+### Impact if adopted
+
+The following parts of the current plan would need revision:
+
+- Remove the goal and target-contract rule that published contracts never
+  contain `experimental`.
+- Reconstruct each historical version from what that version actually
+  published. The existing `0.6` and `0.7` stable schemas would still exclude
+  `experimental`; a future `0.8` publication could include only the explicitly
+  selected experimental fields intended for that contract.
+- Allow published modules to define self-contained, recursively closed
+  experimental types. Development would remain mutable, but would no longer be
+  the only contract status allowed to contain experimental fields.
+- Make shadow-parser expectations version-specific rather than treating
+  `published version + experimental` as universally invalid.
+- Classify corpus migrations by the first exact contract that defines each
+  experimental field. Do not mechanically move every experimental config to
+  the development version.
+- Dispatch state-aware requests according to the selected contract if
+  state-aware experimental shapes are ever included in a published version.
+- Change publication tooling to freeze the complete selected contract rather
+  than copying only a stable candidate surface. Experimental and state-aware
+  types would be excluded or included deliberately per publication, not by a
+  global rule.
+- Generate schemas and SDK wire types that expose the exact experimental field
+  set for each version.
+
+Phase 1's exact version model, registry, and source-text probe would not change.
+The per-version Rust contract and adapter architecture would also remain the
+same.
+
+### Cost and trade-off
+
+An experimental field included in a published contract loses shape-level
+mutability for that version. Adding, removing, renaming, or restructuring one
+of its fields requires a new config version even though the feature remains
+experimental. This is the principal cost of making experimental structures
+closed and publishable.
+
+The benefit is deterministic parsing: an experimental typo or unsupported
+field is rejected rather than silently ignored, and a published version's
+accepted JSON shape cannot change underneath its users.
+
+### Decisions required before adoption
+
+1. Does a published contract structurally accept its experimental fields even
+   when `--experimental` is absent, with the flag controlling execution only?
+2. If an experimental field is present without the execution opt-in, should MXC
+   reject the request or preserve the current parse-and-ignore behavior?
+3. Can state-aware request shapes be included in a published contract, or does
+   this requirement initially apply only to one-shot experimental fields?
+4. When a feature is promoted, does the new contract reject its old
+   `experimental` path immediately, or provide a version-scoped transition
+   spelling?
+5. Which experimental fields, if any, should be selected for the first
+   `0.8.0-alpha` published contract?
+
 ## Target contracts
 
 | Status | Exact version | Contract |
