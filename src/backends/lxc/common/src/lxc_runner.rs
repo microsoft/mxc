@@ -455,6 +455,23 @@ impl LxcScriptRunner {
     /// separated out first, because grep cannot distinguish "absent" from
     /// "unreadable" -- both are status 2 -- and an image that ships no
     /// `/etc/hosts` has no content to protect.
+    ///
+    /// Two gaps survive this guard, and neither is closable while the command
+    /// is restricted to `grep` and `printf` for BusyBox:
+    ///
+    /// * A successful read still loses NUL bytes, because a shell variable
+    ///   cannot hold them. A hosts file containing one would be rewritten
+    ///   truncated at that byte with status 0, and no assertion here would
+    ///   notice. A NUL in `/etc/hosts` is malformed to begin with, and every
+    ///   alternative -- a scratch file, `sed`, `awk` -- reintroduces either the
+    ///   symlink target this design removed or a dependency BusyBox may lack.
+    ///
+    /// * The existence test, the read, and the redirect are three separate
+    ///   path resolutions, so a `/etc/hosts` symlink swapped between them
+    ///   sends the preserved content somewhere else, and a *dangling* symlink
+    ///   fails `-e` and is then followed by the redirect without any read
+    ///   having happened. Closing that needs an open-once-and-rewrite
+    ///   primitive, which is a Rust-side change rather than a shell one.
     fn hosts_read_prologue() -> String {
         format!(
             "kept=''; \

@@ -654,3 +654,126 @@ fn redaction_and_the_credential_guard_agree_on_every_shape() {
         );
     }
 }
+
+// A *special* scheme (http, https, and the rest of the WHATWG set) treats one
+// slash exactly as it treats two, so this is the credentialed URL
+// `http://alice:hunter2@proxy.example.com:3128/` however plainly it reads as a
+// path. Anchoring the authority on `://` skipped straight past it.
+#[test]
+fn a_single_slash_after_the_scheme_still_introduces_an_authority() {
+    let url = "http:/alice:hunter2@proxy.example.com:3128";
+
+    assert!(
+        proxy_url_has_credentials(url),
+        "the one-slash form carries credentials"
+    );
+    assert!(
+        !redact_proxy_url(url).contains("hunter2"),
+        "password survived redaction of {url}"
+    );
+}
+
+#[test]
+fn any_run_of_slashes_after_the_scheme_introduces_an_authority() {
+    for url in [
+        "http:///alice:hunter2@proxy.example.com",
+        "http:////alice:hunter2@proxy.example.com",
+    ] {
+        assert!(proxy_url_has_credentials(url), "{url} carries credentials");
+        assert!(
+            !redact_proxy_url(url).contains("hunter2"),
+            "password survived redaction of {url}"
+        );
+    }
+}
+
+// The redaction has to reassemble the URL in the form it arrived in, or the
+// message names a URL the operator never wrote.
+#[test]
+fn redaction_preserves_the_separator_it_was_given() {
+    assert_eq!(
+        redact_proxy_url("http://alice:hunter2@proxy.example.com"),
+        "http://***@proxy.example.com"
+    );
+    assert_eq!(
+        redact_proxy_url("http:/alice:hunter2@proxy.example.com"),
+        "http:/***@proxy.example.com"
+    );
+    assert_eq!(
+        redact_proxy_url("http:alice:hunter2@proxy.example.com"),
+        "http:***@proxy.example.com"
+    );
+}
+
+// A bearer token used as sole userinfo has no colon and so no scheme to anchor
+// on. The guard already refused it, but redaction returned it unchanged -- so
+// the rejection message printed the very secret it was refusing.
+#[test]
+fn a_schemeless_value_with_userinfo_is_redacted_as_well_as_refused() {
+    let url = "token@proxy.example.com";
+
+    assert!(proxy_url_has_credentials(url), "{url} carries a credential");
+    assert_eq!(redact_proxy_url(url), "***@proxy.example.com");
+}
+
+// Empty userinfo names no user and no password. Refusing it would reject a
+// configuration that leaks nothing, and redacting it would invent a secret.
+#[test]
+fn empty_userinfo_is_not_a_credential() {
+    for url in [
+        "http://@proxy.example.com:3128",
+        "http://:@proxy.example.com:3128",
+        "http://::@proxy.example.com:3128",
+    ] {
+        assert!(
+            !proxy_url_has_credentials(url),
+            "{url} names neither a user nor a password"
+        );
+        assert_eq!(redact_proxy_url(url), url, "nothing to redact in {url}");
+    }
+}
+
+// The omitted half is the dangerous half to get wrong: a password with no
+// username is still a password, and a username with no password is how a
+// bearer token is passed.
+#[test]
+fn a_single_userinfo_component_is_a_credential() {
+    for url in [
+        "http://:hunter2@proxy.example.com",
+        "http://token@proxy.example.com",
+    ] {
+        assert!(proxy_url_has_credentials(url), "{url} carries a credential");
+        assert_ne!(
+            redact_proxy_url(url),
+            url,
+            "redaction left {url} unchanged while the guard flagged it"
+        );
+    }
+}
+
+// The two functions are only safe while they cannot disagree, and the pairs
+// below are exactly the shapes on which they historically did.
+#[test]
+fn the_guard_and_the_redaction_never_disagree_on_the_shapes_that_broke_them() {
+    let shapes = [
+        "http://alice:hunter2@proxy.example.com",
+        "http:alice:hunter2@proxy.example.com",
+        "http:/alice:hunter2@proxy.example.com",
+        "token@proxy.example.com",
+        "http://@proxy.example.com",
+        "http://:@proxy.example.com",
+        "http://proxy.example.com:8080",
+        "proxy.example.com:8080",
+        "http://proxy.example.com/a@b",
+        "socks5:proxy.example.com",
+    ];
+
+    for url in shapes {
+        let flagged = proxy_url_has_credentials(url);
+        let redacted = redact_proxy_url(url) != url;
+        assert_eq!(
+            flagged, redacted,
+            "guard said {flagged} and redaction said {redacted} for {url}"
+        );
+    }
+}

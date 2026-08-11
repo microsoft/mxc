@@ -95,10 +95,8 @@ pub fn is_managed_proxy_key(key: &str) -> bool {
 /// URL. `scheme:opaque` is redacted too, since `url::Url::parse` accepts it and
 /// the resulting error message would otherwise carry the password.
 pub fn redact_proxy_url(url: &str) -> String {
-    let Some(parts) = split_proxy_authority(url) else {
-        return url.to_string();
-    };
-    match parts.authority.rsplit_once('@') {
+    let parts = split_proxy_authority(url);
+    match credential_userinfo(parts.authority) {
         Some((_userinfo, host)) => format!(
             "{}{}***@{}{}",
             parts.scheme, parts.separator, host, parts.tail
@@ -110,8 +108,9 @@ pub fn redact_proxy_url(url: &str) -> String {
 /// The pieces of a proxy URL that userinfo handling needs.
 struct ProxyAuthority<'a> {
     scheme: &'a str,
-    /// Whichever separator followed the scheme, `://` or `:`, so a redaction
-    /// can be reassembled in the same form it arrived in.
+    /// Whichever separator followed the scheme -- `:`, `://`, or the `:/` that
+    /// a special scheme also accepts -- so a redaction can be reassembled in
+    /// the same form it arrived in.
     separator: &'a str,
     /// Everything between the separator and the first path, query, or fragment
     /// delimiter. An `@` after that point belongs to the path, not to userinfo.
@@ -121,31 +120,69 @@ struct ProxyAuthority<'a> {
 
 /// Split `url` into scheme, separator, authority, and tail.
 ///
-/// Both forms are recognized deliberately. `url::Url::parse` accepts the
-/// opaque `scheme:rest` form -- `alice:hunter2@example.com` parses with scheme
-/// `alice` -- and [`ProxyAddress::from_url`] stores whatever string it is
-/// given, so the opaque form reaches the same places the absolute form does.
+/// Every form is recognized deliberately, because [`ProxyAddress::from_url`]
+/// stores whatever string it is given and [`ProxyAddress::to_url`] returns it
+/// verbatim, so anything that parses somewhere downstream reaches the same
+/// places a well-formed URL does.
+///
+/// * `scheme://authority` -- the ordinary form.
+/// * `scheme:authority` -- `url::Url::parse` accepts the opaque form, and
+///   `alice:hunter2@example.com` parses with scheme `alice`.
+/// * `scheme:/authority` -- for a *special* scheme (`http`, `https`, and the
+///   rest of the WHATWG set) one slash introduces an authority exactly as two
+///   do, so `http:/alice:hunter2@example.com` is the credentialed URL
+///   `http://alice:hunter2@example.com/`. Any run of leading slashes is
+///   therefore part of the separator rather than the start of a path.
+/// * no scheme at all -- the whole value is treated as an authority. Nothing
+///   downstream should accept it as a proxy URL, but the point here is not to
+///   decide that; it is that a bearer token used as sole userinfo,
+///   `token@proxy.example.com`, carries no colon and would otherwise be both
+///   unflagged and unredacted.
 ///
 /// This is the single parse shared by [`redact_proxy_url`] and
 /// [`proxy_url_has_credentials`]. They previously had one each, which is how
 /// they came to disagree: redaction handled the opaque form while the guard
-/// reported it as carrying no credentials.
-fn split_proxy_authority(url: &str) -> Option<ProxyAuthority<'_>> {
-    let (scheme, separator, rest) = match url.split_once("://") {
-        Some((scheme, rest)) => (scheme, "://", rest),
-        None => {
-            let (scheme, rest) = url.split_once(':')?;
-            (scheme, ":", rest)
-        }
+/// reported it as carrying no credentials. It is total rather than fallible
+/// for the same reason -- an input only one of them could parse is an input
+/// they can differ on.
+fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
+    let (scheme, after_scheme) = match url.find(':') {
+        Some(colon) => url.split_at(colon),
+        None => (&url[..0], url),
     };
+    let slashes = after_scheme
+        .strip_prefix(':')
+        .map(|rest| 1 + (rest.len() - rest.trim_start_matches('/').len()))
+        .unwrap_or(0);
+    let (separator, rest) = after_scheme.split_at(slashes);
     let auth_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(auth_end);
-    Some(ProxyAuthority {
+    ProxyAuthority {
         scheme,
         separator,
         authority,
         tail,
-    })
+    }
+}
+
+/// The userinfo an authority carries, split from its host, or `None` when it
+/// carries none worth hiding.
+///
+/// Empty userinfo is not a credential: `http://@proxy.example.com` and
+/// `http://:@proxy.example.com` name neither a user nor a password, and
+/// refusing them would reject a configuration that leaks nothing. A single
+/// component *is* one, though -- `http://token@proxy.example.com` is how a
+/// bearer token is passed, and `http://:secret@proxy.example.com` is a
+/// password with the username omitted -- so anything other than colons counts.
+///
+/// Sharing this between the two public functions is what makes them unable to
+/// disagree about a given string.
+fn credential_userinfo(authority: &str) -> Option<(&str, &str)> {
+    let (userinfo, host) = authority.rsplit_once('@')?;
+    if userinfo.chars().all(|c| c == ':') {
+        return None;
+    }
+    Some((userinfo, host))
 }
 
 /// Whether a proxy URL carries `user:pass@` userinfo.
@@ -159,17 +196,7 @@ fn split_proxy_authority(url: &str) -> Option<ProxyAuthority<'_>> {
 /// and returns the input unchanged when the userinfo is already the literal
 /// redaction marker, which would report a credential-bearing URL as clean.
 pub fn proxy_url_has_credentials(url: &str) -> bool {
-    match split_proxy_authority(url) {
-        Some(parts) => parts.authority.contains('@'),
-        // No scheme at all, so nothing downstream should accept this as a
-        // proxy URL. The guard still fails closed rather than reasoning about
-        // what a malformed value will do once it is somewhere else: any `@`
-        // ahead of the path is userinfo.
-        None => {
-            let auth_end = url.find(['/', '?', '#']).unwrap_or(url.len());
-            url[..auth_end].contains('@')
-        }
-    }
+    credential_userinfo(split_proxy_authority(url).authority).is_some()
 }
 
 /// Build the effective environment for a sandbox whose egress is routed
