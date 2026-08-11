@@ -69,6 +69,7 @@ run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_
 run_test "LXC Network Enforcement" "$SCRIPT_DIR/run_lxc_network_enforcement_test.sh"
 run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"
 run_test "LXC Network Proxy" "$SCRIPT_DIR/run_lxc_network_proxy_test.sh"
+run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 
