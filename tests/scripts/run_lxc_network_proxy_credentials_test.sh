@@ -32,6 +32,10 @@ CONFIG="$REPO_DIR/tests/configs/lxc_network_proxy_credentials_rejected.json"
 # credentials would make every assertion below vacuous -- the run would exit
 # non-zero for some unrelated reason, or succeed -- so the fixture is checked
 # against them first.
+#
+# Do not run this script under `set -x`. Tracing prints every expansion,
+# including these two values and the captured output, which defeats the
+# withholding below. The workflow does not enable it.
 EXPECTED_USERNAME="alice"
 EXPECTED_PASSWORD="hunter2"
 EXPECTED_PROXY_URL="http://alice:hunter2@10.0.3.1:3128"
@@ -69,8 +73,17 @@ PY
 }
 
 actual_url="$(read_json_field network.proxy.url)"
-[ "$actual_url" = "$EXPECTED_PROXY_URL" ] \
-    || fail "fixture proxy.url is '$actual_url', test expects '$EXPECTED_PROXY_URL'"
+if [ "$actual_url" != "$EXPECTED_PROXY_URL" ]; then
+    # Naming either URL here would publish the password on exactly the failure
+    # that says this fixture can no longer be trusted, so the mismatch is
+    # described rather than quoted.
+    if echo "$actual_url" | grep -qF "@"; then
+        drift_detail="it still carries userinfo, but not the pair this test asserts"
+    else
+        drift_detail="it carries no userinfo at all, so every assertion below would be vacuous"
+    fi
+    fail "fixture proxy.url changed; both values withheld because they carry credentials -- $drift_detail"
+fi
 echo "Fixture drift guard passed (proxy.url carries inline credentials)."
 
 # ---------------------------------------------------------------------------
