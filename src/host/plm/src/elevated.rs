@@ -173,17 +173,22 @@ impl GuardLifecycle {
 
 struct GuardedOwner {
     owner: OwnedHandle,
+    singleton: crate::coordination::singleton::Observer,
     lifecycle: GuardLifecycle,
 }
 
 impl GuardedOwner {
     fn open(owner_pid: u32) -> Result<Self> {
+        let singleton = crate::coordination::singleton::Observer::open()
+            .map_err(singleton_error)
+            .context("failed to open guarded PLM singleton observer")?;
         let owner = OwnedHandle(
             unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, owner_pid) }
                 .context("failed to open guarded PLM owner process")?,
         );
         let mut guarded = Self {
             owner,
+            singleton,
             lifecycle: GuardLifecycle::new(),
         };
         if guarded.lifecycle.ready(!guarded.has_exited()?) != GuardAction::None {
@@ -207,7 +212,7 @@ impl GuardedOwner {
         match self.lifecycle.on_start_succeeded() {
             GuardAction::None => {}
             GuardAction::Cancel => {
-                cancel_after_owner_exit()
+                self.cancel_after_owner_exit()
                     .context("failed to cancel PLM trace after owner exit during start")?;
                 anyhow::bail!("guarded PLM owner exited during WPR start");
             }
@@ -217,7 +222,7 @@ impl GuardedOwner {
         }
         if self.has_exited()? {
             if self.lifecycle.on_owner_exit() == GuardAction::Cancel {
-                cancel_after_owner_exit()
+                self.cancel_after_owner_exit()
                     .context("failed to cancel PLM trace after owner exit following start")?;
             }
             anyhow::bail!("guarded PLM owner exited immediately after WPR start");
@@ -229,7 +234,7 @@ impl GuardedOwner {
         loop {
             if self.has_exited()? {
                 if self.lifecycle.on_owner_exit() == GuardAction::Cancel {
-                    cancel_after_owner_exit()
+                    self.cancel_after_owner_exit()
                         .context("failed to cancel PLM trace after guarded owner exit")?;
                 }
                 anyhow::bail!("guarded PLM owner exited before disarm");
@@ -273,7 +278,7 @@ impl GuardedOwner {
             return Ok(());
         }
         if self.has_exited()? {
-            cancel_after_owner_exit()
+            self.cancel_after_owner_exit()
         } else {
             crate::start::cancel_existing_wpr_trace()
         }
@@ -283,6 +288,27 @@ impl GuardedOwner {
         if self.lifecycle.cancel_started_trace() == GuardAction::Cancel {
             let _ = crate::start::cancel_existing_wpr_trace();
         }
+    }
+
+    fn cancel_after_owner_exit(&self) -> Result<()> {
+        use crate::coordination::singleton::AcquireError;
+
+        match self.singleton.try_acquire() {
+            Ok(_) => {}
+            Err(AcquireError::AlreadyHeld) => {
+                // A replacement owner won the handoff. Its acquisition
+                // outcome tells it to clean the inherited WPR session before
+                // starting another trace.
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(singleton_error(error))
+                    .context("guarded PLM singleton acquisition failed")
+            }
+        }
+        let result = crate::start::cancel_existing_wpr_trace();
+        self.singleton.release();
+        result
     }
 }
 
@@ -914,24 +940,13 @@ fn build_internal_parameters(
     parameters
 }
 
-fn cancel_after_owner_exit() -> Result<()> {
-    use crate::coordination::singleton::{try_acquire, AcquireError};
-    use std::sync::atomic::AtomicIsize;
-    let singleton = AtomicIsize::new(0);
-    match try_acquire(&singleton) {
-        Ok(()) => {}
-        Err(AcquireError::AlreadyHeld) => {
-            // A new owner won the abandoned-mutex race. Its WPR session may
-            // already be active, so this child must never cancel it.
-            return Ok(());
+fn singleton_error(error: crate::coordination::singleton::AcquireError) -> anyhow::Error {
+    match error {
+        crate::coordination::singleton::AcquireError::AlreadyHeld => {
+            anyhow::anyhow!("PLM singleton is already held")
         }
-        Err(AcquireError::CreateFailed(error)) => {
-            return Err(error).context("guarded PLM singleton acquisition failed")
-        }
+        crate::coordination::singleton::AcquireError::CreateFailed(error) => error.into(),
     }
-    let result = crate::start::cancel_existing_wpr_trace();
-    crate::coordination::singleton::release(&singleton);
-    result
 }
 
 fn new_pipe_name() -> Result<String> {

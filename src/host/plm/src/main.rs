@@ -37,7 +37,16 @@ fn release_plm_singleton() {
 }
 
 #[cfg(target_os = "windows")]
-struct AcquiredSingleton;
+struct AcquiredSingleton {
+    outcome: plm::coordination::singleton::AcquireOutcome,
+}
+
+#[cfg(target_os = "windows")]
+impl AcquiredSingleton {
+    fn inherited_abandoned_owner(&self) -> bool {
+        self.outcome == plm::coordination::singleton::AcquireOutcome::Abandoned
+    }
+}
 
 #[cfg(target_os = "windows")]
 impl Drop for AcquiredSingleton {
@@ -53,7 +62,7 @@ fn acquire_singleton_if_needed(parent_authorized: bool) -> Result<Option<Acquire
     }
     use plm::coordination::singleton::{try_acquire, AcquireError};
     match try_acquire(&PLM_SINGLETON_HANDLE) {
-        Ok(()) => Ok(Some(AcquiredSingleton)),
+        Ok(outcome) => Ok(Some(AcquiredSingleton { outcome })),
         Err(AcquireError::AlreadyHeld) => anyhow::bail!(
             "another PLM trace is already in progress (Global\\Mxc_Plm_Audit held); \
              refusing to interfere with its NT Kernel Logger session"
@@ -62,6 +71,15 @@ fn acquire_singleton_if_needed(parent_authorized: bool) -> Result<Option<Acquire
             Err(error).context("CreateMutexW failed for Global\\Mxc_Plm_Audit")
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn recover_abandoned_trace(singleton: Option<&AcquiredSingleton>) -> Result<()> {
+    if singleton.is_some_and(AcquiredSingleton::inherited_abandoned_owner) {
+        elevated::invoke(Operation::Cancel, None)
+            .context("failed to clean the WPR session inherited from an abandoned PLM owner")?;
+    }
+    Ok(())
 }
 
 #[derive(Parser, Debug)]
@@ -196,13 +214,17 @@ fn main() -> Result<()> {
         Cmd::InternalElevated { operation } => return internal_operation(operation),
         public => public,
     };
-    let authorized_parent_pid = match wxc_parent_auth.as_deref() {
+    let mut parent_claim = match wxc_parent_auth.as_deref() {
         Some(pipe_name) => Some(plm::parent_auth::claim(pipe_name).map_err(anyhow::Error::msg)?),
         None => None,
     };
+    let authorized_parent_pid = parent_claim
+        .as_ref()
+        .map(plm::parent_auth::ParentClaim::server_pid);
     match cmd {
         Cmd::Start => {
-            let _singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
+            let singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
+            recover_abandoned_trace(singleton.as_ref())?;
             elevated::invoke(Operation::Start, None)
         }
         Cmd::Stop {
@@ -215,7 +237,7 @@ fn main() -> Result<()> {
             verbose_logging,
         } => {
             let _singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
-            let result = stop::run(
+            let result = stop::run_with_trace_stopped(
                 stop::StopOptions {
                     log_dir,
                     bin_path,
@@ -226,6 +248,12 @@ fn main() -> Result<()> {
                     verbose: verbose_logging,
                 },
                 &exe_dir()?,
+                || {
+                    if let Some(claim) = parent_claim.as_mut() {
+                        claim.signal_trace_stopped().map_err(anyhow::Error::msg)?;
+                    }
+                    Ok(())
+                },
             )?;
             println!("{}", serde_json::to_string(&result)?);
             Ok(())
@@ -243,7 +271,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Log { verbose_logging } => {
-            let _singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
+            let singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
+            recover_abandoned_trace(singleton.as_ref())?;
             let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
             let disarm_error = std::cell::RefCell::new(None);
             let result = log::run(

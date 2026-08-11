@@ -156,6 +156,14 @@ pub(crate) fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
+fn complete_live_capture(
+    stop_and_transfer: impl FnOnce() -> Result<()>,
+    on_trace_stopped: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    stop_and_transfer()?;
+    on_trace_stopped()
+}
+
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
 /// to its canonical form. Consumed by `update_from_access_events` as
 /// the self-access filter: events referencing this path are dropped
@@ -189,6 +197,14 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
+    run_with_trace_stopped(opts, exe_dir, || Ok(()))
+}
+
+pub fn run_with_trace_stopped(
+    opts: StopOptions,
+    exe_dir: &Path,
+    on_trace_stopped: impl FnOnce() -> Result<()>,
+) -> Result<StopResult> {
     // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
     // Including PID + sub-second component avoids collisions when
     // parallel PLM tasks finish in the same second.
@@ -243,7 +259,10 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
         }
-        crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file))?;
+        complete_live_capture(
+            || crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file)),
+            on_trace_stopped,
+        )?;
     }
 
     if opts.verbose {
@@ -405,12 +424,18 @@ fn target_comparison_key(path: &Path) -> String {
         .or_else(|_| std::path::absolute(path))
         .unwrap_or_else(|_| path.to_path_buf());
     let key = resolved.to_string_lossy().replace('/', "\\");
-    let key = key
-        .strip_prefix(r"\\?\UNC\")
-        .map(|rest| format!(r"\\{rest}"))
-        .or_else(|| key.strip_prefix(r"\\?\").map(str::to_string))
-        .unwrap_or(key);
+    let key = strip_verbatim_prefix(key);
     normalize_win32_components(&key, !is_verbatim)
+}
+
+fn strip_verbatim_prefix(key: String) -> String {
+    let Some(rest) = key.strip_prefix(r"\\?\") else {
+        return key;
+    };
+    match rest.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("UNC\\") => format!(r"\\{}", &rest[4..]),
+        _ => rest.to_string(),
+    }
 }
 
 fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -> String {
@@ -458,6 +483,48 @@ mod tests {
         let (p, warn) = resolve_bin_path(None, &exe);
         assert_eq!(p, exe);
         assert!(warn.is_none(), "no operator intent means no warning");
+    }
+
+    #[test]
+    fn lowercase_verbatim_unc_key_collides_with_normal_unc_key() {
+        let verbatim = normalize_win32_components(
+            &strip_verbatim_prefix(r"\\?\unc\server\share\denials.json".to_string()),
+            false,
+        );
+        let normal = normalize_win32_components(r"\\server\share\denials.json", true);
+        assert!(windows_paths_equal_ignore_case(&verbatim, &normal));
+    }
+
+    #[test]
+    fn trace_stopped_milestone_follows_successful_transfer() {
+        let events = std::cell::RefCell::new(Vec::new());
+        complete_live_capture(
+            || {
+                events.borrow_mut().push("stopped");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("milestone");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(*events.borrow(), ["stopped", "milestone"]);
+    }
+
+    #[test]
+    fn failed_transfer_does_not_signal_trace_stopped() {
+        let signaled = std::cell::Cell::new(false);
+        let error = complete_live_capture(
+            || anyhow::bail!("transfer failed"),
+            || {
+                signaled.set(true);
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("transfer failed"));
+        assert!(!signaled.get());
     }
 
     #[test]

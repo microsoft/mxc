@@ -10,7 +10,8 @@
 //!
 //! The child opens and validates the wxc-exec owner before starting WPR, stays
 //! alive through the workload, and cancels on owner death or pipe break.
-//! Successful stop explicitly sends DISARM and waits for that child to exit.
+//! Successful stop signals its stop/transfer milestone over the authenticated
+//! parent pipe, then explicitly sends DISARM before trace analysis continues.
 //!
 //! The host-wide named-mutex singleton (`Global\Mxc_Plm_Audit`) is
 //! shared with `plm.exe`; both binaries acquire and release it via
@@ -73,10 +74,74 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
     // silently `wpr -cancel` a peer trace. When wxc-exec spawns
     // plm.exe we already hold that mutex for the whole audit window
     // — tell the child to skip its own acquisition so we don't
-    // deadlock on the same global name. The bypass is a one-shot local named
-    // pipe whose server/client PIDs are checked in both directions; there is
-    // no spoofable environment variable or bare hidden flag.
-    let output = run_authorized_public_plm(&plm, args);
+    // deadlock on the same global name. The bypass uses a local named pipe
+    // whose server/client PIDs are checked in both directions; there is no
+    // spoofable environment variable or bare hidden flag.
+    let output = spawn_authorized_public_plm(&plm, args).and_then(|(child, _connection)| {
+        child
+            .wait_with_output()
+            .map_err(|error| format!("failed to wait for public plm.exe: {error}"))
+    });
+    report_plm_output(output, logger, verbose)
+}
+
+pub fn run_plm_stop_command(
+    args: &[&std::ffi::OsStr],
+    guard: &mut AuditTraceGuard,
+    logger: &mut Logger,
+    verbose: bool,
+) -> bool {
+    use std::fmt::Write as _;
+
+    let Some(plm) = plm_exe_path() else {
+        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
+        return false;
+    };
+    if !plm.exists() {
+        let _ = writeln!(logger, "[audit] plm.exe not found at {}", plm.display());
+        return false;
+    }
+
+    let mut summary = format!("[audit] running {}", plm.display());
+    for arg in args {
+        let _ = write!(summary, " {}", arg.to_string_lossy());
+    }
+    let _ = writeln!(logger, "{summary}");
+    if verbose {
+        eprintln!("{summary}");
+    }
+
+    let (child, mut connection) = match spawn_authorized_public_plm(&plm, args) {
+        Ok(run) => run,
+        Err(error) => {
+            let _ = writeln!(logger, "[audit] failed to launch plm: {error}");
+            return false;
+        }
+    };
+    let milestone = connection.wait_for_trace_stopped();
+    let disarmed = match milestone {
+        Ok(()) => guard.disarm(logger, verbose),
+        Err(error) => {
+            let _ = writeln!(
+                logger,
+                "[audit] did not receive trace-stopped milestone: {error}"
+            );
+            false
+        }
+    };
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for public plm.exe: {error}"));
+    report_plm_output(output, logger, verbose) && disarmed
+}
+
+fn report_plm_output(
+    output: Result<std::process::Output, String>,
+    logger: &mut Logger,
+    verbose: bool,
+) -> bool {
+    use std::fmt::Write as _;
+
     match output {
         Ok(run) if run.status.success() => {
             if verbose {
@@ -119,10 +184,10 @@ fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
-fn run_authorized_public_plm(
+fn spawn_authorized_public_plm(
     plm_path: &std::path::Path,
     args: &[&std::ffi::OsStr],
-) -> Result<std::process::Output, String> {
+) -> Result<(std::process::Child, plm::parent_auth::ParentConnection), String> {
     let authorization = plm::parent_auth::ParentAuthorization::new()?;
     let mut child = std::process::Command::new(plm_path)
         .arg("--wxc-parent-auth")
@@ -132,14 +197,14 @@ fn run_authorized_public_plm(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| format!("failed to spawn public plm.exe: {error}"))?;
-    if let Err(error) = authorization.authorize(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(error);
+    match authorization.authorize(child.id()) {
+        Ok(connection) => Ok((child, connection)),
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(error)
+        }
     }
-    child
-        .wait_with_output()
-        .map_err(|error| format!("failed to wait for public plm.exe: {error}"))
 }
 
 /// Stack-owned guarded START session.
@@ -205,9 +270,9 @@ impl AuditTraceGuard {
 /// mutex (`Global\\` so it's machine-wide across sessions) and
 /// refuses to start if another wxc-exec audit is already running.
 /// Each public `plm.exe` child skips its own acquisition only after a
-/// mutually authenticated one-shot named-pipe handshake with this direct
-/// parent, so the parent's handle remains the sole owner for the trace
-/// lifetime without exposing a spoofable bypass flag.
+/// mutually authenticated named-pipe handshake with this direct parent, so
+/// the parent's handle remains the sole owner for the trace lifetime without
+/// exposing a spoofable bypass flag.
 ///
 /// The handle is stashed in a static atomic (not just the stack guard)
 /// so the explicit cleanup before `process::exit` — which skips
@@ -216,7 +281,15 @@ impl AuditTraceGuard {
 /// idempotent.
 static AUDIT_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
 
-pub struct AuditSingletonGuard;
+pub struct AuditSingletonGuard {
+    outcome: plm::coordination::singleton::AcquireOutcome,
+}
+
+impl AuditSingletonGuard {
+    pub fn inherited_abandoned_owner(&self) -> bool {
+        self.outcome == plm::coordination::singleton::AcquireOutcome::Abandoned
+    }
+}
 
 impl Drop for AuditSingletonGuard {
     fn drop(&mut self) {
@@ -234,7 +307,7 @@ pub fn release_audit_singleton() {
 pub fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
     use plm::coordination::singleton::{try_acquire, AcquireError};
     match try_acquire(&AUDIT_SINGLETON_HANDLE) {
-        Ok(()) => Ok(AuditSingletonGuard),
+        Ok(outcome) => Ok(AuditSingletonGuard { outcome }),
         Err(AcquireError::AlreadyHeld) => Err(String::from(
             "another wxc-exec --audit run holds the Global\\Mxc_Plm_Audit mutex; \
              refusing to start a second concurrent PLM trace (only one NT Kernel \

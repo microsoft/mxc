@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Mutual PID authentication for the unelevated wxc-exec → PLM singleton
-//! handoff. This replaces the spoofable environment/CLI bypass.
+//! Mutual PID authentication and lifecycle signaling for the unelevated
+//! wxc-exec to PLM singleton handoff. This replaces the spoofable
+//! environment/CLI bypass.
 
 use std::io::{Read, Write};
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -25,7 +26,9 @@ use windows::Win32::System::Pipes::{
 
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-parent-";
 const AUTH_BYTE: u8 = 0xa7;
+const TRACE_STOPPED_BYTE: u8 = 0x5c;
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+const TRACE_STOPPED_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const ERROR_NO_DATA: i32 = 232;
 
 pub struct ParentAuthorization {
@@ -33,12 +36,21 @@ pub struct ParentAuthorization {
     name: String,
 }
 
+pub struct ParentConnection {
+    pipe: std::fs::File,
+}
+
+pub struct ParentClaim {
+    server_pid: u32,
+    pipe: std::fs::File,
+}
+
 impl ParentAuthorization {
     pub fn new() -> Result<Self, String> {
         let name = new_pipe_name()?;
         let wide = to_wide(&name);
-        // PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE.
-        let open_mode = FILE_FLAGS_AND_ATTRIBUTES(0x0000_0002) | FILE_FLAG_FIRST_PIPE_INSTANCE;
+        // PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE.
+        let open_mode = FILE_FLAGS_AND_ATTRIBUTES(0x0000_0003) | FILE_FLAG_FIRST_PIPE_INSTANCE;
         let pipe = unsafe {
             CreateNamedPipeW(
                 PCWSTR(wide.as_ptr()),
@@ -46,7 +58,7 @@ impl ParentAuthorization {
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 1,
-                0,
+                1,
                 0,
                 None,
             )
@@ -64,7 +76,7 @@ impl ParentAuthorization {
         &self.name
     }
 
-    pub fn authorize(mut self, expected_client_pid: u32) -> Result<(), String> {
+    pub fn authorize(mut self, expected_client_pid: u32) -> Result<ParentConnection, String> {
         let deadline = Instant::now() + AUTH_TIMEOUT;
         loop {
             match unsafe { ConnectNamedPipe(self.pipe, None) } {
@@ -100,7 +112,32 @@ impl ParentAuthorization {
         let mut pipe = unsafe { std::fs::File::from_raw_handle(raw) };
         pipe.write_all(&[AUTH_BYTE])
             .and_then(|_| pipe.flush())
-            .map_err(|error| format!("failed to send PLM parent authorization: {error}"))
+            .map_err(|error| format!("failed to send PLM parent authorization: {error}"))?;
+        Ok(ParentConnection { pipe })
+    }
+}
+
+impl ParentConnection {
+    pub fn wait_for_trace_stopped(&mut self) -> Result<(), String> {
+        read_byte_with_timeout(
+            &mut self.pipe,
+            TRACE_STOPPED_BYTE,
+            "trace-stopped milestone",
+            TRACE_STOPPED_TIMEOUT,
+        )
+    }
+}
+
+impl ParentClaim {
+    pub fn server_pid(&self) -> u32 {
+        self.server_pid
+    }
+
+    pub fn signal_trace_stopped(&mut self) -> Result<(), String> {
+        self.pipe
+            .write_all(&[TRACE_STOPPED_BYTE])
+            .and_then(|_| self.pipe.flush())
+            .map_err(|error| format!("failed to signal PLM trace-stopped milestone: {error}"))
     }
 }
 
@@ -114,12 +151,13 @@ impl Drop for ParentAuthorization {
     }
 }
 
-/// Claim a one-shot authorization created by the direct parent process.
-pub fn claim(pipe_name: &str) -> Result<u32, String> {
+/// Claim an authorization created by the direct parent process.
+pub fn claim(pipe_name: &str) -> Result<ParentClaim, String> {
     validate_pipe_name(pipe_name)?;
     let parent_pid = direct_parent_pid()?;
     let mut pipe = std::fs::OpenOptions::new()
         .read(true)
+        .write(true)
         .open(pipe_name)
         .map_err(|error| format!("failed to connect to PLM parent authorization: {error}"))?;
     let mut server_pid = 0u32;
@@ -130,24 +168,34 @@ pub fn claim(pipe_name: &str) -> Result<u32, String> {
             "PLM authorization server is not the direct parent: expected {parent_pid}, got {server_pid}"
         ));
     }
-    let mut authorization = [0u8; 1];
-    let deadline = Instant::now() + AUTH_TIMEOUT;
+    read_byte_with_timeout(&mut pipe, AUTH_BYTE, "parent authorization", AUTH_TIMEOUT)?;
+    Ok(ParentClaim { server_pid, pipe })
+}
+
+fn read_byte_with_timeout(
+    pipe: &mut std::fs::File,
+    expected: u8,
+    description: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut value = [0u8; 1];
+    let deadline = Instant::now() + timeout;
     loop {
-        match pipe.read_exact(&mut authorization) {
+        match pipe.read_exact(&mut value) {
             Ok(()) => break,
             Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
                 if Instant::now() >= deadline {
-                    return Err("timed out reading PLM parent authorization".to_string());
+                    return Err(format!("timed out reading PLM {description}"));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(error) => return Err(format!("failed to read PLM parent authorization: {error}")),
+            Err(error) => return Err(format!("failed to read PLM {description}: {error}")),
         }
     }
-    if authorization[0] != AUTH_BYTE {
-        return Err("invalid PLM parent authorization byte".to_string());
+    if value[0] != expected {
+        return Err(format!("invalid PLM {description} byte"));
     }
-    Ok(server_pid)
+    Ok(())
 }
 
 fn direct_parent_pid() -> Result<u32, String> {

@@ -18,6 +18,15 @@ pub const CTRL_HANDLER_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "windows")]
 pub mod singleton {
     use std::sync::atomic::{AtomicIsize, Ordering};
+    use windows::Win32::Foundation::HANDLE;
+
+    /// Distinguishes a fresh acquisition from ownership inherited after
+    /// the previous process terminated while holding the mutex.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AcquireOutcome {
+        Acquired,
+        Abandoned,
+    }
 
     /// Outcome of `try_acquire`. Callers translate to their own error
     /// type (anyhow / String / etc).
@@ -42,12 +51,10 @@ pub mod singleton {
     /// take ownership silently, since the abandoned wpr session (if
     /// any) is torn down separately by the caller's normal cancel
     /// path.
-    pub fn try_acquire(slot: &AtomicIsize) -> Result<(), AcquireError> {
+    pub fn try_acquire(slot: &AtomicIsize) -> Result<AcquireOutcome, AcquireError> {
         use windows::core::w;
-        use windows::Win32::Foundation::{
-            CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT,
-        };
-        use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        use windows::Win32::Foundation::CloseHandle;
+        use windows::Win32::System::Threading::CreateMutexW;
 
         let name = w!("Global\\Mxc_Plm_Audit");
         // Open (or create) the named mutex without requesting initial
@@ -56,27 +63,67 @@ pub mod singleton {
         // owner crashed and we now own the abandoned mutex".
         let handle =
             unsafe { CreateMutexW(None, false, name) }.map_err(AcquireError::CreateFailed)?;
-        let wait = unsafe { WaitForSingleObject(handle, 0) };
-        match wait {
-            WAIT_OBJECT_0 | WAIT_ABANDONED => {
-                // We now own the mutex (either freshly or by
-                // inheriting an abandoned one).
+        match try_acquire_handle(handle) {
+            Ok(outcome) => {
                 slot.store(handle.0 as isize, Ordering::SeqCst);
-                Ok(())
+                Ok(outcome)
             }
-            WAIT_TIMEOUT => {
+            Err(error) => {
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
-                Err(AcquireError::AlreadyHeld)
+                Err(error)
             }
+        }
+    }
+
+    /// Keeps the named mutex object alive while another process owns it.
+    ///
+    /// The guarded elevated child opens this before WPR starts. If its owner
+    /// later dies, either this observer or a replacement audit process wins
+    /// the abandoned-mutex acquisition and performs stale-session cleanup.
+    pub struct Observer {
+        handle: HANDLE,
+    }
+
+    impl Observer {
+        pub fn open() -> Result<Self, AcquireError> {
+            use windows::core::w;
+            use windows::Win32::System::Threading::CreateMutexW;
+
+            let handle = unsafe { CreateMutexW(None, false, w!("Global\\Mxc_Plm_Audit")) }
+                .map_err(AcquireError::CreateFailed)?;
+            Ok(Self { handle })
+        }
+
+        pub fn try_acquire(&self) -> Result<AcquireOutcome, AcquireError> {
+            try_acquire_handle(self.handle)
+        }
+
+        pub fn release(&self) {
+            unsafe {
+                let _ = windows::Win32::System::Threading::ReleaseMutex(self.handle);
+            }
+        }
+    }
+
+    impl Drop for Observer {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            }
+        }
+    }
+
+    fn try_acquire_handle(handle: HANDLE) -> Result<AcquireOutcome, AcquireError> {
+        use windows::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_OBJECT_0 => Ok(AcquireOutcome::Acquired),
+            WAIT_ABANDONED => Ok(AcquireOutcome::Abandoned),
+            WAIT_TIMEOUT => Err(AcquireError::AlreadyHeld),
             other => {
-                unsafe {
-                    let _ = CloseHandle(handle);
-                }
-                // Prefer the OS's last-error (set by WAIT_FAILED);
-                // fall back to encoding the raw wait return as an
-                // HRESULT for exotic values.
                 let thread_err = windows::core::Error::from_thread();
                 Err(AcquireError::CreateFailed(if thread_err.code().is_err() {
                     thread_err

@@ -546,8 +546,8 @@ fn audit_stop_args(
 
 #[cfg(target_os = "windows")]
 use audit::{
-    release_audit_singleton, run_plm_command, try_acquire_audit_singleton, AuditSingletonGuard,
-    AuditTraceGuard,
+    release_audit_singleton, run_plm_command, run_plm_stop_command, try_acquire_audit_singleton,
+    AuditSingletonGuard, AuditTraceGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -1216,6 +1216,25 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        if _audit_singleton
+            .as_ref()
+            .is_some_and(AuditSingletonGuard::inherited_abandoned_owner)
+            && !run_plm_command(
+                &[std::ffi::OsStr::new("cancel")],
+                &mut logger,
+                cli.audit_verbose,
+            )
+        {
+            let _ = writeln!(
+                logger,
+                "[audit] failed to clean the WPR session inherited from an abandoned owner"
+            );
+            eprintln!(
+                "error: failed to clean the WPR session inherited from an abandoned audit owner"
+            );
+            release_audit_singleton();
+            std::process::exit(1);
+        }
         match AuditTraceGuard::start(&mut logger, cli.audit_verbose) {
             Ok(guard) => audit_guard = Some(guard),
             Err(_) => {
@@ -1249,21 +1268,13 @@ fn main() {
             .iter()
             .map(std::ffi::OsString::as_os_str)
             .collect();
-        let stop_ok = run_plm_command(&borrowed, &mut logger, cli.audit_verbose);
-        if stop_ok {
-            if let Some(guard) = audit_guard.as_mut() {
-                if !guard.disarm(&mut logger, cli.audit_verbose) {
-                    let _ = writeln!(
-                        logger,
-                        "[audit] stop succeeded but DISARM failed; guarded cleanup remains armed"
-                    );
-                }
-            }
+        let stop_ok = if let Some(guard) = audit_guard.as_mut() {
+            run_plm_stop_command(&borrowed, guard, &mut logger, cli.audit_verbose)
         } else {
-            let _ = writeln!(
-                logger,
-                "[audit] plm stop failed; guarded cleanup remains armed"
-            );
+            false
+        };
+        if !stop_ok {
+            let _ = writeln!(logger, "[audit] plm stop or guarded DISARM failed");
         }
     }
 
