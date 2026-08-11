@@ -23,9 +23,8 @@ hyperlight_common = { workspace = true, optional = true }
 appcontainer_common = { workspace = true }
 nanvix_binaries = { path = "../../backends/nanvix/binaries", optional = true }
 wslc_common = { workspace = true, optional = true }
-# Shared PLM dep: coordination constants, singleton primitives, and the
-# mutually authenticated unelevated parent handoff. WPR control stays behind
-# PLM's restricted elevated child.
+# Shared PLM dep: coordination, guarded lifecycle, and restricted WPR control.
+# wxc-exec never bypasses PLM's public singleton.
 plm = { path = "../../host/plm" }
 tempfile.workspace = true
 

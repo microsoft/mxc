@@ -56,13 +56,10 @@ impl Drop for AcquiredSingleton {
 }
 
 #[cfg(target_os = "windows")]
-fn acquire_singleton_if_needed(parent_authorized: bool) -> Result<Option<AcquiredSingleton>> {
-    if parent_authorized {
-        return Ok(None);
-    }
+fn acquire_singleton() -> Result<AcquiredSingleton> {
     use plm::coordination::singleton::{try_acquire, AcquireError};
     match try_acquire(&PLM_SINGLETON_HANDLE) {
-        Ok(outcome) => Ok(Some(AcquiredSingleton { outcome })),
+        Ok(outcome) => Ok(AcquiredSingleton { outcome }),
         Err(AcquireError::AlreadyHeld) => anyhow::bail!(
             "another PLM trace is already in progress (Global\\Mxc_Plm_Audit held); \
              refusing to interfere with its NT Kernel Logger session"
@@ -74,8 +71,8 @@ fn acquire_singleton_if_needed(parent_authorized: bool) -> Result<Option<Acquire
 }
 
 #[cfg(target_os = "windows")]
-fn recover_abandoned_trace(singleton: Option<&AcquiredSingleton>) -> Result<()> {
-    if singleton.is_some_and(AcquiredSingleton::inherited_abandoned_owner) {
+fn recover_abandoned_trace(singleton: &AcquiredSingleton) -> Result<()> {
+    if singleton.inherited_abandoned_owner() {
         elevated::invoke(Operation::Cancel, None)
             .context("failed to clean the WPR session inherited from an abandoned PLM owner")?;
     }
@@ -90,10 +87,6 @@ fn recover_abandoned_trace(singleton: Option<&AcquiredSingleton>) -> Result<()> 
 )]
 #[cfg(target_os = "windows")]
 struct Cli {
-    /// One-shot, mutually authenticated singleton handoff from wxc-exec.
-    #[arg(long, hide = true)]
-    wxc_parent_auth: Option<String>,
-
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -206,25 +199,15 @@ fn internal_operation(operation: InternalOperation) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn main() -> Result<()> {
-    let Cli {
-        wxc_parent_auth,
-        cmd,
-    } = Cli::parse();
+    let Cli { cmd } = Cli::parse();
     let cmd = match cmd {
         Cmd::InternalElevated { operation } => return internal_operation(operation),
         public => public,
     };
-    let mut parent_claim = match wxc_parent_auth.as_deref() {
-        Some(pipe_name) => Some(plm::parent_auth::claim(pipe_name).map_err(anyhow::Error::msg)?),
-        None => None,
-    };
-    let authorized_parent_pid = parent_claim
-        .as_ref()
-        .map(plm::parent_auth::ParentClaim::server_pid);
     match cmd {
         Cmd::Start => {
-            let singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
-            recover_abandoned_trace(singleton.as_ref())?;
+            let singleton = acquire_singleton()?;
+            recover_abandoned_trace(&singleton)?;
             elevated::invoke(Operation::Start, None)
         }
         Cmd::Stop {
@@ -236,8 +219,14 @@ fn main() -> Result<()> {
             exit_code,
             verbose_logging,
         } => {
-            let _singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
-            let result = stop::run_with_trace_stopped(
+            // Existing-trace analysis never controls the host WPR session and
+            // therefore does not need the live-capture singleton.
+            let _singleton = if trace_file.is_none() {
+                Some(acquire_singleton()?)
+            } else {
+                None
+            };
+            let result = stop::run(
                 stop::StopOptions {
                     log_dir,
                     bin_path,
@@ -248,12 +237,6 @@ fn main() -> Result<()> {
                     verbose: verbose_logging,
                 },
                 &exe_dir()?,
-                || {
-                    if let Some(claim) = parent_claim.as_mut() {
-                        claim.signal_trace_stopped().map_err(anyhow::Error::msg)?;
-                    }
-                    Ok(())
-                },
             )?;
             println!("{}", serde_json::to_string(&result)?);
             Ok(())
@@ -271,8 +254,8 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Log { verbose_logging } => {
-            let singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
-            recover_abandoned_trace(singleton.as_ref())?;
+            let singleton = acquire_singleton()?;
+            recover_abandoned_trace(&singleton)?;
             let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
             let disarm_error = std::cell::RefCell::new(None);
             let result = log::run(
@@ -294,7 +277,7 @@ fn main() -> Result<()> {
             result
         }
         Cmd::Cancel => {
-            let _singleton = acquire_singleton_if_needed(authorized_parent_pid.is_some())?;
+            let _singleton = acquire_singleton()?;
             elevated::invoke(Operation::Cancel, None)
         }
         Cmd::InternalElevated { .. } => unreachable!("handled before public dispatch"),

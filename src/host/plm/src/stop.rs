@@ -46,6 +46,15 @@ pub struct StopResult {
     pub adjusted_config_path: Option<PathBuf>,
 }
 
+pub fn default_log_dir(exe_dir: &Path) -> PathBuf {
+    let stamp = format!(
+        "{}_pid{}",
+        Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+        std::process::id()
+    );
+    exe_dir.join("logs").join(stamp)
+}
+
 #[derive(Debug)]
 struct ConfigOutputPaths {
     source: PathBuf,
@@ -156,14 +165,6 @@ pub(crate) fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
-fn complete_live_capture(
-    stop_and_transfer: impl FnOnce() -> Result<()>,
-    on_trace_stopped: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    stop_and_transfer()?;
-    on_trace_stopped()
-}
-
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
 /// to its canonical form. Consumed by `update_from_access_events` as
 /// the self-access filter: events referencing this path are dropped
@@ -197,14 +198,6 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
 }
 
 pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
-    run_with_trace_stopped(opts, exe_dir, || Ok(()))
-}
-
-pub fn run_with_trace_stopped(
-    opts: StopOptions,
-    exe_dir: &Path,
-    on_trace_stopped: impl FnOnce() -> Result<()>,
-) -> Result<StopResult> {
     // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
     // Including PID + sub-second component avoids collisions when
     // parallel PLM tasks finish in the same second.
@@ -214,12 +207,7 @@ pub fn run_with_trace_stopped(
                 return parent.to_path_buf();
             }
         }
-        let stamp = format!(
-            "{}_pid{}",
-            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
-            std::process::id()
-        );
-        exe_dir.join("logs").join(stamp)
+        default_log_dir(exe_dir)
     });
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
@@ -259,10 +247,7 @@ pub fn run_with_trace_stopped(
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
         }
-        complete_live_capture(
-            || crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file)),
-            on_trace_stopped,
-        )?;
+        crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file))?;
     }
 
     if opts.verbose {
@@ -493,38 +478,6 @@ mod tests {
         );
         let normal = normalize_win32_components(r"\\server\share\denials.json", true);
         assert!(windows_paths_equal_ignore_case(&verbatim, &normal));
-    }
-
-    #[test]
-    fn trace_stopped_milestone_follows_successful_transfer() {
-        let events = std::cell::RefCell::new(Vec::new());
-        complete_live_capture(
-            || {
-                events.borrow_mut().push("stopped");
-                Ok(())
-            },
-            || {
-                events.borrow_mut().push("milestone");
-                Ok(())
-            },
-        )
-        .unwrap();
-        assert_eq!(*events.borrow(), ["stopped", "milestone"]);
-    }
-
-    #[test]
-    fn failed_transfer_does_not_signal_trace_stopped() {
-        let signaled = std::cell::Cell::new(false);
-        let error = complete_live_capture(
-            || anyhow::bail!("transfer failed"),
-            || {
-                signaled.set(true);
-                Ok(())
-            },
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("transfer failed"));
-        assert!(!signaled.get());
     }
 
     #[test]

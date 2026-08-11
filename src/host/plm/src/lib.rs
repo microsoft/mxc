@@ -20,9 +20,6 @@ pub mod profile_gen;
 pub mod log;
 
 #[cfg(target_os = "windows")]
-pub mod parent_auth;
-
-#[cfg(target_os = "windows")]
 mod secure_scratch;
 
 #[cfg(target_os = "windows")]

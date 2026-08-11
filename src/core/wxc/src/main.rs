@@ -533,9 +533,17 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
 #[cfg(target_os = "windows")]
 fn audit_stop_args(
     config_path: Option<&std::path::Path>,
+    log_dir: &std::path::Path,
+    trace_path: &std::path::Path,
     exit_code: i32,
 ) -> Vec<std::ffi::OsString> {
-    let mut args = vec![std::ffi::OsString::from("stop")];
+    let mut args = vec![
+        std::ffi::OsString::from("stop"),
+        std::ffi::OsString::from("--log-dir"),
+        log_dir.as_os_str().to_owned(),
+        std::ffi::OsString::from("--trace-file"),
+        trace_path.as_os_str().to_owned(),
+    ];
     if let Some(config_path) = config_path {
         args.push(std::ffi::OsString::from("--config-path"));
         args.push(config_path.as_os_str().to_owned());
@@ -546,8 +554,8 @@ fn audit_stop_args(
 
 #[cfg(target_os = "windows")]
 use audit::{
-    release_audit_singleton, run_plm_command, run_plm_stop_command, try_acquire_audit_singleton,
-    AuditSingletonGuard, AuditTraceGuard,
+    cancel_inherited_trace, capture_and_disarm, release_audit_singleton, run_plm_command,
+    try_acquire_audit_singleton, AuditSingletonGuard, AuditTraceGuard,
 };
 
 // ---------------------------------------------------------------------------
@@ -1203,27 +1211,23 @@ fn main() {
     // (and its elevated child finish cleanup) before the singleton releases,
     // so declare the singleton first and the trace guard second.
     #[cfg(target_os = "windows")]
-    let _audit_singleton: Option<AuditSingletonGuard>;
+    let mut audit_singleton: Option<AuditSingletonGuard>;
     #[cfg(target_os = "windows")]
     let mut audit_guard: Option<AuditTraceGuard>;
     #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
         match try_acquire_audit_singleton() {
-            Ok(g) => _audit_singleton = Some(g),
+            Ok(g) => audit_singleton = Some(g),
             Err(msg) => {
                 let _ = writeln!(logger, "[audit] {msg}");
                 eprintln!("error: {msg}");
                 std::process::exit(1);
             }
         }
-        if _audit_singleton
+        if audit_singleton
             .as_ref()
             .is_some_and(AuditSingletonGuard::inherited_abandoned_owner)
-            && !run_plm_command(
-                &[std::ffi::OsStr::new("cancel")],
-                &mut logger,
-                cli.audit_verbose,
-            )
+            && !cancel_inherited_trace(&mut logger, cli.audit_verbose)
         {
             let _ = writeln!(
                 logger,
@@ -1249,7 +1253,7 @@ fn main() {
         config_file_path(&cli)
     } else {
         audit_guard = None;
-        _audit_singleton = None;
+        audit_singleton = None;
         None
     };
 
@@ -1263,18 +1267,30 @@ fn main() {
     // tooling sees a fully-quiesced workload.
     #[cfg(target_os = "windows")]
     if cli.audit {
-        let stop_args = audit_stop_args(audit_config_file.as_deref(), response.exit_code);
-        let borrowed: Vec<&std::ffi::OsStr> = stop_args
-            .iter()
-            .map(std::ffi::OsString::as_os_str)
-            .collect();
-        let stop_ok = if let Some(guard) = audit_guard.as_mut() {
-            run_plm_stop_command(&borrowed, guard, &mut logger, cli.audit_verbose)
-        } else {
-            false
-        };
-        if !stop_ok {
-            let _ = writeln!(logger, "[audit] plm stop or guarded DISARM failed");
+        let capture = audit_guard
+            .as_mut()
+            .ok_or_else(|| "audit trace guard is missing".to_string())
+            .and_then(|guard| capture_and_disarm(guard, &mut logger, cli.audit_verbose));
+        match capture {
+            Ok(capture) => {
+                drop(audit_singleton.take());
+                let stop_args = audit_stop_args(
+                    audit_config_file.as_deref(),
+                    &capture.log_dir,
+                    &capture.trace_path,
+                    response.exit_code,
+                );
+                let borrowed: Vec<&std::ffi::OsStr> = stop_args
+                    .iter()
+                    .map(std::ffi::OsString::as_os_str)
+                    .collect();
+                if !run_plm_command(&borrowed, &mut logger, cli.audit_verbose) {
+                    let _ = writeln!(logger, "[audit] PLM trace analysis failed");
+                }
+            }
+            Err(error) => {
+                let _ = writeln!(logger, "[audit] {error}; guarded cleanup remains armed");
+            }
         }
     }
 
@@ -1432,21 +1448,48 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn audit_stop_args_include_workload_exit_code() {
-        let args = audit_stop_args(Some(std::path::Path::new(r"C:\config.json")), 23);
+        let args = audit_stop_args(
+            Some(std::path::Path::new(r"C:\config.json")),
+            std::path::Path::new(r"C:\logs"),
+            std::path::Path::new(r"C:\logs\trace.etl"),
+            23,
+        );
         assert_eq!(
             args,
-            ["stop", "--config-path", r"C:\config.json", "--exit-code=23"]
-                .map(std::ffi::OsString::from)
+            [
+                "stop",
+                "--log-dir",
+                r"C:\logs",
+                "--trace-file",
+                r"C:\logs\trace.etl",
+                "--config-path",
+                r"C:\config.json",
+                "--exit-code=23"
+            ]
+            .map(std::ffi::OsString::from)
         );
     }
 
     #[cfg(target_os = "windows")]
     #[test]
     fn audit_stop_args_accept_negative_workload_exit_code() {
-        let args = audit_stop_args(None, -1);
+        let args = audit_stop_args(
+            None,
+            std::path::Path::new(r"C:\logs"),
+            std::path::Path::new(r"C:\logs\trace.etl"),
+            -1,
+        );
         assert_eq!(
             args,
-            ["stop", "--exit-code=-1"].map(std::ffi::OsString::from)
+            [
+                "stop",
+                "--log-dir",
+                r"C:\logs",
+                "--trace-file",
+                r"C:\logs\trace.etl",
+                "--exit-code=-1"
+            ]
+            .map(std::ffi::OsString::from)
         );
     }
 
