@@ -31,18 +31,25 @@
 # The same measurement applies to PROXY_OK when the proxy runs on the host, as
 # it does here: the proxy ACCEPT rule is not what admits that traffic, because
 # the packet never reaches the chain (6 packets on the INPUT probe, 0 in
-# FORWARD). PROXY_OK proves the env-var injection and the hosts pin are right
-# and that the deny-all posture did not break the proxy path; it does not
-# exercise the ACCEPT rule. That rule is exercised by the unit specs in
+# FORWARD). PROXY_OK proves the env-var injection is right and that the
+# deny-all posture did not break the proxy path; it does not exercise the
+# ACCEPT rule. That rule is exercised by the unit specs in
 # network_iptables_proxy_spec.rs, and in production by an off-host proxy.
+#
+# It does not exercise the hosts pin either. This fixture names the proxy by IP
+# literal (10.0.3.1), and `ProxyAddress::host_pin` returns no pin for a literal
+# because there is no name to resolve, so no hosts entry is written on this
+# path at all. The pin is covered by tests/proxy_address_spec.rs; a fixture
+# naming the proxy by hostname would be needed to exercise it here.
 #
 # The proxy is locally controlled: a tiny forward proxy started by this script
 # on the host bridge IP, so the positive path needs no external internet and
 # the negative paths target fixed public IPs that never resolve in-container.
 #
-# Requires Linux, root, LXC, and python3. It cannot run on the Windows dev box
-# and no CI job invokes the LXC suite, so treat it as unproven until executed
-# on a Linux host.
+# Requires Linux, root, LXC, and python3. It cannot run on the Windows dev box,
+# so it is exercised by the LXC E2E Tests workflow (.github/workflows/lxc-e2e.yml),
+# which runs the suite on ubuntu-latest with MXC_LXC_TESTS_REQUIRE_EXECUTION=1
+# so a missing prerequisite fails the gate instead of skipping quietly.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

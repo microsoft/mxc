@@ -39,21 +39,56 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_enforcement_deny.json"
 ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_enforcement_allow.json"
-DENY_CHAIN="MXC-CLI-LXC-Net-Deny"
-ALLOW_CHAIN="MXC-CLI-LXC-Net-Allow"
 
 fail() {
     echo "FAIL: $1"
     exit 1
 }
 
+# List the MXC-owned chains a tool currently holds. The chain name is derived
+# from a digest of the container name, so a hard-coded literal names a chain
+# that cannot exist: `iptables -S <that name>` always fails, the cleanup check
+# below reads that failure as "the chain is gone", and the assertion passes
+# without inspecting anything. Matching the MXC- prefix stays correct across
+# naming changes.
+mxc_chains() {
+    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
+}
+
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" after="" leaked="" chain
+    # Captured before iterating rather than piped in from a process
+    # substitution, whose exit status is not the loop's. A failed enumeration
+    # would otherwise read as zero chains and pass this assertion while
+    # verifying nothing.
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
+    fi
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done <<<"$after"
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
+    fi
+}
+
+# The named chain must be gone, and the run must not have leaked any other
+# MXC-owned chain either. The first check is specific to the container this
+# case ran; the second catches a rename or a partial rollback that leaves a
+# differently named chain behind.
 assert_firewall_chain_cleaned_up() {
-    if iptables -S "$1" >/dev/null 2>&1; then
-        fail "iptables chain '$1' was left behind after lxc-exec completed."
+    local chain="$1"
+    if iptables -S "$chain" >/dev/null 2>&1; then
+        fail "iptables chain '$chain' was left behind after lxc-exec completed."
     fi
-    if ip6tables -S "$1" >/dev/null 2>&1; then
-        fail "ip6tables chain '$1' was left behind after lxc-exec completed."
+    if ip6tables -S "$chain" >/dev/null 2>&1; then
+        fail "ip6tables chain '$chain' was left behind after lxc-exec completed."
     fi
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 }
 
 # A hook that references the chain but survives teardown leaves the next
@@ -65,12 +100,31 @@ assert_no_forward_reference() {
     fi
 }
 
+# The chain name is a digest of the container name, so it is read back from this
+# run's own debug output rather than hard-coded. Every assertion that names a
+# chain depends on this having succeeded, so an unparsed name fails the test
+# here instead of silently reducing those assertions to no-ops.
+derive_chain_name() {
+    CHAIN_NAME="$(sed -n 's/^.*Creating iptables\/ip6tables chain: \([^ ]*\).*$/\1/p' <<<"$1" | head -n 1)"
+    if [ -z "$CHAIN_NAME" ]; then
+        fail "no chain creation was logged, so the chain name could not be determined."
+    fi
+    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
+        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
+    fi
+    if [ "${#CHAIN_NAME}" -gt 28 ]; then
+        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
+    fi
+}
+
 echo "Running LXC network policy enforcement test..."
 
 # The container reports the outcome itself rather than relying on its exit
 # code, so a wrapper that swallows or rewrites the status cannot turn a
 # reachable destination into an apparent block.
 echo "--- deny case: default policy blocks, nothing allowed ---"
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 DENY_OUTPUT=$("$LXC_EXEC" --debug "$DENY_CONFIG" 2>&1 || true)
 echo "$DENY_OUTPUT"
 
@@ -81,10 +135,13 @@ if ! echo "$DENY_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
     fail "the deny case produced no verdict at all; the container command did not run."
 fi
 
-assert_no_forward_reference "$DENY_CHAIN"
-assert_firewall_chain_cleaned_up "$DENY_CHAIN"
+derive_chain_name "$DENY_OUTPUT"
+assert_no_forward_reference "$CHAIN_NAME"
+assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
 echo "--- allow case: same default, destination explicitly allowed ---"
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 ALLOW_OUTPUT=$("$LXC_EXEC" --debug "$ALLOW_CONFIG" 2>&1 || true)
 echo "$ALLOW_OUTPUT"
 
@@ -95,8 +152,9 @@ if ! echo "$ALLOW_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
     fail "the allow case produced no verdict at all; the container command did not run."
 fi
 
-assert_no_forward_reference "$ALLOW_CHAIN"
-assert_firewall_chain_cleaned_up "$ALLOW_CHAIN"
+derive_chain_name "$ALLOW_OUTPUT"
+assert_no_forward_reference "$CHAIN_NAME"
+assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
 echo "PASS: a disallowed destination was blocked and an allowed destination was reachable."
 echo "LXC network policy enforcement test complete."

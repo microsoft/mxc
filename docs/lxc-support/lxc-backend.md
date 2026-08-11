@@ -212,8 +212,15 @@ Firewall state is torn down automatically with best-effort removal of the `FORWA
 `network.proxy` puts the container in a "deny all except the proxy" posture:
 egress is restricted to the proxy endpoint, and `HTTP_PROXY`/`HTTPS_PROXY` are
 injected so a cooperating client uses it. The env vars are the routing hint;
-the firewall is the enforcement, so an application that ignores them reaches
-nothing rather than reaching the internet directly.
+the firewall is the enforcement, so an application that ignores them cannot
+reach the internet directly.
+
+The chain is hooked into `FORWARD`, so what it governs is traffic the host
+*routes* on the container's behalf. Traffic addressed to the bridge gateway
+itself — where LXC's `dnsmasq` listens, and where a host-local proxy would run
+— is delivered locally and traverses `INPUT`, which this chain does not hook.
+Closing that path needs an INPUT hook and is tracked separately, so "reaches
+nothing" is accurate for forwarded egress and not for host-local destinations.
 
 Only the `{ "url": "http://proxy.example:8080" }` form is accepted. The LXC
 container has its own network namespace, so `{ "localhost": <port> }` names the
@@ -221,6 +228,21 @@ container has its own network namespace, so `{ "localhost": <port> }` names the
 unreachable and the firewall rule would never match. `{ "builtinTestServer":
 true }` is rejected for the same reason, as is a `url` whose host is a loopback
 literal.
+
+Two further constraints are enforced at parse time, both rejections rather than
+silent corrections:
+
+- **`enforcementMode` must be `firewall` or `both`.** Under the default
+  `capabilities` mode no iptables rules are installed, so the proxy env vars
+  would be injected while direct egress stayed open — a config that reads as
+  deny-all-except-proxy and enforces neither half. MXC refuses it rather than
+  auto-promoting the mode, so a stated enforcement level is never silently
+  rewritten.
+- **The `url` must not carry credentials.** LXC passes the proxy URL to
+  `lxc-attach` as a `--set-var` argument, and process arguments are
+  world-readable through `/proc/<pid>/cmdline`, so inline `user:pass@` would be
+  visible to every local user for the lifetime of the command. Supply the
+  credentials to the proxy itself instead.
 
 The chain a proxied container gets differs from the ordinary one in four ways,
 each of which would otherwise be a hole in the posture:

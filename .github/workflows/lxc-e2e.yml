@@ -69,8 +69,14 @@ jobs:
       # written for: the host forwards by default, so the ONLY thing that can
       # block container traffic is a rule MXC installed. A missing hook then
       # shows up as an unexpected success and fails the deny case loudly.
-      # A narrower conntrack RELATED,ESTABLISHED rule would fix the reply path
-      # but leave the DROP policy, and with it the vacuous pass.
+      # A narrower conntrack RELATED,ESTABLISHED rule is not an alternative
+      # here. The chain already carries return rules in both the interface and
+      # the physdev form, and both were measured inert on this bridged
+      # topology: a reply is routed toward lxcbr0, so the bridge port is not
+      # selected when FORWARD runs and neither form matches. Scoping the return
+      # direction by the container's address is the fix, and it is deferred --
+      # it needs the address plumbed through to the manager and a live bridged
+      # measurement, not another untested rule.
       - name: Let the host forward, so only MXC rules can block
         run: |
           sudo iptables -P FORWARD ACCEPT

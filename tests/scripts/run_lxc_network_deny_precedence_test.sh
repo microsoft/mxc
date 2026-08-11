@@ -42,21 +42,56 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 
 OVERLAP_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_precedence_overlap.json"
 CONTROL_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_precedence_control.json"
-OVERLAP_CHAIN="MXC-CLI-LXC-Net-DenyWins"
-CONTROL_CHAIN="MXC-CLI-LXC-Net-DenyCtl"
 
 fail() {
     echo "FAIL: $1"
     exit 1
 }
 
+# List the MXC-owned chains a tool currently holds. The chain name is derived
+# from a digest of the container name, so a hard-coded literal names a chain
+# that cannot exist: `iptables -S <that name>` always fails, the cleanup check
+# below reads that failure as "the chain is gone", and the assertion passes
+# without inspecting anything. Matching the MXC- prefix stays correct across
+# naming changes.
+mxc_chains() {
+    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
+}
+
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" after="" leaked="" chain
+    # Captured before iterating rather than piped in from a process
+    # substitution, whose exit status is not the loop's. A failed enumeration
+    # would otherwise read as zero chains and pass this assertion while
+    # verifying nothing.
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
+    fi
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done <<<"$after"
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
+    fi
+}
+
+# The named chain must be gone, and the run must not have leaked any other
+# MXC-owned chain either. The first check is specific to the container this
+# case ran; the second catches a rename or a partial rollback that leaves a
+# differently named chain behind.
 assert_firewall_chain_cleaned_up() {
-    if iptables -S "$1" >/dev/null 2>&1; then
-        fail "iptables chain '$1' was left behind after lxc-exec completed."
+    local chain="$1"
+    if iptables -S "$chain" >/dev/null 2>&1; then
+        fail "iptables chain '$chain' was left behind after lxc-exec completed."
     fi
-    if ip6tables -S "$1" >/dev/null 2>&1; then
-        fail "ip6tables chain '$1' was left behind after lxc-exec completed."
+    if ip6tables -S "$chain" >/dev/null 2>&1; then
+        fail "ip6tables chain '$chain' was left behind after lxc-exec completed."
     fi
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
 }
 
 assert_no_forward_reference() {
@@ -65,9 +100,28 @@ assert_no_forward_reference() {
     fi
 }
 
+# The chain name is a digest of the container name, so it is read back from this
+# run's own debug output rather than hard-coded. Every assertion that names a
+# chain depends on this having succeeded, so an unparsed name fails the test
+# here instead of silently reducing those assertions to no-ops.
+derive_chain_name() {
+    CHAIN_NAME="$(sed -n 's/^.*Creating iptables\/ip6tables chain: \([^ ]*\).*$/\1/p' <<<"$1" | head -n 1)"
+    if [ -z "$CHAIN_NAME" ]; then
+        fail "no chain creation was logged, so the chain name could not be determined."
+    fi
+    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
+        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
+    fi
+    if [ "${#CHAIN_NAME}" -gt 28 ]; then
+        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
+    fi
+}
+
 echo "Running LXC deny-precedence enforcement test..."
 
 echo "--- control: destination allowed, nothing blocked ---"
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 CONTROL_OUTPUT=$("$LXC_EXEC" --debug "$CONTROL_CONFIG" 2>&1 || true)
 echo "$CONTROL_OUTPUT"
 
@@ -75,10 +129,13 @@ if ! echo "$CONTROL_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
     fail "the control destination was unreachable with an allow-everything policy, so this host cannot distinguish a deny-precedence failure from a broken network."
 fi
 
-assert_no_forward_reference "$CONTROL_CHAIN"
-assert_firewall_chain_cleaned_up "$CONTROL_CHAIN"
+derive_chain_name "$CONTROL_OUTPUT"
+assert_no_forward_reference "$CHAIN_NAME"
+assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
 echo "--- overlap: same destination in both allowedHosts and blockedHosts ---"
+MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 OVERLAP_OUTPUT=$("$LXC_EXEC" --debug "$OVERLAP_CONFIG" 2>&1 || true)
 echo "$OVERLAP_OUTPUT"
 
@@ -89,8 +146,9 @@ if ! echo "$OVERLAP_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
     fail "the overlap case produced no verdict at all; the container command did not run."
 fi
 
-assert_no_forward_reference "$OVERLAP_CHAIN"
-assert_firewall_chain_cleaned_up "$OVERLAP_CHAIN"
+derive_chain_name "$OVERLAP_OUTPUT"
+assert_no_forward_reference "$CHAIN_NAME"
+assert_firewall_chain_cleaned_up "$CHAIN_NAME"
 
 echo "PASS: a destination in both lists was blocked, and the same destination was reachable when only allowed."
 echo "LXC deny-precedence enforcement test complete."

@@ -62,9 +62,12 @@ production configs and the dev schema when working on experimental features:
                                            // only via { "url": "http://proxy.example:8080" }
                                            // (own-netns: localhost/builtinTestServer are
                                            //  unreachable, rejected)
-                                           // Under LXC the proxy is enforced: egress is restricted
-                                           //  to the proxy endpoint and nothing else, so the
-                                           //  allow/block host lists and DNS are not opened.
+                                           // Under LXC the proxy is enforced: forwarded egress is
+                                           //  restricted to the proxy endpoint and nothing else, so
+                                           //  the allow/block host lists and DNS are not opened.
+                                           //  The chain hooks FORWARD, so traffic addressed to the
+                                           //  bridge gateway itself is delivered locally via INPUT
+                                           //  and is outside what this chain governs.
     },
 
     "ui": {
