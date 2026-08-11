@@ -13,16 +13,13 @@ use chrono::Local;
 use learning_mode_core::AnalysisResult;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::analysis::{analyze_trace, legacy_config_inputs, write_detection_summary};
 use crate::config::{
     deny_file_set, initialize_filesystem, update_from_access_events, write_added_paths_summary,
 };
-use crate::coordination::PLM_LOG_START_IN_FLIGHT;
-use crate::start;
-use crate::stop::{stop_plm_trace_with, WprExeStopper};
-use std::sync::atomic::Ordering;
+use crate::elevated::{self, Operation};
 
 fn prompt_enter(message: &str) -> Result<()> {
     print!("{message}");
@@ -41,20 +38,13 @@ fn can_generate_policy_preview(analysis: &AnalysisResult) -> bool {
 }
 
 pub fn run(
-    wprp_path: &Path,
+    owner_pid: u32,
     verbose: bool,
     on_trace_started: impl FnOnce(),
     on_trace_stopped: impl FnOnce(),
 ) -> Result<()> {
     prompt_enter("Press Enter to start logging...")?;
-    // Bracket the `wpr -start` spawn so the console-control handler
-    // in `plm/src/main.rs` waits for it to drain before deciding
-    // whether to issue `wpr -cancel`. Closes the same race the
-    // wxc-exec side closes with `AUDIT_START_IN_FLIGHT`.
-    PLM_LOG_START_IN_FLIGHT.store(true, Ordering::SeqCst);
-    let start_result = start::start_plm_trace(wprp_path);
-    PLM_LOG_START_IN_FLIGHT.store(false, Ordering::SeqCst);
-    start_result?;
+    elevated::invoke_guarded_start(owner_pid)?;
     // `wpr -start` has engaged the kernel session. Only NOW mark the
     // trace active so a stdin-EOF / spawn-fail before this point can't
     // trip the Ctrl+C handler into `wpr -cancel`ing an unrelated host
@@ -68,7 +58,7 @@ pub fn run(
     // parallel `plm log` invocations from colliding on the same .etl.
     let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
-    stop_plm_trace_with(&mut WprExeStopper, &trace_file)?;
+    elevated::invoke(Operation::Stop, Some(&trace_file))?;
     // Kernel session is torn down; safe to clear the active flag so
     // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
     on_trace_stopped();

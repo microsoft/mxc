@@ -1736,7 +1736,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "embed-manifest",
+ "getrandom 0.2.17",
  "learning_mode_core",
  "learning_mode_windows",
  "mxc_build_common",

@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `plm stop` — stop the in-progress WPR trace and write `trace.etl`
-//! into a log directory.
+//! `plm stop` — keep caller-selected path handling and ETL analysis
+//! unelevated. Only the fixed `wpr -stop` operation runs in the restricted
+//! elevated child, which transfers the ETL back over an authenticated pipe.
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -28,7 +29,8 @@ pub struct StopOptions {
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
-    /// Exact destination passed to `wpr -stop`.
+    /// Exact destination written by the unelevated parent after the elevated
+    /// child transfers the captured ETL bytes.
     pub trace_output: Option<PathBuf>,
     /// Exit code recorded in the canonical denials document.
     pub exit_code: i32,
@@ -129,10 +131,15 @@ impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        cmd.arg("-stop")
+        let output = cmd
+            .arg("-stop")
             .arg(trace_file)
-            .status()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
+        if !output.status.success() {
+            return Err(crate::start::describe_wpr_failure("stop", &output));
+        }
+        Ok(output.status)
     }
 }
 
@@ -145,7 +152,7 @@ pub fn stop_plm_trace_with<S: WprStopper>(stopper: &mut S, trace_file: &Path) ->
     Ok(())
 }
 
-fn stop_plm_trace(trace_file: &Path) -> Result<()> {
+pub(crate) fn stop_plm_trace(trace_file: &Path) -> Result<()> {
     stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
@@ -236,7 +243,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
                     .with_context(|| format!("failed to create {}", parent.display()))?;
             }
         }
-        stop_plm_trace(&trace_file)?;
+        crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file))?;
     }
 
     if opts.verbose {
@@ -543,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_output_is_used_as_the_exact_wpr_destination() {
+    fn trace_output_is_used_as_the_exact_unelevated_destination() {
         let log_dir = Path::new(r"C:\logs");
         let output = Path::new(r"D:\captures\block.etl");
         let (path, existing) = resolve_trace_path(None, Some(output), log_dir).unwrap();

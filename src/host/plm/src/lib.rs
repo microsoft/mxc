@@ -10,11 +10,20 @@ pub mod access_event;
 pub mod analysis;
 pub mod config;
 pub mod coordination;
+#[cfg(target_os = "windows")]
+pub mod elevated;
+pub mod elevated_protocol;
 pub mod extract_caps;
 pub mod profile_gen;
 
 #[cfg(target_os = "windows")]
 pub mod log;
+
+#[cfg(target_os = "windows")]
+pub mod parent_auth;
+
+#[cfg(target_os = "windows")]
+mod secure_scratch;
 
 #[cfg(target_os = "windows")]
 pub mod start;

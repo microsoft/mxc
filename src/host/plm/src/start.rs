@@ -1,14 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `plm start` — start a WPR trace using the `AccessFailureProfile`
-//! defined in `profile_gen::EMBEDDED_WPRP` (materialized to disk next
-//! to `plm.exe` by `profile_gen`). If a pre-existing WPR session
-//! blocks our start, we cancel it and retry exactly once.
+//! Fixed WPR start/cancel operations used only by the restricted elevated
+//! child. The profile path passed here is always an elevated-created temporary
+//! file containing `profile_gen::EMBEDDED_WPRP`. Start never cancels a
+//! pre-existing host trace; a conflict fails closed so PLM cannot tear down a
+//! peer recording.
 
 use anyhow::Result;
 use std::path::Path;
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
 
 use crate::wpr_path::wpr_command;
 
@@ -17,7 +18,6 @@ use crate::wpr_path::wpr_command;
 /// `WprExe`.
 pub trait WprLauncher {
     fn start(&mut self, profile_arg: &str) -> Result<ExitStatus>;
-    fn cancel(&mut self);
 }
 
 pub struct WprExe;
@@ -34,19 +34,16 @@ impl WprLauncher for WprExe {
         // pollute the console of any wrapping tool (e.g. wxc-exec
         // --audit); on non-zero exit we replay the captured streams
         // so operators can still diagnose real failures.
-        let cmd = wpr_command();
+        let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        let output = wpr_command()
+        let output = cmd
             .args(["-start", profile_arg, "-filemode"])
             .output()
             .map_err(|e| describe_wpr_spawn_error("start", &resolved, e))?;
         if !output.status.success() {
-            replay_wpr_output("start", &output);
+            return Err(describe_wpr_failure("start", &output));
         }
         Ok(output.status)
-    }
-    fn cancel(&mut self) {
-        cancel_existing_wpr_trace();
     }
 }
 
@@ -66,24 +63,26 @@ fn describe_wpr_spawn_error(verb: &str, resolved: &str, e: std::io::Error) -> an
     }
 }
 
-/// Replay captured wpr.exe stdout/stderr to the caller's own streams.
-/// Used only on failure paths — the happy path stays silent so PLM
-/// can be embedded in wrappers (e.g. `wxc-exec --audit`) without
-/// polluting their console.
-pub(crate) fn replay_wpr_output(verb: &str, output: &std::process::Output) {
-    use std::io::Write as _;
-    if !output.stdout.is_empty() {
-        let _ = std::io::stdout().write_all(&output.stdout);
+pub(crate) fn describe_wpr_failure(verb: &str, output: &std::process::Output) -> anyhow::Error {
+    anyhow::anyhow!(
+        "wpr -{verb} exited with {} (stdout: {}; stderr: {})",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn describe_wpr_output_result(verb: &str, output: std::process::Output) -> Result<()> {
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(describe_wpr_failure(verb, &output))
     }
-    if !output.stderr.is_empty() {
-        let _ = std::io::stderr().write_all(&output.stderr);
-    }
-    eprintln!("[plm] wpr -{verb} exited with {}", output.status);
 }
 
 /// Cancel any pre-existing in-memory WPR session before starting a
-/// new one. Returns non-zero when no session was active — we ignore
-/// the exit code and silence output.
+/// new one. No-active-session and other non-zero exits are returned
+/// as errors so callers can decide whether to ignore them.
 ///
 /// Only one NT Kernel Logger session can exist host-wide, so this
 /// necessarily terminates any concurrent recording (PLM's previous
@@ -93,33 +92,32 @@ pub(crate) fn replay_wpr_output(verb: &str, output: &std::process::Output) {
 /// only stdout match breaks on every localized Windows install.
 /// Cancel is invoked only on the retry path after `wpr -start`
 /// itself reports a conflict (locale-invariant).
-pub fn cancel_existing_wpr_trace() {
+pub fn cancel_existing_wpr_trace() -> Result<()> {
     eprintln!(
         "[plm] cancelling pre-existing WPR session via `wpr -cancel`; \
          any concurrent non-PLM WPR recording on this host has just been terminated. \
          (Only one NT Kernel Logger session can exist at a time.)"
     );
-    let _ = wpr_command()
+    let mut cmd = wpr_command();
+    let resolved = cmd.get_program().to_string_lossy().into_owned();
+    let output = cmd
         .arg("-cancel")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+        .output()
+        .map_err(|e| describe_wpr_spawn_error("cancel", &resolved, e))?;
+    describe_wpr_output_result("cancel", output)
 }
 
-/// Core try-then-cancel-then-retry state machine, parameterised on a
-/// `WprLauncher` so tests can drive the conflict + retry branches
-/// deterministically.
+/// Start state machine parameterized on a `WprLauncher` for tests.
+///
+/// A non-zero result is returned directly. Automatically issuing `wpr
+/// -cancel` here could destroy an unrelated host recording, so cancellation is
+/// reserved for cleanup paths that already own the PLM singleton.
 pub fn start_plm_trace_with<L: WprLauncher>(launcher: &mut L, wprp_path: &Path) -> Result<()> {
     let arg = format!("{}!AccessFailureProfile", wprp_path.display());
-    let first = launcher.start(&arg)?;
-    if first.success() {
-        return Ok(());
-    }
-    launcher.cancel();
-    let second = launcher.start(&arg)?;
-    if !second.success() {
+    let status = launcher.start(&arg)?;
+    if !status.success() {
         anyhow::bail!(
-            "wpr -start exited with {second} (also failed after retry following wpr -cancel)"
+            "wpr -start exited with {status}; refusing to cancel a pre-existing host WPR session"
         );
     }
     Ok(())
@@ -138,14 +136,12 @@ mod tests {
     struct FakeLauncher {
         starts: Vec<ExitStatus>,
         idx: usize,
-        cancels: usize,
     }
     impl FakeLauncher {
         fn new(codes: &[u32]) -> Self {
             Self {
                 starts: codes.iter().map(|c| ExitStatus::from_raw(*c)).collect(),
                 idx: 0,
-                cancels: 0,
             }
         }
     }
@@ -155,35 +151,21 @@ mod tests {
             self.idx += 1;
             Ok(s)
         }
-        fn cancel(&mut self) {
-            self.cancels += 1;
-        }
     }
 
     #[test]
-    fn start_plm_trace_first_attempt_success_does_not_cancel() {
+    fn start_plm_trace_succeeds_on_zero_exit() {
         let mut f = FakeLauncher::new(&[0]);
         start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap();
         assert_eq!(f.idx, 1);
-        assert_eq!(f.cancels, 0);
     }
 
     #[test]
-    fn start_plm_trace_retries_once_after_conflict() {
-        // First attempt fails (non-zero), cancel runs, second succeeds.
-        let mut f = FakeLauncher::new(&[1, 0]);
-        start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap();
-        assert_eq!(f.idx, 2);
-        assert_eq!(f.cancels, 1);
-    }
-
-    #[test]
-    fn start_plm_trace_propagates_when_retry_also_fails() {
-        let mut f = FakeLauncher::new(&[1, 1]);
+    fn start_plm_trace_fails_without_cancelling_or_retrying() {
+        let mut f = FakeLauncher::new(&[1]);
         let err = start_plm_trace_with(&mut f, &PathBuf::from("plm.wprp")).unwrap_err();
-        assert!(format!("{err}").contains("failed after retry"));
-        assert_eq!(f.idx, 2);
-        assert_eq!(f.cancels, 1);
+        assert!(format!("{err}").contains("refusing to cancel"));
+        assert_eq!(f.idx, 1);
     }
 
     /// when wpr.exe isn't on the system
@@ -220,6 +202,55 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("C:\\Windows\\System32\\wpr.exe"), "got: {s}");
         assert!(s.contains("stop"), "verb must appear: {s}");
+    }
+
+    #[test]
+    fn wpr_failure_includes_captured_diagnostics_for_pipe_transport() {
+        let output = std::process::Output {
+            status: ExitStatus::from_raw(1),
+            stdout: b"start diagnostic".to_vec(),
+            stderr: b"access denied".to_vec(),
+        };
+        let error = describe_wpr_failure("start", &output).to_string();
+        assert!(error.contains("start diagnostic"));
+        assert!(error.contains("access denied"));
+    }
+
+    fn output_with_status(status: u32, stdout: &[u8], stderr: &[u8]) -> std::process::Output {
+        std::process::Output {
+            status: ExitStatus::from_raw(status),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn cancel_existing_wpr_trace_output_succeeds_on_zero_exit() {
+        let output = output_with_status(0, b"ignored stdout", b"ignored stderr");
+        describe_wpr_output_result("cancel", output).unwrap();
+    }
+
+    #[test]
+    fn cancel_existing_wpr_trace_output_propagates_diagnostics_on_nonzero_exit() {
+        let output = output_with_status(42, b"no active session", b"wpr cancelled");
+        let error = describe_wpr_output_result("cancel", output)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("wpr -cancel exited"));
+        assert!(error.contains("no active session"));
+        assert!(error.contains("wpr cancelled"));
+    }
+
+    #[test]
+    fn cancel_spawn_not_found_error_is_actionable() {
+        let error = describe_wpr_spawn_error(
+            "cancel",
+            "C:\\Windows\\System32\\wpr.exe",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "the system cannot find"),
+        );
+        let s = format!("{error}");
+        assert!(s.contains("C:\\Windows\\System32\\wpr.exe"));
+        assert!(s.contains("wpr -cancel"));
     }
 
     /// Whether `element` carries an attribute `name` whose (unescaped)

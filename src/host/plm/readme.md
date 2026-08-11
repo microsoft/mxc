@@ -8,9 +8,9 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 ## How it works
 
-1. **Capture** — `plm start` calls `wpr -start <plm.wprp>!AccessFailureProfile -filemode`, enabling the `Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode` and `Microsoft-Windows-Kernel-General` ETW providers in a secure realtime collector.
+1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC only to launch a hidden restricted child for the fixed WPR start/stop/cancel controls, and that child uses the embedded profile only.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
-3. **Stop** — `plm stop` calls `wpr -stop <trace.etl>` and analyzes the sealed ETL through `EtlDenialAnalyzer`.
+3. **Stop** — the restricted child returns ETL bytes and status over a unique local authenticated named pipe. The unelevated parent owns caller-selected `--trace-output`, `--log-dir`, and `--config-path` destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
 4. **Emit** — canonical findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
 5. **Merge (temporary compatibility)** — file and capability denials are adapted into the existing adjusted-config generator until the shared regeneration engine replaces it.
 
@@ -21,30 +21,47 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 | File                    | Role                                                                              |
 |-------------------------|-----------------------------------------------------------------------------------|
 | `src/main.rs`           | `clap` dispatch for `plm start` / `plm stop` / `plm log` / `plm extract-caps`     |
-| `src/start.rs`          | `wpr -cancel` (best-effort) + `wpr -start …!AccessFailureProfile -filemode`       |
+| `src/elevated.rs`       | Restricted `runas` child, PID-authenticated local pipe, fixed WPR operations, ETL transfer |
+| `src/elevated_protocol.rs` | Bounded success/error/ETL framing shared across the privilege boundary          |
+| `src/parent_auth.rs`    | Mutual-PID one-shot authentication for the wxc-exec singleton handoff             |
+| `src/start.rs`          | Fixed `wpr -start …!AccessFailureProfile -filemode` and cleanup-only cancel       |
 | `src/stop.rs`           | `wpr -stop` (or skip with `--trace-file`) + parse + FS/capability merge           |
 | `src/log.rs`            | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config      |
 | `src/analysis.rs`       | Canonical ETL analysis, denials JSON emission, and temporary config-generator adapter |
 | `src/access_event.rs`   | `LearningModeAccessEvent` plain struct                                            |
 | `src/extract_caps.rs`   | DACL ACE blob decoder; resolves capability SIDs via `DeriveCapabilitySidsFromName` |
 | `src/config.rs`         | JSON load/mutate; FS + capability merge into containment-backend section          |
-| `src/coordination.rs`   | Cross-process singleton named-mutex + bypass-env-var coordination for `plm log`   |
+| `src/coordination.rs`   | Cross-process singleton named-mutex and Ctrl-handler coordination                  |
 | `src/wpr_path.rs`       | Resolves `wpr.exe` to its absolute `%SystemRoot%\System32` path (PATH-spoof-safe) |
-| `src/profile_gen.rs`    | Inline WPR profile (`EMBEDDED_WPRP`) + run-time writer that drops `plm.wprp` next to `plm.exe` when missing |
+| `src/profile_gen.rs`    | Inline, non-overridable WPR profile (`EMBEDDED_WPRP`)                              |
+
+## Privilege boundary
+
+`plm.exe` is `asInvoker`; it does **not** carry a `requireAdministrator` manifest, and no service is added. Caller-selected filesystem operations—including `--log-dir`, `--config-path`, `--trace-file`, `--trace-output`, ETL parsing, denials output, and adjusted-config generation—run under the caller token.
+
+Only hidden fixed `start`, `stop`, and `cancel` control operations are launched with `ShellExecuteExW("runas")`. Their command line contains only an operation, a strictly validated unique local pipe name, and the unelevated server PID. The elevated child:
+
+- resolves `wpr.exe` from `GetSystemDirectoryW`;
+- always uses the compiled-in profile (there is no public `--wprp` override or arbitrary elevated destination);
+- keeps its scratch internal and temporary under an OS-resolved trusted local location with restrictive ACL/integrity handling;
+- rejects remote pipes and pipe squatting (`PIPE_REJECT_REMOTE_CLIENTS` and `FILE_FLAG_FIRST_PIPE_INSTANCE`);
+- authenticates the pipe server PID, while the parent authenticates the child PID returned by `ShellExecuteExW`;
+- uses bounded framing for explicit success, error, and ETL responses.
+- for `wxc-exec --audit` and interactive `plm log`, starts an already-elevated owner-death guardian before reporting start success; the guardian cancels only after acquiring the PLM singleton, and refuses to cancel if a new owner won that race.
+
+`wxc-exec --audit` launches the public PLM process normally. Its host-wide singleton handoff uses a separate mutually PID-authenticated one-shot pipe rather than a spoofable environment variable or hidden bypass flag.
 
 ## CLI
 
 ### `plm start`
 
-Cancels any in-progress WPR session and starts a new permissive-learning-mode trace.
+Starts a new permissive-learning-mode trace. If another WPR session already owns the host logger, start fails without cancelling that peer recording.
+
+This command has no public flags; the removed `--wprp` override is no longer accepted.
 
 ```powershell
-plm.exe start [--wprp <path>]
+plm.exe start
 ```
-
-| Flag       | Default                | Purpose                                                       |
-|------------|------------------------|---------------------------------------------------------------|
-| `--wprp`   | `<exe dir>\plm.wprp`   | Override the WPR profile path. By default `plm` materializes its embedded profile next to the exe on first use; an existing `plm.wprp` is never overwritten, so operator hand-edits are preserved. |
 
 ### `plm stop`
 
@@ -56,7 +73,7 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
              [--exit-code <code>] [--verbose-logging]
 ```
 
-`--trace-output` selects the exact ETL destination passed to `wpr -stop`; it cannot be combined with `--trace-file`, which re-processes an existing ETL. `--exit-code` is copied into the canonical `denials.json` summary.
+`--trace-output` selects the exact destination the **unelevated parent** writes after receiving ETL bytes from the elevated child; it is never passed to `wpr.exe` or opened by elevated code. It cannot be combined with `--trace-file`, which is an entirely unelevated path for re-processing an existing ETL. `--exit-code` is copied into the canonical `denials.json` summary.
 
 `--config-path` temporarily preserves the existing adjusted-config behavior. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it independently. The write is atomic so a downstream enforcing run never observes a truncated policy.
 
@@ -74,8 +91,10 @@ plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
 
 Interactive iteration mode: press Enter to start a trace, run the workload, press Enter again to stop. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview.
 
+It also has no public `--wprp` or destination override flags.
+
 ```powershell
-plm.exe log [--wprp <path>] [--verbose-logging]
+plm.exe log [--verbose-logging]
 ```
 
 ## Building
@@ -89,7 +108,7 @@ cargo build -p plm --target x86_64-pc-windows-msvc
 cargo build -p plm --target x86_64-pc-windows-msvc --release
 ```
 
-The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`); on first use of `plm start` / `plm log`, `profile_gen::ensure_wprp_next_to_exe` writes it to disk next to the binary if no `plm.wprp` is already present. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
+The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`) and is materialized only inside the elevated child's internal temporary scratch area. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
 
 ## Limitations
 

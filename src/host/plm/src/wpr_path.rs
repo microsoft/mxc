@@ -5,8 +5,8 @@
 //!
 //! `Command::new("wpr")` is unsafe: on Windows it resolves via
 //! `CreateProcessW`'s implicit DLL/EXE search order — and that order
-//! starts with the **current working directory**. Because PLM runs as
-//! administrator (required to start the NT Kernel Logger), an
+//! starts with the **current working directory**. Because PLM's restricted
+//! WPR-control child runs as administrator, an
 //! unprivileged user who can drop a `wpr.exe` into a directory an
 //! admin later runs PLM from would gain code execution as that admin.
 //!
