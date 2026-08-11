@@ -19,5 +19,7 @@
 mod registry;
 mod version;
 
+pub mod published;
+
 pub use registry::{descriptor, supported_versions, ContractDescriptor, ContractStatus, CONTRACTS};
 pub use version::{probe_version, ContractVersion, ContractVersion::*, VersionProbeError};
