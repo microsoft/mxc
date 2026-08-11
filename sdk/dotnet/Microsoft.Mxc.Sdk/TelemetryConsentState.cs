@@ -22,8 +22,9 @@ public enum TelemetryConsentState
     /// <summary>
     /// No decision has been recorded yet (fresh install, or an unreadable/corrupt
     /// store). Treated identically to <see cref="Denied"/> for gating purposes —
-    /// callers should use this state to decide whether to show a first-run
-    /// consent prompt.
+    /// callers must use <c>MxcTelemetry.GetStatus().NeedsPrompt</c> or
+    /// <c>MxcTelemetry.NeedsConsentPrompt()</c>, not this state alone, to decide
+    /// whether presentation is appropriate under the current policy.
     /// </summary>
     Undetermined,
 
