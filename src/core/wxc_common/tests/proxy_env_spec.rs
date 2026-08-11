@@ -760,6 +760,8 @@ fn the_guard_and_the_redaction_never_disagree_on_the_shapes_that_broke_them() {
         "http:alice:hunter2@proxy.example.com",
         "http:/alice:hunter2@proxy.example.com",
         "token@proxy.example.com",
+        "alice@proxy.example.com:3128",
+        ":hunter2@proxy.example.com:3128",
         "http://@proxy.example.com",
         "http://:@proxy.example.com",
         "http://proxy.example.com:8080",
@@ -774,6 +776,62 @@ fn the_guard_and_the_redaction_never_disagree_on_the_shapes_that_broke_them() {
         assert_eq!(
             flagged, redacted,
             "guard said {flagged} and redaction said {redacted} for {url}"
+        );
+    }
+}
+
+// A colon is not proof of a scheme. When it separates a port instead, every
+// character before it used to be swallowed as the scheme -- so the authority
+// of `alice@proxy.example.com:3128` was read as the bare port `3128`, which
+// carries no `@`, and the username was neither flagged nor hidden while still
+// reaching `lxc-attach` argv.
+#[test]
+fn a_schemeless_host_and_port_still_shows_its_userinfo() {
+    assert!(
+        proxy_url_has_credentials("alice@proxy.example.com:3128"),
+        "a username before a host:port is a credential"
+    );
+    assert_eq!(
+        redact_proxy_url("alice@proxy.example.com:3128"),
+        "***@proxy.example.com:3128",
+        "the username must not survive redaction"
+    );
+}
+
+#[test]
+fn a_schemeless_password_before_a_port_is_a_credential() {
+    assert!(proxy_url_has_credentials(":hunter2@proxy.example.com:3128"));
+    assert!(
+        !redact_proxy_url(":hunter2@proxy.example.com:3128").contains("hunter2"),
+        "the password must not survive redaction"
+    );
+}
+
+// The prefix of a bare `host:port` does satisfy the scheme grammar, and that
+// has to stay harmless: it leaves the port as the authority, which carries no
+// credential either way. This is the invariant the fix above could have broken.
+#[test]
+fn a_bare_host_and_port_is_still_not_a_credential() {
+    assert!(!proxy_url_has_credentials("proxy.example.com:8080"));
+    assert_eq!(
+        redact_proxy_url("proxy.example.com:8080"),
+        "proxy.example.com:8080"
+    );
+}
+
+// A prefix that fails the grammar for a reason other than `@` must not start
+// being treated as an authority in a way that invents a credential.
+#[test]
+fn a_prefix_that_is_not_a_scheme_does_not_invent_a_credential() {
+    for url in [
+        "1http://proxy.example.com",
+        "pro xy:8080",
+        ":3128",
+        "proxy_host:8080",
+    ] {
+        assert!(
+            !proxy_url_has_credentials(url),
+            "{url} names no user and no password"
         );
     }
 }

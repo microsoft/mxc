@@ -139,6 +139,10 @@ struct ProxyAuthority<'a> {
 ///   `token@proxy.example.com`, carries no colon and would otherwise be both
 ///   unflagged and unredacted.
 ///
+/// A colon alone does not make a scheme: the prefix has to satisfy
+/// [`is_uri_scheme`], or the colon is a port separator and the whole value is
+/// the authority. `alice@proxy.example.com:3128` is that case.
+///
 /// This is the single parse shared by [`redact_proxy_url`] and
 /// [`proxy_url_has_credentials`]. They previously had one each, which is how
 /// they came to disagree: redaction handled the opaque form while the guard
@@ -147,8 +151,8 @@ struct ProxyAuthority<'a> {
 /// they can differ on.
 fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
     let (scheme, after_scheme) = match url.find(':') {
-        Some(colon) => url.split_at(colon),
-        None => (&url[..0], url),
+        Some(colon) if is_uri_scheme(&url[..colon]) => url.split_at(colon),
+        _ => (&url[..0], url),
     };
     let slashes = after_scheme
         .strip_prefix(':')
@@ -163,6 +167,34 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
         authority,
         tail,
     }
+}
+
+/// Whether `candidate` satisfies the RFC 3986 scheme grammar,
+/// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
+///
+/// Everything before the first colon used to be taken for a scheme on sight,
+/// which is wrong whenever the colon is a *port* separator instead. In
+/// `alice@proxy.example.com:3128` that read the scheme as
+/// `alice@proxy.example.com` and the authority as `3128`; an authority of
+/// `3128` carries no `@`, so the guard reported no credentials and redaction
+/// returned the string untouched, while the username still reached
+/// `lxc-attach` argv.
+///
+/// `@` is not in the grammar and a prefix carrying userinfo always contains
+/// one, so refusing non-schemes is what sends the whole value through as an
+/// authority -- where the `@` is found. A hostname alone still satisfies the
+/// grammar (`proxy.example.com` is ALPHA and `.`), and that is harmless: it
+/// leaves the authority as the bare port, which carries no credential either
+/// way.
+fn is_uri_scheme(candidate: &str) -> bool {
+    let mut chars = candidate.chars();
+    if !chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
 }
 
 /// The userinfo an authority carries, split from its host, or `None` when it
