@@ -180,12 +180,7 @@ function Initialize-WslcHost {
     Assert-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform' `
         -Remedy 'WSL2 must be baked into the runner image; enabling these features requires a host reboot this job cannot take.'
 
-    # The features can be enabled while the modern (Store/MSIX) WSL runtime is
-    # absent — the image may still carry only the legacy inbox wsl.exe, which
-    # has no --version. Installing needs no reboot once the features are on.
-    #
-    # Probe quietly: the legacy wsl.exe answers an unknown switch with its full
-    # usage text, which would bury the real progress messages.
+    # check for WSL installed and up to date, and update if needed.
     if ($null -eq (Get-InstalledWslVersion)) {
         Write-Host 'Modern WSL runtime absent; installing via wsl --update...'
         # --web-download avoids the Microsoft Store, which CI images generally
