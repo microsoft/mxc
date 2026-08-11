@@ -707,9 +707,7 @@ mod tests {
     // a dispatcher test and a fallback-detector test running on
     // different threads could each mutate `MXC_FORCE_TIER` under
     // independent locks and race.
-    use crate::test_env::{
-        BcUsableGuard, CaptureCapabilityGuard, ForceTierGuard, ENV_LOCK,
-    };
+    use crate::test_env::{BcUsableGuard, CaptureCapabilityGuard, ForceTierGuard, ENV_LOCK};
 
     fn test_request(policy: ContainerPolicy) -> ExecutionRequest {
         ExecutionRequest {

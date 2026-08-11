@@ -46,7 +46,6 @@ pub trait GuardedCaptureSession: Send {
     /// the stop/analyze round trip fails, or the guardian reports a decode
     /// error.
     fn stop_analyzed(&mut self, lifetimes: &[ProcessLifetime]) -> Result<AnalysisResult, String>;
-
 }
 
 /// Starts a [`GuardedCaptureSession`] for the calling (unelevated) process.
@@ -93,7 +92,6 @@ mod tests {
             }
             Ok(self.analysis.clone())
         }
-
     }
 
     struct FakeFactory;
@@ -139,5 +137,4 @@ mod tests {
         };
         assert!(error.contains("owner pid"));
     }
-
 }

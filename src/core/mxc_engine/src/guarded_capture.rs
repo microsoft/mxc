@@ -39,7 +39,6 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
             .stop_analyzed(lifetimes)
             .map_err(|e| format!("guarded WPR stop/analyze failed: {e:#}"))
     }
-
 }
 
 /// [`GuardedCaptureFactory`] that starts a guarded WPR capture session via the
