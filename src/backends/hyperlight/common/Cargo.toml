@@ -1,5 +1,8 @@
 [package]
-name = "hyperlight_common"
+# Not `hyperlight_common`: crates.io treats `-` and `_` as equivalent for name
+# collisions, and `hyperlight-common` is already published from
+# github.com/hyperlight-dev/hyperlight.  See docs/crates-release.md.
+name = "mxc_alpha_test_hyperlight_common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

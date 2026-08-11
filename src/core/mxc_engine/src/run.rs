@@ -361,7 +361,7 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
             ));
         }
         Ok(ResolvedRunner::without_guard(Box::new(
-            hyperlight_common::HyperlightScriptRunner::new(),
+            mxc_alpha_test_hyperlight_common::HyperlightScriptRunner::new(),
         )))
     }
     #[cfg(not(all(feature = "hyperlight", target_arch = "x86_64")))]

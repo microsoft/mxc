@@ -15,7 +15,13 @@ in a single pipeline run:
    `mxc-crates-package` artifact; the other two legs are verification that the
    closure builds natively on those systems.
 2. **Publish stage** — downloads that artifact and publishes each `.crate` to
-   crates.io through ESRP, one `EsrpRelease@12` task per crate, leaf-first.
+   crates.io through ESRP, one `EsrpRelease@12` task per crate, leaf-first,
+   pausing `publishDelaySeconds` after each one to give crates.io time to
+   serve the new version before the crate that depends on it goes up.  The
+   pause is a fixed delay, not a check: network isolation forbids this job
+   from reading crates.io, so nothing confirms the version is visible.  Each
+   ESRP task is capped at `esrpTimeoutMinutes`, so a release that hangs fails
+   that crate and stops the run instead of consuming the job timeout.
 
 No `CARGO_REGISTRY_TOKEN` exists in this repository. ESRP holds the publishing
 credentials and publishes under the `microsoft-oss-releases` account.
@@ -38,6 +44,17 @@ pwsh scripts/ci/Get-CrateOrder.ps1
 above is the authoritative answer.  Their names are provisional until the
 public naming
 scheme is approved.
+
+One name is deliberately not the obvious one.  The Hyperlight backend crate in
+`src/backends/hyperlight/common` is named
+`mxc_alpha_test_hyperlight_common`, not `hyperlight_common`, because crates.io
+treats `-` and `_` as equivalent when checking name collisions and
+`hyperlight-common` is already published from
+github.com/hyperlight-dev/hyperlight.  That crate is also marked
+`trustpub_only`, so co-ownership would not have permitted an ESRP token
+publish.  Do not "correct" this name back — doing so makes the crate
+unpublishable.  The directory keeps its original `hyperlight/common` path; only
+the package name changed.
 
 ## Publish order
 
@@ -282,19 +299,14 @@ These must be resolved before the first real (non-dry-run) publish:
 2. **ESRP `Rust` content-type onboarding** — the ESRP service connection must
    have the `Rust` content type enabled, requested through the ESRP onboarding
    portal.
-3. **`hyperlight_common` name collision** — crates.io treats `-` and `_` as
-   equivalent when checking name collisions, so `hyperlight_common` collides
-   with the existing `hyperlight-common` crate, published from
-   github.com/hyperlight-dev/hyperlight.  It is the only name in the release
-   closure that is taken today; the rest are unregistered.  The crate must be
-   renamed or co-ownership obtained before it can be published. Note that
-   `hyperlight-common` is marked `trustpub_only` on crates.io, so co-ownership
-   alone may not permit an ESRP token publish.
-4. **crates.io rate limit** — the default `PublishNew` rate limit is burst-5
+3. **crates.io rate limit** — the default `PublishNew` rate limit is burst-5
    plus 1 per 10 minutes.  A first release of the whole closure will be
    throttled.  An override must be requested from help@crates.io before the
-   first publish.
-5. **Pipeline registration** — `.azure-pipelines/1ES.Release.Crates.yml` is new
+   first publish.  The `publishDelaySeconds` wait in the publish job does not
+   substitute for it: waiting out the limit would need ten minutes per crate
+   past the fifth, roughly 160 minutes across the closure, which no workable
+   job timeout accommodates.
+4. **Pipeline registration** — `.azure-pipelines/1ES.Release.Crates.yml` is new
    and must be registered as a pipeline in Azure DevOps, and that pipeline must
    be authorized to use the `MXC-ESRP-Signing` variable group.
 
@@ -304,7 +316,7 @@ These must be resolved before the first real (non-dry-run) publish:
 |------|---------|
 | `.azure-pipelines/1ES.Release.Crates.yml` | Top-level release pipeline — the release-ref gate and the stage wiring |
 | `.azure-pipelines/templates/Package.Crates.Job.yml` | Packaging job — runs `cargo package` over the derived order and produces the artifact |
-| `.azure-pipelines/templates/Publish.CratesIo.Job.yml` | ESRP publish job — declares `crateOrder`, and runs one staging step and one `EsrpRelease@12` task per crate |
+| `.azure-pipelines/templates/Publish.CratesIo.Job.yml` | ESRP publish job — declares `crateOrder`, sets a 120-minute job timeout, caps each ESRP release at `esrpTimeoutMinutes`, and runs one staging step, one `EsrpRelease@12` task, and one index wait per crate |
 | `scripts/ci/Get-CrateOrder.ps1` | Computes the leaf-first order from `cargo metadata` — run by packaging, and by a developer regenerating `crateOrder` |
 | `scripts/ci/Invoke-CratePackage.ps1` | Packages the closure and copies the `.crate` files where the artifact task reads them — run by the packaging job |
 | `src/Cargo.toml` | Workspace version (single source of truth for all crate versions) |

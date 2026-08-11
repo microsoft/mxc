@@ -16,7 +16,7 @@ cargo-fuzz = true
 [features]
 # Enable runner-specific validation in the `validator` fuzz target.
 # These pull in heavier deps so they're opt-in for local dev.
-hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
+hyperlight = ["dep:mxc_alpha_test_hyperlight_common", "mxc_alpha_test_hyperlight_common/hyperlight"]
 isolation_session = ["dep:isolation_session_common"]
 microvm = ["dep:nanvix_runner", "wxc_common/microvm"]
 
@@ -24,7 +24,7 @@ microvm = ["dep:nanvix_runner", "wxc_common/microvm"]
 libfuzzer-sys = "0.4"
 wxc_common = { path = "../../core/wxc_common" }
 nanvix_runner = { path = "../../backends/nanvix/runner", optional = true }
-hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
+mxc_alpha_test_hyperlight_common = { path = "../../backends/hyperlight/common", optional = true }
 isolation_session_common = { path = "../../backends/isolation_session/common", optional = true }
 
 [[bin]]

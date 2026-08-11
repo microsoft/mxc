@@ -1011,14 +1011,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyperlight_common"
-version = "0.7.0"
-dependencies = [
- "hyperlight-unikraft",
- "wxc_common",
-]
-
-[[package]]
 name = "iana-time-zone"
 version = "0.1.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,8 +1370,8 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
- "hyperlight_common",
  "lxc_common",
+ "mxc_alpha_test_hyperlight_common",
  "mxc_build_common",
  "mxc_engine",
  "nanvix_binaries",
@@ -1480,6 +1472,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_alpha_test_hyperlight_common"
+version = "0.7.0"
+dependencies = [
+ "hyperlight-unikraft",
+ "wxc_common",
+]
+
+[[package]]
 name = "mxc_build_common"
 version = "0.7.0"
 dependencies = [
@@ -1515,10 +1515,10 @@ version = "0.7.0"
 dependencies = [
  "appcontainer_common",
  "bwrap_common",
- "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
  "lxc_common",
+ "mxc_alpha_test_hyperlight_common",
  "nanvix_runner",
  "seatbelt_common",
  "serde",
@@ -3130,7 +3130,7 @@ dependencies = [
  "anyhow",
  "appcontainer_common",
  "clap",
- "hyperlight_common",
+ "mxc_alpha_test_hyperlight_common",
  "mxc_build_common",
  "mxc_engine",
  "nanvix_binaries",

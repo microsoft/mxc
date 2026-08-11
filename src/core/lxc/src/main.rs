@@ -136,7 +136,7 @@ fn main() {
             } else {
                 Mode::Buffer
             });
-            match hyperlight_common::setup(cli.force, &mut logger) {
+            match mxc_alpha_test_hyperlight_common::setup(cli.force, &mut logger) {
                 Ok(snap) => {
                     eprintln!("hyperlight setup: snapshot ready at {:?}", snap);
                     process::exit(0);

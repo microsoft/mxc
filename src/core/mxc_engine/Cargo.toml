@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 nanvix_runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-hyperlight_common = { workspace = true, optional = true }
+mxc_alpha_test_hyperlight_common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 appcontainer_common = { workspace = true }
@@ -43,7 +43,7 @@ default = []
 # (e.g. NanVix's `nanvix_binaries`) stays with the executor crates.
 microvm = ["dep:nanvix_runner"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk"]
-hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight"]
+hyperlight = ["dep:mxc_alpha_test_hyperlight_common", "mxc_alpha_test_hyperlight_common/hyperlight"]
 isolation_session = [
     "dep:isolation_session_bindings",
     "dep:isolation_session_common",

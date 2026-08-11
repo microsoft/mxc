@@ -41,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
             }
             #[cfg(feature = "hyperlight")]
             ContainmentBackend::Hyperlight => {
-                let runner = hyperlight_common::HyperlightScriptRunner::new();
+                let runner = mxc_alpha_test_hyperlight_common::HyperlightScriptRunner::new();
                 let _ = runner.validate_runner(&req);
             }
             #[cfg(feature = "isolation_session")]
