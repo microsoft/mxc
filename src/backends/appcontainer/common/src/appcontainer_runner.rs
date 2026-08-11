@@ -1257,19 +1257,17 @@ impl SpawnedChild {
     /// session, used when the sandboxed child failed to launch after the
     /// session was already started.
     ///
-    /// Always prefers stopping through the authenticated guarded protocol
-    /// (`stop_analyzed`, using whatever the tracked job recorded — possibly
-    /// an empty lifetime) over a host-wide cancel: an abandoned session
-    /// cannot be safely reasoned about from partial state alone, so it is
-    /// disarmed the same way a normal stop would be, and the resulting
-    /// [`learning_mode_core::AnalysisResult`] is simply discarded since the
-    /// launch itself failed. Never invokes [`GuardedCaptureSession::cancel`].
+    /// Stops through the authenticated guarded protocol only when the tracked
+    /// job can provide a valid process scope. If tracking itself failed, drop
+    /// the session so the guardian preserves recovery state rather than
+    /// sending an invalid empty scope or issuing a host-wide cancellation.
     fn discard_capture_session_after_launch_failure(&mut self) {
         let Some(mut session) = self.capture_session.take() else {
             return;
         };
-        let lifetimes = self.job.finish_process_tracking().unwrap_or_default();
-        let _ = session.stop_analyzed(&lifetimes);
+        if let Ok(lifetimes) = self.job.finish_process_tracking() {
+            let _ = session.stop_analyzed(&lifetimes);
+        }
     }
 }
 

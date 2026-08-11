@@ -2084,7 +2084,7 @@ impl BaseContainerRunner {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::LaunchFailed,
                 ..ScriptResponse::error(&format!(
-                    "ResumeThread failed for the BaseContainer child: {error}"
+                    "ResumeThread failed for the BaseContainer child: {error:?}"
                 ))
             });
         }

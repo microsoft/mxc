@@ -289,8 +289,15 @@ impl GuardedOwner {
                         return run_guarded_stop(pipe, self, None);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
-                        let lifetimes = read_process_lifetimes(pipe)
-                            .context("failed to receive guarded WPR process-lifetime scope")?;
+                        let lifetimes = match read_process_lifetimes(pipe) {
+                            Ok(lifetimes) => lifetimes,
+                            Err(error) => {
+                                self.preserve_after_pipe_break();
+                                return Err(error).context(
+                                    "failed to receive guarded WPR process-lifetime scope",
+                                );
+                            }
+                        };
                         return run_guarded_stop(pipe, self, Some(&lifetimes));
                     }
                     Err(error) => {
