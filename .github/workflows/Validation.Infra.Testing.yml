@@ -1,7 +1,5 @@
 name: Validation Infrastructure Testing
 
-# github was down - forcing this to run now :)  
-
 on:
   push:
     branches:

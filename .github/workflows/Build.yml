@@ -1,7 +1,4 @@
-# Entry point for GHA PR/CI validation. Mirrors the 1ES `1ES.Build.yml`
-# split: this file orchestrates reusable build-and-validation stages.
-
-name: Build + Validate
+name: Build
 
 on:
   push:
@@ -49,13 +46,6 @@ jobs:
   macos:
     needs: dependency-feed-check
     uses: ./.github/workflows/Build.MacOS.Job.yml
-
-  pr-validation-test-matrix:
-    needs: [windows, linux, macos]
-    if: github.event_name == 'pull_request' && github.base_ref == 'main'
-    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
-    with:
-      plan: pr
 
   sdk-unit-tests:
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml

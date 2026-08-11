@@ -198,18 +198,6 @@ function Initialize-WslcHost {
     # # if unicode output mentions wsl.exe --install, skip version check for now
     if ($output -match 'wsl.exe --install') {
         Exit-WithError 'WSL2 is not installed on this runner. The runner image must include WSL2 for this backend.'
-    #     Write-Host "=== installing WSL ==="
-
-    #     [Console]::OutputEncoding = [System.Text.Encoding]::Unicode
-    #     wsl.exe --install --web-download --no-distribution 2>&1 | Write-Host
-    #     if ($LASTEXITCODE -ne 0) {
-    #         [Console]::OutputEncoding = $previousEncoding
-    #         throw "WSL installation failed: $LASTEXITCODE"
-    #     }
-    #     wsl.exe --status  2>&1 | Write-Host
-    #     wsl.exe --version 2>&1 | Write-Host
-    #     [Console]::OutputEncoding = $previousEncoding
-    #
     }
 
     if ((Invoke-Wsl @('--version') -Quiet) -ne 0) {
