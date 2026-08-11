@@ -330,9 +330,10 @@ impl Drop for OwnedHandle {
 
 /// Live authenticated connection to the elevated START child.
 ///
-/// Dropping an armed session closes the control pipe and waits for the child
-/// to cancel the trace. [`Self::stop`] asks that same retained child to stop
-/// WPR and transfer the ETL, avoiding a second elevation prompt.
+/// [`Self::cancel`] closes an armed session and reports whether the child
+/// successfully cancelled the trace. Dropping remains a last-resort cleanup
+/// path for unwinding. [`Self::stop`] asks the same retained child to stop WPR
+/// and transfer the ETL, avoiding a second elevation prompt.
 pub struct GuardedSession {
     pipe: Option<std::fs::File>,
     process: OwnedHandle,
@@ -350,6 +351,16 @@ impl std::fmt::Debug for GuardedSession {
 }
 
 impl GuardedSession {
+    pub fn cancel(&mut self) -> Result<()> {
+        if self.disarmed {
+            return Ok(());
+        }
+        self.pipe.take();
+        self.disarmed = true;
+        wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION)
+            .context("guarded PLM cancellation failed")
+    }
+
     pub fn stop(&mut self, trace_destination: &Path) -> Result<()> {
         if self.disarmed {
             anyhow::bail!("guarded PLM session is already stopped");
@@ -425,12 +436,21 @@ pub fn stop_current_guarded_start(trace_destination: &Path) -> Result<()> {
             .borrow_mut()
             .take()
             .context("no guarded PLM session is active on this thread")?;
-        session.stop(trace_destination)
+        let result = session.stop(trace_destination);
+        if result.is_err() && !session.disarmed {
+            *slot.borrow_mut() = Some(session);
+        }
+        result
     })
 }
 
-pub fn cancel_current_guarded_start() {
-    CURRENT_GUARDED_SESSION.with(|slot| drop(slot.borrow_mut().take()));
+pub fn cancel_current_guarded_start() -> Result<()> {
+    CURRENT_GUARDED_SESSION.with(|slot| {
+        let Some(mut session) = slot.borrow_mut().take() else {
+            return Ok(());
+        };
+        session.cancel()
+    })
 }
 
 pub fn start_guarded_session(owner_pid: u32) -> Result<GuardedSession> {

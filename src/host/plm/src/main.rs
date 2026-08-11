@@ -161,10 +161,14 @@ fn main() -> Result<()> {
         Cmd::Log { verbose_logging } => {
             let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
             let result = log::run(owner_pid, verbose_logging, || {});
-            if result.is_err() {
-                elevated::cancel_current_guarded_start();
+            if let Err(error) = result {
+                if let Err(cancel_error) = elevated::cancel_current_guarded_start() {
+                    return Err(error)
+                        .context(format!("guarded PLM cleanup also failed: {cancel_error:#}"));
+                }
+                return Err(error);
             }
-            result
+            Ok(())
         }
         Cmd::InternalElevated { .. } => unreachable!("handled before public dispatch"),
     }

@@ -1259,6 +1259,15 @@ fn main() {
                     logger,
                     "[audit] {error}; guarded cleanup remains armed only if WPR stop did not complete"
                 );
+                if let Some(guard) = audit_guard.as_mut() {
+                    if let Err(cancel_error) = guard.cancel(&mut logger) {
+                        let _ = writeln!(
+                            logger,
+                            "[audit] explicit guarded cleanup failed: {cancel_error}"
+                        );
+                        eprintln!("error: audit trace cleanup failed: {cancel_error}");
+                    }
+                }
             }
         }
     }

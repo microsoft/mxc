@@ -14,10 +14,8 @@
 //! so the normal audit lifecycle needs only the original UAC prompt. The
 //! singleton is released only after that child reports the trace stopped.
 //!
-//! The host-wide named-mutex singleton (`Global\Mxc_Plm_Audit`) is
-//! shared with `plm.exe`; both binaries acquire and release it via
-//! `plm::coordination::singleton` so their retry-on-conflict paths can
-//! never silently `wpr -cancel` a peer trace.
+//! The retained child exclusively owns the protected host-wide named-mutex
+//! singleton (`Global\Mxc_Plm_Audit`) together with its WPR session.
 
 use wxc_common::logger::Logger;
 
@@ -204,6 +202,16 @@ impl AuditTraceGuard {
 
         self.session.stop(trace_destination).map_err(|error| {
             let message = format!("guarded PLM stop failed: {error:#}");
+            let _ = writeln!(logger, "[audit] {message}");
+            message
+        })
+    }
+
+    pub fn cancel(&mut self, logger: &mut Logger) -> Result<(), String> {
+        use std::fmt::Write as _;
+
+        self.session.cancel().map_err(|error| {
+            let message = format!("guarded PLM cancellation failed: {error:#}");
             let _ = writeln!(logger, "[audit] {message}");
             message
         })
