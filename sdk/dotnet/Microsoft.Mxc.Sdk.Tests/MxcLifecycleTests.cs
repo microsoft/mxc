@@ -220,4 +220,13 @@ public class MxcLifecycleTests
         Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
         Assert.Null(root["experimental"]);
     }
+
+    [Fact]
+    public void ExecInSandboxAsync_PreservesCancellationTokenAsThirdParameter()
+    {
+        static Task<RunResult> InvokeWithDefaultLiteral(SandboxId id, string command) =>
+            MxcLifecycle.ExecInSandboxAsync(id, command, default);
+
+        Assert.NotNull((Func<SandboxId, string, Task<RunResult>>)InvokeWithDefaultLiteral);
+    }
 }

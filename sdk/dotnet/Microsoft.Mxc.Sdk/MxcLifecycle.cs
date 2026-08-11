@@ -169,8 +169,8 @@ public static class MxcLifecycle
     public static async Task<RunResult> ExecInSandboxAsync(
         SandboxId id,
         string command,
-        StateAwareOperationOptions? options = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        StateAwareOperationOptions? options = null)
     {
         // Offload the blocking exec-start P/Invoke so this method never blocks
         // the caller's thread (for a backend that relays exec internally, the
@@ -196,16 +196,6 @@ public static class MxcLifecycle
             proc.Dispose();
         }
     }
-
-    /// <summary>
-    /// Compatibility overload retaining the original positional cancellation
-    /// token signature.
-    /// </summary>
-    public static Task<RunResult> ExecInSandboxAsync(
-        SandboxId id,
-        string command,
-        CancellationToken cancellationToken) =>
-        ExecInSandboxAsync(id, command, null, cancellationToken);
 
     /// <summary>Stop a running sandbox.</summary>
     /// <exception cref="MxcException">Stopping failed.</exception>
