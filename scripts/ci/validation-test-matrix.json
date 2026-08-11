@@ -374,18 +374,6 @@
         ]
       },
       {
-        "os": "macos-26",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
-        "os": "macos-15",
-        "backends": [
-          "seatbelt"
-        ]
-      },
-      {
         "os": "ubuntu-26.04",
         "backends": [
           "bubblewrap",

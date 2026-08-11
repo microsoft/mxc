@@ -53,7 +53,8 @@ case "$backend" in
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
         test -x "$binary_directory/unix-test-proxy"
-        bash "$script_root/TEMP_run_seatbelt_all_tests.sh" "$binary_directory"
+        echo "The Seatbelt CI handler is not wired to an existing backend test entry point yet." >&2
+        exit 2
         ;;
     *)
         usage
