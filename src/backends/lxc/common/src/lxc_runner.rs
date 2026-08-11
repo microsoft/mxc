@@ -466,15 +466,24 @@ impl LxcScriptRunner {
     ///   alternative -- a scratch file, `sed`, `awk` -- reintroduces either the
     ///   symlink target this design removed or a dependency BusyBox may lack.
     ///
-    /// * The existence test, the read, and the redirect are three separate
-    ///   path resolutions, so a `/etc/hosts` symlink swapped between them
-    ///   sends the preserved content somewhere else, and a *dangling* symlink
-    ///   fails `-e` and is then followed by the redirect without any read
-    ///   having happened. Closing that needs an open-once-and-rewrite
-    ///   primitive, which is a Rust-side change rather than a shell one.
+    /// * A symlink *swapped in* between the `-h` test and the redirect is
+    ///   still followed. That is a genuine race, and closing it needs an
+    ///   open-once-and-rewrite primitive -- `openat` with `O_NOFOLLOW` inside
+    ///   the container's mount namespace -- which is a Rust-side change rather
+    ///   than a shell one. What the `-h` test does close is the case that
+    ///   needs no race at all: a workload reused across runs can *leave*
+    ///   `/etc/hosts` as a symlink, and a dangling one used to be the worst
+    ///   shape of all, because it failed `-e`, skipped the read, and then had
+    ///   its target created by the redirect -- a write to an attacker-named
+    ///   path, which on a writable host bind mount lands outside the
+    ///   container.
     fn hosts_read_prologue() -> String {
         format!(
-            "kept=''; \
+            "if [ -h /etc/hosts ]; then \
+             printf 'mxc: refusing to rewrite /etc/hosts: it is a symbolic link\\n' >&2; \
+             exit 4; \
+             fi; \
+             kept=''; \
              if [ -e /etc/hosts ]; then \
              kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
              status=$?; \
@@ -1119,5 +1128,88 @@ mod hosts_command_execution {
                 "the unpin dropped {line:?}; file is now:\n{after}"
             );
         }
+    }
+    // A dangling symlink was the worst shape the guard did not cover: `-e` is
+    // false, so no read happened, and the redirect then *created* the target.
+    // On a writable host bind mount that is a write outside the container, at
+    // a path the workload chose.
+    #[test]
+    fn pinning_refuses_a_dangling_symlink_instead_of_creating_its_target() {
+        let scratch = Scratch::new("dangling");
+        let target = scratch.dir.join("attacker-named");
+        std::os::unix::fs::symlink(&target, scratch.hosts())
+            .expect("the scratch symlink should be creatable");
+
+        let code = run(&pin(&scratch.hosts()), None);
+
+        assert_ne!(code, 0, "writing through a symlink should be refused");
+        assert!(
+            !target.exists(),
+            "the refused pin still created {}",
+            target.display()
+        );
+    }
+
+    // The non-dangling case is the same write to somewhere the workload chose,
+    // it just does not announce itself by leaving a broken link behind.
+    #[test]
+    fn pinning_refuses_a_symlink_rather_than_writing_through_it() {
+        let scratch = Scratch::new("symlink");
+        let target = scratch.dir.join("elsewhere");
+        std::fs::write(&target, ORIGINAL).expect("the target should be writable");
+        std::os::unix::fs::symlink(&target, scratch.hosts())
+            .expect("the scratch symlink should be creatable");
+
+        let code = run(&pin(&scratch.hosts()), None);
+
+        assert_ne!(code, 0, "writing through a symlink should be refused");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target should still be readable"),
+            ORIGINAL,
+            "the refused pin still rewrote the symlink target"
+        );
+    }
+
+    // Unpinning takes the same prologue, so it has to refuse on the same terms
+    // -- and it is the more destructive of the two, since it writes back only
+    // what it read.
+    #[test]
+    fn unpinning_refuses_a_symlink_rather_than_emptying_its_target() {
+        let scratch = Scratch::new("unpinsymlink");
+        let target = scratch.dir.join("elsewhere");
+        std::fs::write(&target, ORIGINAL).expect("the target should be writable");
+        std::os::unix::fs::symlink(&target, scratch.hosts())
+            .expect("the scratch symlink should be creatable");
+
+        let code = run(&unpin(&scratch.hosts()), None);
+
+        assert_ne!(code, 0, "writing through a symlink should be refused");
+        assert_eq!(
+            std::fs::read_to_string(&target).expect("the target should still be readable"),
+            ORIGINAL,
+            "the refused unpin still emptied the symlink target"
+        );
+    }
+
+    // The refusal has to be legible in the container's stderr, or an operator
+    // sees only a non-zero exit from a destroyed container.
+    #[test]
+    fn the_symlink_refusal_says_why() {
+        let scratch = Scratch::new("symlinkmsg");
+        let target = scratch.dir.join("elsewhere");
+        std::os::unix::fs::symlink(&target, scratch.hosts())
+            .expect("the scratch symlink should be creatable");
+
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(pin(&scratch.hosts()))
+            .output()
+            .expect("/bin/sh should be executable");
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("symbolic link"),
+            "the refusal named no reason; stderr was:\n{stderr}"
+        );
     }
 }
