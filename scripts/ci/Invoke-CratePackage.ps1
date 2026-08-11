@@ -60,8 +60,27 @@ if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed with exit $LASTEXITCODE"
 $packageDir = Join-Path $metadata.target_directory 'package'
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
-$found = @(Get-ChildItem -Path $packageDir -Filter '*.crate' -File)
-if ($found.Count -ne $crates.Count) { throw "packaged $($crates.Count) crates but found $($found.Count) .crate files in $packageDir" }
+# target/package accumulates across runs, so a bare *.crate glob also matches
+# files left by earlier runs -- including crates that have since been renamed.
+# Counting those is both fragile and unsafe: a coincidental match would copy a
+# stale crate into the artifact.  Collect by the exact file name cargo produces
+# for each crate in this closure instead.
+$versions = @{}
+foreach ($package in $metadata.packages)
+{
+    $versions[$package.name] = $package.version
+}
 
-Copy-Item $found.FullName -Destination $OutDir
+$found = @()
+foreach ($crate in $crates)
+{
+    if (-not $versions.ContainsKey($crate)) { throw "cargo metadata has no package named $crate" }
+
+    $cratePath = Join-Path $packageDir "$crate-$($versions[$crate]).crate"
+    if (-not (Test-Path -LiteralPath $cratePath)) { throw "cargo package did not produce $cratePath" }
+
+    $found += $cratePath
+}
+
+Copy-Item $found -Destination $OutDir
 Write-Host "collected $($found.Count) crates into $OutDir"
