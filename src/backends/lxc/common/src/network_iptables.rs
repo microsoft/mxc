@@ -224,23 +224,20 @@ pub struct NetworkIptablesManager {
     /// The container's veth interface name on the host.
     veth_interface: Option<String>,
     /// Whether a caller that never supplies a veth is expected rather than
-    /// broken. Defaults to `false`, so a missing veth fails fast.
+    /// broken.
     veth_scoping_optional: bool,
-    /// Topology the hook logic should assume, bypassing the sysfs probe.
+    /// Topology the hook logic assumes, in place of the sysfs probe.
     ///
-    /// Unit tests run on hosts with no `/sys/class/net`, where the honest probe
-    /// answer is [`VethTopology::Unknown`] and every apply would take the
-    /// bridged branch. Tests therefore declare a topology rather than inherit
-    /// the build host's; only tests can set this.
+    /// Test-only. A build host has no `/sys/class/net`, so the probe's
+    /// honest answer there is [`VethTopology::Unknown`] for every container.
     #[cfg(test)]
     topology_override: Option<VethTopology>,
     /// Chains and FORWARD hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
-    /// The hosts-file pin the container needs so it resolves the proxy
-    /// hostname to the one address this manager authorized. Recorded during
-    /// apply, because the resolution that produced the firewall rule is the
-    /// only one the container is allowed to agree with.
+    /// The hosts-file pin that resolves the proxy hostname to the one address
+    /// this manager authorized -- the same resolution the firewall rule was
+    /// built from.
     proxy_pin: Option<ProxyHostPin>,
 }
 
@@ -323,26 +320,16 @@ pub fn chain_name_for(container_name: &str) -> String {
     }
 }
 
-/// What a sysfs lookup was able to establish about a veth's topology.
+/// What a sysfs lookup established about a veth's topology.
 ///
-/// The third state is the point of this type. `Path::exists()` folds every
-/// metadata error into `false`, so a two-state check built on it would read a
-/// masked, unmounted, or permission-denied sysfs as "directly routed" -- and
-/// that is the reading which downgrades a failed physdev hook from fatal to a
-/// warning. The lookup is independent of how the interface was discovered:
-/// `discover_veth_interface`
-/// parses `lxc-info`, not sysfs, so a veth can be known to exist while its
-/// sysfs entry is unreadable.
+/// Failure to establish it is a third answer rather than a negative one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VethTopology {
-    /// `master` is present, so the interface is enslaved to a bridge.
+    /// The interface is enslaved to a bridge.
     Bridged,
-    /// The interface directory is present and holds no `master`. This is a
-    /// positive finding, not the absence of one.
+    /// The interface is not enslaved to a bridge. Established, not assumed.
     DirectlyRouted,
-    /// The lookup failed, so the topology is not known. Callers must treat
-    /// this as bridged: that is the branch which keeps a physdev hook
-    /// failure fatal.
+    /// The topology could not be established.
     Unknown,
 }
 impl NetworkIptablesManager {
@@ -2375,8 +2362,8 @@ mod test_firewall {
         /// back to `fallback`.
         scripted: VecDeque<Result<(), String>>,
         fallback: Result<(), String>,
-        /// When set, any command whose argv contains the needle fails with the
-        /// paired message, regardless of `scripted`/`fallback`.
+        /// A needle, and the message every command whose argv contains it
+        /// fails with. Takes precedence over `scripted` and `fallback`.
         fail_matching: Option<(String, String)>,
     }
 
