@@ -597,8 +597,7 @@ fn forced_decision(
     // any tier that would touch them.
     let needs_dacl = match tier {
         IsolationTier::AppContainerDacl => true,
-        IsolationTier::BaseContainer => false,
-        IsolationTier::AppContainerBfs => denied,
+        IsolationTier::BaseContainer | IsolationTier::AppContainerBfs => denied,
     };
     if needs_dacl && !policy.fallback.allow_dacl_mutation {
         return Err(FallbackError::DaclFallbackDisabled);
