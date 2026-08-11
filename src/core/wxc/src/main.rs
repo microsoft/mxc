@@ -1289,7 +1289,10 @@ fn main() {
                 }
             }
             Err(error) => {
-                let _ = writeln!(logger, "[audit] {error}; guarded cleanup remains armed");
+                let _ = writeln!(
+                    logger,
+                    "[audit] {error}; guarded cleanup remains armed only if WPR stop did not complete"
+                );
             }
         }
     }

@@ -19,7 +19,7 @@ use crate::analysis::{analyze_trace, legacy_config_inputs, write_detection_summa
 use crate::config::{
     deny_file_set, initialize_filesystem, update_from_access_events, write_added_paths_summary,
 };
-use crate::elevated::{self, Operation};
+use crate::elevated;
 
 fn prompt_enter(message: &str) -> Result<()> {
     print!("{message}");
@@ -41,7 +41,7 @@ pub fn run(
     owner_pid: u32,
     verbose: bool,
     on_trace_started: impl FnOnce(),
-    on_trace_stopped: impl FnOnce(),
+    on_trace_stopped: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     prompt_enter("Press Enter to start logging...")?;
     elevated::invoke_guarded_start(owner_pid)?;
@@ -58,10 +58,11 @@ pub fn run(
     // parallel `plm log` invocations from colliding on the same .etl.
     let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
-    elevated::invoke(Operation::Stop, Some(&trace_file))?;
-    // Kernel session is torn down; safe to clear the active flag so
-    // any subsequent Ctrl+C doesn't issue a stale `wpr -cancel`.
-    on_trace_stopped();
+    elevated::invoke_stop_with_stopped(&trace_file, || {
+        // Kernel session is torn down; clear the active flag before ETL
+        // persistence so later failure cannot issue a stale wpr -cancel.
+        on_trace_stopped()
+    })?;
 
     if verbose {
         println!("Beginning event parsing, this may take several minutes");

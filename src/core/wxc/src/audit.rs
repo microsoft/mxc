@@ -40,7 +40,11 @@ pub struct CapturedAudit {
 pub fn cancel_inherited_trace(logger: &mut Logger, verbose: bool) -> bool {
     use std::fmt::Write as _;
 
-    match plm::elevated::invoke(plm::elevated::Operation::Cancel, None) {
+    let Some(plm) = plm_exe_path() else {
+        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
+        return false;
+    };
+    match plm::elevated::invoke_with_executable(&plm, plm::elevated::Operation::Cancel, None) {
         Ok(()) => true,
         Err(error) => {
             let _ = writeln!(logger, "[audit] inherited WPR cleanup failed: {error:#}");
@@ -73,14 +77,20 @@ pub fn capture_and_disarm(
         "[audit] stopping trace into {}",
         trace_path.display()
     );
-    plm::elevated::invoke(plm::elevated::Operation::Stop, Some(&trace_path)).map_err(|error| {
+    plm::elevated::invoke_stop_with_executable_and_stopped(&plm, &trace_path, || {
+        if guard.disarm(logger, verbose) {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "failed to disarm guarded PLM start after WPR stopped"
+            ))
+        }
+    })
+    .map_err(|error| {
         let message = format!("failed to stop and transfer PLM trace: {error:#}");
         let _ = writeln!(logger, "[audit] {message}");
         message
     })?;
-    if !guard.disarm(logger, verbose) {
-        return Err("failed to disarm guarded PLM start after trace transfer".to_string());
-    }
     Ok(CapturedAudit {
         log_dir,
         trace_path,

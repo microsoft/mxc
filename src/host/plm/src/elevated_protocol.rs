@@ -18,6 +18,7 @@ pub enum ResponseKind {
     Success = 0,
     Trace = 1,
     Error = 2,
+    Stopped = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,7 @@ pub fn read_header(reader: &mut impl Read) -> io::Result<ResponseHeader> {
         0 => ResponseKind::Success,
         1 => ResponseKind::Trace,
         2 => ResponseKind::Error,
+        3 => ResponseKind::Stopped,
         _ => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -83,7 +85,7 @@ pub fn read_header(reader: &mut impl Read) -> io::Result<ResponseHeader> {
 
 fn validate_payload(kind: ResponseKind, payload_len: u64) -> io::Result<()> {
     let valid = match kind {
-        ResponseKind::Success => payload_len == 0,
+        ResponseKind::Success | ResponseKind::Stopped => payload_len == 0,
         ResponseKind::Trace => payload_len <= MAX_TRACE_BYTES,
         ResponseKind::Error => payload_len <= MAX_ERROR_BYTES,
     };
@@ -116,6 +118,10 @@ mod tests {
                 kind: ResponseKind::Error,
                 payload_len: 42,
             },
+            ResponseHeader {
+                kind: ResponseKind::Stopped,
+                payload_len: 0,
+            },
         ] {
             let mut bytes = Vec::new();
             write_header(&mut bytes, expected.kind, expected.payload_len).unwrap();
@@ -126,6 +132,7 @@ mod tests {
     #[test]
     fn rejects_unbounded_payloads_and_success_payloads() {
         assert!(write_header(&mut Vec::new(), ResponseKind::Success, 1).is_err());
+        assert!(write_header(&mut Vec::new(), ResponseKind::Stopped, 1).is_err());
         assert!(write_header(&mut Vec::new(), ResponseKind::Error, MAX_ERROR_BYTES + 1).is_err());
         assert!(write_header(&mut Vec::new(), ResponseKind::Trace, MAX_TRACE_BYTES + 1).is_err());
     }

@@ -257,22 +257,14 @@ fn main() -> Result<()> {
             let singleton = acquire_singleton()?;
             recover_abandoned_trace(&singleton)?;
             let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
-            let disarm_error = std::cell::RefCell::new(None);
             let result = log::run(
                 owner_pid,
                 verbose_logging,
                 || {},
-                || {
-                    if let Err(error) = elevated::disarm_current_guarded_start() {
-                        *disarm_error.borrow_mut() = Some(error);
-                    }
-                },
+                elevated::disarm_current_guarded_start,
             );
             if result.is_err() {
                 elevated::cancel_current_guarded_start();
-            }
-            if let Some(error) = disarm_error.into_inner() {
-                return Err(error).context("failed to disarm interactive guarded PLM session");
             }
             result
         }

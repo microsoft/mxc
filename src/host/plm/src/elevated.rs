@@ -337,8 +337,8 @@ impl Drop for OwnedHandle {
 /// Live authenticated connection to the elevated START child.
 ///
 /// Dropping an armed session closes the control pipe and waits for the child
-/// to cancel the trace. Call [`Self::disarm`] only after stop and ETL transfer
-/// have both succeeded.
+/// to cancel the trace. Call [`Self::disarm`] only after the authenticated STOP
+/// child has reported that the WPR session is stopped.
 pub struct GuardedSession {
     pipe: Option<std::fs::File>,
     process: OwnedHandle,
@@ -360,14 +360,34 @@ impl GuardedSession {
         if self.disarmed {
             return Ok(());
         }
-        let pipe = self
-            .pipe
-            .as_mut()
-            .context("guarded PLM control connection is already closed")?;
-        pipe.write_all(&[CONTROL_DISARM])
-            .context("failed to send guarded PLM DISARM")?;
-        pipe.flush().context("failed to flush guarded PLM DISARM")?;
-        wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION)?;
+        let result = (|| {
+            let pipe = self
+                .pipe
+                .as_mut()
+                .context("guarded PLM control connection is already closed")?;
+            pipe.write_all(&[CONTROL_DISARM])
+                .context("failed to send guarded PLM DISARM")?;
+            pipe.flush().context("failed to flush guarded PLM DISARM")?;
+            wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION)
+        })();
+        if let Err(error) = result {
+            // This method is called only after the authenticated STOP child
+            // reported that wpr -stop completed. If graceful DISARM fails,
+            // terminate the guardian before closing its pipe so it cannot
+            // interpret the pipe break as permission to cancel a later,
+            // unrelated WPR session.
+            let terminate_error = unsafe { TerminateProcess(self.process.0, 1) }.err();
+            let _ = wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION);
+            self.pipe.take();
+            self.disarmed = true;
+            return match terminate_error {
+                Some(terminate_error) => Err(error).context(format!(
+                    "also failed to terminate guarded PLM child after DISARM failure: \
+                     {terminate_error}"
+                )),
+                None => Err(error),
+            };
+        }
         self.pipe.take();
         self.disarmed = true;
         Ok(())
@@ -395,6 +415,27 @@ thread_local! {
 pub fn invoke(operation: Operation, trace_destination: Option<&Path>) -> Result<()> {
     let executable = std::env::current_exe().context("failed to resolve plm.exe path")?;
     invoke_with_executable(&executable, operation, trace_destination)
+}
+
+pub fn invoke_stop_with_executable_and_stopped(
+    executable: &Path,
+    trace_destination: &Path,
+    on_stopped: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    invoke_with_executable_and_stopped(
+        executable,
+        Operation::Stop,
+        Some(trace_destination),
+        on_stopped,
+    )
+}
+
+pub fn invoke_stop_with_stopped(
+    trace_destination: &Path,
+    on_stopped: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let executable = std::env::current_exe().context("failed to resolve plm.exe path")?;
+    invoke_stop_with_executable_and_stopped(&executable, trace_destination, on_stopped)
 }
 
 /// Compatibility entry point used by interactive `plm log`.
@@ -437,7 +478,14 @@ pub fn start_guarded_session_with_executable(
     }
     let (mut pipe, process, deadline) =
         launch_connected_child(executable, Operation::Start, Some(owner_pid))?;
-    if let Err(error) = read_response(&mut pipe, process.0, Operation::Start, None, deadline) {
+    if let Err(error) = read_response(
+        &mut pipe,
+        process.0,
+        Operation::Start,
+        None,
+        deadline,
+        || Ok(()),
+    ) {
         drop(pipe);
         let _ = wait_for_child_exit(process.0, WAIT_TIMEOUT_DURATION);
         return Err(error);
@@ -449,10 +497,19 @@ pub fn start_guarded_session_with_executable(
     })
 }
 
-fn invoke_with_executable(
+pub fn invoke_with_executable(
     executable: &Path,
     operation: Operation,
     trace_destination: Option<&Path>,
+) -> Result<()> {
+    invoke_with_executable_and_stopped(executable, operation, trace_destination, || Ok(()))
+}
+
+fn invoke_with_executable_and_stopped(
+    executable: &Path,
+    operation: Operation,
+    trace_destination: Option<&Path>,
+    on_stopped: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     match (operation, trace_destination) {
         (Operation::Stop, Some(_)) | (Operation::Start | Operation::Cancel, None) => {}
@@ -461,7 +518,14 @@ fn invoke_with_executable(
     }
 
     let (mut pipe, process, deadline) = launch_connected_child(executable, operation, None)?;
-    let result = read_response(&mut pipe, process.0, operation, trace_destination, deadline);
+    let result = read_response(
+        &mut pipe,
+        process.0,
+        operation,
+        trace_destination,
+        deadline,
+        on_stopped,
+    );
     drop(pipe);
     let wait_result = wait_for_child_exit(
         process.0,
@@ -628,6 +692,9 @@ fn run_stop(pipe: &mut std::fs::File) -> Result<()> {
     crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
     let scratch = SecureScratch::new()?;
     crate::stop::stop_plm_trace(scratch.trace_path())?;
+    write_header(pipe, ResponseKind::Stopped, 0)
+        .and_then(|_| pipe.flush())
+        .context("failed to return elevated PLM WPR-stopped milestone")?;
     let (mut trace_file, len) = scratch.open_trace()?;
     if len > MAX_TRACE_BYTES {
         anyhow::bail!(
@@ -697,12 +764,16 @@ fn read_response(
     operation: Operation,
     trace_destination: Option<&Path>,
     deadline: Instant,
+    on_stopped: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    let header = read_header_polling(pipe, process, deadline)?;
+    let first_header = read_header_polling(pipe, process, deadline)?;
+    let (header, stopped) = accept_response_headers(first_header, operation, on_stopped, || {
+        read_header_polling(pipe, process, deadline)
+    })?;
     match header.kind {
         ResponseKind::Success if operation != Operation::Stop => Ok(()),
         ResponseKind::Success => anyhow::bail!("elevated stop returned no ETL payload"),
-        ResponseKind::Trace if operation == Operation::Stop => {
+        ResponseKind::Trace if operation == Operation::Stop && stopped => {
             let destination = trace_destination.context("missing unelevated trace destination")?;
             let parent = destination.parent().unwrap_or_else(|| Path::new("."));
             std::fs::create_dir_all(parent).with_context(|| {
@@ -736,6 +807,9 @@ fn read_response(
                 })?;
             Ok(())
         }
+        ResponseKind::Trace if operation == Operation::Stop => {
+            anyhow::bail!("elevated stop returned ETL before the WPR-stopped milestone")
+        }
         ResponseKind::Trace => anyhow::bail!("unexpected ETL payload for elevated {operation:?}"),
         ResponseKind::Error => {
             let mut message = vec![0u8; header.payload_len as usize];
@@ -745,6 +819,28 @@ fn read_response(
                 String::from_utf8_lossy(&message)
             )
         }
+        ResponseKind::Stopped => unreachable!("duplicate stopped milestone handled above"),
+    }
+}
+
+fn accept_response_headers(
+    first_header: crate::elevated_protocol::ResponseHeader,
+    operation: Operation,
+    on_stopped: impl FnOnce() -> Result<()>,
+    read_next: impl FnOnce() -> Result<crate::elevated_protocol::ResponseHeader>,
+) -> Result<(crate::elevated_protocol::ResponseHeader, bool)> {
+    if first_header.kind == ResponseKind::Stopped {
+        if operation != Operation::Stop {
+            anyhow::bail!("unexpected WPR-stopped milestone for elevated {operation:?}");
+        }
+        on_stopped().context("failed to handle PLM WPR-stopped milestone")?;
+        let header = read_next()?;
+        if header.kind == ResponseKind::Stopped {
+            anyhow::bail!("elevated stop returned a duplicate WPR-stopped milestone");
+        }
+        Ok((header, true))
+    } else {
+        Ok((first_header, false))
     }
 }
 
@@ -1059,6 +1155,124 @@ mod tests {
         // A failed stop sends no DISARM.
         assert_eq!(lifecycle.state, GuardState::Armed);
         assert_eq!(lifecycle.on_pipe_break(), GuardAction::Cancel);
+    }
+
+    #[test]
+    fn stopped_milestone_callback_precedes_second_header_read() {
+        use crate::elevated_protocol::ResponseHeader;
+
+        let events = RefCell::new(Vec::new());
+        let (header, stopped) = accept_response_headers(
+            ResponseHeader {
+                kind: ResponseKind::Stopped,
+                payload_len: 0,
+            },
+            Operation::Stop,
+            || {
+                events.borrow_mut().push("stopped");
+                Ok(())
+            },
+            || {
+                events.borrow_mut().push("trace");
+                Ok(ResponseHeader {
+                    kind: ResponseKind::Trace,
+                    payload_len: 42,
+                })
+            },
+        )
+        .unwrap();
+        assert!(stopped);
+        assert_eq!(header.kind, ResponseKind::Trace);
+        assert_eq!(*events.borrow(), ["stopped", "trace"]);
+    }
+
+    #[test]
+    fn trace_before_stopped_is_not_accepted_as_a_stopped_response() {
+        use crate::elevated_protocol::ResponseHeader;
+
+        let callback_called = std::cell::Cell::new(false);
+        let (header, stopped) = accept_response_headers(
+            ResponseHeader {
+                kind: ResponseKind::Trace,
+                payload_len: 42,
+            },
+            Operation::Stop,
+            || {
+                callback_called.set(true);
+                Ok(())
+            },
+            || anyhow::bail!("must not read another header"),
+        )
+        .unwrap();
+        assert!(!stopped);
+        assert_eq!(header.kind, ResponseKind::Trace);
+        assert!(!callback_called.get());
+    }
+
+    #[test]
+    fn stopped_callback_failure_prevents_second_header_read() {
+        use crate::elevated_protocol::ResponseHeader;
+
+        let read_next = std::cell::Cell::new(false);
+        let error = accept_response_headers(
+            ResponseHeader {
+                kind: ResponseKind::Stopped,
+                payload_len: 0,
+            },
+            Operation::Stop,
+            || anyhow::bail!("disarm failed"),
+            || {
+                read_next.set(true);
+                Ok(ResponseHeader {
+                    kind: ResponseKind::Trace,
+                    payload_len: 42,
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("WPR-stopped milestone"));
+        assert!(!read_next.get());
+    }
+
+    #[test]
+    fn stopped_milestone_is_rejected_for_non_stop_operations() {
+        use crate::elevated_protocol::ResponseHeader;
+
+        for operation in [Operation::Start, Operation::Cancel] {
+            let error = accept_response_headers(
+                ResponseHeader {
+                    kind: ResponseKind::Stopped,
+                    payload_len: 0,
+                },
+                operation,
+                || Ok(()),
+                || anyhow::bail!("must not read another header"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unexpected WPR-stopped"));
+        }
+    }
+
+    #[test]
+    fn duplicate_stopped_milestone_is_rejected() {
+        use crate::elevated_protocol::ResponseHeader;
+
+        let error = accept_response_headers(
+            ResponseHeader {
+                kind: ResponseKind::Stopped,
+                payload_len: 0,
+            },
+            Operation::Stop,
+            || Ok(()),
+            || {
+                Ok(ResponseHeader {
+                    kind: ResponseKind::Stopped,
+                    payload_len: 0,
+                })
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("duplicate"));
     }
 
     #[test]
