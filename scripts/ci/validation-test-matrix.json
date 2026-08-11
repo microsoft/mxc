@@ -417,27 +417,31 @@
     "weekly": [],
     "enabled": [
       {
-        "os": "windows-prerelease-process-container",
+        "os": "ubuntu-24.04",
         "backends": [
-          "wslc"
+          "lxc",
+          "bubblewrap"
         ]
       },
       {
-        "os": "windows-25h2",
+        "os": "ubuntu-26.04",
         "backends": [
-          "wslc"
+          "lxc",
+          "bubblewrap"
         ]
       },
       {
-        "os": "windows-24h2",
+        "os": "rhel-10",
         "backends": [
-          "wslc"
+          "lxc",
+          "bubblewrap"
         ]
       },
       {
-        "os": "windows-23h2",
+        "os": "debian-13",
         "backends": [
-          "wslc"
+          "lxc",
+          "bubblewrap"
         ]
       }
     ]
