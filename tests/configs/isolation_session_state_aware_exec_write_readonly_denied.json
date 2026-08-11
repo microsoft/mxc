@@ -1,8 +1,0 @@
-{
-    "phase": "exec",
-    "sandboxId": "{{SANDBOX_ID}}",
-    "process": {
-        "commandLine": "echo agent-write-attempt > C:\\mxc_share_test\\ro\\agent_should_fail.txt",
-        "timeout": 30000
-    }
-}

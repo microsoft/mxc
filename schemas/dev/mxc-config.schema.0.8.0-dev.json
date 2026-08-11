@@ -310,132 +310,34 @@
       },
       "type": "object"
     },
-    "IsolationConfigurationId": {
-      "description": "IsolationSession sizing profile.",
-      "enum": [
-        "small",
-        "medium",
-        "large",
-        "composable"
-      ],
-      "type": "string"
-    },
     "IsolationSession": {
-      "description": "IsolationSession backend config. Carries both the one-shot fields (`configurationId`, `user`) and the per-phase state-aware nesting (`provision` / `start` / `stop` / `deprovision`).",
+      "description": "IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.",
       "properties": {
-        "configurationId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationConfigurationId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Sizing profile (one-shot)."
-        },
-        "deprovision": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationSessionPhase"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "State-aware deprovision-phase configuration."
-        },
         "provision": {
           "anyOf": [
             {
-              "$ref": "#/definitions/IsolationSessionPhase"
+              "$ref": "#/definitions/IsolationSessionProvisionPhase"
             },
             {
               "type": "null"
             }
           ],
           "description": "State-aware provision-phase configuration."
-        },
-        "start": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationSessionPhase"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "State-aware start-phase configuration."
-        },
-        "stop": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationSessionPhase"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "State-aware stop-phase configuration."
-        },
-        "user": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationUser"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Optional Entra cloud-agent user bundle (one-shot)."
         }
       },
       "type": "object"
     },
-    "IsolationSessionPhase": {
-      "description": "Per-phase IsolationSession configuration (state-aware lifecycle).",
+    "IsolationSessionProvisionPhase": {
+      "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nThe only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
       "properties": {
-        "configurationId": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationConfigurationId"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Sizing profile for this phase."
-        },
-        "user": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationUser"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Entra cloud-agent user bundle for this phase."
+        "appId": {
+          "description": "Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
-      "type": "object"
-    },
-    "IsolationUser": {
-      "description": "Entra cloud-agent user bundle. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
-      "properties": {
-        "upn": {
-          "description": "User principal name.",
-          "type": "string"
-        },
-        "wamToken": {
-          "description": "Short-lived WAM bearer token (passed verbatim to the OS service).",
-          "type": "string"
-        }
-      },
-      "required": [
-        "upn",
-        "wamToken"
-      ],
       "type": "object"
     },
     "LaunchMethod": {
@@ -656,7 +558,7 @@
           ]
         },
         "cwd": {
-          "description": "Working directory for the process.",
+          "description": "Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` (\"Working Directory\").",
           "type": [
             "string",
             "null"

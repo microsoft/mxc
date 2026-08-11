@@ -392,13 +392,12 @@ fn validate_denied_path_overlap_with(
 /// - `None` — no network interface, fully isolated
 /// - `Bridged` — NAT networking through the WSL2 VM's virtual adapter
 ///
-/// When `allowedHosts` or `blockedHosts` are present, networking must be
-/// `Bridged` (so the container has connectivity), and per-host filtering
-/// is enforced via iptables rules applied post-start.
+/// Per-host filtering (`allowedHosts`/`blockedHosts` that need enforcement) is
+/// rejected before this runs — see `build_iptables_rules`. This only maps the
+/// bare-default posture:
 ///
 /// - `Block` with no host rules → `None` (fully isolated)
-/// - `Block` with `allowedHosts` → `Bridged` (iptables will restrict)
-/// - `Allow` → `Bridged`
+/// - `Allow` → `Bridged` (NAT)
 pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainerNetworkingMode {
     if is_block && !has_host_rules {
         WslcContainerNetworkingMode::WSLC_CONTAINER_NETWORKING_MODE_NONE
@@ -407,10 +406,11 @@ pub fn map_network_policy(is_block: bool, has_host_rules: bool) -> WslcContainer
     }
 }
 
-/// Returns true if per-host network filtering is needed (requires iptables
-/// exec after container start and `Privileged` flag).
+/// Returns true if the policy requests per-host filtering (which WSLc cannot
+/// enforce — such configs are rejected before execution).
 ///
-/// Only returns true when the host list can refine the selected default policy:
+/// Thin wrapper over [`wxc_common::models::needs_host_filtering`] so the parser
+/// and this backend share one definition:
 /// - `Block` → only `allowed_hosts` matter (allowlist)
 /// - `Allow` → only `blocked_hosts` matter (blocklist)
 pub fn needs_host_filtering(
@@ -418,11 +418,7 @@ pub fn needs_host_filtering(
     allowed_hosts: &[String],
     blocked_hosts: &[String],
 ) -> bool {
-    if is_default_block {
-        !allowed_hosts.is_empty()
-    } else {
-        !blocked_hosts.is_empty()
-    }
+    wxc_common::models::needs_host_filtering(is_default_block, allowed_hosts, blocked_hosts)
 }
 
 /// Validate that a host string is safe for use in an iptables command.
@@ -438,10 +434,17 @@ fn is_valid_host(host: &str) -> bool {
 
 /// Build iptables commands for per-host network filtering.
 ///
-/// These rules are exec'd inside the container after start via
-/// `WslcCreateContainerProcess`. The container must have the `Privileged`
-/// flag set (grants root + NET_ADMIN capability) for iptables to work.
-/// Images without iptables installed will not support per-host filtering.
+/// **NOTE: WSLC per-host filtering is non-functional.** Two independent
+/// blockers prevent it from working:
+/// 1. WSLC containers lack `CAP_NET_ADMIN` — the SDK's `Privileged` flag does
+///    **not** grant it — so the in-container `iptables` exec is rejected.
+/// 2. WSLC cannot expose VM-level network enforcement without breaking other
+///    security guarantees (e.g. MDE); a host-enforced design is longer-tail.
+///
+/// Configs that require per-host filtering are therefore **rejected at
+/// config-parse time** (and by `WSLContainerRunner::validate_runner`) before
+/// this function is reached. This function is retained for reference but its
+/// output is never applied.
 ///
 /// When `defaultPolicy` is `Block` + `allowedHosts`:
 ///   - Default DROP all outbound

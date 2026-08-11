@@ -3,18 +3,17 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { inspect } from 'node:util';
 import {
   ConfigsForBackend,
   DeprovisionConfigFor,
   ExecConfigFor,
   IsolationSessionProvisionConfig,
   IsolationSessionStartConfig,
-  IsolationSessionUserConfig,
   ProvisionMetadataFor,
   ProvisionResult,
   SandboxId,
   StartMetadataFor,
+  StateAwareContainmentBackend,
   StopConfigFor,
   WindowsSandboxProvisionConfig,
   WindowsSandboxStartConfig,
@@ -44,41 +43,123 @@ describe('SandboxId<C> brand', () => {
 });
 
 describe('IsolationSessionProvisionConfig', () => {
-  it('accepts version and filesystem', () => {
-    const cfg: IsolationSessionProvisionConfig = {
-      version: '0.6.0-alpha',
-      filesystem: { readwritePaths: ['C:\\workspace'] },
-    };
-    assert.deepStrictEqual(cfg.filesystem?.readwritePaths, ['C:\\workspace']);
+  // The one accepted network value: the unrestricted-network acknowledgment.
+  const network: { defaultPolicy: 'allow'; allowLocalNetwork: true } = {
+    defaultPolicy: 'allow',
+    allowLocalNetwork: true,
+  };
+
+  it('requires the canonical network acknowledgment', () => {
+    const ok: IsolationSessionProvisionConfig = { version: '0.6.0-alpha', network };
+    assert.strictEqual(ok.network.defaultPolicy, 'allow');
+    assert.strictEqual(ok.network.allowLocalNetwork, true);
+
+    // @ts-expect-error — network is required; provision must acknowledge the unrestricted network.
+    const missing: IsolationSessionProvisionConfig = { version: '0.6.0-alpha' };
+    assert.ok(missing);
   });
 
-  it('rejects network and ui until those features land Rust-side', () => {
-    const withNetwork: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — network is not exposed at provision until the Rust runtime honors it.
-      network: { defaultPolicy: 'block' },
+  it('cannot be skipped by omitting the config argument entirely', async () => {
+    // Declaring `network` required on the config type is only a real guarantee
+    // if the call signature also refuses an omitted config — otherwise the
+    // requirement is bypassable by passing nothing at all. `provisionSandbox`
+    // takes a conditional parameter tuple so the config is mandatory exactly
+    // for backends whose provision config has a required member.
+    const { provisionSandbox } = await import('../../src/state-aware.js');
+
+    // @ts-expect-error — isolation_session provision requires a config.
+    const skipped = () => provisionSandbox('isolation_session');
+    assert.ok(skipped);
+
+    // Backends whose provision config is entirely optional stay skippable.
+    const optional = () => provisionSandbox('windows_sandbox');
+    assert.ok(optional);
+  });
+
+  it('cannot be skipped by widening the backend to the union', async () => {
+    // A caller holding a variable typed as the whole backend union — rather
+    // than a literal — instantiates the conditional tuple with that union. If
+    // optionality were decided over the *union of configs*, the all-optional
+    // WindowsSandbox member would satisfy it and make the config optional for
+    // every backend, silently re-opening the hole the test above closes.
+    // A union backend must behave like its strictest member.
+    const { provisionSandbox } = await import('../../src/state-aware.js');
+    const wide = 'isolation_session' as StateAwareContainmentBackend;
+
+    // @ts-expect-error — the union includes a backend that requires a config.
+    const widened = () => provisionSandbox(wide);
+    assert.ok(widened);
+  });
+
+  it('rejects any network value other than the canonical acknowledgment', () => {
+    const block: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — defaultPolicy must be 'allow'; the backend cannot enforce a deny.
+      network: { defaultPolicy: 'block', allowLocalNetwork: true },
     };
-    const withUi: IsolationSessionProvisionConfig = {
+    const noLocal: IsolationSessionProvisionConfig = {
+      // @ts-expect-error — allowLocalNetwork must be true; inbound is open and cannot be denied.
+      network: { defaultPolicy: 'allow', allowLocalNetwork: false },
+    };
+    assert.ok(block);
+    assert.ok(noLocal);
+  });
+
+  it('rejects filesystem', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
+      // @ts-expect-error — filesystem is rejected at provision; the backend has no host-folder-sharing primitive.
+      filesystem: { readwritePaths: ['C:\\workspace'] },
+    };
+    assert.ok(cfg);
+  });
+
+  it('rejects ui until that feature lands Rust-side', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
       // @ts-expect-error — ui is not exposed at provision until the Rust runtime honors it.
       ui: { disable: true, clipboard: 'none', injection: false },
     };
-    assert.ok(withNetwork);
-    assert.ok(withUi);
+    assert.ok(cfg);
   });
 
-  it('accepts user only as an IsolationSessionUserConfig instance', () => {
-    const ok: IsolationSessionProvisionConfig = {
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+  it('accepts an optional appId', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
+      appId: 'Contoso.App_8wekyb3d8bbwe',
     };
-    const bare: IsolationSessionProvisionConfig = {
-      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
-      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
+    assert.strictEqual(cfg.appId, 'Contoso.App_8wekyb3d8bbwe');
+  });
+
+  it('accepts an empty appId as a value distinct from omitting it', () => {
+    // A future OS API may assign meaning to the empty string, so the SDK must
+    // not treat it as equivalent to absent.
+    const empty: IsolationSessionProvisionConfig = { network, appId: '' };
+    const absent: IsolationSessionProvisionConfig = { network };
+    assert.strictEqual(empty.appId, '');
+    assert.strictEqual(absent.appId, undefined);
+    assert.ok('appId' in empty);
+    assert.ok(!('appId' in absent));
+  });
+
+  it('rejects a non-string appId', () => {
+    const cfg: IsolationSessionProvisionConfig = {
+      network,
+      // @ts-expect-error — appId is a string.
+      appId: 42,
     };
-    assert.strictEqual(ok.user?.upn, 'alice@contoso.com');
-    assert.ok(bare);
+    assert.ok(cfg);
   });
 });
 
 describe('IsolationSessionStartConfig', () => {
+  it('rejects appId (provision-only; fixed for the sandbox lifetime)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — appId is accepted only at provision.
+      appId: 'Contoso.App_8wekyb3d8bbwe',
+    };
+    assert.ok(cfg);
+  });
+
   it('rejects cross-cutting fields the matrix marks as rejected', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — start phase does not honor filesystem.
@@ -87,45 +168,28 @@ describe('IsolationSessionStartConfig', () => {
     assert.ok(cfg);
   });
 
-  it('accepts configurationId only from the closed enum', () => {
-    const ok: IsolationSessionStartConfig = { configurationId: 'composable' };
-    assert.strictEqual(ok.configurationId, 'composable');
-
-    const bogus: IsolationSessionStartConfig = {
-      // @ts-expect-error — configurationId must be in the closed enum.
-      configurationId: 'xlarge',
+  it('rejects network (fixed at provision; provision-only)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — network is fixed at provision; post-provision phases do not accept it.
+      network: { defaultPolicy: 'allow', allowLocalNetwork: true },
     };
-    assert.ok(bogus);
+    assert.ok(cfg);
   });
 
-  it('accepts user only as an IsolationSessionUserConfig instance', () => {
-    const ok: IsolationSessionStartConfig = {
+  it('rejects configurationId', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — configurationId is not part of the start config.
       configurationId: 'composable',
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
     };
-    const bare: IsolationSessionStartConfig = {
-      // @ts-expect-error — user must be constructed via IsolationSessionUserConfig for wamToken redaction.
-      user: { upn: 'alice@contoso.com', wamToken: 'tok' },
-    };
-    assert.strictEqual(ok.user?.wamToken, 'tok');
-    assert.ok(bare);
-  });
-});
-
-describe('IsolationSessionUserConfig', () => {
-  it('redacts wamToken under util.inspect', () => {
-    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
-    const inspected = inspect(user);
-    assert.ok(inspected.includes('alice@contoso.com'), `got: ${inspected}`);
-    assert.ok(inspected.includes('<redacted>'), `got: ${inspected}`);
-    assert.ok(!inspected.includes('super-secret'), `got: ${inspected}`);
+    assert.ok(cfg);
   });
 
-  it('JSON.stringify preserves both fields for wire serialisation', () => {
-    const user = new IsolationSessionUserConfig('alice@contoso.com', 'super-secret');
-    const json = JSON.parse(JSON.stringify(user));
-    assert.strictEqual(json.upn, 'alice@contoso.com');
-    assert.strictEqual(json.wamToken, 'super-secret');
+  it('rejects a backend-specific field (start takes only version)', () => {
+    const cfg: IsolationSessionStartConfig = {
+      // @ts-expect-error — start accepts no backend-specific config.
+      unsupportedSetting: { nested: true },
+    };
+    assert.ok(cfg);
   });
 });
 
@@ -160,7 +224,7 @@ describe('IsolationSessionStopConfig and IsolationSessionDeprovisionConfig', () 
 describe('ConfigsForBackend', () => {
   it('selects the IsolationSession bundle for the isolation_session backend', () => {
     const bundle: ConfigsForBackend<'isolation_session'> = {
-      provision: { version: '0.6.0-alpha' },
+      provision: { version: '0.6.0-alpha', network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
       start: {},
       exec: { process: { commandLine: 'echo' } },
       stop: {},
@@ -194,10 +258,10 @@ describe('WindowsSandboxProvisionConfig', () => {
     assert.deepStrictEqual(cfg.filesystem?.deniedPaths, ['C:\\secrets']);
   });
 
-  it('rejects the Entra user bundle (WindowsSandbox has no Entra surface)', () => {
+  it('rejects an undeclared backend-specific field', () => {
     const cfg: WindowsSandboxProvisionConfig = {
-      // @ts-expect-error — windows_sandbox provision has no `user` bundle.
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+      // @ts-expect-error — windows_sandbox provision declares no such field.
+      unsupportedSetting: { nested: true },
     };
     assert.ok(cfg);
   });
@@ -217,7 +281,7 @@ describe('WindowsSandboxProvisionConfig', () => {
 });
 
 describe('WindowsSandboxStartConfig', () => {
-  it('carries only version (no configurationId, no user)', () => {
+  it('carries only version (no configurationId, no backend-specific fields)', () => {
     const ok: WindowsSandboxStartConfig = { version: '0.6.0-alpha' };
     assert.strictEqual(ok.version, '0.6.0-alpha');
 
@@ -227,11 +291,11 @@ describe('WindowsSandboxStartConfig', () => {
     };
     assert.ok(withConfigurationId);
 
-    const withUser: WindowsSandboxStartConfig = {
-      // @ts-expect-error — windows_sandbox start has no Entra `user` bundle.
-      user: new IsolationSessionUserConfig('alice@contoso.com', 'tok'),
+    const withExtra: WindowsSandboxStartConfig = {
+      // @ts-expect-error — windows_sandbox start declares no backend-specific field.
+      unsupportedSetting: { nested: true },
     };
-    assert.ok(withUser);
+    assert.ok(withExtra);
   });
 });
 
@@ -289,8 +353,14 @@ describe('ProvisionResult<C>', () => {
   it('carries backend-typed metadata for isolation_session', () => {
     const result: ProvisionResult<'isolation_session'> = {
       sandboxId: 'iso:abcd' as SandboxId<'isolation_session'>,
-      metadata: { agentUserName: 'iso\\agent' },
+      metadata: {
+        agentUserName: 'iso\\agent',
+        agentUserSid: 'S-1-5-21-1001',
+        ephemeralWorkspacePath: 'C:\\ProgramData\\ws',
+      },
     };
     assert.strictEqual(result.metadata?.agentUserName, 'iso\\agent');
+    assert.strictEqual(result.metadata?.agentUserSid, 'S-1-5-21-1001');
+    assert.strictEqual(result.metadata?.ephemeralWorkspacePath, 'C:\\ProgramData\\ws');
   });
 });

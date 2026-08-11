@@ -35,6 +35,11 @@ pub mod process_mitigation;
 pub mod proxy_coordinator;
 #[cfg(target_os = "windows")]
 pub mod sandbox_tracking;
+/// Working-directory resolution for both Windows launch paths. Deliberately
+/// **not** `cfg`-gated: the mapping is pure, and keeping it portable means its
+/// regression tests (notably "never resolve to a `NULL` cwd") run on every CI
+/// lane rather than only the Windows one.
+pub mod working_directory;
 
 /// Test-only helpers shared across this crate's unit-test modules.
 /// Mirrors the helper that previously lived in `wxc_common::test_env`;

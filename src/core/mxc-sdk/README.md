@@ -53,8 +53,64 @@ Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
-[`platform_support`] is the Rust port of `getPlatformSupport` — reports host
-support and the available containment backends.
+## Discovering host backends
+
+Two read-only probes answer "what can I run here?" — for two different
+questions:
+
+- [`platform_support`] — the Rust port of `getPlatformSupport`. Reports whether
+  MXC is supported on this host and the backends **this SDK can actually
+  launch** (the subset in [Supported backends](#supported-backends)). Use it to
+  decide whether `run` / `spawn_sandbox` will work before building a request.
+- [`available_backends`] — a broader **host-capability** probe. Reports every
+  containment backend the *host* can run, including ones only the executor
+  binaries (`wxc-exec` etc.) can currently drive — Windows Sandbox,
+  IsolationSession, LXC — each with its effective isolation **tier** (for the
+  Windows ProcessContainer ladder). Use it for capability discovery, not as a
+  launchability guarantee.
+
+```rust,no_run
+use mxc_sdk::{available_backends, platform_support, BackendCapability};
+
+// Will run()/spawn_sandbox() work here, and with which backends?
+let support = platform_support();
+if support.is_supported {
+    println!("SDK-launchable: {:?}", support.available_methods);
+} else {
+    println!("unsupported: {:?}", support.reason);
+}
+
+// What can the host run at all, and at what isolation-tier ceiling?
+for backend in available_backends() {
+    let capture_denials = backend
+        .capabilities
+        .contains(&BackendCapability::CaptureDenials);
+    match backend.tier {
+        Some(tier) => println!(
+            "{} (tier: {tier}, captureDenials: {capture_denials})",
+            backend.backend
+        ),
+        None => println!("{}", backend.backend),
+    }
+}
+```
+
+The reported `tier` is a **ceiling** — the strongest isolation the host can
+reach for that backend; a policy can still force a weaker tier at dispatch.
+`capabilities` reports optional features that passed the host probe, including
+the ProcessContainer's `CaptureDenials`. These are advisory: callers must still
+handle `ErrorCode::BackendUnavailable` if availability changes before launch.
+And a backend appearing in `available_backends()` is a host-capability signal,
+**not** a guarantee this SDK can launch it — cross-check [`platform_support`]
+for that.
+
+> **Before / after.** Host-and-backend discovery previously lived only in the
+> TypeScript SDK (`getPlatformSupport`), so Rust callers and the executor
+> binaries had no in-process way to ask "what backends does this host support?"
+> and could only learn a backend was unusable by trying to launch it. Now the
+> engine answers both in-process — [`platform_support`] for the SDK-launchable
+> subset and [`available_backends`] for the full host-capability set with tiers —
+> with no TypeScript dependency and no trial spawn.
 
 ## Denial capture (Windows)
 
@@ -67,7 +123,7 @@ use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
 use mxc_sdk::SandboxPolicy;
 
 let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
+    version: "0.8.0-alpha".to_string(),
     filesystem: None,
     network: None,
     ui: None,

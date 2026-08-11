@@ -10,7 +10,7 @@ use wxc_common::models::ExecutionRequest;
 use isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
-use super::error::{lifecycle_err, IsolationSessionError};
+use super::error::{op, transport_err, IsolationSessionError};
 
 const REDIRECT_STDIN: u32 = 0x1;
 const REDIRECT_STDOUT: u32 = 0x2;
@@ -96,39 +96,47 @@ pub(super) fn build_iso_process_options(
     options: &ProcessOptions,
 ) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
     let proc_options = IsoSessionProcessOptions::new()
-        .map_err(|e| lifecycle_err(format!("IsoSessionProcessOptions::new failed: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))?;
 
     proc_options
         .SetTimeoutMilliseconds(options.timeout_ms)
-        .map_err(|e| lifecycle_err(format!("SetTimeoutMilliseconds: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_TIMEOUT, "set failed", &e))?;
 
     if !options.working_directory.is_empty() {
         proc_options
             .SetWorkingDirectory(&HSTRING::from(&options.working_directory))
-            .map_err(|e| lifecycle_err(format!("SetWorkingDirectory: {}", e)))?;
+            .map_err(|e| transport_err(op::OPTIONS_WORKING_DIR, "set failed", &e))?;
     }
 
     proc_options
         .SetInteractiveConsole(options.interactive)
-        .map_err(|e| lifecycle_err(format!("SetInteractiveConsole: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_INTERACTIVE, "set failed", &e))?;
 
     proc_options
         .SetRedirectStandardInput(options.redirect_flags & REDIRECT_STDIN != 0)
-        .map_err(|e| lifecycle_err(format!("SetRedirectStandardInput: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_REDIRECT_STDIN, "set failed", &e))?;
     proc_options
         .SetRedirectStandardOutput(options.redirect_flags & REDIRECT_STDOUT != 0)
-        .map_err(|e| lifecycle_err(format!("SetRedirectStandardOutput: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_REDIRECT_STDOUT, "set failed", &e))?;
     proc_options
         .SetRedirectStandardError(options.redirect_flags & REDIRECT_STDERR != 0)
-        .map_err(|e| lifecycle_err(format!("SetRedirectStandardError: {}", e)))?;
+        .map_err(|e| transport_err(op::OPTIONS_REDIRECT_STDERR, "set failed", &e))?;
 
     if !options.env_vars.is_empty() {
         let env = proc_options
             .Environment()
-            .map_err(|e| lifecycle_err(format!("get Environment IMap: {}", e)))?;
+            .map_err(|e| transport_err(op::OPTIONS_ENVIRONMENT, "get failed", &e))?;
         for (name, value) in &options.env_vars {
+            // The variable name rides in the message, never in `operation` —
+            // that field stays low-cardinality for telemetry grouping.
             env.Insert(&HSTRING::from(name), &HSTRING::from(value))
-                .map_err(|e| lifecycle_err(format!("Environment.Insert({}): {}", name, e)))?;
+                .map_err(|e| {
+                    transport_err(
+                        op::OPTIONS_ENVIRONMENT,
+                        &format!("insert {name} failed"),
+                        &e,
+                    )
+                })?;
         }
     }
 

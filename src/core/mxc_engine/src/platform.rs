@@ -31,7 +31,10 @@ pub struct PlatformSupport {
 /// `mxc-sdk` library can actually run. On Windows the isolation tier and UI
 /// capabilities come from the in-process fallback probe rather than a
 /// `wxc-exec --probe` subprocess, and `wslc` is reported when the host has the
-/// WSL Container runtime (requires the `wslc` feature).
+/// WSL Container runtime (requires the `wslc` feature). The broader
+/// host-capability set (backends the host can run but the SDK cannot launch,
+/// e.g. `lxc`, `windows_sandbox`, `isolation_session`) is reported separately by
+/// [`available_backends`](crate::available_backends).
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
@@ -55,7 +58,9 @@ pub fn platform_support() -> PlatformSupport {
     {
         // Presence alone is not enough: `bwrap` must also be new enough for
         // every flag the argument builder emits (see
-        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`).
+        // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
+        // host-capability backend the SDK can't launch, so it is reported by
+        // `available_backends()` rather than here.
         match bwrap_common::bwrap_version::probe_bwrap() {
             Ok(_) => PlatformSupport {
                 is_supported: true,
@@ -72,6 +77,10 @@ pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "windows")]
     {
         let mut available_methods = vec!["processcontainer".to_string()];
+        // `windows_sandbox` and `isolation_session` are host-capability backends
+        // the SDK can't launch, so they are reported by `available_backends()`
+        // rather than here.
+        //
         // WSLC is an additional, opt-in backend rather than a fallback: report
         // it only when the host can actually run it (WSL2 + the WSLC runtime),
         // which is the same preflight the runner performs.
@@ -106,5 +115,81 @@ fn wslc_available() -> bool {
     #[cfg(not(feature = "wslc"))]
     {
         false
+    }
+}
+
+/// Read-only activation probe of the in-process IsolationSession service.
+///
+/// Reports whether the isolation-session backend's OS-side service is
+/// available on this host. Exposed from the engine so `wxc` reaches the
+/// isolation-session backend through `mxc_engine` rather than depending on
+/// `isolation_session_common` directly.
+///
+/// Delegates to the backend's own availability probe — the same one
+/// [`available_backends`](crate::available_backends) consults — so the CLI
+/// `--probe` surface and the Rust SDK surface can never disagree about this
+/// host. That probe owns its COM apartment, so this is callable regardless of
+/// whether the caller has initialized COM.
+#[cfg(all(target_os = "windows", feature = "isolation_session"))]
+pub fn isolation_session_available() -> bool {
+    isolation_session_common::availability::is_isolation_session_available()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::platform_support;
+    use wxc_common::wire::Containment;
+
+    fn wire_name(containment: &Containment) -> String {
+        serde_json::to_string(containment)
+            .expect("Containment serializes")
+            .trim_matches('"')
+            .to_string()
+    }
+
+    fn all_wire_names() -> Vec<String> {
+        [
+            Containment::Process,
+            Containment::ProcessContainer,
+            Containment::Vm,
+            Containment::WindowsSandbox,
+            Containment::Lxc,
+            Containment::Microvm,
+            Containment::Hyperlight,
+            Containment::Wslc,
+            Containment::Seatbelt,
+            Containment::IsolationSession,
+            Containment::Bubblewrap,
+        ]
+        .iter()
+        .map(wire_name)
+        .collect()
+    }
+
+    /// Guards the reported string literals against drift from the `Containment`
+    /// serde wire names.
+    #[test]
+    fn reported_method_names_match_the_containment_wire_names() {
+        assert_eq!(wire_name(&Containment::Lxc), "lxc");
+        assert_eq!(wire_name(&Containment::WindowsSandbox), "windows_sandbox");
+        assert_eq!(
+            wire_name(&Containment::ProcessContainer),
+            "processcontainer"
+        );
+        assert_eq!(wire_name(&Containment::Bubblewrap), "bubblewrap");
+        assert_eq!(wire_name(&Containment::Seatbelt), "seatbelt");
+    }
+
+    /// Exercises the live per-target arm, catching a typo'd literal (e.g.
+    /// `"wsb"`) that the assertions above would miss.
+    #[test]
+    fn every_reported_method_is_a_real_wire_name() {
+        let known = all_wire_names();
+        for method in platform_support().available_methods {
+            assert!(
+                known.contains(&method),
+                "reported method {method:?} is not a Containment wire name"
+            );
+        }
     }
 }

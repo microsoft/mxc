@@ -167,7 +167,13 @@ pub enum Containment {
 pub struct Process {
     /// Command line (or script) to execute.
     pub command_line: Option<String>,
-    /// Working directory for the process.
+    /// Working directory for the process. When omitted, backends substitute a
+    /// directory the sandbox can use rather than inheriting the launcher's cwd:
+    /// Windows ProcessContainer picks the first `readwritePaths` entry that is
+    /// an existing directory, else the first such `readonlyPaths` entry, else
+    /// the system drive root; Seatbelt applies the same precedence with a `/`
+    /// fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a
+    /// working directory outright. See `docs/schema.md` ("Working Directory").
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
     pub env: Option<Vec<String>>,
@@ -551,59 +557,35 @@ pub enum TransportProtocol {
     Tcp,
 }
 
-/// IsolationSession backend config. Carries both the one-shot fields
-/// (`configurationId`, `user`) and the per-phase state-aware nesting
-/// (`provision` / `start` / `stop` / `deprovision`).
+/// IsolationSession backend config. Carries only the per-phase state-aware
+/// nesting for the phases that take config (`provision`). The one-shot surface
+/// takes no backend configuration at all. `start`, `stop`, `deprovision`, and
+/// `exec` take no per-phase config payload: `start`, `stop` and `deprovision`
+/// are invoked with only the top-level `phase` and `sandboxId`, and `exec`
+/// additionally carries the top-level `process` block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSession {
-    /// Sizing profile (one-shot).
-    pub configuration_id: Option<IsolationConfigurationId>,
-    /// Optional Entra cloud-agent user bundle (one-shot).
-    pub user: Option<IsolationUser>,
     /// State-aware provision-phase configuration.
-    pub provision: Option<IsolationSessionPhase>,
-    /// State-aware start-phase configuration.
-    pub start: Option<IsolationSessionPhase>,
-    /// State-aware stop-phase configuration.
-    pub stop: Option<IsolationSessionPhase>,
-    /// State-aware deprovision-phase configuration.
-    pub deprovision: Option<IsolationSessionPhase>,
+    pub provision: Option<IsolationSessionProvisionPhase>,
 }
 
-/// Per-phase IsolationSession configuration (state-aware lifecycle).
+/// Provision-phase IsolationSession configuration (state-aware lifecycle).
+///
+/// The only phase that takes a per-phase payload, so it is its own type rather
+/// than a shared one: a shared type would advertise its fields on every phase
+/// in the generated schema. The domain configs and the SDK types are already
+/// split per phase; this keeps the wire model aligned with them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct IsolationSessionPhase {
-    /// Sizing profile for this phase.
-    pub configuration_id: Option<IsolationConfigurationId>,
-    /// Entra cloud-agent user bundle for this phase.
-    pub user: Option<IsolationUser>,
-}
-
-/// IsolationSession sizing profile.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "lowercase")]
-pub enum IsolationConfigurationId {
-    Small,
-    Medium,
-    Large,
-    Composable,
-}
-
-/// Entra cloud-agent user bundle. Reachable only under the permissive
-/// `experimental` surface, so unknown fields are tolerated (forward-compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
-#[serde(rename_all = "camelCase")]
-pub struct IsolationUser {
-    /// User principal name.
-    pub upn: String,
-    /// Short-lived WAM bearer token (passed verbatim to the OS service).
-    pub wam_token: String,
+pub struct IsolationSessionProvisionPhase {
+    /// Optional application identifier for the calling application. For a
+    /// packaged application this is the Package Family Name; for an unpackaged
+    /// one it may be any string. Carried inside the `sandboxId` so later
+    /// lifecycle phases can recover it without the caller re-supplying it.
+    pub app_id: Option<String>,
 }
 
 /// JSON Schema generation from the wire model, gated behind `schema-gen` so

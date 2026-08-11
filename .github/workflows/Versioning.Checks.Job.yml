@@ -7,10 +7,17 @@ jobs:
   versioning-checks:
     name: Versioning Checks
     runs-on: ubuntu-latest
+    env:
+      MXC_VERSIONING_BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event_name == 'push' && github.event.before || 'HEAD^' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so a pull-request base ref can be resolved. For a
+          # pull_request event the checkout action fetches the base branch too,
+          # so the gates can read files at the base commit directly.
+          fetch-depth: 0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 20
 
@@ -23,6 +30,10 @@ jobs:
       - name: Install tooling deps
         working-directory: scripts/versioning
         run: npm ci
+
+      - name: Test versioning gate logic
+        working-directory: scripts/versioning
+        run: npm test
 
       - name: Check schema version sync
         run: node scripts/versioning/check-schema-versions.js

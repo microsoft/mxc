@@ -7,7 +7,7 @@ name = "process_security_environment_spec"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish = false
+publish = true
 description = "Generated FlatBuffers bindings for ProcessSecurityEnvironment"
 
 [dependencies]
