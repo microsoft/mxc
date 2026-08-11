@@ -21,9 +21,28 @@ ProcessContainer ingress has no peer or port rules. `ingress.default` controls L
 `ingress.hostLoopback` controls host-loopback connectivity and overrides `default` for that path. WAN inbound remains
 blocked.
 
+AppContainer capabilities form the access envelope needed to implement the policy:
+
+| Egress default | Ingress default | AppContainer capabilities | Result |
+|---|---|---|---|
+| `deny` | `deny` | None | Public/private outbound and private-network inbound are denied. |
+| `allow` | `deny` | `internetClient`, `privateNetworkClientServer` | Public/private outbound is allowed. Current PSEC does not yet narrow the inbound side of `privateNetworkClientServer`. |
+| `deny` | `allow` | `privateNetworkClientServer` | Private-network inbound is allowed. PSEC WFP retains deny-default outbound; downlevel AppContainer without WFP cannot narrow the outbound side of the capability. |
+| `allow` | `allow` | `internetClient`, `privateNetworkClientServer` | Public/private outbound and private-network inbound are allowed. |
+
+This matrix covers the direction defaults without explicit egress rules or proxy mode. Explicit public/internet egress
+rules require `internetClient`; private-network rules require `privateNetworkClientServer`.
+`ingress.hostLoopback` is independent of these defaults.
+
+Windows has no outbound-only private-network capability. `privateNetworkClientServer` grants both directions, so
+`ingress.default: "deny"` does not remove it when egress requires private-network access. Current PSEC support does not
+yet narrow the unused inbound side; directional WFP enforcement is required to make asymmetric private-network policy
+exact.
+
 ### Model 1: direct egress, WFP-filtered (least restrictive)
 
-- **Capabilities:** internetClient, plus a loopback exemption for same-container connections; no other network capability.
+- **Capabilities:** `internetClient` for public/internet egress; `privateNetworkClientServer` when the policy requires
+  private-network egress; plus a loopback exemption for same-container connections.
 - **Enforcement:** WFP allow/block rules; no proxy.
 
 ```jsonc
@@ -162,7 +181,7 @@ the strongest usable process-creation contract through runtime probing.
 
 | Current schema 0.8 selection | Downlevel (Windows 23H2) |
 |---|---|
-| Prefer PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support probe succeed. Fall back temporarily to SBOX (`CreateProcessInSandbox`) when PSEC is unavailable, then to AppContainer when neither BaseContainer contract is usable. | Neither PSEC nor SBOX (`CreateProcessInSandbox`) is available, so MXC uses the AppContainer fallback.<br><br>Until downlevel WFP support is implemented, model 1 provides coarse egress and ingress allow/deny postures only. Proxy-configured requests receive cooperative routing through environment variables; this compatibility behavior is not model 2 enforcement. |
+| Prefer PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support probe succeed. Fall back temporarily to SBOX (`CreateProcessInSandbox`) when PSEC is unavailable, then to AppContainer when neither BaseContainer contract is usable. | Neither PSEC nor SBOX (`CreateProcessInSandbox`) is available, so MXC uses the AppContainer fallback.<br><br>Without downlevel WFP, MXC derives the coarse AppContainer capability envelope from both directions. `egress.default: "allow"` grants `internetClient` and `privateNetworkClientServer`; `ingress.default: "allow"` grants `privateNetworkClientServer`. Because the private-network capability is bidirectional, asymmetric private-network intent is accepted but not independently narrowed at the capability layer. Current PSEC has the same coupling until inbound WFP narrowing is implemented.<br><br>Proxy-configured requests receive cooperative routing through environment variables; this compatibility behavior is not model 2 enforcement. |
 
 ### 2.1 Fail loud on version skew: never silently downgrade
 
@@ -170,6 +189,8 @@ PSEC and SBOX support varies between Windows builds as the network-policy
 surface grows. Runtime probing selects the contract, but MXC must not silently
 weaken the requested policy. The documented downlevel cooperative proxy path
 is the explicit compatibility exception and is not model 2 enforcement.
+The documented `privateNetworkClientServer` direction coupling is the current
+ProcessContainer capability model, not a version-skew downgrade.
 
 - Follow the PSEC, SBOX, and AppContainer fallback order only when the next path
   can preserve the requested semantics.
