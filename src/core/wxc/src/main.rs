@@ -565,14 +565,12 @@ fn run_state_aware_main(
             phase,
             phase_config,
         );
-        if telemetry_active {
-            let identity = state_aware_policy_identity(parsed.sandbox_id.as_deref());
-            wxc_common::telemetry::log_policy_hash(
-                &identity,
-                &policy_hash,
-                &parsed.request.schema_version,
-            );
-        }
+        let identity = state_aware_policy_identity(parsed.sandbox_id.as_deref());
+        wxc_common::telemetry::log_policy_hash(
+            &identity,
+            &policy_hash,
+            &parsed.request.schema_version,
+        );
         if diagnostics_active {
             let record = AuditEvent::new(AuditEventName::PolicyHash)
                 .str("backend", backend)

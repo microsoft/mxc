@@ -1668,18 +1668,16 @@ impl AppContainerSandboxProcess {
             }
             self.audit_logger.log_audit_event(&record);
         }
-        if wxc_common::telemetry::is_active() {
-            let released_resources = format_released_resources(
-                network.rules_removed,
-                bfs_removed,
-                network.proxy_stopped,
-            );
-            wxc_common::telemetry::log_sandbox_torn_down(
-                &self.identity,
-                status.as_str(),
-                &released_resources,
-            );
-        }
+        let released_resources = if wxc_common::telemetry::is_active() {
+            format_released_resources(network.rules_removed, bfs_removed, network.proxy_stopped)
+        } else {
+            String::new()
+        };
+        wxc_common::telemetry::log_sandbox_torn_down(
+            &self.identity,
+            status.as_str(),
+            &released_resources,
+        );
     }
 }
 

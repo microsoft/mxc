@@ -446,7 +446,27 @@ fn create_pipe_instance(pipe_name: &str, first: bool) -> Result<HANDLE, String> 
 ///    Unicode scalar with `& 0xff` and rendered `\xNN`, which collided for
 ///    every pair of characters whose scalars agreed in the low byte (e.g.
 ///    `\u{0100}` and `\u{0200}` both rendered as `\x00`).
-///
+fn escape_display_message(text: &str) -> String {
+    let mut result = String::new();
+    for ch in text.chars() {
+        match ch {
+            '\t' | '\n' => result.push(ch),
+            c if (c as u32) < 0x20 => {
+                for escaped in c.escape_default() {
+                    result.push(escaped);
+                }
+            }
+            c if c.is_ascii() && c as u32 >= 0x20 && c as u32 <= 0x7e => result.push(c),
+            c => {
+                for escaped in c.escape_default() {
+                    result.push(escaped);
+                }
+            }
+        }
+    }
+    result
+}
+
 /// Get the client process ID from a connected pipe handle.
 fn get_client_pid(pipe: HANDLE) -> Option<u32> {
     let mut pid: u32 = 0;
@@ -652,23 +672,24 @@ fn process_display_event(
         DisplayEvent::Message { pid, text } => {
             let (color, exe) = get_pid_info(pid_info_map, pid);
             for line in text.lines() {
-                if line.starts_with("WARNING:") {
+                let escaped = escape_display_message(line);
+                if escaped.starts_with("WARNING:") {
                     println!(
-                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;33m{line}\x1b[0m"
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;33m{escaped}\x1b[0m"
                     );
-                } else if line.contains("SECTION:") {
+                } else if escaped.contains("SECTION:") {
                     println!(
-                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;36m{line}\x1b[0m"
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;36m{escaped}\x1b[0m"
                     );
-                } else if line.starts_with("ERROR:") || line.starts_with("Error:") {
+                } else if escaped.starts_with("ERROR:") || escaped.starts_with("Error:") {
                     println!(
-                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;31m{line}\x1b[0m"
+                        "{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} \x1b[1;31m{escaped}\x1b[0m"
                     );
                 } else {
-                    println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} {line}");
+                    println!("{DIM}[{ts}]{RESET} {color}[{exe}:{pid}]{RESET} {escaped}");
                 }
                 if let Some((ref mut v, ref mut m)) = log_writers {
-                    let plain = format!("[{ts}] [{exe}:{pid}] {line}\n");
+                    let plain = format!("[{ts}] [{exe}:{pid}] {escaped}\n");
                     let _ = v.write_all(plain.as_bytes());
                     let _ = m.write_all(plain.as_bytes());
                 }
