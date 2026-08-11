@@ -70,6 +70,10 @@ Schema 0.8:
 }
 ```
 
+This schema 0.8 example intentionally narrows the schema 0.7 all-port,
+all-protocol allow to TCP port 443. Omit `ports` to preserve the schema 0.7
+rule exactly.
+
 ## Proxy
 
 Schema 0.7 uses cooperative proxy variables:
@@ -93,6 +97,11 @@ Schema 0.8 moves the endpoint to runtime metadata:
 ```
 
 The omitted 0.8 `network` block uses deny defaults.
+
+On ProcessContainer, the proxy also needs a reachable peer path. Set
+`processContainer.network.allowedProxyPeer` for a packaged app or unpackaged
+AppContainer proxy. For an unpackaged non-AppContainer proxy, omit
+`allowedProxyPeer` and set `ingress.hostLoopback` to `"allow"`.
 
 ## Backend-specific schema 0.8 configuration
 

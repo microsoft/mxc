@@ -75,8 +75,9 @@ exact.
 | Peer | Package family name for a packaged app or AppContainer profile name for an unpackaged AppContainer |
 | Enforcement | Per-container WinHTTP proxy plus scoped loopback; all direct egress remains blocked |
 
-When `runtimeConfig.networkProxy` is set, MXC adds `privateNetworkClientServer`
-for this path.
+When both `runtimeConfig.networkProxy` and
+`processContainer.network.allowedProxyPeer` are set, MXC adds
+`privateNetworkClientServer` for this path.
 
 MXC does not add capabilities to the proxy. The proxy developer must declare `privateNetworkClientServer` for an
 AppContainer proxy and `internetClient` when the proxy connects to external destinations.
