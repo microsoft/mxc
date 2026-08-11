@@ -184,7 +184,6 @@ try {
 
     $providerGuid = Get-TraceLoggingProviderGuid -Name $providerName
     logman stop $sessionName -ets 2>$null | Out-Null
-    logman delete $sessionName -ets 2>$null | Out-Null
     logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 2>&1 | Out-Host
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create ETW trace session.' }
     $traceStarted = $true
@@ -198,7 +197,7 @@ try {
     if (-not (Test-Path $etlFile) -or (Get-Item $etlFile).Length -eq 0) {
         throw 'ETL output was absent or empty.'
     }
-    tracerpt "$etlFile" -o "$xmlFile" -of XML -y 2>&1 | Out-Host
+    tracerpt "$etlFile" -o "$xmlFile" -of XML -lr -y 2>&1 | Out-Host
     if (-not (Test-Path $xmlFile)) { throw 'tracerpt did not produce XML.' }
     $xml = Get-Content $xmlFile -Raw
     if (([regex]::Matches($xml, '<Event ')).Count -eq 0) {
@@ -210,7 +209,6 @@ try {
     Write-Host 'PASSED: isolated MXC ETW capture smoke test' -ForegroundColor Green
 } finally {
     if ($traceStarted) { logman stop $sessionName -ets 2>$null | Out-Null }
-    logman delete $sessionName -ets 2>$null | Out-Null
     if ($null -eq $originalOverride) { Remove-Item "Env:$overrideName" -ErrorAction SilentlyContinue }
     else { Set-Item "Env:$overrideName" $originalOverride }
     if ($null -eq $originalPolicyOverride) { Remove-Item "Env:$policyOverrideName" -ErrorAction SilentlyContinue }
@@ -218,3 +216,7 @@ try {
     Remove-Item -Recurse -Force $policyPath -ErrorAction SilentlyContinue
     if (-not $SkipClean) { Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue }
 }
+
+# Native cleanup commands may legitimately report "session not found." Do not
+# leak their `$LASTEXITCODE` after the test has completed successfully.
+exit 0
