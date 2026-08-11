@@ -129,12 +129,17 @@ export {
 // Export telemetry consent functions and types
 export {
   TelemetryConsentState,
-  TelemetryConsentSource,
+  TelemetryConsentStatusReason,
+  TelemetryConsentPrompt,
+  TelemetryConsentDecision,
+  TelemetryConsentOutcome,
+  TelemetryConsentPresenter,
   TelemetryConsentQuery,
   TelemetryPolicyState,
   getTelemetryConsent,
   queryTelemetryConsent,
   needsTelemetryConsentPrompt,
   getTelemetryPolicy,
-  setTelemetryConsent,
+  requestTelemetryConsent,
+  withdrawTelemetryConsent,
 } from './telemetry.js';

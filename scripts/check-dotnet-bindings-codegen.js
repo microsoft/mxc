@@ -35,7 +35,9 @@ const REQUIRED_ENTRY_POINTS = [
   "mxc_string_free",
   "mxc_version",
   "mxc_telemetry_get_consent",
-  "mxc_telemetry_set_consent",
+  "mxc_telemetry_request_consent",
+  "mxc_telemetry_withdraw_consent",
+  "mxc_telemetry_get_consent_status",
   "mxc_telemetry_needs_consent_prompt",
   "mxc_telemetry_get_policy",
 ];

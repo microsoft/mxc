@@ -86,8 +86,9 @@ emission (never a Windows-level setting like Diagnostics & feedback). See
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 for the full design.
 
-`MxcTelemetry` is UI-agnostic: call it once at first run, and again at any
-later time from your own settings surface.
+`MxcTelemetry` is UI-agnostic. It invokes a host presenter with the exact
+Rust-owned canonical resource; only the typed decision returned from that
+invocation may be persisted.
 
 Collection is also disabled for each invocation unless the caller opts in.
 Set `SandboxPolicy.TelemetryEnabled = true` for one-shot `Run`/`Spawn` calls.
@@ -99,23 +100,20 @@ administrative policy.
 ```csharp
 using Microsoft.Mxc.Sdk;
 
-if (MxcTelemetry.NeedsConsentPrompt())
+var outcome = MxcTelemetry.RequestConsent(prompt =>
 {
-    // Show your own consent UI, then record the user's choice:
-    MxcTelemetry.SetConsent(userOptedIn, "prompt");
-}
+    // Render title, body, labels, and privacy link verbatim.
+    return TelemetryConsentDecision.Yes;
+});
 
-// Anywhere later, e.g. a settings toggle:
-var state = MxcTelemetry.GetConsent();
-MxcTelemetry.SetConsent(false, "settings-ui");
+TelemetryConsentStatus status = MxcTelemetry.GetConsentStatus();
+MxcTelemetry.WithdrawConsent();
 ```
 
-On non-Windows hosts `NeedsConsentPrompt()` always returns `false`, `GetConsent()` always returns
-`TelemetryConsentState.NotApplicable` and `SetConsent(...)` always throws
-`MxcException` with `Code == ErrorCode.ConsentWriteFailed` — MXC neither
-collects nor offers consent for telemetry off Windows. Both check
-`OperatingSystem.IsWindows()` before touching the native library, so the
-guarantee holds even when `mxc_ffi` is missing entirely.
+`RequestConsentAsync` accepts an asynchronous presenter. If consent is never
+requested, the presenter fails, or it returns `Dismissed`, telemetry remains
+off. On non-Windows hosts requests and withdrawals return `NotApplicable`
+without invoking a presenter.
 
 ### Administrative policy
 

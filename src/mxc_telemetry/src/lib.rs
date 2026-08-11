@@ -133,7 +133,7 @@ mod provider {
         }
     }
 
-    /// Emit an `Execution` ETW event.
+    /// Emit an `MXC.Execution` ETW event.
     ///
     /// `phase` is the state-aware lifecycle phase that produced this event —
     /// one of `provision|start|exec|stop|deprovision`. It is empty for one-shot
@@ -168,7 +168,7 @@ mod provider {
 
         tracelogging::write_event!(
             MXC_PROVIDER,
-            "Execution",
+            "MXC.Execution",
             // Informational: every completion (success or failure) is a routine
             // "what happened" record, not a fault. Severity is reserved for
             // Error (Warning) and any future provider malfunction.
@@ -198,7 +198,7 @@ mod provider {
         );
     }
 
-    /// Emit an `Error` ETW event.
+    /// Emit an `MXC.Error` ETW event.
     ///
     /// By design this event carries **no free-form error text** — only the
     /// bounded `error_type` category and the process `exit_code`. This keeps
@@ -226,7 +226,7 @@ mod provider {
 
         tracelogging::write_event!(
             MXC_PROVIDER,
-            "Error",
+            "MXC.Error",
             // Warning, not Error/Critical: this reports an expected operational
             // failure of a *sandboxed run* (e.g. the user's script failed, a
             // backend was unavailable, a missing/rejected config) — not a
@@ -305,6 +305,23 @@ mod tests {
     /// The provider uses global state (`OnceLock`), so tests that call
     /// `init`/`shutdown` must not run concurrently.
     static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn event_names_preserve_collector_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+        assert!(
+            provider_source.contains("\"MXC.Execution\","),
+            "execution event identity changed"
+        );
+        assert!(
+            provider_source.contains("\"MXC.Error\","),
+            "error event identity changed"
+        );
+    }
 
     #[test]
     fn init_shutdown_roundtrip() {

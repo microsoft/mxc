@@ -112,30 +112,25 @@ struct Cli {
     probe: bool,
 
     /// Print the current persisted telemetry consent state as one-line JSON
-    /// and exit, without spawning a sandbox. The payload is
-    /// `{"consent":...,"needsPrompt":...,"policy":...}`. Windows-only: on
+    /// and exit, without spawning a sandbox. The payload is the same typed
+    /// response as JSON maintenance action `status`. Windows-only: on
     /// other platforms every field reports `not-applicable`/`false` and
     /// nothing touches disk, since MXC does not collect telemetry there. See
     /// `docs/telemetry/telemetry-consent-design.md`.
     #[arg(long = "telemetry-consent-status")]
     telemetry_consent_status: bool,
 
-    /// Persist telemetry consent as granted for the current Windows user and
-    /// exit. Fails with a clear error on non-Windows platforms — MXC must
-    /// not accept a consent decision it can never act on.
+    /// Legacy non-mutating tombstone. Returns a migration error directing the
+    /// caller to the typed JSON consent maintenance envelope.
     #[arg(long = "telemetry-consent-grant")]
     telemetry_consent_grant: bool,
 
-    /// Persist telemetry consent as denied for the current Windows user and
-    /// exit. Fails with a clear error on non-Windows platforms, for the same
-    /// reason as `--telemetry-consent-grant`.
+    /// Legacy non-mutating tombstone. Returns a migration error directing the
+    /// caller to JSON action `withdraw`.
     #[arg(long = "telemetry-consent-revoke")]
     telemetry_consent_revoke: bool,
 
-    /// Provenance recorded alongside a `--telemetry-consent-grant` /
-    /// `--telemetry-consent-revoke` decision (e.g. `"prompt"`,
-    /// `"settings-toggle"`). Defaults to `"cli"` when omitted. Never
-    /// transmitted anywhere; local diagnostic metadata only.
+    /// Legacy companion tombstone for the removed grant/revoke flow.
     #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
     telemetry_consent_source: Option<String>,
 
@@ -267,6 +262,20 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
             source: cli.telemetry_consent_source.as_deref(),
         })
     else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+fn handle_telemetry_consent_input(cli: &Cli) -> bool {
+    let Some((input, is_base64)) = config_input(cli) else {
+        return false;
+    };
+    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input(&input, is_base64) else {
         return false;
     };
     let code = outcome.emit();
@@ -801,6 +810,9 @@ fn main() {
     // ACLs. Matches the Linux/macOS executors, where this fast path also
     // runs unconditionally immediately after CLI parsing.
     if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+    if handle_telemetry_consent_input(&cli) {
         return;
     }
 

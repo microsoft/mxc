@@ -262,13 +262,17 @@ for the full design; the summary:
   policy, not Windows'. It is a deny-only ceiling: it can subtract from what
   the user permitted but can never stand in for the user's consent. See
   [`docs/telemetry/telemetry-policy.md`](telemetry-policy.md).
-- `wxc-exec.exe` exposes `--telemetry-consent-status` / `--telemetry-consent-grant`
-  / `--telemetry-consent-revoke` (+ `--telemetry-consent-source`) so a hosting
-  agent/SDK can prompt on first run and let the end user flip the decision at
-  any later time. `lxc-exec` and `mxc-exec-mac` accept the same flags for
-  CLI-surface parity but always report `not-applicable` and refuse
-  grant/revoke — MXC must not gather telemetry, and therefore must not offer
-  a consent toggle, on any non-Windows platform.
+- Consent request/withdraw/status operations use the typed JSON maintenance
+  envelope documented in the consent design. The old grant/revoke/source flags
+  are non-mutating migration tombstones. `--telemetry-consent-status` remains
+  read-only and emits the same typed response as JSON `action: "status"`.
+- Every EXE/SDK presenter receives the exact Rust-owned, versioned `en-US`
+  resource. Only an explicit Yes returned from that invocation may create a
+  current grant. No request, No, dismissal, presenter failure, or legacy grant
+  means no collection.
+- Consent and policy are rechecked immediately before every event write, so
+  withdrawal or a new administrative block stops later events in a long-lived
+  process.
 - Flipping consent never itself emits telemetry (no "last ping on the way
   out" when revoking).
 

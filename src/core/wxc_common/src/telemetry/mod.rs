@@ -13,6 +13,7 @@
 
 pub mod consent;
 pub mod consent_cli;
+pub mod consent_prompt;
 pub mod correlation_vector;
 pub mod events;
 pub mod policy;
@@ -93,6 +94,11 @@ thread_local! {
     /// telemetry test's forced-active state and trip the global panic hook into
     /// the sink. Never set outside tests.
     static TEST_FORCE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Optional authorization result used to prove the live gate independently
+    /// of platform consent storage.
+    static TEST_AUTHORIZATION_OVERRIDE: std::cell::Cell<Option<bool>> = const {
+        std::cell::Cell::new(None)
+    };
 }
 
 /// Whether the emit glue should proceed. In production this is exactly
@@ -104,6 +110,28 @@ fn emit_active() -> bool {
         return true;
     }
     mxc_telemetry::is_active()
+}
+
+/// Re-read the mutable privacy gates immediately before an event write.
+fn authorization_allows_emission() -> bool {
+    #[cfg(test)]
+    if let Some(allowed) = TEST_AUTHORIZATION_OVERRIDE.with(|value| value.get()) {
+        return allowed;
+    }
+    #[cfg(test)]
+    if TEST_FORCE_ACTIVE.with(|active| active.get()) {
+        return true;
+    }
+
+    consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
+}
+
+fn invocation_can_emit(active: bool) -> bool {
+    active && authorization_allows_emission()
+}
+
+fn process_can_emit() -> bool {
+    emit_active() && authorization_allows_emission()
 }
 
 /// Claim the single terminal-emit slot for this process. Returns `true` if a
@@ -126,6 +154,7 @@ fn reset_for_test() {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
     TEST_FORCE_ACTIVE.with(|f| f.set(false));
+    TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(None));
     events::test_sink::clear();
 }
 
@@ -238,17 +267,18 @@ pub fn emit_completion(
     response: &ScriptResponse,
     elapsed: Duration,
 ) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
     if already_emitted() {
         return;
     }
-    emit_completion_event(containment, response, elapsed);
+    emit_completion_event(active, containment, response, elapsed);
     shutdown();
 }
 
 fn emit_completion_event(
+    active: bool,
     containment: &ContainmentBackend,
     response: &ScriptResponse,
     elapsed: Duration,
@@ -258,23 +288,25 @@ fn emit_completion_event(
     let outcome = if failed { "failure" } else { "success" };
     let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
 
-    log_execution(&ExecutionEvent {
-        backend,
-        exit_code: response.exit_code,
-        outcome,
-        duration_ms: elapsed.as_millis() as u64,
-        failure_reason,
-        // One-shot execution — no state-aware lifecycle phase.
-        phase: "",
-        // One-shot execution — already correlated by AppSessionGuid, no
-        // cross-phase lifecycle to join.
-        correlation_vector: "",
-    });
+    if invocation_can_emit(active) {
+        log_execution(&ExecutionEvent {
+            backend,
+            exit_code: response.exit_code,
+            outcome,
+            duration_ms: elapsed.as_millis() as u64,
+            failure_reason,
+            // One-shot execution — no state-aware lifecycle phase.
+            phase: "",
+            // One-shot execution — already correlated by AppSessionGuid, no
+            // cross-phase lifecycle to join.
+            correlation_vector: "",
+        });
+    }
 
     // The presence of an error message signals an infrastructure error (as
     // opposed to a script that merely exited non-zero). We use it only as a
     // boolean signal — the message text itself is never emitted.
-    if failed && !response.error_message.is_empty() {
+    if failed && !response.error_message.is_empty() && invocation_can_emit(active) {
         log_error(
             TelemetryContext {
                 backend,
@@ -298,10 +330,10 @@ pub fn emit_sdk_completion(
     response: &ScriptResponse,
     elapsed: Duration,
 ) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
-    emit_completion_event(containment, response, elapsed);
+    emit_completion_event(active, containment, response, elapsed);
     shutdown();
 }
 
@@ -316,48 +348,52 @@ pub fn emit_sdk_completion(
 /// bounded `reason` category and exit code, so config/policy/init failures are
 /// observable. `duration_ms` is reported as `0` because no execution occurred.
 pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
     if already_emitted() {
         return;
     }
-    emit_early_exit_event(containment, reason);
+    emit_early_exit_event(active, containment, reason);
     shutdown();
 }
 
-fn emit_early_exit_event(containment: &ContainmentBackend, reason: FailureReason) {
+fn emit_early_exit_event(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
     let backend = containment.wire_name();
 
-    log_execution(&ExecutionEvent {
-        backend,
-        exit_code: 1,
-        outcome: "failure",
-        duration_ms: 0,
-        failure_reason: Some(reason),
-        // One-shot early-exit — no state-aware lifecycle phase.
-        phase: "",
-        // One-shot early-exit — no cross-phase lifecycle to correlate.
-        correlation_vector: "",
-    });
-
-    log_error(
-        TelemetryContext {
+    if invocation_can_emit(active) {
+        log_execution(&ExecutionEvent {
             backend,
+            exit_code: 1,
+            outcome: "failure",
+            duration_ms: 0,
+            failure_reason: Some(reason),
+            // One-shot early-exit — no state-aware lifecycle phase.
             phase: "",
+            // One-shot early-exit — no cross-phase lifecycle to correlate.
             correlation_vector: "",
-        },
-        reason,
-        1,
-    );
+        });
+    }
+
+    if invocation_can_emit(active) {
+        log_error(
+            TelemetryContext {
+                backend,
+                phase: "",
+                correlation_vector: "",
+            },
+            reason,
+            1,
+        );
+    }
 }
 
 /// Emit an SDK spawn failure without claiming the executable-wide terminal slot.
 pub fn emit_sdk_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
-    emit_early_exit_event(containment, reason);
+    emit_early_exit_event(active, containment, reason);
     shutdown();
 }
 
@@ -524,8 +560,12 @@ fn plan_crash<'a>(
 /// resolved attribution so the pure [`plan_crash`] mapping stays testable.
 fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) {
     let plan = plan_crash(ctx, exit_code, reason);
-    log_execution(&plan.execution);
-    log_error(ctx, plan.error, plan.exit_code);
+    if process_can_emit() {
+        log_execution(&plan.execution);
+    }
+    if process_can_emit() {
+        log_error(ctx, plan.error, plan.exit_code);
+    }
 }
 
 /// Emit crash telemetry from a global panic hook.
@@ -541,7 +581,7 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 /// where the OS reclaims the ETW registration at process exit. It also carries
 /// **no** panic message text, which can contain paths or other PII.
 pub fn emit_panic() {
-    if !emit_active() || already_emitted() {
+    if !process_can_emit() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
@@ -570,7 +610,7 @@ pub fn emit_panic() {
 /// tears the process down via `ExitProcess`, and the main thread may still be
 /// live. It is allocation-light and emits no free-form text.
 pub fn emit_cancellation() {
-    if !emit_active() || already_emitted() {
+    if !process_can_emit() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
@@ -696,17 +736,18 @@ pub fn emit_state_aware(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
 ) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
     if already_emitted() {
         return;
     }
-    emit_state_aware_event(ctx, outcome, elapsed);
+    emit_state_aware_event(active, ctx, outcome, elapsed);
     shutdown();
 }
 
 fn emit_state_aware_event(
+    active: bool,
     ctx: TelemetryContext<'_>,
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
@@ -714,8 +755,10 @@ fn emit_state_aware_event(
     let duration_ms = elapsed.as_millis() as u64;
     let plan = plan_state_aware(ctx, outcome, duration_ms);
 
-    log_execution(&plan.execution);
-    if let Some(reason) = plan.error {
+    if invocation_can_emit(active) {
+        log_execution(&plan.execution);
+    }
+    if let Some(reason) = plan.error.filter(|_| invocation_can_emit(active)) {
         log_error(ctx, reason, plan.execution.exit_code);
     }
 }
@@ -730,10 +773,10 @@ pub fn emit_sdk_state_aware(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
 ) {
-    if !active {
+    if !invocation_can_emit(active) {
         return;
     }
-    emit_state_aware_event(ctx, outcome, elapsed);
+    emit_state_aware_event(active, ctx, outcome, elapsed);
     shutdown();
 }
 
@@ -968,6 +1011,27 @@ mod tests {
     }
 
     #[test]
+    fn live_authorization_gate_suppresses_and_then_allows_emission() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|active| active.set(true));
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(false)));
+        set_process_context(&ContainmentBackend::IsolationSession);
+
+        emit_panic();
+        assert!(events::test_sink::take_executions().is_empty());
+        assert!(events::test_sink::take_errors().is_empty());
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
+        emit_panic();
+        assert_eq!(events::test_sink::take_executions().len(), 1);
+        assert_eq!(events::test_sink::take_errors().len(), 1);
+
+        reset_for_test();
+    }
+
+    #[test]
     fn emit_panic_active_captures_execution_and_error() {
         // Drive the real emit glue (globals read → active guard → paired write)
         // with the provider forced active and the capture sink installed, then
@@ -975,6 +1039,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
@@ -1011,6 +1076,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("start");
@@ -1385,6 +1451,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
 
         // Provision-style success envelope → one Execution, no Error.
         let envelope = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
@@ -1408,6 +1475,7 @@ mod tests {
         // Fresh slot for the error case (the emit above claimed it once).
         reset_for_test();
         events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         let err = Err(MxcError::policy_validation("bad policy"));
         emit_state_aware(
             true,
@@ -1443,6 +1511,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
 
         // Register the real ETW provider; on Windows this makes is_active() true.
         assert!(

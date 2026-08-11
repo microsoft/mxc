@@ -69,8 +69,7 @@ struct Cli {
     #[arg(long = "telemetry-consent-status")]
     telemetry_consent_status: bool,
 
-    /// Not supported on macOS; always fails. Present for CLI-surface
-    /// parity with wxc-exec.exe.
+    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
     #[arg(long = "telemetry-consent-grant")]
     telemetry_consent_grant: bool,
 
@@ -79,16 +78,15 @@ struct Cli {
     #[arg(long = "telemetry-consent-revoke")]
     telemetry_consent_revoke: bool,
 
-    /// Unused on macOS; accepted only for CLI-surface parity.
+    /// Legacy companion tombstone for the removed grant/revoke flow.
     #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
     telemetry_consent_source: Option<String>,
 }
 
 /// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
 /// mirrors. On macOS, `wxc_common::telemetry::consent` always reports
-/// `NotApplicable` and rejects writes, so `--telemetry-consent-grant`/
-/// `-revoke` fail loudly here instead of pretending to record a decision
-/// MXC can never act on (MXC must never gather telemetry off Windows).
+/// `NotApplicable`; legacy state-changing flags return the same non-mutating
+/// maintenance-JSON migration error as every other executor.
 /// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
 /// this fast path can't drift from `wxc-exec`/`lxc-exec`. The shared handler
 /// returns the outcome as data; terminating the process is this binary's
@@ -102,6 +100,26 @@ fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
             source: cli.telemetry_consent_source.as_deref(),
         },
     ) else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+fn handle_telemetry_consent_input(cli: &Cli) -> bool {
+    let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
+        (input, true)
+    } else if let Some(input) = cli.config.as_ref().or(cli.config_path.as_ref()) {
+        (input, false)
+    } else {
+        return false;
+    };
+    let Some(outcome) =
+        wxc_common::telemetry::consent_cli::handle_maintenance_input(input, is_base64)
+    else {
         return false;
     };
     let code = outcome.emit();
@@ -133,6 +151,9 @@ fn main() {
     // --telemetry-consent-{status,grant,revoke}: report/administer the
     // (always not-applicable on macOS) consent state and exit.
     if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+    if handle_telemetry_consent_input(&cli) {
         return;
     }
 

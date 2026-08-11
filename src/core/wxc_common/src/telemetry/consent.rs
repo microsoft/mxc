@@ -22,13 +22,16 @@
 // consent store; the non-Windows stub persists nothing.
 #[cfg(target_os = "windows")]
 use serde::{Deserialize, Serialize};
+use std::fmt;
+
+use super::consent_prompt::{prompt_for_locale, ConsentPrompt};
 
 /// Current schema version for the persisted consent record. Bump when the
 /// on-disk shape changes in a way that isn't purely additive; unknown/older
 /// versions are treated as [`ConsentState::Undetermined`] on read (fail
 /// closed) rather than guessed at.
 #[cfg(target_os = "windows")]
-const CONSENT_SCHEMA_VERSION: u32 = 1;
+const CONSENT_SCHEMA_VERSION: u32 = 2;
 
 /// The user's telemetry consent decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +50,106 @@ pub enum ConsentState {
     /// all on these platforms.
     NotApplicable,
 }
+
+/// Why persisted consent does not currently authorize collection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentStatusReason {
+    /// No consent record exists for this user.
+    NoRecord,
+    /// The consent store could not be read.
+    StoreUnreadable,
+    /// The consent record was not valid JSON or did not have a recognized
+    /// consent value.
+    StoreMalformed,
+    /// The persisted consent schema is not supported by this build.
+    ConsentSchemaUnsupported,
+    /// A stored grant predates versioned canonical consent language.
+    PromptVersionMissing,
+    /// A stored grant references a different canonical prompt version.
+    PromptVersionUnsupported,
+    /// Telemetry consent is not applicable on this platform.
+    NotApplicable,
+}
+
+impl ConsentStatusReason {
+    /// Stable wire representation used by status APIs and bindings.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoRecord => "no-record",
+            Self::StoreUnreadable => "store-unreadable",
+            Self::StoreMalformed => "store-malformed",
+            Self::ConsentSchemaUnsupported => "consent-schema-unsupported",
+            Self::PromptVersionMissing => "prompt-version-missing",
+            Self::PromptVersionUnsupported => "prompt-version-unsupported",
+            Self::NotApplicable => "not-applicable",
+        }
+    }
+}
+
+/// Persisted and effective telemetry consent at one point in time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsentStatus {
+    /// Decision found in the consent record, when one could be recovered.
+    pub stored_state: ConsentState,
+    /// State used by the telemetry gate after validating the record and prompt
+    /// version.
+    pub effective_state: ConsentState,
+    /// Fail-closed reason when the record is absent, invalid, or inapplicable.
+    pub reason: Option<ConsentStatusReason>,
+}
+
+impl ConsentStatus {
+    /// Whether an explicit consent request may offer the canonical prompt.
+    pub fn needs_prompt(&self) -> bool {
+        matches!(self.effective_state, ConsentState::Undetermined)
+    }
+}
+
+/// Explicit result returned by a consent presenter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentDecision {
+    Yes,
+    No,
+    Dismissed,
+}
+
+/// Result of requesting or withdrawing telemetry consent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConsentActionResult {
+    Granted,
+    Denied,
+    Dismissed,
+    Withdrawn,
+    AlreadyGranted,
+    PolicyBlocked,
+    NotApplicable,
+}
+
+/// Consent action result together with the resulting status and policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsentActionOutcome {
+    pub result: ConsentActionResult,
+    pub status: ConsentStatus,
+    pub policy: super::policy::PolicyState,
+}
+
+/// Failure to present or persist a consent decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsentActionError {
+    Presenter(String),
+    Persist(String),
+}
+
+impl fmt::Display for ConsentActionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Presenter(message) => write!(formatter, "consent presenter failed: {message}"),
+            Self::Persist(message) => write!(formatter, "failed to persist consent: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ConsentActionError {}
 
 impl ConsentState {
     /// Stable, lowercase wire representation used by the CLI flags, the FFI
@@ -114,6 +217,10 @@ struct ConsentRecord {
     source: String,
     #[serde(rename = "promptedMxcVersion", default)]
     prompted_mxc_version: String,
+    #[serde(rename = "promptResourceVersion", default)]
+    prompt_resource_version: Option<u32>,
+    #[serde(rename = "promptLocale", default)]
+    prompt_locale: String,
     /// Unix seconds at the time of the last grant/revoke. Debug/support
     /// provenance only — never used for gating — so a plain epoch integer is
     /// enough; `#[serde(default)]` means older or foreign records missing
@@ -129,7 +236,12 @@ struct ConsentRecord {
 /// — never to `Granted`. Always [`ConsentState::NotApplicable`] on
 /// non-Windows platforms, without any filesystem access.
 pub fn get_consent() -> ConsentState {
-    platform::read()
+    get_status().effective_state
+}
+
+/// Returns persisted and effective consent plus a typed fail-closed reason.
+pub fn get_status() -> ConsentStatus {
+    platform::read_status()
 }
 
 /// Persists a new telemetry consent decision for the current Windows user.
@@ -143,6 +255,153 @@ pub fn get_consent() -> ConsentState {
 /// silently accept a consent decision it can never act on.
 pub fn set_consent(granted: bool, source: &str) -> Result<(), String> {
     platform::write(granted, source)
+}
+
+/// Request telemetry consent through a host-owned presenter.
+///
+/// The presenter receives the complete canonical resource. Only an explicit
+/// [`ConsentDecision::Yes`] returned from this invocation can create a grant.
+pub fn request_consent<F>(
+    locale: Option<&str>,
+    presenter: F,
+) -> Result<ConsentActionOutcome, ConsentActionError>
+where
+    F: FnOnce(&ConsentPrompt) -> Result<ConsentDecision, String>,
+{
+    let (prompt, policy, status) = match consent_preflight(locale) {
+        ConsentPreflight::Complete(outcome) => return Ok(outcome),
+        ConsentPreflight::Present {
+            prompt,
+            policy,
+            status,
+        } => (prompt, policy, status),
+    };
+
+    let decision = presenter(prompt).map_err(ConsentActionError::Presenter)?;
+    persist_presented_decision(decision, prompt, policy, status)
+}
+
+/// Asynchronous counterpart to [`request_consent`].
+pub async fn request_consent_async<F, Fut>(
+    locale: Option<&str>,
+    presenter: F,
+) -> Result<ConsentActionOutcome, ConsentActionError>
+where
+    F: FnOnce(&ConsentPrompt) -> Fut,
+    Fut: std::future::Future<Output = Result<ConsentDecision, String>>,
+{
+    match consent_preflight(locale) {
+        ConsentPreflight::Complete(outcome) => Ok(outcome),
+        ConsentPreflight::Present {
+            prompt,
+            policy,
+            status,
+        } => {
+            let decision = presenter(prompt)
+                .await
+                .map_err(ConsentActionError::Presenter)?;
+            persist_presented_decision(decision, prompt, policy, status)
+        }
+    }
+}
+
+enum ConsentPreflight {
+    Complete(ConsentActionOutcome),
+    Present {
+        prompt: &'static ConsentPrompt,
+        policy: super::policy::PolicyState,
+        status: ConsentStatus,
+    },
+}
+
+fn consent_preflight(locale: Option<&str>) -> ConsentPreflight {
+    let policy = super::policy::get_policy();
+    let status = get_status();
+
+    if status.effective_state == ConsentState::NotApplicable {
+        return ConsentPreflight::Complete(ConsentActionOutcome {
+            result: ConsentActionResult::NotApplicable,
+            status,
+            policy,
+        });
+    }
+    if !policy.allows_collection() {
+        return ConsentPreflight::Complete(ConsentActionOutcome {
+            result: ConsentActionResult::PolicyBlocked,
+            status,
+            policy,
+        });
+    }
+    if status.effective_state == ConsentState::Granted {
+        return ConsentPreflight::Complete(ConsentActionOutcome {
+            result: ConsentActionResult::AlreadyGranted,
+            status,
+            policy,
+        });
+    }
+
+    let prompt = prompt_for_locale(locale);
+    ConsentPreflight::Present {
+        prompt,
+        policy,
+        status,
+    }
+}
+
+fn persist_presented_decision(
+    decision: ConsentDecision,
+    prompt: &ConsentPrompt,
+    policy: super::policy::PolicyState,
+    status: ConsentStatus,
+) -> Result<ConsentActionOutcome, ConsentActionError> {
+    match decision {
+        ConsentDecision::Yes => {
+            platform::write_presented(true, "prompt", prompt)
+                .map_err(ConsentActionError::Persist)?;
+            Ok(ConsentActionOutcome {
+                result: ConsentActionResult::Granted,
+                status: get_status(),
+                policy,
+            })
+        }
+        ConsentDecision::No => {
+            platform::write_presented(false, "prompt", prompt)
+                .map_err(ConsentActionError::Persist)?;
+            Ok(ConsentActionOutcome {
+                result: ConsentActionResult::Denied,
+                status: get_status(),
+                policy,
+            })
+        }
+        ConsentDecision::Dismissed => Ok(ConsentActionOutcome {
+            result: ConsentActionResult::Dismissed,
+            status,
+            policy,
+        }),
+    }
+}
+
+/// Idempotently withdraw telemetry consent.
+///
+/// Withdrawal does not require a permitting administrative policy. Off
+/// Windows it succeeds as a typed `NotApplicable` result without storage.
+pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
+    let policy = super::policy::get_policy();
+    let status = get_status();
+    if status.effective_state == ConsentState::NotApplicable {
+        return Ok(ConsentActionOutcome {
+            result: ConsentActionResult::NotApplicable,
+            status,
+            policy,
+        });
+    }
+
+    platform::write(false, "withdrawal").map_err(ConsentActionError::Persist)?;
+    Ok(ConsentActionOutcome {
+        result: ConsentActionResult::Withdrawn,
+        status: get_status(),
+        policy,
+    })
 }
 
 /// Current time as Unix seconds. Debug/support provenance only (see
@@ -164,7 +423,11 @@ fn now_epoch_seconds() -> u64 {
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{now_epoch_seconds, ConsentRecord, ConsentState, CONSENT_SCHEMA_VERSION};
+    use super::{
+        now_epoch_seconds, ConsentRecord, ConsentState, ConsentStatus, ConsentStatusReason,
+        CONSENT_SCHEMA_VERSION,
+    };
+    use crate::telemetry::consent_prompt::{CONSENT_RESOURCE_VERSION, FALLBACK_LOCALE};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -376,25 +639,87 @@ mod platform {
     #[cfg(test)]
     pub(super) const IO_RETRY_ATTEMPTS_FOR_TEST: u32 = IO_RETRY_ATTEMPTS;
 
-    pub(super) fn read() -> ConsentState {
+    pub(super) fn read_status() -> ConsentStatus {
         let Some(path) = consent_file_path() else {
-            return ConsentState::Undetermined;
+            return ConsentStatus {
+                stored_state: ConsentState::Undetermined,
+                effective_state: ConsentState::Undetermined,
+                reason: Some(ConsentStatusReason::StoreUnreadable),
+            };
         };
-        let Ok(data) = with_io_retry(|| fs::read_to_string(&path)) else {
-            return ConsentState::Undetermined;
+        let data = match with_io_retry(|| fs::read_to_string(&path)) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ConsentStatus {
+                    stored_state: ConsentState::Undetermined,
+                    effective_state: ConsentState::Undetermined,
+                    reason: Some(ConsentStatusReason::NoRecord),
+                };
+            }
+            Err(_) => {
+                return ConsentStatus {
+                    stored_state: ConsentState::Undetermined,
+                    effective_state: ConsentState::Undetermined,
+                    reason: Some(ConsentStatusReason::StoreUnreadable),
+                };
+            }
         };
         let Ok(record) = serde_json::from_str::<ConsentRecord>(&data) else {
-            return ConsentState::Undetermined;
+            return ConsentStatus {
+                stored_state: ConsentState::Undetermined,
+                effective_state: ConsentState::Undetermined,
+                reason: Some(ConsentStatusReason::StoreMalformed),
+            };
         };
-        // Fail closed on any schema we don't recognize, rather than guessing
-        // at forward/backward compatibility.
-        if record.schema_version != CONSENT_SCHEMA_VERSION {
-            return ConsentState::Undetermined;
-        }
-        match record.consent.as_str() {
+
+        let stored_state = match record.consent.as_str() {
             "granted" => ConsentState::Granted,
             "denied" => ConsentState::Denied,
-            _ => ConsentState::Undetermined,
+            _ => {
+                return ConsentStatus {
+                    stored_state: ConsentState::Undetermined,
+                    effective_state: ConsentState::Undetermined,
+                    reason: Some(ConsentStatusReason::StoreMalformed),
+                };
+            }
+        };
+
+        if stored_state == ConsentState::Denied {
+            return ConsentStatus {
+                stored_state,
+                effective_state: ConsentState::Denied,
+                reason: None,
+            };
+        }
+
+        if record.schema_version != CONSENT_SCHEMA_VERSION {
+            return ConsentStatus {
+                stored_state,
+                effective_state: ConsentState::Undetermined,
+                reason: Some(if record.prompt_resource_version.is_none() {
+                    ConsentStatusReason::PromptVersionMissing
+                } else {
+                    ConsentStatusReason::ConsentSchemaUnsupported
+                }),
+            };
+        }
+
+        match record.prompt_resource_version {
+            Some(CONSENT_RESOURCE_VERSION) if !record.prompt_locale.is_empty() => ConsentStatus {
+                stored_state,
+                effective_state: ConsentState::Granted,
+                reason: None,
+            },
+            None => ConsentStatus {
+                stored_state,
+                effective_state: ConsentState::Undetermined,
+                reason: Some(ConsentStatusReason::PromptVersionMissing),
+            },
+            Some(_) => ConsentStatus {
+                stored_state,
+                effective_state: ConsentState::Undetermined,
+                reason: Some(ConsentStatusReason::PromptVersionUnsupported),
+            },
         }
     }
 
@@ -406,6 +731,33 @@ mod platform {
     }
 
     pub(super) fn write(granted: bool, source: &str) -> Result<(), String> {
+        write_record(
+            granted,
+            source,
+            Some(CONSENT_RESOURCE_VERSION),
+            FALLBACK_LOCALE,
+        )
+    }
+
+    pub(super) fn write_presented(
+        granted: bool,
+        source: &str,
+        prompt: &crate::telemetry::consent_prompt::ConsentPrompt,
+    ) -> Result<(), String> {
+        write_record(
+            granted,
+            source,
+            Some(prompt.resource_version),
+            prompt.locale,
+        )
+    }
+
+    fn write_record(
+        granted: bool,
+        source: &str,
+        prompt_resource_version: Option<u32>,
+        prompt_locale: &str,
+    ) -> Result<(), String> {
         let path = consent_file_path().ok_or_else(|| {
             "could not resolve %LocalAppData%; cannot persist telemetry consent".to_string()
         })?;
@@ -419,6 +771,8 @@ mod platform {
             consent: if granted { "granted" } else { "denied" }.to_string(),
             source: source.to_string(),
             prompted_mxc_version: crate::telemetry::version().to_string(),
+            prompt_resource_version,
+            prompt_locale: prompt_locale.to_string(),
             updated_at_epoch: now_epoch_seconds(),
         };
         let json = serde_json::to_string_pretty(&record)
@@ -471,13 +825,25 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
-    use super::ConsentState;
+    use super::{ConsentState, ConsentStatus, ConsentStatusReason};
 
-    pub(super) fn read() -> ConsentState {
-        ConsentState::NotApplicable
+    pub(super) fn read_status() -> ConsentStatus {
+        ConsentStatus {
+            stored_state: ConsentState::NotApplicable,
+            effective_state: ConsentState::NotApplicable,
+            reason: Some(ConsentStatusReason::NotApplicable),
+        }
     }
 
     pub(super) fn write(_granted: bool, _source: &str) -> Result<(), String> {
+        Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
+    }
+
+    pub(super) fn write_presented(
+        _granted: bool,
+        _source: &str,
+        _prompt: &crate::telemetry::consent_prompt::ConsentPrompt,
+    ) -> Result<(), String> {
         Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
     }
 }
@@ -611,7 +977,9 @@ mod tests {
     mod windows_tests {
         use super::LocalAppDataGuard;
         use crate::telemetry::consent::{
-            get_consent, needs_consent_prompt, set_consent, ConsentState,
+            get_consent, get_status, needs_consent_prompt, request_consent, set_consent,
+            withdraw_consent, ConsentActionError, ConsentActionResult, ConsentDecision,
+            ConsentState, ConsentStatusReason,
         };
 
         #[test]
@@ -667,6 +1035,90 @@ mod tests {
             assert_eq!(get_consent(), ConsentState::Denied);
             set_consent(true, "settings-toggle").unwrap();
             assert_eq!(get_consent(), ConsentState::Granted);
+        }
+
+        #[test]
+        fn presenter_yes_persists_a_current_version_grant() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+
+            let outcome = request_consent(Some("en-US"), |prompt| {
+                assert_eq!(prompt.resource_version, 1);
+                assert_eq!(prompt.locale, "en-US");
+                Ok(ConsentDecision::Yes)
+            })
+            .expect("consent request");
+
+            assert_eq!(outcome.result, ConsentActionResult::Granted);
+            assert_eq!(outcome.status.stored_state, ConsentState::Granted);
+            assert_eq!(outcome.status.effective_state, ConsentState::Granted);
+            assert_eq!(outcome.status.reason, None);
+        }
+
+        #[test]
+        fn explicit_request_can_replace_a_prior_denial() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+            set_consent(false, "prompt").unwrap();
+
+            let outcome = request_consent(None, |_| Ok(ConsentDecision::Yes)).unwrap();
+
+            assert_eq!(outcome.result, ConsentActionResult::Granted);
+            assert_eq!(get_consent(), ConsentState::Granted);
+        }
+
+        #[test]
+        fn dismissed_or_failed_presenter_does_not_rewrite_prior_state() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+            set_consent(false, "prompt").unwrap();
+
+            let dismissed =
+                request_consent(None, |_| Ok(ConsentDecision::Dismissed)).expect("dismissal");
+            assert_eq!(dismissed.result, ConsentActionResult::Dismissed);
+            assert_eq!(get_consent(), ConsentState::Denied);
+
+            let error = request_consent(None, |_| Err("host UI failed".to_string()))
+                .expect_err("presenter failure");
+            assert_eq!(
+                error,
+                ConsentActionError::Presenter("host UI failed".to_string())
+            );
+            assert_eq!(get_consent(), ConsentState::Denied);
+        }
+
+        #[test]
+        fn policy_block_and_current_grant_skip_the_presenter() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(0);
+            let blocked = request_consent(None, |_| panic!("blocked policy must not present"))
+                .expect("blocked result");
+            assert_eq!(blocked.result, ConsentActionResult::PolicyBlocked);
+
+            env.set_policy_value(3);
+            set_consent(true, "prompt").unwrap();
+            let granted = request_consent(None, |_| panic!("current grant must not re-present"))
+                .expect("already granted result");
+            assert_eq!(granted.result, ConsentActionResult::AlreadyGranted);
+        }
+
+        #[test]
+        fn withdrawal_is_idempotent_and_ignores_blocking_policy() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+            set_consent(true, "prompt").unwrap();
+            env.set_policy_value(0);
+
+            for _ in 0..2 {
+                let outcome = withdraw_consent().expect("withdrawal");
+                assert_eq!(outcome.result, ConsentActionResult::Withdrawn);
+                assert_eq!(outcome.status.effective_state, ConsentState::Denied);
+            }
         }
 
         #[test]
@@ -728,16 +1180,17 @@ mod tests {
             ));
         }
 
-        /// The `updatedAtUtc: String` → `updatedAtEpoch: u64` rename claims
-        /// backward compatibility via `#[serde(default)]`. That claim is
-        /// load-bearing (a user who already granted consent must not be
-        /// silently reset to Undetermined and re-prompted), so lock it in
-        /// against a verbatim pre-rename record.
+        /// Pre-versioned grants must be invalidated because they cannot prove
+        /// the canonical prompt was shown. A prior denial remains denied.
         #[test]
-        fn pre_rename_record_still_reads_back_its_consent_state() {
-            for (stored, expected) in [
-                ("granted", ConsentState::Granted),
-                ("denied", ConsentState::Denied),
+        fn legacy_records_preserve_provenance_but_require_reconsent_for_grants() {
+            for (stored, effective, reason) in [
+                (
+                    "granted",
+                    ConsentState::Undetermined,
+                    Some(ConsentStatusReason::PromptVersionMissing),
+                ),
+                ("denied", ConsentState::Denied, None),
             ] {
                 let tmp = tempfile::tempdir().unwrap();
                 let _guard = LocalAppDataGuard::set(tmp.path());
@@ -750,7 +1203,17 @@ mod tests {
                     ),
                 )
                 .unwrap();
-                assert_eq!(get_consent(), expected, "old-format {stored} record");
+                let status = get_status();
+                assert_eq!(
+                    status.stored_state,
+                    if stored == "granted" {
+                        ConsentState::Granted
+                    } else {
+                        ConsentState::Denied
+                    }
+                );
+                assert_eq!(status.effective_state, effective);
+                assert_eq!(status.reason, reason);
             }
         }
 

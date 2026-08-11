@@ -316,33 +316,38 @@ emission (never a Windows-level setting like Diagnostics & feedback). See
 [`docs/telemetry/telemetry-consent-design.md`](../../../docs/telemetry/telemetry-consent-design.md)
 for the full design.
 
-The crate is UI-agnostic: it does not render a prompt. Call
-`needs_consent_prompt()` once at first sandbox run, show your own UI, then
-record the answer — and let a settings surface flip it at any later time.
+The crate is UI-agnostic: it does not render a prompt. A host may call
+`request_consent()` or `request_consent_async()` and render every field of the
+canonical prompt supplied to its presenter callback verbatim. MXC persists a
+grant only from the typed decision returned by that callback. If the host never
+requests consent, telemetry remains off.
 
 Telemetry is also off per invocation unless the request explicitly enables it
 with `SandboxRequest::set_telemetry_enabled(true)`. This stable switch does not
 require `set_experimental(true)` and cannot bypass consent or administrative
-policy.
+policy. The same configured `SandboxRequest` can be passed to either
+run-to-completion (`run`) or streaming (`spawn_sandbox`).
 
 ```rust,no_run
 use mxc_sdk::telemetry;
 
-if telemetry::needs_consent_prompt() {
-    // Show your own consent UI, then record the user's choice:
-    telemetry::set_consent(user_opted_in, "prompt")?;
-}
+let outcome = telemetry::request_consent(Some("en-US"), |prompt| {
+    // Render title, body, labels, and privacy link verbatim in host UI.
+    assert_eq!(prompt.resource_version, 1);
+    Ok(telemetry::ConsentDecision::Yes)
+})?;
 
-// Anywhere later, e.g. a settings toggle:
-let _state = telemetry::get_consent();
-telemetry::set_consent(false, "settings-toggle")?;
+let status = telemetry::get_consent_status();
+let withdrawal = telemetry::withdraw_consent()?;
+# let _ = (outcome, status, withdrawal);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Off Windows `get_consent()` always returns `ConsentState::NotApplicable`,
-`needs_consent_prompt()` is always `false`, and `set_consent(..)` always
-fails — MXC neither collects nor offers consent for telemetry there, so a
-host can call these unconditionally without special-casing the platform.
+`needs_consent_prompt()` is always `false`, and consent requests return
+`ConsentActionResult::NotApplicable` — MXC neither collects nor offers consent
+for telemetry there, so a host can call these unconditionally without
+special-casing the platform.
 
 `ConsentState` and `PolicyState` are SDK-owned types, so the public API never
 leaks the internal `wxc_common` foundation crate. The *decision logic* behind

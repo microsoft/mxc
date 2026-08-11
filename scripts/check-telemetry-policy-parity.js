@@ -35,7 +35,14 @@ const csharpPath = join(
   "Microsoft.Mxc.Sdk",
   "MxcTelemetry.cs"
 );
-const tsPath = join(repoRoot, "sdk", "node", "src", "telemetry.ts");
+const tsPath = join(
+  repoRoot,
+  "sdk",
+  "node",
+  "src",
+  "generated",
+  "telemetry-consent-wire.ts"
+);
 
 const errors = [];
 
@@ -102,16 +109,16 @@ csharpStates.add("blocked");
 // --- TypeScript: the exported union ---------------------------------------
 const tsSrc = readFileSync(tsPath, "utf8");
 const unionMatch = tsSrc.match(
-  /export type TelemetryPolicyState\s*=\s*([^;]+);/
+  /export type TelemetryConsentPolicyState\s*=\s*([^;]+);/
 );
 if (!unionMatch) {
   console.error(
-    "ERROR: could not find `export type TelemetryPolicyState` in telemetry.ts"
+    "ERROR: could not find generated `TelemetryConsentPolicyState`"
   );
   process.exit(1);
 }
 const tsStates = new Set();
-for (const m of unionMatch[1].matchAll(/'([a-z-]+)'/g)) {
+for (const m of unionMatch[1].matchAll(/["']([a-z-]+)["']/g)) {
   tsStates.add(m[1]);
 }
 

@@ -66,10 +66,31 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
+      - name: Test telemetry consent and policy in release mode
+        run: |
+          cargo test --locked --release --target ${{ matrix.target }} -p wxc_common telemetry::consent
+          cargo test --locked --release --target ${{ matrix.target }} -p wxc_common telemetry::policy
+
       - name: Test
         run: cargo test --locked --release --target ${{ matrix.target }}
              --no-default-features
              --features "${{ matrix.features }}"
+
+      - name: Build debug executor for isolated telemetry smoke tests
+        if: matrix.arch == 'x64'
+        run: cargo build --locked -p wxc
+
+      - name: Run isolated telemetry consent smoke test
+        if: matrix.arch == 'x64'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: tests\scripts\run_telemetry_consent_smoke_test.ps1 -BinDir src\target\debug
+
+      - name: Run isolated telemetry ETW smoke test
+        if: matrix.arch == 'x64'
+        working-directory: ${{ github.workspace }}
+        shell: pwsh
+        run: tests\scripts\run_telemetry_etw_smoke_test.ps1 -BinDir src\target\debug
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4

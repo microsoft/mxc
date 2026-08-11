@@ -416,9 +416,10 @@ getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
 // Telemetry consent (Windows-only; see Telemetry Consent section below)
 getTelemetryConsent()             → TelemetryConsentState
-queryTelemetryConsent()           → { state, needsPrompt, policy, error? }
+queryTelemetryConsent()           → { storedState, effectiveState, needsPrompt, policy, reason?, error? }
 needsTelemetryConsentPrompt()     → boolean
-setTelemetryConsent(granted, source?)
+requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
+withdrawTelemetryConsent()        → TelemetryConsentOutcome
 getTelemetryPolicy()              → TelemetryPolicyState
 
 // Capability types
@@ -449,27 +450,29 @@ call passes `options.telemetry: { enabled: true }`. This stable switch does not
 require `options.experimental` and cannot bypass consent or administrative
 policy.
 
-The SDK does not ship a consent UI — call these once at first run, and again
-at any later time from your own settings surface:
+The SDK does not ship a consent UI. It invokes your presenter with the exact
+Rust-owned canonical resource over a private, session-bound child protocol.
+Render every supplied field verbatim and return a typed decision:
 
 ```typescript
-import { needsTelemetryConsentPrompt, setTelemetryConsent, getTelemetryConsent } from '@microsoft/mxc-sdk';
+import {
+  requestTelemetryConsent,
+  queryTelemetryConsent,
+  withdrawTelemetryConsent,
+} from '@microsoft/mxc-sdk';
 
-if (needsTelemetryConsentPrompt()) {
-  // Show your own consent UI, then record the user's choice:
-  setTelemetryConsent(userOptedIn, 'prompt');
-}
+const outcome = await requestTelemetryConsent(async (prompt) => {
+  // Render title, body, labels, and privacy link verbatim.
+  return 'yes'; // 'yes' | 'no' | 'dismissed'
+}, 'en-US');
 
-// Anywhere later, e.g. a settings toggle:
-const state = getTelemetryConsent(); // 'granted' | 'denied' | 'undetermined' | 'not-applicable'
-setTelemetryConsent(false, 'settings-toggle');
+const status = queryTelemetryConsent();
+withdrawTelemetryConsent();
 ```
 
-On non-Windows hosts `getTelemetryConsent()` always returns `'not-applicable'`
-and `setTelemetryConsent(...)` always throws — MXC neither collects nor offers
-consent for telemetry off Windows. Both check `process.platform` before doing
-anything else, so `needsTelemetryConsentPrompt()` is guaranteed `false` there;
-you can call it unconditionally without special-casing the platform yourself.
+If the API is never called, the presenter fails, or it returns `dismissed`,
+telemetry remains off. On non-Windows hosts requests and withdrawals return
+`notApplicable` without invoking the presenter or child process.
 
 `getTelemetryConsent()` never throws: any failure to reach `wxc-exec` reads
 back as `'undetermined'` (fail-closed — never `'granted'`). If you need to
@@ -478,7 +481,8 @@ tell a genuine "user has not decided yet" apart from a broken install, use
 `error` string when the state was forced by a failure:
 
 ```typescript
-const { state, needsPrompt, policy, error } = queryTelemetryConsent();
+const { effectiveState, storedState, needsPrompt, policy, reason, error } =
+  queryTelemetryConsent();
 if (error) {
   console.warn(`mxc: could not read telemetry consent: ${error}`);
 }

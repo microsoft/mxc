@@ -186,7 +186,7 @@ public sealed class MxcTelemetryTests : IDisposable
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(
             path,
-            $$"""{"schemaVersion":1,"consent":"{{consent}}","source":"test","promptedMxcVersion":"0.0.0","updatedAtEpoch":0}""");
+            $$"""{"schemaVersion":2,"consent":"{{consent}}","source":"test","promptedMxcVersion":"0.0.0","promptResourceVersion":1,"promptLocale":"en-US","updatedAtEpoch":0}""");
     }
 
     public void Dispose()
@@ -225,19 +225,39 @@ public sealed class MxcTelemetryTests : IDisposable
     }
 
     [Fact]
-    public void SetConsent_ThenGetConsent_RoundTrips_OnWindows()
+    public void RequestConsent_ThenWithdraw_RoundTrips_OnWindows()
     {
         if (!OperatingSystem.IsWindows())
         {
-            // MXC must not gather telemetry off Windows, so consent cannot be
-            // persisted there either — see SetConsent_NonWindows_ThrowsConsentWriteFailed.
             return;
         }
 
-        MxcTelemetry.SetConsent(true, "prompt");
+        var outcome = MxcTelemetry.RequestConsent(prompt =>
+        {
+            Assert.Equal(1u, prompt.ResourceVersion);
+            Assert.Equal("en-US", prompt.Locale);
+            Assert.Equal("Help improve Microsoft eXecution Container (MXC)", prompt.Title.Text);
+            Assert.Equal(
+                """
+                Would you like to send optional diagnostic data to Microsoft to help us understand how MXC is used, diagnose problems, and improve the product?
+
+                If you choose Yes, MXC will send the MXC version and channel, containment backend, run outcome and exit code, run duration, bounded failure category, lifecycle phase, and random identifiers used to correlate events from the same app session or sandbox lifecycle.
+
+                MXC does not send your command text, file paths, environment variables, standard input or output, usernames, credentials, or free-form error messages.
+
+                Choosing No, closing this prompt, or not responding will keep telemetry off. If this consent request is never shown, telemetry also remains off. You can change or withdraw your choice later using MXC telemetry consent controls.
+                """.ReplaceLineEndings("\n"),
+                prompt.Body.Text);
+            Assert.Equal("Yes, send optional diagnostic data", prompt.AffirmativeLabel.Text);
+            Assert.Equal("No, do not send", prompt.NegativeLabel.Text);
+            Assert.Equal("https://privacy.microsoft.com/privacystatement", prompt.LearnMoreUrl);
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
 
-        MxcTelemetry.SetConsent(false, "settings-ui");
+        var withdrawal = MxcTelemetry.WithdrawConsent();
+        Assert.Equal(TelemetryConsentActionResult.Withdrawn, withdrawal.Result);
         Assert.Equal(TelemetryConsentState.Denied, MxcTelemetry.GetConsent());
     }
 
@@ -257,23 +277,31 @@ public sealed class MxcTelemetryTests : IDisposable
             return;
         }
 
-        MxcTelemetry.SetConsent(false, "prompt");
+        var denied = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.No);
+        Assert.Equal(TelemetryConsentActionResult.Denied, denied.Result);
         Assert.False(MxcTelemetry.NeedsConsentPrompt());
 
-        MxcTelemetry.SetConsent(true, "settings-ui");
+        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+        Assert.Equal(TelemetryConsentActionResult.Granted, granted.Result);
         Assert.False(MxcTelemetry.NeedsConsentPrompt());
     }
 
     [Fact]
-    public void SetConsent_NonWindows_ThrowsConsentWriteFailed()
+    public void RequestConsent_NonWindows_IsNotApplicableAndDoesNotPresent()
     {
         if (OperatingSystem.IsWindows())
         {
             return;
         }
 
-        var ex = Assert.Throws<MxcException>(() => MxcTelemetry.SetConsent(true));
-        Assert.Equal(ErrorCode.ConsentWriteFailed, ex.Code);
+        var presented = false;
+        var outcome = MxcTelemetry.RequestConsent(_ =>
+        {
+            presented = true;
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.False(presented);
+        Assert.Equal(TelemetryConsentActionResult.NotApplicable, outcome.Result);
     }
 
     [Fact]
@@ -371,25 +399,38 @@ public sealed class MxcTelemetryTests : IDisposable
         Assert.False(MxcTelemetry.NeedsConsentPrompt());
         Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
 
-        MxcTelemetry.SetConsent(true, "settings-ui");
-        Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
+        var presented = false;
+        var blocked = MxcTelemetry.RequestConsent(_ =>
+        {
+            presented = true;
+            return TelemetryConsentDecision.Yes;
+        });
+        Assert.False(presented);
+        Assert.Equal(TelemetryConsentActionResult.PolicyBlocked, blocked.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, MxcTelemetry.GetConsent());
         Assert.Equal(TelemetryPolicyState.Blocked, MxcTelemetry.GetPolicy());
 
         SetPolicyValue(null);
         Assert.Equal(TelemetryPolicyState.Unrestricted, MxcTelemetry.GetPolicy());
+        var granted = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
+        Assert.Equal(TelemetryConsentActionResult.Granted, granted.Result);
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
     }
 
     [Fact]
-    public void SetConsent_NullSource_DefaultsToSdkAndDoesNotThrowOnWindows()
+    public async Task RequestConsentAsync_PersistsPresenterDecision_OnWindows()
     {
         if (!OperatingSystem.IsWindows())
         {
             return;
         }
 
-        // Should not throw; "sdk" is the documented default provenance.
-        MxcTelemetry.SetConsent(true);
+        var outcome = await MxcTelemetry.RequestConsentAsync(
+            prompt => ValueTask.FromResult(
+                prompt.Locale == "en-US"
+                    ? TelemetryConsentDecision.Yes
+                    : TelemetryConsentDecision.Dismissed));
+        Assert.Equal(TelemetryConsentActionResult.Granted, outcome.Result);
         Assert.Equal(TelemetryConsentState.Granted, MxcTelemetry.GetConsent());
     }
 
@@ -433,6 +474,9 @@ public sealed class MxcTelemetryTests : IDisposable
 
         var policy = Record.Exception(() => MxcTelemetry.GetPolicy());
         Assert.Null(policy);
+
+        var status = Record.Exception(() => MxcTelemetry.GetConsentStatus());
+        Assert.Null(status);
     }
 
     [Fact]

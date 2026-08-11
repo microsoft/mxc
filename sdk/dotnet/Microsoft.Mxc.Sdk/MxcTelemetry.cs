@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 using System.Runtime.InteropServices;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using Microsoft.Mxc.Sdk.Native;
 
 namespace Microsoft.Mxc.Sdk;
@@ -10,13 +12,10 @@ namespace Microsoft.Mxc.Sdk;
 /// Administers MXC's persisted, MXC-owned telemetry consent flag. See
 /// docs/telemetry/telemetry-consent-design.md for the full design.
 ///
-/// This is deliberately UI-agnostic: it does not render a consent prompt.
-/// A hosting application should call <see cref="NeedsConsentPrompt"/> once
-/// (e.g. before its first sandbox run) and, if it returns <c>true</c>, show
-/// its own consent UI and then call <see cref="SetConsent"/> with the user's
-/// choice. A settings page can call <see cref="GetConsent"/> and
-/// <see cref="SetConsent"/> at any later time to let the user change their
-/// mind.
+/// This is deliberately UI-agnostic: it invokes a host presenter with the
+/// complete canonical prompt. Only the typed decision returned from that
+/// invocation may be persisted. A host that never requests consent leaves
+/// telemetry off. <see cref="WithdrawConsent"/> remains available at any time.
 ///
 /// Prefer <see cref="NeedsConsentPrompt"/> over testing
 /// <see cref="GetConsent"/> against
@@ -172,7 +171,7 @@ public static class MxcTelemetry
     /// Always succeeds. Fails closed to <see langword="false"/> (do not prompt)
     /// on any failure — the native library cannot be reached, the native call
     /// reports an error status, or it panics: prompting would be pointless
-    /// there, since <see cref="SetConsent"/> could not persist the answer
+    /// there, since a consent request could not persist the answer
     /// either. A read-only status query on a privacy gate must never be able to
     /// crash the host, so nothing is allowed to propagate out of this method.
     /// </summary>
@@ -288,65 +287,264 @@ public static class MxcTelemetry
         }
     }
 
-    /// <summary>
-    /// Grant or revoke telemetry consent and persist the decision.
-    /// </summary>
-    /// <param name="granted"><see langword="true"/> to grant, <see langword="false"/> to revoke/deny.</param>
-    /// <param name="source">
-    /// Optional, free-form provenance for support/debugging (e.g. <c>"prompt"</c>,
-    /// <c>"settings-ui"</c>). Never transmitted anywhere. Defaults to <c>"sdk"</c>.
-    /// </param>
-    /// <exception cref="MxcException">
-    /// The decision could not be persisted — always the case on non-Windows
-    /// hosts (<see cref="ErrorCode.ConsentWriteFailed"/>), since MXC must not
-    /// collect, and therefore must not offer consent for, telemetry there.
-    /// </exception>
-    public static void SetConsent(bool granted, string? source = null)
+    private sealed class PresenterContext
     {
-        // Windows-only by design; fail here rather than depending on the
-        // native layer to refuse, so the contract holds even when mxc_ffi is
-        // missing entirely.
+        internal required Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> Presenter { get; init; }
+        internal Exception? Error { get; set; }
+    }
+
+    /// <summary>Request consent through a synchronous host presenter.</summary>
+    public static TelemetryConsentOutcome RequestConsent(
+        Func<TelemetryConsentPrompt, TelemetryConsentDecision> presenter,
+        string? locale = null)
+    {
+        ArgumentNullException.ThrowIfNull(presenter);
+        return RequestConsentCore(prompt => ValueTask.FromResult(presenter(prompt)), locale);
+    }
+
+    /// <summary>Request consent through an asynchronous host presenter.</summary>
+    public static Task<TelemetryConsentOutcome> RequestConsentAsync(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        string? locale = null)
+    {
+        ArgumentNullException.ThrowIfNull(presenter);
+        return Task.Run(() => RequestConsentCore(presenter, locale));
+    }
+
+    /// <summary>Read stored/effective consent and the administrative ceiling.</summary>
+    public static TelemetryConsentStatus GetConsentStatus()
+    {
         if (!OperatingSystem.IsWindows())
         {
-            throw new MxcException(
-                ErrorCode.ConsentWriteFailed,
-                "telemetry consent could not be persisted (MXC only collects telemetry, and only offers consent, on Windows)");
+            return new(
+                TelemetryConsentState.NotApplicable,
+                TelemetryConsentState.NotApplicable,
+                TelemetryConsentStatusReason.NotApplicable,
+                TelemetryPolicyState.NotApplicable);
         }
-
-        var sourceBuf = ToNullTerminatedUtf8(source ?? "sdk");
 
         try
         {
             unsafe
             {
-                fixed (byte* sourcePtr = sourceBuf)
+                byte* outUtf8 = null;
+                try
                 {
-                    var status = NativeMethods.mxc_telemetry_set_consent(granted ? 1 : 0, sourcePtr);
-                    if (status != (int)ErrorCode.Success)
+                    EnsureSuccess(
+                        NativeMethods.mxc_telemetry_get_consent_status(&outUtf8),
+                        "failed to read telemetry consent status");
+                    return ParseConsentStatus(Marshal.PtrToStringUTF8((IntPtr)outUtf8));
+                }
+                finally
+                {
+                    if (outUtf8 is not null)
                     {
-                        throw new MxcException(
-                            (ErrorCode)status,
-                            status == (int)ErrorCode.ConsentWriteFailed
-                                ? "telemetry consent could not be persisted (MXC only collects telemetry, and only offers consent, on Windows)"
-                                : "failed to persist telemetry consent");
+                        NativeMethods.mxc_string_free(outUtf8);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            ReportFailClosed("GetConsentStatus", "Undetermined/Blocked", ex);
+            return new(
+                TelemetryConsentState.Undetermined,
+                TelemetryConsentState.Undetermined,
+                TelemetryConsentStatusReason.StoreUnreadable,
+                TelemetryPolicyState.Blocked);
+        }
+    }
+
+    /// <summary>Idempotently withdraw telemetry consent.</summary>
+    public static TelemetryConsentOutcome WithdrawConsent()
+    {
+        try
+        {
+            unsafe
+            {
+                byte* outUtf8 = null;
+                try
+                {
+                    EnsureSuccess(
+                        NativeMethods.mxc_telemetry_withdraw_consent(&outUtf8),
+                        "failed to withdraw telemetry consent");
+                    return ParseConsentOutcome(Marshal.PtrToStringUTF8((IntPtr)outUtf8));
+                }
+                finally
+                {
+                    if (outUtf8 is not null)
+                    {
+                        NativeMethods.mxc_string_free(outUtf8);
                     }
                 }
             }
         }
         catch (Exception ex) when (ex is not MxcException)
         {
-            // A broken install throws DllNotFoundException (and friends) from
-            // the marshalling layer. This method documents MxcException as its
-            // only failure mode, so convert rather than leak a raw type a host
-            // following the contract would not be catching. Unlike the read
-            // paths this still throws: the caller asked us to persist a
-            // decision and it did not happen, so silence would be a lie.
-            ReportFailClosed("SetConsent", "MxcException", ex);
             throw new MxcException(
                 ErrorCode.ConsentWriteFailed,
-                "telemetry consent could not be persisted (the MXC native library could not be reached)",
+                "failed to withdraw telemetry consent",
                 ex);
         }
+    }
+
+    private static TelemetryConsentOutcome RequestConsentCore(
+        Func<TelemetryConsentPrompt, ValueTask<TelemetryConsentDecision>> presenter,
+        string? locale)
+    {
+        var context = new PresenterContext { Presenter = presenter };
+        var handle = GCHandle.Alloc(context);
+        var localeBuffer = locale is null ? null : ToNullTerminatedUtf8(locale);
+        try
+        {
+            unsafe
+            {
+                fixed (byte* localePtr = localeBuffer)
+                {
+                    byte* outUtf8 = null;
+                    var status = NativeMethods.mxc_telemetry_request_consent(
+                        localePtr,
+                        &PresentConsent,
+                        (void*)GCHandle.ToIntPtr(handle),
+                        &outUtf8);
+                    try
+                    {
+                        if (context.Error is not null)
+                        {
+                            throw new MxcException(
+                                ErrorCode.BackendError,
+                                "telemetry consent presenter failed",
+                                context.Error);
+                        }
+                        EnsureSuccess(status, "failed to request telemetry consent");
+                        return ParseConsentOutcome(Marshal.PtrToStringUTF8((IntPtr)outUtf8));
+                    }
+                    finally
+                    {
+                        if (outUtf8 is not null)
+                        {
+                            NativeMethods.mxc_string_free(outUtf8);
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is not MxcException)
+        {
+            throw new MxcException(
+                ErrorCode.ConsentWriteFailed,
+                "telemetry consent request failed",
+                ex);
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static unsafe int PresentConsent(byte* promptJsonUtf8, void* contextPointer)
+    {
+        var context = (PresenterContext)GCHandle.FromIntPtr((IntPtr)contextPointer).Target!;
+        try
+        {
+            var prompt = ParseConsentPrompt(Marshal.PtrToStringUTF8((IntPtr)promptJsonUtf8));
+            return context.Presenter(prompt).AsTask().GetAwaiter().GetResult() switch
+            {
+                TelemetryConsentDecision.No => 0,
+                TelemetryConsentDecision.Yes => 1,
+                TelemetryConsentDecision.Dismissed => 2,
+                _ => -1,
+            };
+        }
+        catch (Exception ex)
+        {
+            context.Error = ex;
+            return -1;
+        }
+    }
+
+    private static void EnsureSuccess(int status, string message)
+    {
+        if (status != (int)ErrorCode.Success)
+        {
+            throw new MxcException((ErrorCode)status, message);
+        }
+    }
+
+    private static TelemetryConsentPrompt ParseConsentPrompt(string? json)
+    {
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent prompt"));
+        var root = document.RootElement;
+        return new(
+            root.GetProperty("resourceVersion").GetUInt32(),
+            root.GetProperty("locale").GetString() ?? throw new JsonException("missing locale"),
+            ParseConsentMessage(root.GetProperty("title")),
+            ParseConsentMessage(root.GetProperty("body")),
+            ParseConsentMessage(root.GetProperty("affirmativeLabel")),
+            ParseConsentMessage(root.GetProperty("negativeLabel")),
+            ParseConsentMessage(root.GetProperty("learnMoreLabel")),
+            root.GetProperty("learnMoreUrl").GetString() ?? throw new JsonException("missing learn-more URL"));
+    }
+
+    private static TelemetryConsentMessage ParseConsentMessage(JsonElement value) =>
+        new(
+            value.GetProperty("id").GetString() ?? throw new JsonException("missing message id"),
+            value.GetProperty("text").GetString() ?? throw new JsonException("missing message text"));
+
+    private static TelemetryConsentStatus ParseConsentStatus(string? json)
+    {
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent status"));
+        var root = document.RootElement;
+        return new(
+            ParseConsentState(root.GetProperty("storedState").GetString()),
+            ParseConsentState(root.GetProperty("effectiveState").GetString()),
+            ParseConsentStatusReason(root.GetProperty("reason")),
+            ParsePolicyState(root.GetProperty("policy").GetString()));
+    }
+
+    private static TelemetryConsentOutcome ParseConsentOutcome(string? json)
+    {
+        using var document = JsonDocument.Parse(json ?? throw new JsonException("missing consent outcome"));
+        var root = document.RootElement;
+        return new(
+            ParseConsentActionResult(root.GetProperty("result").GetString()),
+            ParseConsentState(root.GetProperty("storedState").GetString()),
+            ParseConsentState(root.GetProperty("effectiveState").GetString()),
+            ParseConsentStatusReason(root.GetProperty("reason")),
+            ParsePolicyState(root.GetProperty("policy").GetString()));
+    }
+
+    private static TelemetryConsentActionResult ParseConsentActionResult(string? value) => value switch
+    {
+        "granted" => TelemetryConsentActionResult.Granted,
+        "denied" => TelemetryConsentActionResult.Denied,
+        "dismissed" => TelemetryConsentActionResult.Dismissed,
+        "withdrawn" => TelemetryConsentActionResult.Withdrawn,
+        "already-granted" => TelemetryConsentActionResult.AlreadyGranted,
+        "policy-blocked" => TelemetryConsentActionResult.PolicyBlocked,
+        "not-applicable" => TelemetryConsentActionResult.NotApplicable,
+        _ => throw new JsonException($"unrecognized consent action result '{value ?? "<null>"}'"),
+    };
+
+    private static TelemetryConsentStatusReason? ParseConsentStatusReason(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+
+        return value.GetString() switch
+        {
+            "no-record" => TelemetryConsentStatusReason.NoRecord,
+            "store-unreadable" => TelemetryConsentStatusReason.StoreUnreadable,
+            "store-malformed" => TelemetryConsentStatusReason.StoreMalformed,
+            "consent-schema-unsupported" => TelemetryConsentStatusReason.ConsentSchemaUnsupported,
+            "prompt-version-missing" => TelemetryConsentStatusReason.PromptVersionMissing,
+            "prompt-version-unsupported" => TelemetryConsentStatusReason.PromptVersionUnsupported,
+            "not-applicable" => TelemetryConsentStatusReason.NotApplicable,
+            var reason => throw new JsonException($"unrecognized consent status reason '{reason ?? "<null>"}'"),
+        };
     }
 
     /// <summary>

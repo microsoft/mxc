@@ -1693,6 +1693,38 @@ mod tests {
     }
 
     #[test]
+    fn telemetry_enablement_is_stable_and_independent_of_experimental_mode() {
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        assert!(request.inner.telemetry.is_none());
+        assert!(!request.inner.experimental_enabled);
+
+        request.set_telemetry_enabled(true);
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(true)
+        );
+        assert!(
+            !request.inner.experimental_enabled,
+            "stable telemetry enablement must not opt into experimental features"
+        );
+
+        request.set_telemetry_enabled(false);
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(false)
+        );
+        assert!(!request.inner.experimental_enabled);
+    }
+
+    #[test]
     fn wslc_rejects_an_invalid_port_mapping() {
         // Validation is the shared parser's, so a bad mapping is rejected at
         // build time rather than at spawn.

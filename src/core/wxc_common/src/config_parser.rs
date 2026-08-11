@@ -139,7 +139,7 @@ pub fn load_request_with_options(
     opts: LoadOptions,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
-        let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
+        let json_str = decode_request_input(input, opts.is_base64)?;
         let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         reject_legacy_telemetry_raw(discriminator.experimental)?;
@@ -213,8 +213,7 @@ pub fn load_mxc_request_with_options(
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
     let result = (|| {
-        let json_str = decode_request_input_without_logging(input, opts.is_base64)
-            .map_err(ParseError::Decode)?;
+        let json_str = decode_request_input(input, opts.is_base64).map_err(ParseError::Decode)?;
         parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
     })();
 
@@ -285,7 +284,11 @@ fn log_error(logger: &mut Logger, message: &str, output: ErrorOutput) {
 }
 
 /// Reads a request from disk or decodes it from base64.
-fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<String, WxcError> {
+/// Decode a config/maintenance input supplied as a file path or base64 JSON.
+///
+/// This performs no logging so callers can apply the correct output contract
+/// after discriminating execution requests from maintenance commands.
+pub fn decode_request_input(input: &str, is_base64: bool) -> Result<String, WxcError> {
     if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
             WxcError::ConfigParse("Failed to decode base64 configuration".to_string())

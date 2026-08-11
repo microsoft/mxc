@@ -45,7 +45,7 @@
 //! versioned binding (the C# SDK) matched to the same release.
 
 use std::any::Any;
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{c_char, c_void, CStr, CString};
 use std::io::{self, Write};
 use std::panic::catch_unwind;
 use std::ptr;
@@ -57,6 +57,22 @@ mod state_aware;
 mod streaming;
 pub use state_aware::*;
 pub use streaming::*;
+
+/// Return code from an FFI telemetry-consent presenter callback.
+pub const MXC_TELEMETRY_CONSENT_DECISION_NO: i32 = 0;
+/// Return code from an FFI telemetry-consent presenter callback.
+pub const MXC_TELEMETRY_CONSENT_DECISION_YES: i32 = 1;
+/// Return code from an FFI telemetry-consent presenter callback.
+pub const MXC_TELEMETRY_CONSENT_DECISION_DISMISSED: i32 = 2;
+/// Return code indicating that the host presenter failed.
+pub const MXC_TELEMETRY_CONSENT_PRESENTER_ERROR: i32 = -1;
+
+/// Host callback invoked synchronously with the canonical consent prompt JSON.
+///
+/// The JSON pointer remains valid only for the duration of the callback. The
+/// callback must return one of the `MXC_TELEMETRY_CONSENT_DECISION_*` values.
+pub type MxcTelemetryConsentPresenter =
+    Option<unsafe extern "C" fn(prompt_json_utf8: *const c_char, context: *mut c_void) -> i32>;
 
 /// Write a diagnostic line to stderr without ever panicking.
 ///
@@ -488,49 +504,181 @@ pub unsafe extern "C" fn mxc_telemetry_get_consent(out_utf8: *mut *mut c_char) -
     MXC_STATUS_SUCCESS
 }
 
-/// Grant or revoke telemetry consent and persist the decision.
+fn consent_status_json(
+    status: mxc_sdk::telemetry::ConsentStatus,
+    policy: mxc_sdk::telemetry::PolicyState,
+) -> serde_json::Value {
+    serde_json::json!({
+        "storedState": status.stored_state.as_str(),
+        "effectiveState": status.effective_state.as_str(),
+        "reason": status.reason.map(|reason| reason.as_str()),
+        "policy": policy.as_str(),
+    })
+}
+
+fn consent_outcome_json(outcome: mxc_sdk::telemetry::ConsentActionOutcome) -> serde_json::Value {
+    let mut value = consent_status_json(outcome.status, outcome.policy);
+    value["result"] = serde_json::Value::String(outcome.result.as_str().to_string());
+    value
+}
+
+fn consent_prompt_json(prompt: &mxc_sdk::telemetry::ConsentPrompt) -> serde_json::Value {
+    fn message(value: mxc_sdk::telemetry::ConsentMessage) -> serde_json::Value {
+        serde_json::json!({ "id": value.id, "text": value.text })
+    }
+
+    serde_json::json!({
+        "resourceVersion": prompt.resource_version,
+        "locale": prompt.locale,
+        "title": message(prompt.title),
+        "body": message(prompt.body),
+        "affirmativeLabel": message(prompt.affirmative_label),
+        "negativeLabel": message(prompt.negative_label),
+        "learnMoreLabel": message(prompt.learn_more_label),
+        "learnMoreUrl": prompt.learn_more_url,
+    })
+}
+
+unsafe fn write_json_out(value: serde_json::Value, out_utf8: *mut *mut c_char) -> i32 {
+    let bytes = match serde_json::to_vec(&value) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            report_to_stderr(format_args!(
+                "mxc: failed to serialize telemetry consent result: {error}"
+            ));
+            return MXC_STATUS_BACKEND_ERROR;
+        }
+    };
+    // SAFETY: caller guarantees that the non-null out pointer is writable.
+    unsafe { ptr::write(out_utf8, alloc_cstring(&bytes)) };
+    MXC_STATUS_SUCCESS
+}
+
+/// Request telemetry consent through a host presenter callback.
 ///
-/// `granted` is `1` to grant, `0` to revoke/deny. `source_utf8` is an
-/// optional, free-form provenance string (e.g. `"prompt"`, `"settings-ui"`)
-/// recorded for support/debugging only — it is never transmitted anywhere. A
-/// null `source_utf8` records `"sdk"`.
-///
-/// Returns [`MXC_STATUS_SUCCESS`] on success. Returns
-/// [`MXC_STATUS_CONSENT_WRITE_FAILED`] if the decision could not be
-/// persisted — always the case on non-Windows hosts, since MXC must not
-/// collect (and therefore must not offer consent for) telemetry there.
+/// The callback receives the complete canonical prompt as JSON and returns a
+/// typed decision synchronously. MXC persists a grant only when that callback
+/// returns `MXC_TELEMETRY_CONSENT_DECISION_YES`.
 ///
 /// # Safety
-/// `source_utf8` must be null or a valid NUL-terminated UTF-8 C string.
+/// `locale_utf8` must be null or valid NUL-terminated UTF-8. `presenter` must
+/// be a valid callback when non-null. `context` is passed through untouched.
+/// `out_utf8` must point to writable pointer-sized storage.
 #[no_mangle]
-pub unsafe extern "C" fn mxc_telemetry_set_consent(
-    granted: i32,
-    source_utf8: *const c_char,
+pub unsafe extern "C" fn mxc_telemetry_request_consent(
+    locale_utf8: *const c_char,
+    presenter: MxcTelemetryConsentPresenter,
+    context: *mut c_void,
+    out_utf8: *mut *mut c_char,
 ) -> i32 {
+    if out_utf8.is_null() || presenter.is_none() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
     // SAFETY: caller contract above.
-    let source = match unsafe { cstr_to_str(source_utf8) } {
-        Some(s) => s,
-        None if source_utf8.is_null() => "sdk",
+    let locale = match unsafe { cstr_to_str(locale_utf8) } {
+        Some(value) => Some(value.to_string()),
+        None if locale_utf8.is_null() => None,
         None => return MXC_STATUS_INVALID_UTF8,
     };
-    let source = source.to_string();
-    let granted = granted != 0;
+    let presenter = presenter.expect("checked above");
 
-    let result = catch_unwind(|| mxc_sdk::telemetry::set_consent(granted, &source));
+    let result = catch_unwind(|| {
+        mxc_sdk::telemetry::request_consent(locale.as_deref(), |prompt| {
+            let prompt_json = serde_json::to_vec(&consent_prompt_json(prompt))
+                .map_err(|error| error.to_string())?;
+            let prompt_json = CString::new(prompt_json).map_err(|error| error.to_string())?;
+            // SAFETY: the host supplied this callback and context. The prompt
+            // pointer remains valid for the duration of this invocation.
+            let decision = unsafe { presenter(prompt_json.as_ptr(), context) };
+            match decision {
+                MXC_TELEMETRY_CONSENT_DECISION_YES => Ok(mxc_sdk::telemetry::ConsentDecision::Yes),
+                MXC_TELEMETRY_CONSENT_DECISION_NO => Ok(mxc_sdk::telemetry::ConsentDecision::No),
+                MXC_TELEMETRY_CONSENT_DECISION_DISMISSED => {
+                    Ok(mxc_sdk::telemetry::ConsentDecision::Dismissed)
+                }
+                MXC_TELEMETRY_CONSENT_PRESENTER_ERROR => {
+                    Err("host consent presenter failed".to_string())
+                }
+                value => Err(format!(
+                    "host consent presenter returned invalid decision {value}"
+                )),
+            }
+        })
+    });
+
     match result {
-        Ok(Ok(())) => MXC_STATUS_SUCCESS,
-        Ok(Err(e)) => {
-            // The status code alone cannot say *why* the write failed (missing
-            // profile directory, denied ACL, read-only volume). Without this the
-            // reason is lost and a host sees only "consent did not stick".
-            // This arm runs *outside* `catch_unwind`, so it must not panic.
+        Ok(Ok(outcome)) => {
+            // SAFETY: validated above.
+            unsafe { write_json_out(consent_outcome_json(outcome), out_utf8) }
+        }
+        Ok(Err(mxc_sdk::telemetry::ConsentError::Persist(error))) => {
             report_to_stderr(format_args!(
-                "mxc: failed to persist telemetry consent: {e}"
+                "mxc: failed to persist telemetry consent: {error}"
             ));
             MXC_STATUS_CONSENT_WRITE_FAILED
         }
-        Err(p) => {
-            report_panic("mxc_telemetry_set_consent", &*p);
+        Ok(Err(mxc_sdk::telemetry::ConsentError::Presenter(error))) => {
+            report_to_stderr(format_args!(
+                "mxc: telemetry consent presenter failed: {error}"
+            ));
+            MXC_STATUS_BACKEND_ERROR
+        }
+        Err(panic) => {
+            report_panic("mxc_telemetry_request_consent", &*panic);
+            MXC_STATUS_PANIC
+        }
+    }
+}
+
+/// Persist an idempotent telemetry-consent withdrawal.
+///
+/// # Safety
+/// `out_utf8` must point to writable pointer-sized storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_withdraw_consent(out_utf8: *mut *mut c_char) -> i32 {
+    if out_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    match catch_unwind(mxc_sdk::telemetry::withdraw_consent) {
+        Ok(Ok(outcome)) => {
+            // SAFETY: validated above.
+            unsafe { write_json_out(consent_outcome_json(outcome), out_utf8) }
+        }
+        Ok(Err(error)) => {
+            report_to_stderr(format_args!(
+                "mxc: failed to withdraw telemetry consent: {error}"
+            ));
+            MXC_STATUS_CONSENT_WRITE_FAILED
+        }
+        Err(panic) => {
+            report_panic("mxc_telemetry_withdraw_consent", &*panic);
+            MXC_STATUS_PANIC
+        }
+    }
+}
+
+/// Return the typed persisted/effective consent and policy snapshot as JSON.
+///
+/// # Safety
+/// `out_utf8` must point to writable pointer-sized storage.
+#[no_mangle]
+pub unsafe extern "C" fn mxc_telemetry_get_consent_status(out_utf8: *mut *mut c_char) -> i32 {
+    if out_utf8.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+    let result = catch_unwind(|| {
+        consent_status_json(
+            mxc_sdk::telemetry::get_consent_status(),
+            mxc_sdk::telemetry::get_policy(),
+        )
+    });
+    match result {
+        Ok(value) => {
+            // SAFETY: validated above.
+            unsafe { write_json_out(value, out_utf8) }
+        }
+        Err(panic) => {
+            report_panic("mxc_telemetry_get_consent_status", &*panic);
             MXC_STATUS_PANIC
         }
     }
@@ -834,11 +982,59 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    fn set_then_get_consent_round_trips() {
+    fn presenter_request_then_get_consent_round_trips() {
         let _guard = TelemetryTestEnv::new("round_trip");
-        let source = CString::new("prompt").unwrap();
-        // SAFETY: `source` is a valid NUL-terminated UTF-8 C string.
-        let set_status = unsafe { mxc_telemetry_set_consent(1, source.as_ptr()) };
+        unsafe extern "C" fn presenter(
+            prompt_json_utf8: *const c_char,
+            context: *mut c_void,
+        ) -> i32 {
+            // SAFETY: the FFI request provides valid pointers for this call.
+            let prompt = unsafe { CStr::from_ptr(prompt_json_utf8) }
+                .to_str()
+                .unwrap();
+            let prompt: serde_json::Value = serde_json::from_str(prompt).unwrap();
+            let canonical = wxc_common::telemetry::consent_prompt::prompt_for_locale(Some("en-US"));
+            assert_eq!(prompt["resourceVersion"], canonical.resource_version);
+            assert_eq!(prompt["locale"], canonical.locale);
+            assert_eq!(prompt["title"]["id"], canonical.title.id);
+            assert_eq!(prompt["title"]["text"], canonical.title.text);
+            assert_eq!(prompt["body"]["id"], canonical.body.id);
+            assert_eq!(prompt["body"]["text"], canonical.body.text);
+            assert_eq!(
+                prompt["affirmativeLabel"]["text"],
+                canonical.affirmative_label.text
+            );
+            assert_eq!(
+                prompt["negativeLabel"]["text"],
+                canonical.negative_label.text
+            );
+            assert_eq!(
+                prompt["learnMoreLabel"]["text"],
+                canonical.learn_more_label.text
+            );
+            assert_eq!(prompt["learnMoreUrl"], canonical.learn_more_url);
+            // SAFETY: the test passes a pointer to this bool as context.
+            unsafe { *(context as *mut bool) = true };
+            MXC_TELEMETRY_CONSENT_DECISION_YES
+        }
+
+        let mut called = false;
+        let mut outcome: *mut c_char = ptr::null_mut();
+        // SAFETY: callback, context, and out pointer remain valid for the call.
+        let request_status = unsafe {
+            mxc_telemetry_request_consent(
+                ptr::null(),
+                Some(presenter),
+                (&mut called as *mut bool).cast(),
+                &mut outcome,
+            )
+        };
+        assert_eq!(request_status, MXC_STATUS_SUCCESS);
+        assert!(!outcome.is_null());
+        // SAFETY: allocated by the request export.
+        let outcome_json = unsafe { CStr::from_ptr(outcome) }.to_str().unwrap();
+        let outcome_json: serde_json::Value = serde_json::from_str(outcome_json).unwrap();
+        unsafe { mxc_string_free(outcome) };
 
         let mut out: *mut c_char = ptr::null_mut();
         // SAFETY: `out` is a valid writable pointer to a local variable.
@@ -850,26 +1046,28 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         {
-            assert_eq!(set_status, MXC_STATUS_SUCCESS);
+            assert!(called);
+            assert_eq!(outcome_json["result"], "granted");
             assert_eq!(s, "granted");
         }
         #[cfg(not(target_os = "windows"))]
         {
-            assert_eq!(set_status, MXC_STATUS_CONSENT_WRITE_FAILED);
+            assert!(!called);
+            assert_eq!(outcome_json["result"], "not-applicable");
             assert_eq!(s, "not-applicable");
         }
     }
 
     #[cfg(debug_assertions)]
     #[test]
-    fn set_consent_null_source_defaults_to_sdk() {
-        let _guard = TelemetryTestEnv::new("null_source");
-        // SAFETY: null source is explicitly allowed (defaults to "sdk").
-        let status = unsafe { mxc_telemetry_set_consent(0, ptr::null()) };
-        #[cfg(target_os = "windows")]
-        assert_eq!(status, MXC_STATUS_SUCCESS);
-        #[cfg(not(target_os = "windows"))]
-        assert_eq!(status, MXC_STATUS_CONSENT_WRITE_FAILED);
+    fn request_consent_requires_a_presenter() {
+        let _guard = TelemetryTestEnv::new("null_presenter");
+        let mut out: *mut c_char = ptr::null_mut();
+        // SAFETY: null presenter is explicitly rejected.
+        let status =
+            unsafe { mxc_telemetry_request_consent(ptr::null(), None, ptr::null_mut(), &mut out) };
+        assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
+        assert!(out.is_null());
     }
 
     #[cfg(debug_assertions)]
@@ -889,12 +1087,27 @@ mod tests {
 
         #[cfg(target_os = "windows")]
         {
-            let source = CString::new("prompt").unwrap();
-            // SAFETY: `source` is a valid NUL-terminated UTF-8 C string.
+            unsafe extern "C" fn deny(
+                _prompt_json_utf8: *const c_char,
+                _context: *mut c_void,
+            ) -> i32 {
+                MXC_TELEMETRY_CONSENT_DECISION_NO
+            }
+            let mut outcome: *mut c_char = ptr::null_mut();
+            // SAFETY: callback and out pointer remain valid for the call.
             assert_eq!(
-                unsafe { mxc_telemetry_set_consent(0, source.as_ptr()) },
+                unsafe {
+                    mxc_telemetry_request_consent(
+                        ptr::null(),
+                        Some(deny),
+                        ptr::null_mut(),
+                        &mut outcome,
+                    )
+                },
                 MXC_STATUS_SUCCESS
             );
+            // SAFETY: allocated by the request export.
+            unsafe { mxc_string_free(outcome) };
             // SAFETY: `needs` is a valid writable pointer to a local variable.
             let status = unsafe { mxc_telemetry_needs_consent_prompt(&mut needs) };
             assert_eq!(status, MXC_STATUS_SUCCESS);
