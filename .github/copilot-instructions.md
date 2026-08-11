@@ -45,12 +45,51 @@ Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` 
 
 ### GitHub Actions
 
-`.github/workflows/Build.And.Validate.yml` is the PR/CI entry point. It calls the
-workflow-call-only `.github/workflows/Build.Artifacts.Job.yml`, which builds and
-uploads the Windows, Linux, and macOS artifacts in parallel. Scheduled E2E and
-validation-infrastructure workflows reuse the same artifact workflow before
-calling `.github/workflows/Test.Matrix.Job.yml`; keep artifact production and
-consumption in the same workflow run.
+`.github/workflows/Build.yml` is the PR/CI entry point. It fans out to the
+workflow-call-only `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
+`Build.MacOS.Job.yml`, which build and upload the per-target artifacts in
+parallel, then to the lint / versioning / SDK jobs.
+
+**Validation (E2E) test infrastructure.** Backend E2E tests run from those same
+build artifacts — never from a fresh build — so artifact production and
+consumption stay in one workflow run:
+
+- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point.
+  The `nightly` plan runs Mon–Sat; Sunday runs `nightly` *and* `weekly`.
+  `workflow_dispatch` takes a `plan` input to run one on demand.
+- `.github/workflows/Validation.Infra.Testing.yml` — push-triggered entry point
+  for iterating on the validation infrastructure itself, on a dedicated branch.
+- `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
+  takes a `plan` input. Its `resolve` job expands the plan into per-family
+  matrices, then the `windows` / `linux` / `macos` jobs each download the
+  artifact, prepare the host, and run the backend suite.
+
+An entry point must build the artifacts (call the three `Build.*.Job.yml`
+workflows) before calling the matrix job.
+
+**The matrix is declarative:**
+
+- `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
+  with per-architecture target/artifact/1ES pool and the backends that platform
+  supports), `handlers` (backend id → test-dispatcher command), and `triggers`
+  (which OS/backend pairs each plan runs).
+- `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
+  expands a plan (`pr`, `nightly`, `weekly`, `enabled`) into GitHub Actions
+  matrices. It rejects an invalid catalog before any specialized test runner is
+  allocated, so add a backend to a trigger only where the platform declares it.
+- A non-macOS platform architecture with an empty `pool` is never scheduled,
+  which is how a catalog entry stays declared but dormant. macOS entries use a
+  GitHub-hosted `runner` instead of a 1ES `pool`.
+
+**Host preparation** happens in the matrix job before the tests, keyed by the
+matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
+`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
+explicit no-op, so the step runs unconditionally for every entry.
+
+**Test dispatch** goes through `tests/scripts/run_ci_backend_tests.ps1`
+(Windows) and `tests/scripts/run_ci_backend_tests.sh` (Linux/macOS), which map
+the handler command to the repository's existing backend suite. A handler with
+no wired suite fails loudly rather than reporting a false success.
 
 ### Individual components
 
@@ -108,6 +147,16 @@ cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repea
 
 # WSLC has no cargo E2E suite — it is covered by tests\scripts\run_wslc_all_tests.ps1,
 # which the validation matrix runs via tests\scripts\run_ci_backend_tests.ps1.
+
+# CI validation entry points — run a backend suite against a downloaded artifact
+# the way the validation matrix does. Take the handler command (see the
+# `handlers` map in scripts/ci/validation-test-matrix.json), not the matrix
+# backend id, except where a tier must be pinned.
+tests\scripts\run_ci_backend_tests.ps1 -Backend process-container -BinaryDirectory <dir> -Architecture x64 -ExpectedTier T1
+tests\scripts\run_ci_backend_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
+
+# Resolve a plan locally to see exactly what CI would schedule
+node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
 ```
 
 ## Architecture
