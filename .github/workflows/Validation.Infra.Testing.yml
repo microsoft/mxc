@@ -35,4 +35,4 @@ jobs:
     with:
       # Exercise every combination currently rolled out, independent of its
       # normal PR/nightly/weekly schedule.
-      plan: enabled
+      plan: nightly

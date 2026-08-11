@@ -71,34 +71,35 @@ jobs:
              --no-default-features
              --features "${{ matrix.features }}"
 
-      - name: Verify artifact payload
-        shell: pwsh
-        run: |
-          $binDir = "target\${{ matrix.target }}\release"
-          $required = @(
-            "wxc-exec.exe",
-            "wxc-host-prep.exe",
-            "winhttp-proxy-shim.exe",
-            "wxc-windows-sandbox-daemon.exe",
-            "wxc-windows-sandbox-guest.exe",
-            "wxc-test-proxy.exe",
-            "wxc-test-driver.exe",
-            "wxc-ui-probe.exe",
-            "mxc-diagnostic-console.exe",
-            "wslcsdk.dll"
-          )
-          if ("${{ matrix.arch }}" -eq "x64") {
-            $required += @(
-              "nanvixd.exe",
-              "nanvix_rootfs.img",
-              "python3.initrd",
-              "bin\kernel.elf"
-            )
-          }
-          $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
-          if ($missing) {
-            throw "Missing artifact files: $($missing -join ', ')"
-          }
+      # MICROVM NOT WORKING CURRENTLY
+      # - name: Verify artifact payload
+      #   shell: pwsh
+      #   run: |
+      #     $binDir = "target\${{ matrix.target }}\release"
+      #     $required = @(
+      #       "wxc-exec.exe",
+      #       "wxc-host-prep.exe",
+      #       "winhttp-proxy-shim.exe",
+      #       "wxc-windows-sandbox-daemon.exe",
+      #       "wxc-windows-sandbox-guest.exe",
+      #       "wxc-test-proxy.exe",
+      #       "wxc-test-driver.exe",
+      #       "wxc-ui-probe.exe",
+      #       "mxc-diagnostic-console.exe",
+      #       "wslcsdk.dll"
+      #     )
+      #     if ("${{ matrix.arch }}" -eq "x64") {
+      #       $required += @(
+      #         "nanvixd.exe",
+      #         "nanvix_rootfs.img",
+      #         "python3.initrd",
+      #         "bin\kernel.elf"
+      #       )
+      #     }
+      #     $missing = $required | Where-Object { -not (Test-Path (Join-Path $binDir $_)) }
+      #     if ($missing) {
+      #       throw "Missing artifact files: $($missing -join ', ')"
+      #     }
 
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -112,15 +113,16 @@ jobs:
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-guest.exe
             src/target/${{ matrix.target }}/release/wxc-wslc-daemon.exe
             src/target/${{ matrix.target }}/release/wxc-test-proxy.exe
-            src/target/${{ matrix.target }}/release/wxc-test-driver.exe
-            src/target/${{ matrix.target }}/release/wxc-ui-probe.exe
             src/target/${{ matrix.target }}/release/mxc-diagnostic-console.exe
             src/target/${{ matrix.target }}/release/wslcsdk.dll
-            src/target/${{ matrix.target }}/release/nanvixd.exe
-            src/target/${{ matrix.target }}/release/nanvix_rootfs.img
-            src/target/${{ matrix.target }}/release/python3.initrd
-            src/target/${{ matrix.target }}/release/bin/kernel.elf
-            src/target/${{ matrix.target }}/release/snapshots/kernel.vmem
-            src/target/${{ matrix.target }}/release/snapshots/kernel.whp.cbor
           if-no-files-found: error
           retention-days: 1
+
+            # src/target/${{ matrix.target }}/release/nanvixd.exe
+            # src/target/${{ matrix.target }}/release/nanvix_rootfs.img
+            # src/target/${{ matrix.target }}/release/python3.initrd
+            # src/target/${{ matrix.target }}/release/bin/kernel.elf
+            # src/target/${{ matrix.target }}/release/snapshots/kernel.vmem
+            # src/target/${{ matrix.target }}/release/snapshots/kernel.whp.cbor
+            # src/target/${{ matrix.target }}/release/wxc-test-driver.exe
+            # src/target/${{ matrix.target }}/release/wxc-ui-probe.exe

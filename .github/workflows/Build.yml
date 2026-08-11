@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-validate-${{ github.workflow }}-${{ github.ref }}
+  group: build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
