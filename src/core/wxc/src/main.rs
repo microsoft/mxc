@@ -553,10 +553,7 @@ fn audit_stop_args(
 }
 
 #[cfg(target_os = "windows")]
-use audit::{
-    cancel_inherited_trace, capture_and_disarm, release_audit_singleton, run_plm_command,
-    try_acquire_audit_singleton, AuditSingletonGuard, AuditTraceGuard,
-};
+use audit::{capture_and_stop, run_plm_command, AuditTraceGuard};
 
 // ---------------------------------------------------------------------------
 // Graceful-exit DACL cleanup
@@ -1207,38 +1204,10 @@ fn main() {
     // tears the trace down and (when the policy came from a file)
     // merges findings back into it.
     //
-    // Declaration order matters. The guarded START connection must close
-    // (and its elevated child finish cleanup) before the singleton releases,
-    // so declare the singleton first and the trace guard second.
-    #[cfg(target_os = "windows")]
-    let mut audit_singleton: Option<AuditSingletonGuard>;
     #[cfg(target_os = "windows")]
     let mut audit_guard: Option<AuditTraceGuard>;
     #[cfg(target_os = "windows")]
     let audit_config_file = if cli.audit {
-        match try_acquire_audit_singleton() {
-            Ok(g) => audit_singleton = Some(g),
-            Err(msg) => {
-                let _ = writeln!(logger, "[audit] {msg}");
-                eprintln!("error: {msg}");
-                std::process::exit(1);
-            }
-        }
-        if audit_singleton
-            .as_ref()
-            .is_some_and(AuditSingletonGuard::inherited_abandoned_owner)
-            && !cancel_inherited_trace(&mut logger, cli.audit_verbose)
-        {
-            let _ = writeln!(
-                logger,
-                "[audit] failed to clean the WPR session inherited from an abandoned owner"
-            );
-            eprintln!(
-                "error: failed to clean the WPR session inherited from an abandoned audit owner"
-            );
-            release_audit_singleton();
-            std::process::exit(1);
-        }
         match AuditTraceGuard::start(&mut logger, cli.audit_verbose) {
             Ok(guard) => audit_guard = Some(guard),
             Err(_) => {
@@ -1246,14 +1215,12 @@ fn main() {
                     "error: plm start failed; refusing to run --audit without an \
                      active trace. See logs for details."
                 );
-                release_audit_singleton();
                 std::process::exit(1);
             }
         }
         config_file_path(&cli)
     } else {
         audit_guard = None;
-        audit_singleton = None;
         None
     };
 
@@ -1270,10 +1237,9 @@ fn main() {
         let capture = audit_guard
             .as_mut()
             .ok_or_else(|| "audit trace guard is missing".to_string())
-            .and_then(|guard| capture_and_disarm(guard, &mut logger, cli.audit_verbose));
+            .and_then(|guard| capture_and_stop(guard, &mut logger));
         match capture {
             Ok(capture) => {
-                drop(audit_singleton.take());
                 let stop_args = audit_stop_args(
                     audit_config_file.as_deref(),
                     &capture.log_dir,
@@ -1307,14 +1273,11 @@ fn main() {
     drop(runner);
     drop(take_parked_dacl());
 
-    // `process::exit` below skips destructors. Drop the guarded connection
-    // first so it either confirms DISARM or cancels while the singleton still
-    // excludes a new WPR owner, then release the singleton.
+    // `process::exit` below skips destructors. Drop any still-armed guarded
+    // connection first so the elevated child cancels and releases its
+    // singleton before this process exits.
     #[cfg(target_os = "windows")]
-    {
-        drop(audit_guard);
-        release_audit_singleton();
-    }
+    drop(audit_guard);
 
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);

@@ -39,7 +39,9 @@ use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_F
 const DIRECTORY_PREFIX: &str = "mxc-plm-elevated-";
 const PROFILE_FILE: &str = "embedded.wprp";
 const TRACE_FILE: &str = "trace.etl";
+const RECOVERY_MARKER_FILE: &str = "mxc-plm-active.marker";
 const PROTECTED_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NW;;;HI)";
+const MARKER_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)S:(ML;;NW;;;HI)";
 const PIN_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
 const PROTECTOR_SHARE: FILE_SHARE_MODE = FILE_SHARE_READ;
 const RANDOM_NAME_ATTEMPTS: usize = 32;
@@ -68,6 +70,15 @@ impl fmt::Debug for SecureScratch {
 /// Keeps the embedded profile protected against write, delete, and rename.
 pub struct ProfileGuard {
     _protector: OwnedHandle,
+}
+
+/// Protected durable signal that a guardian may have left WPR armed.
+pub struct RecoveryMarker {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    _ancestor_handles: Vec<OwnedHandle>,
+    stale: bool,
+    delete_on_drop: bool,
 }
 
 impl fmt::Debug for ProfileGuard {
@@ -276,6 +287,95 @@ impl SecureScratch {
         let wide = wide_path(&self.directory);
         // SAFETY: `wide` is a NUL-terminated path to the one known directory.
         let _ = unsafe { RemoveDirectoryW(PCWSTR(wide.as_ptr())) };
+    }
+}
+
+impl RecoveryMarker {
+    pub fn acquire() -> Result<Self> {
+        use windows::Win32::Storage::FileSystem::DELETE;
+
+        let program_data = program_data_path()?;
+        let root = validate_program_data_path(&program_data)?;
+        validate_volume(&root)?;
+        let ancestor_handles = pin_program_data_components(&program_data, &root)?;
+        let path = program_data.join(RECOVERY_MARKER_FILE);
+        let wide = wide_path(&path);
+        let security = OwnedSecurityDescriptor::from_sddl(MARKER_SDDL)?;
+        let attributes = security.attributes();
+        let access = (FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE).0;
+
+        let (handle, stale) = match unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                access,
+                FILE_SHARE_READ,
+                Some(&attributes),
+                CREATE_NEW,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        } {
+            Ok(handle) => (handle, false),
+            Err(error)
+                if error.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0)
+                    || error.code() == HRESULT::from_win32(ERROR_FILE_EXISTS.0) =>
+            {
+                let handle = unsafe {
+                    CreateFileW(
+                        PCWSTR(wide.as_ptr()),
+                        access,
+                        FILE_SHARE_READ,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_FLAG_OPEN_REPARSE_POINT,
+                        None,
+                    )
+                }
+                .context("failed to open existing PLM recovery marker")?;
+                (handle, true)
+            }
+            Err(error) => return Err(error).context("failed to create PLM recovery marker"),
+        };
+        verify_file_kind(handle, false)?;
+        if stale && !has_trusted_owner(handle)? {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            bail!("existing PLM recovery marker has an untrusted owner");
+        }
+        let file = unsafe { std::fs::File::from_raw_handle(handle.0) };
+        Ok(Self {
+            path,
+            file: Some(file),
+            _ancestor_handles: ancestor_handles,
+            stale,
+            delete_on_drop: !stale,
+        })
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.stale
+    }
+
+    pub fn preserve(&mut self) {
+        self.delete_on_drop = false;
+    }
+
+    pub fn recovered(&mut self) {
+        self.stale = false;
+        self.delete_on_drop = true;
+    }
+}
+
+impl Drop for RecoveryMarker {
+    fn drop(&mut self) {
+        self.file.take();
+        if self.delete_on_drop {
+            let wide = wide_path(&self.path);
+            unsafe {
+                let _ = DeleteFileW(PCWSTR(wide.as_ptr()));
+            }
+        }
     }
 }
 
@@ -510,6 +610,41 @@ fn verify_file_kind(handle: HANDLE, directory_expected: bool) -> Result<()> {
     Ok(())
 }
 
+fn has_trusted_owner(handle: HANDLE) -> Result<bool> {
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL};
+    use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows::Win32::Security::{
+        IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid, OWNER_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR, PSID,
+    };
+
+    let mut owner = PSID::default();
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let result = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            Some(&mut owner),
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
+        )
+    };
+    if result != ERROR_SUCCESS {
+        bail!("GetSecurityInfo failed for PLM recovery marker: {result:?}");
+    }
+    let trusted = unsafe {
+        bool::from(IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
+            || bool::from(IsWellKnownSid(owner, WinLocalSystemSid))
+    };
+    unsafe {
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+    }
+    Ok(trusted)
+}
+
 fn file_identity(handle: HANDLE) -> Result<FileIdentity> {
     let mut info = FILE_ID_INFO::default();
     // SAFETY: `handle` is valid and `info` is a correctly sized out-param.
@@ -614,5 +749,27 @@ mod tests {
             PIN_SHARE,
             FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0)
         );
+    }
+
+    #[test]
+    fn recovery_marker_is_admin_owned_and_durable_until_recovered() {
+        assert!(MARKER_SDDL.starts_with("O:BAG:BAD:P"));
+        assert!(MARKER_SDDL.contains(";;;SY"));
+        assert!(MARKER_SDDL.contains(";;;BA"));
+        assert!(MARKER_SDDL.ends_with("S:(ML;;NW;;;HI)"));
+
+        let mut marker = RecoveryMarker {
+            path: PathBuf::new(),
+            file: None,
+            _ancestor_handles: Vec::new(),
+            stale: true,
+            delete_on_drop: false,
+        };
+        assert!(marker.is_stale());
+        marker.recovered();
+        assert!(!marker.is_stale());
+        assert!(marker.delete_on_drop);
+        marker.preserve();
+        assert!(!marker.delete_on_drop);
     }
 }

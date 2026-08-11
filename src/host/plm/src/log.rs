@@ -37,12 +37,7 @@ fn can_generate_policy_preview(analysis: &AnalysisResult) -> bool {
     !analysis.denied_resources_truncated
 }
 
-pub fn run(
-    owner_pid: u32,
-    verbose: bool,
-    on_trace_started: impl FnOnce(),
-    on_trace_stopped: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+pub fn run(owner_pid: u32, verbose: bool, on_trace_started: impl FnOnce()) -> Result<()> {
     prompt_enter("Press Enter to start logging...")?;
     elevated::invoke_guarded_start(owner_pid)?;
     // `wpr -start` has engaged the kernel session. Only NOW mark the
@@ -58,11 +53,7 @@ pub fn run(
     // parallel `plm log` invocations from colliding on the same .etl.
     let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
     let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
-    elevated::invoke_stop_with_stopped(&trace_file, || {
-        // Kernel session is torn down; clear the active flag before ETL
-        // persistence so later failure cannot issue a stale wpr -cancel.
-        on_trace_stopped()
-    })?;
+    elevated::stop_current_guarded_start(&trace_file)?;
 
     if verbose {
         println!("Beginning event parsing, this may take several minutes");

@@ -29,9 +29,6 @@ pub struct StopOptions {
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
-    /// Exact destination written by the unelevated parent after the elevated
-    /// child transfers the captured ETL bytes.
-    pub trace_output: Option<PathBuf>,
     /// Exit code recorded in the canonical denials document.
     pub exit_code: i32,
     pub verbose: bool,
@@ -60,21 +57,6 @@ struct ConfigOutputPaths {
     source: PathBuf,
     snapshot: PathBuf,
     adjusted: PathBuf,
-}
-
-fn resolve_trace_path(
-    trace_file: Option<&Path>,
-    trace_output: Option<&Path>,
-    log_dir: &Path,
-) -> Result<(PathBuf, bool)> {
-    match (trace_file, trace_output) {
-        (Some(_), Some(_)) => {
-            anyhow::bail!("--trace-file and --trace-output cannot be used together")
-        }
-        (Some(path), None) => Ok((path.to_path_buf(), true)),
-        (None, Some(path)) => Ok((path.to_path_buf(), false)),
-        (None, None) => Ok((log_dir.join("trace.etl"), false)),
-    }
 }
 
 fn prepare_config_output_paths(
@@ -161,10 +143,6 @@ pub fn stop_plm_trace_with<S: WprStopper>(stopper: &mut S, trace_file: &Path) ->
     Ok(())
 }
 
-pub(crate) fn stop_plm_trace(trace_file: &Path) -> Result<()> {
-    stop_plm_trace_with(&mut WprExeStopper, trace_file)
-}
-
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
 /// to its canonical form. Consumed by `update_from_access_events` as
 /// the self-access filter: events referencing this path are dropped
@@ -201,14 +179,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
     // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
     // Including PID + sub-second component avoids collisions when
     // parallel PLM tasks finish in the same second.
-    let log_dir = opts.log_dir.unwrap_or_else(|| {
-        if let Some(parent) = opts.trace_output.as_deref().and_then(Path::parent) {
-            if !parent.as_os_str().is_empty() {
-                return parent.to_path_buf();
-            }
-        }
-        default_log_dir(exe_dir)
-    });
+    let log_dir = opts.log_dir.unwrap_or_else(|| default_log_dir(exe_dir));
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
@@ -221,11 +192,9 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
         eprintln!("[plm] warning: {w}");
     }
 
-    let (trace_file, is_existing_trace) = resolve_trace_path(
-        opts.trace_file.as_deref(),
-        opts.trace_output.as_deref(),
-        &log_dir,
-    )?;
+    let trace_file = opts
+        .trace_file
+        .context("plm stop requires --trace-file from a retained guardian capture")?;
     let denials_path = log_dir.join("denials.json");
     let config_outputs = prepare_config_output_paths(
         opts.config_path.as_deref(),
@@ -234,20 +203,8 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
         &denials_path,
     )?;
 
-    if is_existing_trace {
-        // Operator supplied a pre-captured .etl -- don't try to stop a
-        // (likely non-existent) live WPR session.
-        if !trace_file.exists() {
-            anyhow::bail!("trace file does not exist: {}", trace_file.display());
-        }
-    } else {
-        if let Some(parent) = trace_file.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("failed to create {}", parent.display()))?;
-            }
-        }
-        crate::elevated::invoke(crate::elevated::Operation::Stop, Some(&trace_file))?;
+    if !trace_file.exists() {
+        anyhow::bail!("trace file does not exist: {}", trace_file.display());
     }
 
     if opts.verbose {
@@ -570,27 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn trace_output_is_used_as_the_exact_unelevated_destination() {
-        let log_dir = Path::new(r"C:\logs");
-        let output = Path::new(r"D:\captures\block.etl");
-        let (path, existing) = resolve_trace_path(None, Some(output), log_dir).unwrap();
-        assert_eq!(path, output);
-        assert!(!existing);
-    }
-
-    #[test]
-    fn trace_input_and_output_are_mutually_exclusive() {
-        let error = resolve_trace_path(
-            Some(Path::new("input.etl")),
-            Some(Path::new("output.etl")),
-            Path::new("."),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("cannot be used together"));
-    }
-
-    #[test]
-    fn trace_output_cannot_collide_with_denials_output() {
+    fn trace_input_cannot_collide_with_denials_output() {
         let path = Path::new(r"C:\captures\denials.json");
         let error =
             prepare_config_output_paths(None, Path::new(r"C:\captures"), path, path).unwrap_err();

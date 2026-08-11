@@ -35,6 +35,10 @@ pub mod singleton {
         AlreadyHeld,
         /// `CreateMutexW` failed for a non-conflict reason.
         CreateFailed(windows::core::Error),
+        /// The fixed name was pre-created by an untrusted principal.
+        UntrustedExisting,
+        /// Reading the existing mutex security descriptor failed.
+        SecurityQueryFailed(windows::Win32::Foundation::WIN32_ERROR),
     }
 
     /// Attempt to acquire the host-wide PLM audit mutex, stashing the
@@ -47,22 +51,13 @@ pub mod singleton {
     /// releasing" case (Windows surfaces this as `WAIT_ABANDONED_0`
     /// on the wait, never on the create). Treating an abandoned
     /// mutex as `AlreadyHeld` would leave a stale singleton forever
-    /// after any PLM crash and force operators to reboot; we instead
-    /// take ownership silently, since the abandoned wpr session (if
-    /// any) is torn down separately by the caller's normal cancel
-    /// path.
+    /// after any PLM crash and force operators to reboot. Durable uncertain
+    /// cleanup state is tracked separately by a protected recovery marker;
+    /// abandonment never authorizes blind cancellation.
     pub fn try_acquire(slot: &AtomicIsize) -> Result<AcquireOutcome, AcquireError> {
-        use windows::core::w;
         use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::CreateMutexW;
 
-        let name = w!("Global\\Mxc_Plm_Audit");
-        // Open (or create) the named mutex without requesting initial
-        // ownership; ownership is acquired via the wait below so we
-        // can distinguish "someone else holds it" from "previous
-        // owner crashed and we now own the abandoned mutex".
-        let handle =
-            unsafe { CreateMutexW(None, false, name) }.map_err(AcquireError::CreateFailed)?;
+        let handle = create_or_open_trusted_mutex()?;
         match try_acquire_handle(handle) {
             Ok(outcome) => {
                 slot.store(handle.0 as isize, Ordering::SeqCst);
@@ -77,40 +72,100 @@ pub mod singleton {
         }
     }
 
-    /// Keeps the named mutex object alive while another process owns it.
-    ///
-    /// The guarded elevated child opens this before WPR starts. If its owner
-    /// later dies, either this observer or a replacement audit process wins
-    /// the abandoned-mutex acquisition and performs stale-session cleanup.
-    pub struct Observer {
-        handle: HANDLE,
+    fn create_or_open_trusted_mutex() -> Result<HANDLE, AcquireError> {
+        use windows::core::w;
+        use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+        use windows::Win32::System::Threading::CreateMutexW;
+
+        let descriptor = OwnedSecurityDescriptor::new()?;
+        let attributes = descriptor.attributes();
+        let handle = unsafe { CreateMutexW(Some(&attributes), false, w!("Global\\Mxc_Plm_Audit")) }
+            .map_err(AcquireError::CreateFailed)?;
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS && !has_trusted_owner(handle)? {
+            unsafe {
+                let _ = windows::Win32::Foundation::CloseHandle(handle);
+            }
+            return Err(AcquireError::UntrustedExisting);
+        }
+        Ok(handle)
     }
 
-    impl Observer {
-        pub fn open() -> Result<Self, AcquireError> {
-            use windows::core::w;
-            use windows::Win32::System::Threading::CreateMutexW;
+    fn has_trusted_owner(handle: HANDLE) -> Result<bool, AcquireError> {
+        use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+        use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+        use windows::Win32::Security::{
+            IsWellKnownSid, WinBuiltinAdministratorsSid, WinLocalSystemSid,
+            OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        };
 
-            let handle = unsafe { CreateMutexW(None, false, w!("Global\\Mxc_Plm_Audit")) }
-                .map_err(AcquireError::CreateFailed)?;
-            Ok(Self { handle })
+        let mut owner = PSID::default();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let result = unsafe {
+            GetSecurityInfo(
+                handle,
+                SE_KERNEL_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut descriptor),
+            )
+        };
+        if result != ERROR_SUCCESS {
+            return Err(AcquireError::SecurityQueryFailed(result));
         }
-
-        pub fn try_acquire(&self) -> Result<AcquireOutcome, AcquireError> {
-            try_acquire_handle(self.handle)
+        let trusted = unsafe {
+            bool::from(IsWellKnownSid(owner, WinBuiltinAdministratorsSid))
+                || bool::from(IsWellKnownSid(owner, WinLocalSystemSid))
+        };
+        unsafe {
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
         }
+        Ok(trusted)
+    }
 
-        pub fn release(&self) {
+    struct OwnedSecurityDescriptor(windows::Win32::Security::PSECURITY_DESCRIPTOR);
+
+    impl OwnedSecurityDescriptor {
+        fn new() -> Result<Self, AcquireError> {
+            use windows::core::{w, PCWSTR};
+            use windows::Win32::Security::Authorization::{
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+            };
+            use windows::Win32::Security::PSECURITY_DESCRIPTOR;
+
+            let mut descriptor = PSECURITY_DESCRIPTOR::default();
             unsafe {
-                let _ = windows::Win32::System::Threading::ReleaseMutex(self.handle);
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(w!("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)").as_ptr()),
+                    SDDL_REVISION_1,
+                    &mut descriptor,
+                    None,
+                )
+            }
+            .map_err(AcquireError::CreateFailed)?;
+            Ok(Self(descriptor))
+        }
+
+        fn attributes(&self) -> windows::Win32::Security::SECURITY_ATTRIBUTES {
+            windows::Win32::Security::SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<windows::Win32::Security::SECURITY_ATTRIBUTES>()
+                    as u32,
+                lpSecurityDescriptor: self.0 .0,
+                bInheritHandle: false.into(),
             }
         }
     }
 
-    impl Drop for Observer {
+    impl Drop for OwnedSecurityDescriptor {
         fn drop(&mut self) {
-            unsafe {
-                let _ = windows::Win32::Foundation::CloseHandle(self.handle);
+            use windows::Win32::Foundation::{LocalFree, HLOCAL};
+
+            if !self.0 .0.is_null() {
+                unsafe {
+                    let _ = LocalFree(Some(HLOCAL(self.0 .0)));
+                }
             }
         }
     }

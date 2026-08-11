@@ -10,16 +10,14 @@
 //!
 //! The child opens and validates the wxc-exec owner before starting WPR, stays
 //! alive through the workload, and cancels on owner death or pipe break.
-//! Successful stop and ETL transfer run in-process through PLM's restricted
-//! elevated operation. The guard is disarmed before the singleton is released
-//! and a normal public PLM process is launched to analyze the captured ETL.
+//! The retained child also performs the fixed stop and ETL transfer operation,
+//! so the normal audit lifecycle needs only the original UAC prompt. The
+//! singleton is released only after that child reports the trace stopped.
 //!
 //! The host-wide named-mutex singleton (`Global\Mxc_Plm_Audit`) is
 //! shared with `plm.exe`; both binaries acquire and release it via
 //! `plm::coordination::singleton` so their retry-on-conflict paths can
 //! never silently `wpr -cancel` a peer trace.
-
-use std::sync::atomic::AtomicIsize;
 
 use wxc_common::logger::Logger;
 
@@ -37,29 +35,9 @@ pub struct CapturedAudit {
     pub trace_path: std::path::PathBuf,
 }
 
-pub fn cancel_inherited_trace(logger: &mut Logger, verbose: bool) -> bool {
-    use std::fmt::Write as _;
-
-    let Some(plm) = plm_exe_path() else {
-        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
-        return false;
-    };
-    match plm::elevated::invoke_with_executable(&plm, plm::elevated::Operation::Cancel, None) {
-        Ok(()) => true,
-        Err(error) => {
-            let _ = writeln!(logger, "[audit] inherited WPR cleanup failed: {error:#}");
-            if verbose {
-                eprintln!("[audit] inherited WPR cleanup failed: {error:#}");
-            }
-            false
-        }
-    }
-}
-
-pub fn capture_and_disarm(
+pub fn capture_and_stop(
     guard: &mut AuditTraceGuard,
     logger: &mut Logger,
-    verbose: bool,
 ) -> Result<CapturedAudit, String> {
     use std::fmt::Write as _;
 
@@ -77,16 +55,7 @@ pub fn capture_and_disarm(
         "[audit] stopping trace into {}",
         trace_path.display()
     );
-    plm::elevated::invoke_stop_with_executable_and_stopped(&plm, &trace_path, || {
-        if guard.disarm(logger, verbose) {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "failed to disarm guarded PLM start after WPR stopped"
-            ))
-        }
-    })
-    .map_err(|error| {
+    guard.stop(&trace_path, logger).map_err(|error| {
         let message = format!("failed to stop and transfer PLM trace: {error:#}");
         let _ = writeln!(logger, "[audit] {message}");
         message
@@ -226,72 +195,17 @@ impl AuditTraceGuard {
             })
     }
 
-    pub fn disarm(&mut self, logger: &mut Logger, verbose: bool) -> bool {
+    pub fn stop(
+        &mut self,
+        trace_destination: &std::path::Path,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         use std::fmt::Write as _;
 
-        match self.session.disarm() {
-            Ok(()) => true,
-            Err(error) => {
-                let _ = writeln!(logger, "[audit] failed to disarm guarded start: {error:#}");
-                if verbose {
-                    eprintln!("[audit] failed to disarm guarded start: {error:#}");
-                }
-                false
-            }
-        }
-    }
-}
-
-/// Raw handle of the host-wide single-instance mutex for PLM audit
-/// mode. Two concurrent `wxc-exec --audit` runs would share a single
-/// NT Kernel Logger session, so the second one's `wpr -start` would
-/// either steal the first's session or fail and silently corrupt the
-/// first run's findings. `wxc-exec` (unelevated) acquires the named
-/// mutex (`Global\\` so it's machine-wide across sessions) and
-/// refuses to start if another wxc-exec audit is already running.
-/// Live WPR control runs through the linked PLM library while this mutex is
-/// held. The public PLM process is launched only for existing-trace analysis,
-/// which never controls WPR and therefore needs no singleton bypass.
-///
-/// The handle is stashed in a static atomic (not just the stack guard)
-/// so the explicit cleanup before `process::exit` — which skips
-/// destructors — can release it too. `AuditSingletonGuard::drop` is
-/// a thin shim over `release_audit_singleton`; both paths are
-/// idempotent.
-static AUDIT_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
-
-pub struct AuditSingletonGuard {
-    outcome: plm::coordination::singleton::AcquireOutcome,
-}
-
-impl AuditSingletonGuard {
-    pub fn inherited_abandoned_owner(&self) -> bool {
-        self.outcome == plm::coordination::singleton::AcquireOutcome::Abandoned
-    }
-}
-
-impl Drop for AuditSingletonGuard {
-    fn drop(&mut self) {
-        release_audit_singleton();
-    }
-}
-
-/// Release the host-wide audit singleton if held. Idempotent: safe to
-/// call from `Drop`, from the explicit pre-`process::exit` cleanup,
-/// and from error paths.
-pub fn release_audit_singleton() {
-    plm::coordination::singleton::release(&AUDIT_SINGLETON_HANDLE);
-}
-
-pub fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
-    use plm::coordination::singleton::{try_acquire, AcquireError};
-    match try_acquire(&AUDIT_SINGLETON_HANDLE) {
-        Ok(outcome) => Ok(AuditSingletonGuard { outcome }),
-        Err(AcquireError::AlreadyHeld) => Err(String::from(
-            "another wxc-exec --audit run holds the Global\\Mxc_Plm_Audit mutex; \
-             refusing to start a second concurrent PLM trace (only one NT Kernel \
-             Logger session can exist per host)",
-        )),
-        Err(AcquireError::CreateFailed(e)) => Err(format!("CreateMutexW failed: {e}")),
+        self.session.stop(trace_destination).map_err(|error| {
+            let message = format!("guarded PLM stop failed: {error:#}");
+            let _ = writeln!(logger, "[audit] {message}");
+            message
+        })
     }
 }

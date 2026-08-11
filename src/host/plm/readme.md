@@ -4,13 +4,13 @@
 
 The canonical analyzer decodes filesystem, capability, registry, and UI findings from both provider shapes. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
 
-PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI documented here is for capturing traces, interactive iteration, and debugging the parser itself.
+PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI provides interactive capture through `plm log` and existing-ETL analysis through `plm stop --trace-file`.
 
 ## How it works
 
-1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC only to launch a hidden restricted child for the fixed WPR start/stop/cancel controls, and that child uses the embedded profile only.
+1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC once to launch a retained restricted child. That child acquires the host-wide singleton, starts WPR with the embedded profile, and remains alive through stop or cancellation.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
-3. **Stop** — the restricted child returns ETL bytes and status over a unique local authenticated named pipe. The unelevated parent owns caller-selected `--trace-output`, `--log-dir`, and `--config-path` destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
+3. **Stop** — the retained child returns ETL bytes and status over the original authenticated named pipe. The unelevated parent owns the trace, log, and config destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
 4. **Emit** — canonical findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
 5. **Merge (temporary compatibility)** — file and capability denials are adapted into the existing adjusted-config generator until the shared regeneration engine replaces it.
 
@@ -20,12 +20,11 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 | File                    | Role                                                                              |
 |-------------------------|-----------------------------------------------------------------------------------|
-| `src/main.rs`           | `clap` dispatch for `plm start` / `plm stop` / `plm log` / `plm extract-caps`     |
-| `src/elevated.rs`       | Restricted `runas` child, PID-authenticated local pipe, fixed WPR operations, ETL transfer |
+| `src/main.rs`           | `clap` dispatch for `plm stop` / `plm log` / `plm extract-caps`                    |
+| `src/elevated.rs`       | Retained `runas` guardian, singleton/WPR ownership, authenticated control pipe, ETL transfer |
 | `src/elevated_protocol.rs` | Bounded success/error/ETL framing shared across the privilege boundary          |
-| `src/parent_auth.rs`    | Mutual-PID one-shot authentication for the wxc-exec singleton handoff             |
-| `src/start.rs`          | Fixed `wpr -start …!AccessFailureProfile -filemode` and cleanup-only cancel       |
-| `src/stop.rs`           | `wpr -stop` (or skip with `--trace-file`) + parse + FS/capability merge           |
+| `src/start.rs`          | Fixed `wpr -start …!AccessFailureProfile -filemode` and guardian cleanup cancel   |
+| `src/stop.rs`           | Existing-ETL analysis + FS/capability merge                                       |
 | `src/log.rs`            | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config      |
 | `src/analysis.rs`       | Canonical ETL analysis, denials JSON emission, and temporary config-generator adapter |
 | `src/access_event.rs`   | `LearningModeAccessEvent` plain struct                                            |
@@ -37,43 +36,43 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 
 ## Privilege boundary
 
-`plm.exe` is `asInvoker`; it does **not** carry a `requireAdministrator` manifest, and no service is added. Caller-selected filesystem operations—including `--log-dir`, `--config-path`, `--trace-file`, `--trace-output`, ETL parsing, denials output, and adjusted-config generation—run under the caller token.
+`plm.exe` is `asInvoker`; it does **not** carry a `requireAdministrator` manifest, and no service is added. Caller-selected filesystem operations—including trace persistence, `--log-dir`, `--config-path`, `--trace-file`, ETL parsing, denials output, and adjusted-config generation—run under the caller token.
 
-Only hidden fixed `start`, `stop`, and `cancel` control operations are launched with `ShellExecuteExW("runas")`. Their command line contains only an operation, a strictly validated unique local pipe name, and the unelevated server PID. The elevated child:
+Only one hidden guarded `start` operation is launched with `ShellExecuteExW("runas")`. Its command line contains only the operation, a strictly validated unique local pipe name, and the unelevated server/owner PIDs. The retained elevated child:
 
 - resolves `wpr.exe` from `GetSystemDirectoryW`;
 - always uses the compiled-in profile (there is no public `--wprp` override or arbitrary elevated destination);
 - keeps its scratch internal and temporary under an OS-resolved trusted local location with restrictive ACL/integrity handling;
 - rejects remote pipes and pipe squatting (`PIPE_REJECT_REMOTE_CLIENTS` and `FILE_FLAG_FIRST_PIPE_INSTANCE`);
 - authenticates the pipe server PID, while the parent authenticates the child PID returned by `ShellExecuteExW`;
-- uses bounded framing for explicit success, error, and ETL responses.
-- for `wxc-exec --audit` and interactive `plm log`, starts an already-elevated owner-death guardian before reporting start success; the guardian cancels only after acquiring the PLM singleton, and refuses to cancel if a new owner won that race.
+- acquires and retains `Global\Mxc_Plm_Audit` before touching WPR;
+- creates that mutex with a protected administrator/SYSTEM-owned descriptor
+  and rejects an untrusted pre-existing object;
+- maintains an administrator/SYSTEM-owned high-integrity ProgramData recovery
+  marker while WPR may be armed; the marker survives simultaneous process
+  termination and is retained whenever cleanup is uncertain or fails;
+- never auto-cancels stale or otherwise unverified WPR state: if the protected
+  recovery marker remains and start conflicts, PLM fails closed so an
+  administrator can inspect/clean the host without risking an unrelated trace;
+- uses bounded framing for explicit success, stopped, error, and ETL responses;
+- receives STOP on the original authenticated pipe, runs `wpr -stop`, marks the lifecycle stopped before ETL transfer, and releases the singleton only when the child exits;
+- cancels its own armed trace if the owner or authenticated pipe disappears before WPR stops.
 
-`wxc-exec --audit` launches the public PLM process normally. Its host-wide singleton handoff uses a separate mutually PID-authenticated one-shot pipe rather than a spoofable environment variable or hidden bypass flag.
+There is no public or hidden standalone elevated stop/cancel entry point and no parent-to-child singleton handoff.
 
 ## CLI
 
-### `plm start`
-
-Starts a new permissive-learning-mode trace. If another WPR session already owns the host logger, start fails without cancelling that peer recording.
-
-This command has no public flags; the removed `--wprp` override is no longer accepted.
-
-```powershell
-plm.exe start
-```
-
 ### `plm stop`
 
-Stops the active trace (or accepts a previously captured one).
+Analyzes a previously captured trace without elevation.
 
 ```powershell
 plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
-             [--trace-file <path> | --trace-output <path>]
+             --trace-file <path>
              [--exit-code <code>] [--verbose-logging]
 ```
 
-`--trace-output` selects the exact destination the **unelevated parent** writes after receiving ETL bytes from the elevated child; it is never passed to `wpr.exe` or opened by elevated code. It cannot be combined with `--trace-file`, which is an entirely unelevated path for re-processing an existing ETL. `--exit-code` is copied into the canonical `denials.json` summary.
+The retained guardian transfers its ETL to the unelevated caller before this command is launched. `--exit-code` is copied into the canonical `denials.json` summary.
 
 `--config-path` temporarily preserves the existing adjusted-config behavior. The adjusted config is written next to the operator's config snapshot in `--log-dir`; there is deliberately no flag to redirect it independently. The write is atomic so a downstream enforcing run never observes a truncated policy.
 

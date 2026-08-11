@@ -17,6 +17,8 @@ use std::io::{Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use std::process::Stdio;
+use std::sync::atomic::AtomicIsize;
 use std::time::{Duration, Instant};
 
 use windows::core::PCWSTR;
@@ -29,7 +31,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
-    PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    SetNamedPipeHandleState, NAMED_PIPE_MODE, PIPE_NOWAIT, PIPE_READMODE_BYTE,
+    PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
 };
 use windows::Win32::System::Threading::{
     GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
@@ -40,23 +43,24 @@ use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLE
 use crate::elevated_protocol::{
     read_header, write_header, ResponseKind, HEADER_LEN, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
 };
-use crate::secure_scratch::{ProfileGuard, SecureScratch};
+use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ERROR_NO_DATA: i32 = 232;
 const SW_HIDE: i32 = 0;
-const CONTROL_DISARM: u8 = 1;
+const CONTROL_STOP: u8 = 1;
+static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardControl {
-    Disarm,
+    Stop,
 }
 
 fn parse_guard_control(value: u8) -> Result<GuardControl> {
     match value {
-        CONTROL_DISARM => Ok(GuardControl::Disarm),
+        CONTROL_STOP => Ok(GuardControl::Stop),
         _ => anyhow::bail!("invalid guarded PLM control message {value}"),
     }
 }
@@ -65,7 +69,6 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
 pub enum Operation {
     Start,
     Stop,
-    Cancel,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,26 +172,35 @@ impl GuardLifecycle {
             _ => GuardAction::None,
         }
     }
+
+    fn defer_cleanup(&mut self) {
+        if self.state == GuardState::Armed {
+            self.state = GuardState::Cancelled;
+        }
+    }
 }
 
 struct GuardedOwner {
     owner: OwnedHandle,
-    singleton: crate::coordination::singleton::Observer,
+    _singleton: SingletonGuard,
+    recovery_marker: RecoveryMarker,
     lifecycle: GuardLifecycle,
 }
 
 impl GuardedOwner {
     fn open(owner_pid: u32) -> Result<Self> {
-        let singleton = crate::coordination::singleton::Observer::open()
-            .map_err(singleton_error)
-            .context("failed to open guarded PLM singleton observer")?;
-        let owner = OwnedHandle(
-            unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, owner_pid) }
-                .context("failed to open guarded PLM owner process")?,
-        );
+        let singleton = SingletonGuard::acquire()?;
+        let recovery_marker = RecoveryMarker::acquire()?;
+        let owner = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, owner_pid) } {
+            Ok(owner) => OwnedHandle(owner),
+            Err(error) => {
+                return Err(error).context("failed to open guarded PLM owner process");
+            }
+        };
         let mut guarded = Self {
             owner,
-            singleton,
+            _singleton: singleton,
+            recovery_marker,
             lifecycle: GuardLifecycle::new(),
         };
         if guarded.lifecycle.ready(!guarded.has_exited()?) != GuardAction::None {
@@ -230,36 +242,30 @@ impl GuardedOwner {
         Ok(())
     }
 
-    fn wait_for_disarm(&mut self, pipe: &mut std::fs::File) -> Result<()> {
+    fn wait_for_control(&mut self, pipe: &mut std::fs::File) -> Result<()> {
         loop {
             if self.has_exited()? {
                 if self.lifecycle.on_owner_exit() == GuardAction::Cancel {
                     self.cancel_after_owner_exit()
                         .context("failed to cancel PLM trace after guarded owner exit")?;
                 }
-                anyhow::bail!("guarded PLM owner exited before disarm");
+                anyhow::bail!("guarded PLM owner exited before stop");
             }
 
             let mut control = [0u8; 1];
             match pipe.read(&mut control) {
-                Ok(1) => {
-                    if let Err(error) = parse_guard_control(control[0]) {
+                Ok(1) => match parse_guard_control(control[0]) {
+                    Ok(GuardControl::Stop) => {
+                        return run_guarded_stop(pipe, self);
+                    }
+                    Err(error) => {
                         self.cancel_for_pipe_break()?;
                         return Err(error);
                     }
-                    match self.lifecycle.disarm() {
-                        GuardAction::None => return Ok(()),
-                        GuardAction::Cancel => {
-                            anyhow::bail!("guarded PLM cleanup won the disarm race")
-                        }
-                        GuardAction::RejectStart => {
-                            anyhow::bail!("guarded PLM disarm arrived in an invalid state")
-                        }
-                    }
-                }
+                },
                 Ok(0) => {
                     self.cancel_for_pipe_break()?;
-                    anyhow::bail!("guarded PLM control pipe closed before disarm");
+                    anyhow::bail!("guarded PLM control pipe closed before stop");
                 }
                 Ok(_) => unreachable!("one-byte control read returned too many bytes"),
                 Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {
@@ -267,7 +273,7 @@ impl GuardedOwner {
                 }
                 Err(error) => {
                     self.cancel_for_pipe_break()?;
-                    return Err(error).context("guarded PLM control pipe failed before disarm");
+                    return Err(error).context("guarded PLM control pipe failed before stop");
                 }
             }
         }
@@ -277,38 +283,27 @@ impl GuardedOwner {
         if self.lifecycle.on_pipe_break() != GuardAction::Cancel {
             return Ok(());
         }
-        if self.has_exited()? {
-            self.cancel_after_owner_exit()
-        } else {
-            crate::start::cancel_existing_wpr_trace()
-        }
+        cancel_trace(&mut self.recovery_marker)
     }
 
     fn cancel_after_start_error(&mut self) {
         if self.lifecycle.cancel_started_trace() == GuardAction::Cancel {
-            let _ = crate::start::cancel_existing_wpr_trace();
+            let _ = cancel_trace(&mut self.recovery_marker);
         }
     }
 
-    fn cancel_after_owner_exit(&self) -> Result<()> {
-        use crate::coordination::singleton::AcquireError;
-
-        match self.singleton.try_acquire() {
-            Ok(_) => {}
-            Err(AcquireError::AlreadyHeld) => {
-                // A replacement owner won the handoff. Its acquisition
-                // outcome tells it to clean the inherited WPR session before
-                // starting another trace.
-                return Ok(());
-            }
-            Err(error) => {
-                return Err(singleton_error(error))
-                    .context("guarded PLM singleton acquisition failed")
+    fn mark_stopped(&mut self) -> Result<()> {
+        match self.lifecycle.disarm() {
+            GuardAction::None => Ok(()),
+            GuardAction::Cancel => anyhow::bail!("guarded cleanup won the stop race"),
+            GuardAction::RejectStart => {
+                anyhow::bail!("guarded PLM stop arrived in an invalid state")
             }
         }
-        let result = crate::start::cancel_existing_wpr_trace();
-        self.singleton.release();
-        result
+    }
+
+    fn cancel_after_owner_exit(&mut self) -> Result<()> {
+        cancel_trace(&mut self.recovery_marker)
     }
 }
 
@@ -317,7 +312,6 @@ impl Operation {
         match self {
             Self::Start => "start",
             Self::Stop => "stop",
-            Self::Cancel => "cancel",
         }
     }
 }
@@ -337,8 +331,8 @@ impl Drop for OwnedHandle {
 /// Live authenticated connection to the elevated START child.
 ///
 /// Dropping an armed session closes the control pipe and waits for the child
-/// to cancel the trace. Call [`Self::disarm`] only after the authenticated STOP
-/// child has reported that the WPR session is stopped.
+/// to cancel the trace. [`Self::stop`] asks that same retained child to stop
+/// WPR and transfer the ETL, avoiding a second elevation prompt.
 pub struct GuardedSession {
     pipe: Option<std::fs::File>,
     process: OwnedHandle,
@@ -356,41 +350,44 @@ impl std::fmt::Debug for GuardedSession {
 }
 
 impl GuardedSession {
-    pub fn disarm(&mut self) -> Result<()> {
+    pub fn stop(&mut self, trace_destination: &Path) -> Result<()> {
         if self.disarmed {
-            return Ok(());
+            anyhow::bail!("guarded PLM session is already stopped");
         }
-        let result = (|| {
-            let pipe = self
-                .pipe
-                .as_mut()
-                .context("guarded PLM control connection is already closed")?;
-            pipe.write_all(&[CONTROL_DISARM])
-                .context("failed to send guarded PLM DISARM")?;
-            pipe.flush().context("failed to flush guarded PLM DISARM")?;
-            wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION)
-        })();
-        if let Err(error) = result {
-            // This method is called only after the authenticated STOP child
-            // reported that wpr -stop completed. If graceful DISARM fails,
-            // terminate the guardian before closing its pipe so it cannot
-            // interpret the pipe break as permission to cancel a later,
-            // unrelated WPR session.
-            let terminate_error = unsafe { TerminateProcess(self.process.0, 1) }.err();
-            let _ = wait_for_child_exit(self.process.0, WAIT_TIMEOUT_DURATION);
-            self.pipe.take();
+        let mut pipe = self
+            .pipe
+            .take()
+            .context("guarded PLM control connection is already closed")?;
+        pipe.write_all(&[CONTROL_STOP])
+            .context("failed to send guarded PLM STOP")?;
+        pipe.flush().context("failed to flush guarded PLM STOP")?;
+
+        let stopped = std::cell::Cell::new(false);
+        let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
+        let result = read_response(
+            &mut pipe,
+            self.process.0,
+            Operation::Stop,
+            Some(trace_destination),
+            deadline,
+            || {
+                stopped.set(true);
+                Ok(())
+            },
+        );
+        if stopped.get() {
             self.disarmed = true;
-            return match terminate_error {
-                Some(terminate_error) => Err(error).context(format!(
-                    "also failed to terminate guarded PLM child after DISARM failure: \
-                     {terminate_error}"
-                )),
-                None => Err(error),
-            };
+            drop(pipe);
+            let wait_result = wait_for_child_exit(
+                self.process.0,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            result?;
+            wait_result
+        } else {
+            self.pipe = Some(pipe);
+            result
         }
-        self.pipe.take();
-        self.disarmed = true;
-        Ok(())
     }
 }
 
@@ -410,34 +407,6 @@ thread_local! {
     };
 }
 
-/// Invoke a fixed elevated operation. `trace_destination` is consumed only by
-/// the unelevated parent and is never placed on the elevated command line.
-pub fn invoke(operation: Operation, trace_destination: Option<&Path>) -> Result<()> {
-    let executable = std::env::current_exe().context("failed to resolve plm.exe path")?;
-    invoke_with_executable(&executable, operation, trace_destination)
-}
-
-pub fn invoke_stop_with_executable_and_stopped(
-    executable: &Path,
-    trace_destination: &Path,
-    on_stopped: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    invoke_with_executable_and_stopped(
-        executable,
-        Operation::Stop,
-        Some(trace_destination),
-        on_stopped,
-    )
-}
-
-pub fn invoke_stop_with_stopped(
-    trace_destination: &Path,
-    on_stopped: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    let executable = std::env::current_exe().context("failed to resolve plm.exe path")?;
-    invoke_stop_with_executable_and_stopped(&executable, trace_destination, on_stopped)
-}
-
 /// Compatibility entry point used by interactive `plm log`.
 pub fn invoke_guarded_start(owner_pid: u32) -> Result<()> {
     CURRENT_GUARDED_SESSION.with(|slot| {
@@ -450,13 +419,13 @@ pub fn invoke_guarded_start(owner_pid: u32) -> Result<()> {
     })
 }
 
-pub fn disarm_current_guarded_start() -> Result<()> {
+pub fn stop_current_guarded_start(trace_destination: &Path) -> Result<()> {
     CURRENT_GUARDED_SESSION.with(|slot| {
         let mut session = slot
             .borrow_mut()
             .take()
             .context("no guarded PLM session is active on this thread")?;
-        session.disarm()
+        session.stop(trace_destination)
     })
 }
 
@@ -497,44 +466,6 @@ pub fn start_guarded_session_with_executable(
     })
 }
 
-pub fn invoke_with_executable(
-    executable: &Path,
-    operation: Operation,
-    trace_destination: Option<&Path>,
-) -> Result<()> {
-    invoke_with_executable_and_stopped(executable, operation, trace_destination, || Ok(()))
-}
-
-fn invoke_with_executable_and_stopped(
-    executable: &Path,
-    operation: Operation,
-    trace_destination: Option<&Path>,
-    on_stopped: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    match (operation, trace_destination) {
-        (Operation::Stop, Some(_)) | (Operation::Start | Operation::Cancel, None) => {}
-        (Operation::Stop, None) => anyhow::bail!("elevated stop requires a trace destination"),
-        (_, Some(_)) => anyhow::bail!("only elevated stop accepts a trace destination"),
-    }
-
-    let (mut pipe, process, deadline) = launch_connected_child(executable, operation, None)?;
-    let result = read_response(
-        &mut pipe,
-        process.0,
-        operation,
-        trace_destination,
-        deadline,
-        on_stopped,
-    );
-    drop(pipe);
-    let wait_result = wait_for_child_exit(
-        process.0,
-        deadline.saturating_duration_since(Instant::now()),
-    );
-    result?;
-    wait_result
-}
-
 fn launch_connected_child(
     executable: &Path,
     operation: Operation,
@@ -542,8 +473,8 @@ fn launch_connected_child(
 ) -> Result<(std::fs::File, OwnedHandle, Instant)> {
     let pipe_name = new_pipe_name()?;
     let pipe = OwnedHandle(create_pipe(&pipe_name)?);
-    if owner_pid.is_some() && operation != Operation::Start {
-        anyhow::bail!("only elevated start accepts a guarded owner PID");
+    if operation != Operation::Start || owner_pid.is_none() {
+        anyhow::bail!("only guarded elevated start may launch a PLM child");
     }
     let process = OwnedHandle(launch_elevated_child(
         executable, operation, &pipe_name, owner_pid,
@@ -603,55 +534,55 @@ pub fn run_child(
         .open(pipe_name)
         .with_context(|| format!("failed to connect to PLM control pipe {pipe_name}"))?;
     authenticate_server(&pipe, server_pid)?;
-    if owner_pid.is_some() && operation != Operation::Start {
-        anyhow::bail!("guarded owner PID is valid only for elevated start");
+    set_pipe_nowait(&pipe)?;
+    if operation != Operation::Start || owner_pid.is_none() {
+        anyhow::bail!("elevated start requires a guarded owner PID");
     }
+    run_guarded_start_child(
+        &mut pipe,
+        owner_pid.context("guarded start owner PID disappeared")?,
+    )
+}
 
-    if operation == Operation::Start {
-        if let Some(owner_pid) = owner_pid {
-            return run_guarded_start_child(&mut pipe, owner_pid);
-        }
-    }
+struct SingletonGuard;
 
-    let operation_result = match operation {
-        Operation::Start => run_start(),
-        Operation::Stop => run_stop(&mut pipe),
-        Operation::Cancel => run_cancel(),
-    };
+impl SingletonGuard {
+    fn acquire() -> Result<Self> {
+        use crate::coordination::singleton::{try_acquire, AcquireError};
 
-    match operation_result {
-        Ok(()) if operation != Operation::Stop => {
-            let response_result =
-                write_header(&mut pipe, ResponseKind::Success, 0).and_then(|_| pipe.flush());
-            if let Err(error) = response_result {
-                if operation == Operation::Start {
-                    let _ = crate::start::cancel_existing_wpr_trace();
-                }
-                return Err(error).context("failed to return elevated PLM success");
+        match try_acquire(&GUARDIAN_SINGLETON) {
+            Ok(_) => Ok(Self),
+            Err(AcquireError::AlreadyHeld) => anyhow::bail!(
+                "another PLM trace is already in progress (Global\\Mxc_Plm_Audit held)"
+            ),
+            Err(AcquireError::CreateFailed(error)) => {
+                Err(error).context("failed to acquire Global\\Mxc_Plm_Audit in elevated PLM child")
             }
-            Ok(())
-        }
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let message = format!("{error:#}");
-            let bytes = message.as_bytes();
-            let len = (bytes.len() as u64).min(MAX_ERROR_BYTES);
-            let send_result = write_header(&mut pipe, ResponseKind::Error, len)
-                .and_then(|_| pipe.write_all(&bytes[..len as usize]))
-                .and_then(|_| pipe.flush());
-            if let Err(send_error) = send_result {
-                return Err(error).context(format!(
-                    "also failed to return elevated PLM error over the pipe: {send_error}"
-                ));
+            Err(AcquireError::UntrustedExisting) => {
+                anyhow::bail!("Global\\Mxc_Plm_Audit already exists with an untrusted owner")
             }
-            Err(error)
+            Err(AcquireError::SecurityQueryFailed(error)) => {
+                anyhow::bail!("failed to validate Global\\Mxc_Plm_Audit security: {error:?}")
+            }
         }
     }
 }
 
+impl Drop for SingletonGuard {
+    fn drop(&mut self) {
+        crate::coordination::singleton::release(&GUARDIAN_SINGLETON);
+    }
+}
+
 fn run_guarded_start_child(pipe: &mut std::fs::File, owner_pid: u32) -> Result<()> {
-    let mut owner = GuardedOwner::open(owner_pid)?;
-    if let Err(error) = run_start() {
+    let mut owner = match GuardedOwner::open(owner_pid) {
+        Ok(owner) => owner,
+        Err(error) => {
+            write_error_response(pipe, &error)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = start_owned_trace(&mut owner) {
         write_error_response(pipe, &error)?;
         return Err(error);
     }
@@ -660,14 +591,166 @@ fn run_guarded_start_child(pipe: &mut std::fs::File, owner_pid: u32) -> Result<(
         write_error_response(pipe, &error)?;
         return Err(error);
     }
+    set_pipe_mode(pipe, PIPE_WAIT)?;
     if let Err(error) = write_header(pipe, ResponseKind::Success, 0).and_then(|_| pipe.flush()) {
         let _ = owner.cancel_for_pipe_break();
         return Err(error).context("failed to return guarded PLM start success");
     }
-    owner.wait_for_disarm(pipe)
+    set_pipe_mode(pipe, PIPE_NOWAIT)?;
+    owner.wait_for_control(pipe)
+}
+
+fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
+    let stale = owner.recovery_marker.is_stale();
+    match run_start() {
+        Ok(()) => {
+            owner.recovery_marker.recovered();
+            Ok(())
+        }
+        Err(error) if stale => Err(error).context(
+            "WPR start failed while a protected stale-recovery marker exists; \
+             refusing to cancel an unverified WPR session",
+        ),
+        Err(error) => Err(error),
+    }
+}
+
+fn cancel_trace(marker: &mut RecoveryMarker) -> Result<()> {
+    marker.preserve();
+    crate::start::cancel_existing_wpr_trace()?;
+    marker.recovered();
+    Ok(())
+}
+
+fn run_guarded_stop(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Result<()> {
+    let result = run_guarded_stop_with_stopped(pipe, owner);
+    if let Err(error) = result {
+        owner.cancel_after_start_error();
+        write_error_response(pipe, &error)?;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn run_guarded_stop_with_stopped(pipe: &mut std::fs::File, owner: &mut GuardedOwner) -> Result<()> {
+    crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
+    let scratch = SecureScratch::new()?;
+    run_monitored_wpr_stop(pipe, owner, scratch.trace_path())?;
+    owner.mark_stopped()?;
+    set_pipe_mode(pipe, PIPE_WAIT)?;
+    write_header(pipe, ResponseKind::Stopped, 0)
+        .and_then(|_| pipe.flush())
+        .context("failed to return elevated PLM WPR-stopped milestone")?;
+    write_trace_response(pipe, &scratch)
+}
+
+fn run_monitored_wpr_stop(
+    pipe: &mut std::fs::File,
+    owner: &mut GuardedOwner,
+    trace_path: &Path,
+) -> Result<()> {
+    let mut command = crate::wpr_path::wpr_command();
+    let resolved = command.get_program().to_string_lossy().into_owned();
+    let mut child = command
+        .arg("-stop")
+        .arg(trace_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("failed to capture wpr -stop stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("failed to capture wpr -stop stderr")?;
+    let stdout_reader = spawn_output_reader(stdout);
+    let stderr_reader = spawn_output_reader(stderr);
+    let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
+    // Once STOP is accepted, finish it even if the owner or pipe disappears.
+    // Killing an in-flight `wpr -stop` and then cancelling could race a newly
+    // started unrelated WPR session after the original stop already succeeded.
+    let mut stop_unattended = false;
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(error) => {
+                terminate_child(&mut child);
+                owner.lifecycle.defer_cleanup();
+                owner.recovery_marker.preserve();
+                return Err(error).context("failed to poll wpr -stop");
+            }
+        }
+        if !stop_unattended {
+            match owner.has_exited() {
+                Ok(true) => stop_unattended = true,
+                Ok(false) => {}
+                Err(_) => stop_unattended = true,
+            }
+
+            let mut control = [0u8; 1];
+            match pipe.read(&mut control) {
+                Ok(0 | 1) => stop_unattended = true,
+                Ok(_) => unreachable!("one-byte control read returned too many bytes"),
+                Err(error) if error.raw_os_error() == Some(ERROR_NO_DATA) => {}
+                Err(_) => stop_unattended = true,
+            }
+        }
+        if Instant::now() >= deadline {
+            terminate_child(&mut child);
+            owner.lifecycle.defer_cleanup();
+            owner.recovery_marker.preserve();
+            anyhow::bail!("timed out waiting for wpr -stop; deferred cleanup to the next guardian");
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    };
+
+    let stdout = join_output_reader(stdout_reader, "stdout")?;
+    let stderr = join_output_reader(stderr_reader, "stderr")?;
+    if !status.success() {
+        return Err(crate::start::describe_wpr_failure(
+            "stop",
+            &std::process::Output {
+                status,
+                stdout,
+                stderr,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn spawn_output_reader(
+    mut stream: impl Read + Send + 'static,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        stream.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_output_reader(
+    reader: std::thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    stream: &str,
+) -> Result<Vec<u8>> {
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("wpr -stop {stream} reader panicked"))?
+        .with_context(|| format!("failed to read wpr -stop {stream}"))
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn write_error_response(pipe: &mut std::fs::File, error: &anyhow::Error) -> Result<()> {
+    set_pipe_mode(pipe, PIPE_WAIT)?;
     let message = format!("{error:#}");
     let bytes = message.as_bytes();
     let len = (bytes.len() as u64).min(MAX_ERROR_BYTES);
@@ -688,13 +771,7 @@ fn run_start() -> Result<()> {
     Ok(())
 }
 
-fn run_stop(pipe: &mut std::fs::File) -> Result<()> {
-    crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
-    let scratch = SecureScratch::new()?;
-    crate::stop::stop_plm_trace(scratch.trace_path())?;
-    write_header(pipe, ResponseKind::Stopped, 0)
-        .and_then(|_| pipe.flush())
-        .context("failed to return elevated PLM WPR-stopped milestone")?;
+fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
     let (mut trace_file, len) = scratch.open_trace()?;
     if len > MAX_TRACE_BYTES {
         anyhow::bail!(
@@ -718,11 +795,6 @@ fn copy_exact_len(reader: &mut impl Read, writer: &mut impl Write, len: u64) -> 
     Ok(())
 }
 
-fn run_cancel() -> Result<()> {
-    crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
-    crate::start::cancel_existing_wpr_trace()
-}
-
 fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<()> {
     let mut actual_pid = 0u32;
     unsafe { GetNamedPipeServerProcessId(HANDLE(pipe.as_raw_handle()), &mut actual_pid) }
@@ -732,7 +804,17 @@ fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<()> {
             "PLM control pipe server PID mismatch: expected {expected_pid}, got {actual_pid}"
         );
     }
+
     Ok(())
+}
+
+fn set_pipe_nowait(pipe: &std::fs::File) -> Result<()> {
+    set_pipe_mode(pipe, PIPE_NOWAIT)
+}
+
+fn set_pipe_mode(pipe: &std::fs::File, mode: NAMED_PIPE_MODE) -> Result<()> {
+    unsafe { SetNamedPipeHandleState(HANDLE(pipe.as_raw_handle()), Some(&mode), None, None) }
+        .context("failed to set guarded PLM control pipe mode")
 }
 
 fn is_process_elevated() -> Result<bool> {
@@ -1036,15 +1118,6 @@ fn build_internal_parameters(
     parameters
 }
 
-fn singleton_error(error: crate::coordination::singleton::AcquireError) -> anyhow::Error {
-    match error {
-        crate::coordination::singleton::AcquireError::AlreadyHeld => {
-            anyhow::anyhow!("PLM singleton is already held")
-        }
-        crate::coordination::singleton::AcquireError::CreateFailed(error) => error.into(),
-    }
-}
-
 fn new_pipe_name() -> Result<String> {
     let mut random = [0u8; 16];
     getrandom::getrandom(&mut random)
@@ -1139,7 +1212,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_disarm_prevents_cancel_and_post_stop_interference() {
+    fn stopped_state_prevents_cancel_and_post_stop_interference() {
         let mut lifecycle = armed_lifecycle();
 
         assert_eq!(lifecycle.disarm(), GuardAction::None);
@@ -1152,9 +1225,19 @@ mod tests {
     fn stop_failure_leaves_guard_armed() {
         let mut lifecycle = armed_lifecycle();
 
-        // A failed stop sends no DISARM.
+        // A failed stop never marks the lifecycle stopped.
         assert_eq!(lifecycle.state, GuardState::Armed);
         assert_eq!(lifecycle.on_pipe_break(), GuardAction::Cancel);
+    }
+
+    #[test]
+    fn uncertain_stop_defers_cleanup_without_late_cancel() {
+        let mut lifecycle = armed_lifecycle();
+
+        lifecycle.defer_cleanup();
+        assert_eq!(lifecycle.state, GuardState::Cancelled);
+        assert_eq!(lifecycle.cancel_started_trace(), GuardAction::None);
+        assert_eq!(lifecycle.on_pipe_break(), GuardAction::None);
     }
 
     #[test]
@@ -1220,7 +1303,7 @@ mod tests {
                 payload_len: 0,
             },
             Operation::Stop,
-            || anyhow::bail!("disarm failed"),
+            || anyhow::bail!("stopped milestone handling failed"),
             || {
                 read_next.set(true);
                 Ok(ResponseHeader {
@@ -1238,19 +1321,17 @@ mod tests {
     fn stopped_milestone_is_rejected_for_non_stop_operations() {
         use crate::elevated_protocol::ResponseHeader;
 
-        for operation in [Operation::Start, Operation::Cancel] {
-            let error = accept_response_headers(
-                ResponseHeader {
-                    kind: ResponseKind::Stopped,
-                    payload_len: 0,
-                },
-                operation,
-                || Ok(()),
-                || anyhow::bail!("must not read another header"),
-            )
-            .unwrap_err();
-            assert!(error.to_string().contains("unexpected WPR-stopped"));
-        }
+        let error = accept_response_headers(
+            ResponseHeader {
+                kind: ResponseKind::Stopped,
+                payload_len: 0,
+            },
+            Operation::Start,
+            || Ok(()),
+            || anyhow::bail!("must not read another header"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("unexpected WPR-stopped"));
     }
 
     #[test]
@@ -1284,10 +1365,10 @@ mod tests {
     }
 
     #[test]
-    fn control_protocol_accepts_only_one_byte_disarm() {
+    fn control_protocol_accepts_only_stop() {
         assert_eq!(
-            parse_guard_control(CONTROL_DISARM).unwrap(),
-            GuardControl::Disarm
+            parse_guard_control(CONTROL_STOP).unwrap(),
+            GuardControl::Stop
         );
         for invalid in [0, 2, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
@@ -1318,19 +1399,17 @@ mod tests {
     }
 
     #[test]
-    fn internal_command_contains_no_filesystem_path_argument() {
+    fn guarded_start_command_contains_no_filesystem_path_argument() {
         let pipe = r"\\.\pipe\mxc-plm-elevated-00112233445566778899aabbccddeeff";
-        for operation in [Operation::Start, Operation::Stop, Operation::Cancel] {
-            let parameters = build_internal_parameters(operation, pipe, 42, None);
-            assert!(parameters.starts_with("__elevated "));
-            assert!(parameters.contains("--pipe-name"));
-            assert!(parameters.contains("--server-pid 42"));
-            assert!(!parameters.contains("trace-output"));
-            assert!(!parameters.contains("wprp"));
-            assert!(!parameters.contains("log-dir"));
-            assert!(!parameters.contains("config-path"));
-            assert!(!parameters.contains("owner-pid"));
-        }
+        let parameters = build_internal_parameters(Operation::Start, pipe, 42, Some(84));
+        assert!(parameters.starts_with("__elevated start"));
+        assert!(parameters.contains("--pipe-name"));
+        assert!(parameters.contains("--server-pid 42"));
+        assert!(parameters.contains("--owner-pid 84"));
+        assert!(!parameters.contains("trace-output"));
+        assert!(!parameters.contains("wprp"));
+        assert!(!parameters.contains("log-dir"));
+        assert!(!parameters.contains("config-path"));
     }
 
     #[test]
