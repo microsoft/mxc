@@ -429,11 +429,45 @@ impl LxcScriptRunner {
         // printf's, so a grep that matches nothing and exits 1 does not fail
         // the command.
         format!(
-            "kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
-             {{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; \
+            "{}{{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; \
              printf '%s {marker}\\n' '{hosts_line}'; }} > /etc/hosts",
+            Self::hosts_read_prologue(),
             marker = HOSTS_PIN_MARKER,
             hosts_line = hosts_line
+        )
+    }
+
+    /// Read the existing `/etc/hosts` into `$kept`, or abort before anything
+    /// opens the file for writing.
+    ///
+    /// `> /etc/hosts` truncates the moment it is opened, so every reason the
+    /// read could fail has to be settled first. The original form discarded
+    /// grep's status entirely: with `grep` absent, `/etc/hosts` unreadable, or
+    /// the binary killed, `$kept` came back empty, the redirect truncated the
+    /// file, and the closing `printf` exited 0 -- so the runner recorded a
+    /// successful pin over a hosts file it had just emptied of every entry the
+    /// image shipped.
+    ///
+    /// Only status 0 (lines kept) and status 1 (nothing kept) are outcomes.
+    /// Status 1 is legitimate and common: an empty file, or a re-pin where
+    /// every existing line carries the marker. Anything above 1 is a failed
+    /// read, and `127` additionally covers a missing `grep`. A missing file is
+    /// separated out first, because grep cannot distinguish "absent" from
+    /// "unreadable" -- both are status 2 -- and an image that ships no
+    /// `/etc/hosts` has no content to protect.
+    fn hosts_read_prologue() -> String {
+        format!(
+            "kept=''; \
+             if [ -e /etc/hosts ]; then \
+             kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
+             status=$?; \
+             if [ \"$status\" -gt 1 ]; then \
+             printf 'mxc: refusing to rewrite /etc/hosts: reading it exited %s\\n' \
+             \"$status\" >&2; \
+             exit \"$status\"; \
+             fi; \
+             fi; ",
+            marker = HOSTS_PIN_MARKER
         )
     }
 
@@ -452,9 +486,8 @@ impl LxcScriptRunner {
     /// symlink reason.
     fn build_hosts_unpin_command() -> String {
         format!(
-            "kept=$(grep -v '{marker}' /etc/hosts 2>/dev/null); \
-             {{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; }} > /etc/hosts",
-            marker = HOSTS_PIN_MARKER
+            "{}{{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; }} > /etc/hosts",
+            Self::hosts_read_prologue()
         )
     }
 }
@@ -782,5 +815,292 @@ mod tests {
             !log.contains("Creating LXC container"),
             "the guard must return before container creation, log was: {log}"
         );
+    }
+}
+
+/// The generated hosts commands, executed rather than pattern-matched.
+///
+/// Every hosts test in `tests` above asserts on the command *string*. No
+/// string assertion can separate a command that preserves `/etc/hosts` from
+/// one that empties it -- both contain `> /etc/hosts`, and the truncation
+/// defect these tests exist to pin was invisible to all six of them. Running
+/// the command under a real `/bin/sh` is what makes the difference
+/// observable.
+#[cfg(all(test, unix))]
+mod hosts_command_execution {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// What a container image ships before anything pins a proxy.
+    const ORIGINAL: &str = "127.0.0.1 localhost\n::1 ip6-localhost\n10.0.0.9 build.internal\n";
+
+    const PIN_LINE: &str = "10.0.0.5 proxy.example.com";
+
+    /// A private directory that removes itself, so a failing test cannot leave
+    /// a hosts fixture behind for the next run to find.
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "mxc-hosts-{}-{}-{}",
+                tag,
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("the system clock should be after the unix epoch")
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).expect("the scratch directory should be creatable");
+            Self { dir }
+        }
+
+        fn hosts(&self) -> PathBuf {
+            self.dir.join("hosts")
+        }
+
+        fn write_hosts(&self, contents: &str) {
+            std::fs::write(self.hosts(), contents).expect("the fixture should be writable");
+        }
+
+        fn read_hosts(&self) -> String {
+            std::fs::read_to_string(self.hosts()).expect("the fixture should be readable")
+        }
+
+        /// A `PATH` carrying a `grep` that fails with `status`, so the read can
+        /// be broken without breaking the shell around it. `printf` and `[` are
+        /// builtins and survive the override; everything else still resolves
+        /// through the inherited `PATH` behind the shim.
+        fn path_with_failing_grep(&self, status: i32) -> String {
+            use std::os::unix::fs::PermissionsExt;
+
+            let bin = self.dir.join("bin");
+            std::fs::create_dir_all(&bin).expect("the shim directory should be creatable");
+            let grep = bin.join("grep");
+            std::fs::write(&grep, format!("#!/bin/sh\nexit {status}\n"))
+                .expect("the shim should be writable");
+            std::fs::set_permissions(&grep, std::fs::Permissions::from_mode(0o755))
+                .expect("the shim should be executable");
+
+            format!(
+                "{}:{}",
+                bin.display(),
+                std::env::var("PATH").unwrap_or_default()
+            )
+        }
+
+        /// A `PATH` with no `grep` on it at all, which is how a BusyBox image
+        /// missing the applet fails: the shell cannot find the binary and
+        /// reports 127.
+        fn path_without_grep(&self) -> String {
+            let empty = self.dir.join("empty");
+            std::fs::create_dir_all(&empty).expect("the empty directory should be creatable");
+            empty.display().to_string()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// Point a generated command at a scratch file. Only the path moves: the
+    /// existence check, the read, the status guard, and the redirect are the
+    /// generated text unmodified. That the real target is `/etc/hosts` is
+    /// pinned separately, by the string tests above.
+    fn retarget(command: &str, hosts: &Path) -> String {
+        command.replace(
+            "/etc/hosts",
+            hosts.to_str().expect("the scratch path should be utf-8"),
+        )
+    }
+
+    fn run(command: &str, path: Option<&str>) -> i32 {
+        let mut shell = std::process::Command::new("/bin/sh");
+        shell.arg("-c").arg(command);
+        if let Some(path) = path {
+            shell.env("PATH", path);
+        }
+        shell
+            .output()
+            .expect("/bin/sh should be executable")
+            .status
+            .code()
+            .expect("the shell should exit rather than be signalled")
+    }
+
+    fn pin(hosts: &Path) -> String {
+        retarget(&LxcScriptRunner::build_hosts_pin_command(PIN_LINE), hosts)
+    }
+
+    fn unpin(hosts: &Path) -> String {
+        retarget(&LxcScriptRunner::build_hosts_unpin_command(), hosts)
+    }
+
+    #[test]
+    fn pinning_adds_the_mapping_and_keeps_every_line_the_image_shipped() {
+        let scratch = Scratch::new("keeps");
+        scratch.write_hosts(ORIGINAL);
+
+        let code = run(&pin(&scratch.hosts()), None);
+        let after = scratch.read_hosts();
+
+        assert_eq!(code, 0, "pinning a readable file should succeed");
+        for line in ORIGINAL.lines() {
+            assert!(
+                after.contains(line),
+                "the pin dropped {line:?}; file is now:\n{after}"
+            );
+        }
+        assert!(
+            after.contains(&format!("{PIN_LINE} {HOSTS_PIN_MARKER}")),
+            "the pin never landed; file is now:\n{after}"
+        );
+    }
+
+    // The first match in a hosts file wins, so a pin left over from a previous
+    // run on a reused container would shadow the one this run authorized.
+    #[test]
+    fn re_pinning_replaces_the_previous_entry_instead_of_stacking_on_it() {
+        let scratch = Scratch::new("repin");
+        scratch.write_hosts(ORIGINAL);
+
+        assert_eq!(run(&pin(&scratch.hosts()), None), 0);
+        assert_eq!(run(&pin(&scratch.hosts()), None), 0);
+        let after = scratch.read_hosts();
+
+        assert_eq!(
+            after.matches(HOSTS_PIN_MARKER).count(),
+            1,
+            "a second pin should replace the first, not stack; file is now:\n{after}"
+        );
+        assert!(
+            after.contains("10.0.0.9 build.internal"),
+            "re-pinning dropped an unrelated entry; file is now:\n{after}"
+        );
+    }
+
+    // The defect this module was written for. `> /etc/hosts` truncates the
+    // instant it is opened, so a read that failed has to stop the command
+    // before the redirect -- not merely produce nothing to write back.
+    #[test]
+    fn a_failed_read_leaves_the_file_byte_for_byte_as_it_was() {
+        let scratch = Scratch::new("failread");
+        scratch.write_hosts(ORIGINAL);
+        let path = scratch.path_with_failing_grep(2);
+
+        let code = run(&pin(&scratch.hosts()), Some(&path));
+
+        assert_eq!(
+            scratch.read_hosts(),
+            ORIGINAL,
+            "a failed read truncated the file it could not read"
+        );
+        assert_ne!(
+            code, 0,
+            "a failed read must fail the command, not report a pin it never made"
+        );
+    }
+
+    // A missing `grep` is status 127, not 2, and is the likelier failure on a
+    // stripped image -- the same class, reached by a different route.
+    #[test]
+    fn a_missing_grep_leaves_the_file_byte_for_byte_as_it_was() {
+        let scratch = Scratch::new("nogrep");
+        scratch.write_hosts(ORIGINAL);
+        let path = scratch.path_without_grep();
+
+        let code = run(&pin(&scratch.hosts()), Some(&path));
+
+        assert_eq!(
+            scratch.read_hosts(),
+            ORIGINAL,
+            "a missing grep truncated the file"
+        );
+        assert_ne!(code, 0, "a missing grep must fail the command");
+    }
+
+    // Unpinning writes back only what it read, so a failed read there empties
+    // the file outright rather than reducing it to one line.
+    #[test]
+    fn a_failed_read_while_unpinning_leaves_the_file_byte_for_byte_as_it_was() {
+        let scratch = Scratch::new("failunpin");
+        scratch.write_hosts(ORIGINAL);
+        let path = scratch.path_with_failing_grep(2);
+
+        let code = run(&unpin(&scratch.hosts()), Some(&path));
+
+        assert_eq!(
+            scratch.read_hosts(),
+            ORIGINAL,
+            "a failed read emptied the file it could not read"
+        );
+        assert_ne!(code, 0, "a failed read must fail the unpin");
+    }
+
+    // Status 1 means grep selected nothing, which is an outcome and not a
+    // failure: an empty file, or a re-pin where every line carried the marker.
+    // Treating it as an error would make the guard reject the ordinary case.
+    #[test]
+    fn a_file_of_nothing_but_previous_pins_is_rewritten_rather_than_refused() {
+        let scratch = Scratch::new("allmarked");
+        scratch.write_hosts(&format!("10.0.0.4 proxy.example.com {HOSTS_PIN_MARKER}\n"));
+
+        let code = run(&pin(&scratch.hosts()), None);
+        let after = scratch.read_hosts();
+
+        assert_eq!(
+            code, 0,
+            "a file of only stale pins should still be pinnable"
+        );
+        assert_eq!(
+            after.trim(),
+            format!("{PIN_LINE} {HOSTS_PIN_MARKER}"),
+            "the stale pin should be gone and the new one present"
+        );
+    }
+
+    // An image that ships no hosts file has no content to protect, and grep
+    // cannot tell "absent" from "unreadable" -- both are status 2. The
+    // existence check is what keeps the guard from refusing to pin here.
+    #[test]
+    fn an_image_with_no_hosts_file_is_pinned_rather_than_refused() {
+        let scratch = Scratch::new("nofile");
+
+        let code = run(&pin(&scratch.hosts()), None);
+
+        assert_eq!(
+            code, 0,
+            "a missing hosts file should be created, not refused"
+        );
+        assert_eq!(
+            scratch.read_hosts().trim(),
+            format!("{PIN_LINE} {HOSTS_PIN_MARKER}")
+        );
+    }
+
+    #[test]
+    fn unpinning_removes_the_pin_and_keeps_everything_else() {
+        let scratch = Scratch::new("unpin");
+        scratch.write_hosts(ORIGINAL);
+        assert_eq!(run(&pin(&scratch.hosts()), None), 0);
+
+        let code = run(&unpin(&scratch.hosts()), None);
+        let after = scratch.read_hosts();
+
+        assert_eq!(code, 0, "unpinning a readable file should succeed");
+        assert!(
+            !after.contains(HOSTS_PIN_MARKER),
+            "the pin survived the unpin; file is now:\n{after}"
+        );
+        for line in ORIGINAL.lines() {
+            assert!(
+                after.contains(line),
+                "the unpin dropped {line:?}; file is now:\n{after}"
+            );
+        }
     }
 }
