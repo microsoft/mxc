@@ -1470,16 +1470,11 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request.policy.capture_denials.is_some() {
-            match &self.guarded_capture_factory {
-                None => {
-                    return Err(ScriptResponse {
-                        failure_phase: FailurePhase::BackendUnavailable,
-                        ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
-                    });
-                }
-                Some(_) => {}
-            }
+        if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
+            });
         }
         if !request.policy.denied_paths.is_empty()
             && self.filesystem_mode != FilesystemMode::Dacl

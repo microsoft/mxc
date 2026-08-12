@@ -524,26 +524,18 @@ impl ProcessTrackerState {
         }
     }
 
-    fn process_started(
-        &mut self,
-        pid: u32,
-        observed_filetime: u64,
-        attestation: Result<(OwnedHandle, u64)>,
-    ) {
+    fn process_started<F>(&mut self, pid: u32, observed_filetime: u64, attest: F)
+    where
+        F: FnOnce() -> Result<(OwnedHandle, u64)>,
+    {
         self.active_process_zero_filetime = None;
         if pid == self.root_pid && self.root_active && !self.root_start_notification_seen {
             self.root_start_notification_seen = true;
             return;
         }
-        let (process, creation_filetime) = match attestation {
-            Ok(attestation) => attestation,
-            Err(error) => {
-                self.fail(format!(
-                    "failed to attest job process generation for PID {pid}: {error:#}"
-                ));
-                return;
-            }
-        };
+        if self.error.is_some() {
+            return;
+        }
         if self.processes.len() >= MAX_JOB_PROCESS_LIFETIMES - 1 {
             self.fail(format!(
                 "sandbox job exceeded the {MAX_JOB_PROCESS_LIFETIMES}-process tracking limit"
@@ -556,6 +548,15 @@ impl ProcessTrackerState {
             ));
             return;
         }
+        let (process, creation_filetime) = match attest() {
+            Ok(attestation) => attestation,
+            Err(error) => {
+                self.fail(format!(
+                    "failed to attest job process generation for PID {pid}: {error:#}"
+                ));
+                return;
+            }
+        };
         let index = self.processes.len();
         let start_sequence = self.take_notification_sequence();
         self.processes.push(TrackedMembership {
@@ -906,17 +907,12 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
         }
         let pid = overlapped as usize as u32;
         let observed_filetime = current_filetime();
-        let attestation = if message == JOB_OBJECT_MSG_NEW_PROCESS {
-            attest_job_process(job, pid)
-        } else {
-            Err(anyhow::anyhow!("not a process-start notification"))
-        };
         let Ok(mut state) = state.lock() else {
             return;
         };
         match message {
             JOB_OBJECT_MSG_NEW_PROCESS => {
-                state.process_started(pid, observed_filetime, attestation);
+                state.process_started(pid, observed_filetime, || attest_job_process(job, pid));
             }
             JOB_OBJECT_MSG_EXIT_PROCESS | JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
                 state.process_exited(pid, observed_filetime);
@@ -2289,11 +2285,11 @@ mod tests {
 
         let mut state = ProcessTrackerState::new(1, 0);
         for pid in 1..MAX_JOB_PROCESS_LIFETIMES as u32 {
-            state.process_started(pid, 2, fake_attestation(pid));
+            state.process_started(pid, 2, || fake_attestation(pid));
             state.process_exited(pid, 3);
         }
 
-        state.process_started(u32::MAX, 4, fake_attestation(u32::MAX));
+        state.process_started(u32::MAX, 4, || fake_attestation(u32::MAX));
 
         assert!(state.active.is_empty());
         assert_eq!(state.processes.len(), MAX_JOB_PROCESS_LIFETIMES - 1);
@@ -2303,11 +2299,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_tracker_failure_skips_further_process_attestation() {
+        let mut state = ProcessTrackerState::new(1, 0);
+        state.fail("terminal tracker failure");
+        let attested = std::cell::Cell::new(false);
+
+        state.process_started(1, 2, || {
+            attested.set(true);
+            Ok((OwnedHandle(HANDLE::default()), 2))
+        });
+
+        assert!(!attested.get());
+        assert!(state.processes.is_empty());
+        assert_eq!(state.error.as_deref(), Some("terminal tracker failure"));
+    }
+
+    #[test]
     fn root_notifications_are_optional_and_not_double_counted() {
         for include_start in [false, true] {
             let mut state = ProcessTrackerState::new(1, 42);
             if include_start {
-                state.process_started(42, 2, Ok((OwnedHandle(HANDLE::default()), 1)));
+                state.process_started(42, 2, || Ok((OwnedHandle(HANDLE::default()), 1)));
             }
             state.process_exited(42, 3);
             state.all_processes_exited(4);

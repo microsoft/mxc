@@ -22,10 +22,10 @@ use std::sync::{Mutex, MutexGuard};
 /// Process-wide serialization for tests that mutate test-seam env
 /// vars. Tests in any module in this crate should acquire this lock
 /// (typically via [`ForceTierGuard`] / [`BfscfgPathGuard`]) before
-/// reading or writing `MXC_FORCE_TIER` or `MXC_BFSCFG_PATH`.
+/// reading or writing any MXC test-seam environment variable.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn lock() -> MutexGuard<'static, ()> {
+pub(crate) fn lock() -> MutexGuard<'static, ()> {
     // Poison is irrelevant here: the env var is restored on Drop
     // regardless of whether a previous holder panicked, and the lock's
     // only purpose is to serialize accesses.

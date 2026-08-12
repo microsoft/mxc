@@ -16,13 +16,6 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
-#[test]
-fn guarded_capture_rejects_a_child_that_was_never_suspended() {
-    assert!(guarded_capture_started_too_late(0, true));
-    assert!(!guarded_capture_started_too_late(1, true));
-    assert!(!guarded_capture_started_too_late(0, false));
-}
-
 use learning_mode_core::DenialAnalyzer;
 use learning_mode_windows::{
     CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
@@ -2820,6 +2813,13 @@ mod tests {
     use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
+    #[test]
+    fn guarded_capture_rejects_a_child_that_was_never_suspended() {
+        assert!(guarded_capture_started_too_late(0, true));
+        assert!(!guarded_capture_started_too_late(1, true));
+        assert!(!guarded_capture_started_too_late(0, false));
+    }
+
     struct FakeCaptureSession {
         finish_error: Option<(&'static str, i32)>,
         finish_calls: Arc<AtomicUsize>,
@@ -3733,6 +3733,7 @@ mod tests {
 
     #[test]
     fn capture_validation_requires_guarded_fallback_when_v2_api_is_unavailable() {
+        let _guard = crate::test_env::lock();
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: Some("missing CloseLearningModeTrace"),
@@ -3758,6 +3759,7 @@ mod tests {
 
     #[test]
     fn capture_validation_requires_guarded_fallback_when_native_deny_query_fails() {
+        let _guard = crate::test_env::lock();
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
@@ -3782,6 +3784,7 @@ mod tests {
 
     #[test]
     fn capture_validation_requires_guarded_fallback_when_native_deny_bit_is_clear() {
+        let _guard = crate::test_env::lock();
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
