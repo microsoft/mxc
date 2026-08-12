@@ -175,9 +175,9 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 The omitted `network` block uses the default-deny egress, LAN inbound, and host
 loopback posture. An explicit deny-default block is equivalent.
 
-For a host-process proxy, omit `processContainer.network.allowedProxyPeer` and
-set `ingress.hostLoopback` to `"allow"`. This explicitly opts into the
-host-loopback path instead of the contained, identity-scoped peer path.
+For an unpackaged non-AppContainer proxy, omit `processContainer.network.allowedProxyPeer` and set
+`ingress.hostLoopback` to `"allow"`. This explicitly opts into the host-loopback path instead of the contained,
+identity-scoped peer path.
 
 This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps an explicit deny list and a per-direction default, which are a deliberate extension over pure Kubernetes NetworkPolicy (allow-only with `ipBlock.except`) to give an auditable default and block-precedence.
 

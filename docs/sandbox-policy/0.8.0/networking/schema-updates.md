@@ -13,7 +13,7 @@ the shared policy.
 | `allowedHosts` | `egress.allow[].to[].cidr` | 0.8 uses IP/CIDR only and can scope by port/protocol |
 | `blockedHosts` | `egress.deny[].to[].cidr` | 0.8 uses IP/CIDR only and deny overrides allow |
 | `enforcementMode` | Removed | The caller no longer selects an enforcement mode |
-| `allowLocalNetwork` | `egress` and `ingress.default` | 0.8 separates outbound private-network access from inbound posture |
+| `allowLocalNetwork` | `egress.default` and `ingress.default` | 0.8 separates outbound from inbound local-network access |
 | No equivalent | `ingress.hostLoopback` | New host-loopback connectivity control in either direction |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
@@ -21,17 +21,8 @@ the shared policy.
 
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
-`allowLocalNetwork` does not have a one-to-one schema 0.8 replacement. In
-schema 0.7 it combines private-network access behind one switch. In schema 0.8,
-`egress` expresses outbound private-network access and `ingress.default`
-expresses inbound private-network access. Backends derive their required
-network capabilities from both directions.
-
-A schema 0.7 policy with `defaultPolicy: "allow"` and
-`allowLocalNetwork: false` therefore has no single-field translation.
-`egress.default: "allow"` permits private-network destinations in schema 0.8;
-preserving the old private-network denial requires explicit egress deny rules
-for the applicable private ranges.
+`allowLocalNetwork` has no one-to-one replacement. Set `egress.default` and `ingress.default` to match the workload's
+required outbound and inbound local-network access.
 
 ## Direct egress
 

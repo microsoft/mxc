@@ -16,13 +16,11 @@ prompt per launch. The AppContainer compatibility behavior is documented in
 section 2 and is not equivalent to these guarantees.
 
 - **WFP outbound filters:** block all outbound traffic by default, then allow or block specific destinations by IP address or range, protocol, and port (a single port or a range), for both IPv4 and IPv6. An explicit block always wins over an allow, so a deny is expected to fall inside the allow it narrows; an allow and a deny matching the exact same destination, protocol, and port is rejected as an invalid policy. The rules apply only to this sandbox.
-- **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g.,
-  the WinHTTP/Chromium stack) at a caller-provided loopback proxy container.
-  MXC also sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants to
-  the loopback endpoint for runtimes that use proxy environment variables
-  rather than WinHTTP. `NO_PROXY` is a bypass list and does not carry the proxy
-  endpoint. On an enforcing path, traffic not destined for the proxy loopback
-  is dropped.
+- **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g., the WinHTTP/Chromium stack) at a
+  caller-provided loopback proxy container. MXC also sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants to
+  the loopback endpoint for runtimes that use proxy environment variables rather than WinHTTP. `NO_PROXY` is a bypass
+  list and does not carry the proxy endpoint. On an enforcing path, traffic not destined for the proxy loopback is
+  dropped.
 
 The examples below use the proposed schema 0.8 network shape.
 
