@@ -14,8 +14,9 @@ use std::fmt::Write as _;
 
 use windows::core::GUID;
 use windows::Win32::System::Diagnostics::Etw::{
-    TdhGetEventInformation, EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL, EVENT_PROPERTY_INFO,
-    EVENT_RECORD, TRACE_EVENT_INFO,
+    TdhGetEventInformation, TdhGetProperty, TdhGetPropertySize,
+    EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL, EVENT_PROPERTY_INFO, EVENT_RECORD,
+    PROPERTY_DATA_DESCRIPTOR, TRACE_EVENT_INFO,
 };
 
 use crate::extractors::DecodedEventParts;
@@ -200,6 +201,48 @@ pub unsafe fn decode_event_parts(
         event_id,
         props,
     })
+}
+
+/// Reads one scalar `u32` property without decoding unrelated event fields.
+///
+/// Kernel process lifecycle events contain variable-length fields that the
+/// denial-event decoder intentionally does not support. TDH can retrieve the
+/// required `ProcessId` property directly, avoiding those unrelated fields.
+///
+/// # Safety
+/// `event_record` must point to a valid `EVENT_RECORD` supplied by ETW.
+pub unsafe fn decode_u32_property(
+    event_record: *mut EVENT_RECORD,
+    property_name: &str,
+) -> Result<u32, DecodeError> {
+    let mut wide_name = property_name.encode_utf16().collect::<Vec<_>>();
+    wide_name.push(0);
+    let descriptor = PROPERTY_DATA_DESCRIPTOR {
+        PropertyName: wide_name.as_ptr() as u64,
+        ArrayIndex: u32::MAX,
+        Reserved: 0,
+    };
+    let mut size = 0u32;
+    let status = unsafe { TdhGetPropertySize(event_record, None, &[descriptor], &mut size) };
+    if status != 0 {
+        return Err(DecodeError::Event(format!(
+            "TdhGetPropertySize({property_name}) failed with Win32 error {status}"
+        )));
+    }
+    if size != size_of::<u32>() as u32 {
+        return Err(DecodeError::Event(format!(
+            "property '{property_name}' has size {size}, expected {}",
+            size_of::<u32>()
+        )));
+    }
+    let mut bytes = [0u8; size_of::<u32>()];
+    let status = unsafe { TdhGetProperty(event_record, None, &[descriptor], &mut bytes) };
+    if status != 0 {
+        return Err(DecodeError::Event(format!(
+            "TdhGetProperty({property_name}) failed with Win32 error {status}"
+        )));
+    }
+    Ok(u32::from_ne_bytes(bytes))
 }
 
 unsafe fn load_event_schema(event_record: *mut EVENT_RECORD) -> Result<TdhInfoBuffer, DecodeError> {

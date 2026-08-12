@@ -606,6 +606,20 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     {
         return;
     }
+    if matches!(acc.mode, CollectionMode::KernelProcessLifetimes) {
+        let pid = match unsafe { tdh_decode::decode_u32_property(event_record, "ProcessId") } {
+            Ok(pid) => pid,
+            Err(error) => {
+                acc.record_event_decode_error(provider, event_id, error);
+                return;
+            }
+        };
+        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+            return;
+        };
+        acc.add_kernel_process_event(pid, filetime, opcode);
+        return;
+    }
 
     match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
         Ok(parts) => match acc.mode {
@@ -623,18 +637,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
                 }
             }
             CollectionMode::Raw => acc.visit_raw_event(&parts),
-            CollectionMode::KernelProcessLifetimes => {
-                let Some(pid) = decoded_u32_property(&parts, "ProcessId") else {
-                    acc.decode_error = Some(format!(
-                        "kernel process lifecycle event opcode {opcode} omitted ProcessId"
-                    ));
-                    return;
-                };
-                let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
-                    return;
-                };
-                acc.add_kernel_process_event(pid, filetime, opcode);
-            }
+            CollectionMode::KernelProcessLifetimes => unreachable!(),
         },
         Err(error) => acc.record_event_decode_error(provider, event_id, error),
     }
@@ -651,24 +654,6 @@ fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64>
             ));
             None
         }
-    }
-}
-
-fn decoded_u32_property(parts: &DecodedEventParts, name: &str) -> Option<u32> {
-    let raw = parts
-        .props
-        .iter()
-        .find(|(property, _)| property.eq_ignore_ascii_case(name))?
-        .1
-        .trim()
-        .trim_matches('"')
-        .trim();
-    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
-    } else {
-        raw.parse::<u32>()
-            .ok()
-            .or_else(|| u32::from_str_radix(raw, 16).ok())
     }
 }
 
