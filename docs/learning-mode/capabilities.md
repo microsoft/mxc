@@ -222,16 +222,22 @@ C# SDK exposes it through `RunResult.OutputMetadata` and
 `MxcSandboxProcess.OutputMetadata`.
 
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
-temp file that MXC deletes after analysis. Set `captureDenials.retainEtl` to
-`true` to preserve the sealed trace for diagnostics. When retention succeeds,
-the structured pointer and in-process metadata include its absolute
+file in a protected per-run temporary directory that MXC deletes after
+analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
+for diagnostics after a terminal wait. Retention-enabled captures begin under
+`%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and move to a protected
+per-run directory under `capture-denials\retained` only after sealing succeeds.
+Abandoning or disposing a process without a terminal wait deletes the internal
+trace because no caller can observe its structured path. When retention
+succeeds, the structured pointer and in-process metadata include its absolute
 `etlPath`:
 
 ```json
-{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false,"etlPath":"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\mxc_capture_denials_4321_0123456789abcdef0123456789abcdef.etl"}
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false,"etlPath":"C:\\Users\\runneradmin\\AppData\\Local\\Microsoft\\MXC\\capture-denials\\retained\\4321_0123456789abcdef0123456789abcdef\\capture.etl"}
 ```
 
-If analysis fails while retention is enabled, MXC preserves the ETL and
-includes its path in the returned error. ETL traces can contain sensitive
-resource paths and identifiers; callers that retain them are responsible for
-restricting access and deleting them when they are no longer needed.
+If analysis fails while retention is enabled, MXC preserves the ETL, includes
+its path in the returned error, and exposes `captureDenialsError` through
+in-process output metadata. ETL traces can contain sensitive resource paths
+and identifiers; callers that retain them are responsible for deleting the ETL
+and its now-empty per-run parent directory when they are no longer needed.

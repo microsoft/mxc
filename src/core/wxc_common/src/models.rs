@@ -561,16 +561,18 @@ pub struct CaptureDenialsConfig {
     /// How each ungranted access check is handled while it is recorded.
     /// Defaults to [`CaptureDenialsMode::Block`].
     pub mode: CaptureDenialsMode,
-    /// Absolute path where the JSON denials output file is written — the
-    /// deliverable a consuming application reads. The runner inserts a per-run
-    /// identifier into the file stem (`denials.json` ->
+    /// Absolute path where the JSON denials output file is written. This is the
+    /// application-facing deliverable, not the runner-managed intermediate ETL.
+    /// The runner inserts a per-run identifier into the file stem (`denials.json` ->
     /// `denials.<run-id>.json`) so concurrent and sequential captures don't
     /// collide, and reports the actual path on stderr. When `None`, the runner
     /// falls back to a managed per-run temporary file and prints its path on
     /// stderr.
     pub output_path: Option<String>,
     /// Whether to preserve the sealed ETL trace after analysis. Defaults to
-    /// `false`, which deletes the internal trace.
+    /// `false`, which deletes the internal trace. Retention is honored only by
+    /// a terminal wait that leaves structured output observable; abandoning the
+    /// process handle deletes the trace.
     pub retain_etl: bool,
 }
 
@@ -879,6 +881,19 @@ pub struct SandboxOutputMetadata {
     /// Location and summary of a captureDenials output document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_denials: Option<CaptureDenialsOutput>,
+    /// Failure details and retained ETL location when capture finalization fails.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_denials_error: Option<CaptureDenialsErrorOutput>,
+}
+
+/// Structured diagnostics for a failed captureDenials finalization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureDenialsErrorOutput {
+    /// Human-readable finalization failure.
+    pub message: String,
+    /// Absolute path to the retained ETL trace.
+    pub etl_path: String,
 }
 
 /// Location and summary of a captureDenials output document.
@@ -1099,5 +1114,20 @@ mod tests {
 
         let value = serde_json::to_value(output).unwrap();
         assert_eq!(value["etlPath"], "capture.etl");
+    }
+
+    #[test]
+    fn capture_denials_error_serializes_retained_etl_path() {
+        let metadata = SandboxOutputMetadata {
+            capture_denials: None,
+            capture_denials_error: Some(CaptureDenialsErrorOutput {
+                message: "decode failed".to_string(),
+                etl_path: "capture.etl".to_string(),
+            }),
+        };
+
+        let value = serde_json::to_value(metadata).expect("serialize metadata");
+        assert_eq!(value["captureDenialsError"]["message"], "decode failed");
+        assert_eq!(value["captureDenialsError"]["etlPath"], "capture.etl");
     }
 }

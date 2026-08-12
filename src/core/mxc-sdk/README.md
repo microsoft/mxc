@@ -144,8 +144,12 @@ let policy = SandboxPolicy {
 `Allow` relaxes containment for the run — it is reported through `warnings()`.
 Read the resulting file path and denial summary from `output_metadata()` after
 the process terminates. When `retain_etl` is enabled, the capture output's
-`etl_path` identifies the retained trace. The section is ignored on Linux and
-macOS, whose backends have no learning-mode API.
+`etl_path` identifies the retained trace. If post-seal finalization fails,
+`capture_denials_error` carries the failure and retained path. Dropping a
+sandbox without a terminal wait deletes the internal trace even when retention
+was requested. After deleting a retained ETL, callers should also remove its
+now-empty per-run parent directory. The section is ignored on Linux and macOS,
+whose backends have no learning-mode API.
 
 ## Live stdio + kill (streaming)
 
@@ -194,7 +198,8 @@ The handle is modelled on [`std::process::Child`]:
   sandbox, such as `permissiveLearningMode` weakening deny-by-default.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
-  plus the retained ETL path when requested.
+  plus the retained ETL path when requested. Post-seal failures expose
+  `capture_denials_error` with the failure and retained path.
 - `kill()` terminates the sandboxed process **and its descendants** (a
   process-tree kill): on Unix the child leads its own process group and the
   whole group is signalled (an immediate `SIGKILL`, no graceful `SIGTERM`);

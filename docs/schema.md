@@ -82,7 +82,10 @@ production configs and the dev schema when working on experimental features:
                                            // stem and the actual path is printed on stderr.
             "retainEtl": false             // Keep the sealed ETL after analysis and report its
                                            // path in output metadata. Defaults to false.
-        }                                  // Omit outputPath for a managed temp file.
+                                           // Retention requires a terminal wait; abandoning the
+                                           // process handle deletes the internal trace.
+        }
+                                           // Omit outputPath for a managed JSON output file.
                                            // captureDenials cannot be combined with leastPrivilege.
                                            // captureDenials cannot currently be combined with network.proxy.
     },

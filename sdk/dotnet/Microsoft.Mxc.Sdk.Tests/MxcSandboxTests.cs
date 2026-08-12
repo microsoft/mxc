@@ -86,4 +86,24 @@ public class MxcSandboxTests
         Assert.NotNull(output);
         Assert.Equal("capture.etl", output.EtlPath);
     }
+
+    [Fact]
+    public void SandboxOutputMetadata_DeserializesCaptureFailure()
+    {
+        const string json = """
+            {
+              "captureDenialsError": {
+                "message": "decode failed",
+                "etlPath": "capture.etl"
+              }
+            }
+            """;
+
+        var metadata = JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
+
+        var error = metadata?.CaptureDenialsError;
+        Assert.NotNull(error);
+        Assert.Equal("decode failed", error.Message);
+        Assert.Equal("capture.etl", error.EtlPath);
+    }
 }
