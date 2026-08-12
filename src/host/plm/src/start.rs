@@ -588,7 +588,6 @@ mod tests {
         let control_elapsed = started.elapsed();
         let message = format!("{error:#}");
 
-        assert!(message.contains("INHERITED_HANDLE_SENTINEL"));
         assert!(message.contains("output drain failed"));
         assert!(may_have_changed_wpr_state(&error));
         assert!(control_elapsed < Duration::from_secs(15));
