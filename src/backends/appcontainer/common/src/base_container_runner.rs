@@ -16,6 +16,13 @@ use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
 
+#[test]
+fn guarded_capture_rejects_a_child_that_was_never_suspended() {
+    assert!(guarded_capture_started_too_late(0, true));
+    assert!(!guarded_capture_started_too_late(1, true));
+    assert!(!guarded_capture_started_too_late(0, false));
+}
+
 use learning_mode_core::DenialAnalyzer;
 use learning_mode_windows::{
     CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
@@ -412,6 +419,13 @@ fn run_sandbox_cleanup(
         logger,
         "{EMOJI_SECTION} SECTION: Lifecycle cleanup (skipping -- child process tracking not yet implemented)"
     );
+}
+
+fn guarded_capture_started_too_late(
+    previous_suspend_count: u32,
+    guarded_capture_active: bool,
+) -> bool {
+    guarded_capture_active && previous_suspend_count == 0
 }
 
 impl BaseContainerRunner {
@@ -1641,9 +1655,9 @@ impl BaseContainerRunner {
         let no_window_flag = if pipe_mode { CREATE_NO_WINDOW.0 } else { 0 };
         // Create the child suspended so its main thread cannot spawn any
         // descendant before we've assigned it to the job object below; it is
-        // resumed right after the assignment. If the sandbox create API ignores
-        // CREATE_SUSPENDED on a given build, the child starts running anyway and
-        // the later resume is a harmless no-op.
+        // resumed right after the assignment. Guarded capture verifies below
+        // that the API honored CREATE_SUSPENDED; an already-running child would
+        // have executed before capture attachment and must fail closed.
         let creation_flags = CREATE_SUSPENDED.0
             | no_window_flag
             | if env_block.is_some() {
@@ -1959,10 +1973,9 @@ impl BaseContainerRunner {
         //
         // The child was created suspended (CREATE_SUSPENDED) and is resumed only
         // after this assignment, so no descendant it spawns can escape the job.
-        // If the create API ignores CREATE_SUSPENDED on a given build the child
-        // is already running; it is a shell that has not yet run the user
-        // command, so the pre-assignment window is empty in practice and the
-        // later resume is a harmless no-op.
+        // If the create API ignores CREATE_SUSPENDED on a given build, guarded
+        // capture rejects the launch below because its trace would be incomplete.
+        // Non-capture launches retain the historical harmless-no-op behavior.
         let job = match UiJobObject::new().and_then(|job| {
             // Pass the raw handle — `assign_process` borrows it and does not
             // take ownership. Wrapping it in a temporary `OwnedHandle` here
@@ -2046,40 +2059,35 @@ impl BaseContainerRunner {
                     if let Err(attach_error) =
                         session.attach_process_tree(job.handle_value(), pi.hProcess.0 as usize)
                     {
-                        if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
-                            unsafe {
-                                let _ = CloseHandle(pi.hProcess);
-                                let _ = CloseHandle(pi.hThread);
-                            }
-                            return Err(ScriptResponse {
-                                failure_phase: FailurePhase::LaunchFailed,
-                                ..ScriptResponse::error(&format!(
-                                    "captureDenials failed to attach the sandbox process tree to \
-                                     guarded WPR before resuming the sandbox: {attach_error}; \
-                                     additionally failed to terminate the suspended sandbox: \
-                                     {terminate_error}"
-                                ))
-                            });
-                        }
+                        let termination_error = job.terminate_and_wait(u32::MAX).err();
                         let discard_error = session.discard().err();
                         unsafe {
                             let _ = CloseHandle(pi.hProcess);
                             let _ = CloseHandle(pi.hThread);
                         }
-                        if legacy_destroy_on_exit {
-                            run_sandbox_cleanup(
-                                &identity,
-                                &sid_string,
-                                request.policy.network_proxy.is_enabled(),
-                                logger,
-                            );
-                            sandbox_tracking::unregister_ctrl_c_cleanup();
+                        if termination_error.is_none() {
+                            if legacy_destroy_on_exit {
+                                run_sandbox_cleanup(
+                                    &identity,
+                                    &sid_string,
+                                    request.policy.network_proxy.is_enabled(),
+                                    logger,
+                                );
+                                sandbox_tracking::unregister_ctrl_c_cleanup();
+                            }
+                            self.proxy_coordinator.stop(logger);
                         }
-                        self.proxy_coordinator.stop(logger);
                         let mut message = format!(
                             "captureDenials failed to attach the sandbox process tree to guarded WPR \
                              before resuming the sandbox: {attach_error}"
                         );
+                        if let Some(terminate_error) = termination_error {
+                            let _ = write!(
+                                message,
+                                "; additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                            );
+                        }
                         if let Some(discard_error) = discard_error {
                             let _ = write!(
                                 message,
@@ -2137,48 +2145,64 @@ impl BaseContainerRunner {
         };
 
         // The child was created suspended; now that it is in the job object (so
-        // every descendant it spawns is captured), resume its main thread. If the
-        // create API ignored CREATE_SUSPENDED the thread is already running and
-        // this is a harmless no-op.
+        // every descendant it spawns is captured), resume its main thread.
         // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
         // handle; `ResumeThread` only adjusts its suspend count.
-        if unsafe { ResumeThread(pi.hThread) } == u32::MAX {
-            let error = unsafe { GetLastError() };
-            if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
-                unsafe {
-                    let _ = CloseHandle(pi.hProcess);
-                    let _ = CloseHandle(pi.hThread);
-                }
-                return Err(ScriptResponse {
-                    failure_phase: FailurePhase::LaunchFailed,
-                    ..ScriptResponse::error(&format!(
-                        "ResumeThread failed: {error:?}; additionally failed to terminate the \
-                         suspended sandbox: {terminate_error}"
-                    ))
-                });
-            }
-            if let Some(mut session) = guarded_capture_session.take() {
-                let _ = session.discard();
-            }
+        let previous_suspend_count = unsafe { ResumeThread(pi.hThread) };
+        let resume_error = if previous_suspend_count == u32::MAX {
+            Some(format!(
+                "ResumeThread failed for the BaseContainer child: {:?}",
+                unsafe { GetLastError() }
+            ))
+        } else if guarded_capture_started_too_late(
+            previous_suspend_count,
+            guarded_capture_session.is_some(),
+        ) {
+            Some(
+                "the legacy BaseContainer API ignored CREATE_SUSPENDED, so guarded WPR could not \
+                 observe the complete sandbox execution"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if let Some(mut message) = resume_error {
+            let termination_error = job.terminate_and_wait(u32::MAX).err();
+            let discard_error = guarded_capture_session
+                .take()
+                .and_then(|mut session| session.discard().err());
             unsafe {
                 let _ = CloseHandle(pi.hProcess);
                 let _ = CloseHandle(pi.hThread);
             }
-            if legacy_destroy_on_exit {
-                run_sandbox_cleanup(
-                    &identity,
-                    &sid_string,
-                    request.policy.network_proxy.is_enabled(),
-                    logger,
-                );
-                sandbox_tracking::unregister_ctrl_c_cleanup();
+            if termination_error.is_none() {
+                if legacy_destroy_on_exit {
+                    run_sandbox_cleanup(
+                        &identity,
+                        &sid_string,
+                        request.policy.network_proxy.is_enabled(),
+                        logger,
+                    );
+                    sandbox_tracking::unregister_ctrl_c_cleanup();
+                }
+                self.proxy_coordinator.stop(logger);
             }
-            self.proxy_coordinator.stop(logger);
+            if let Some(terminate_error) = termination_error {
+                let _ = write!(
+                    message,
+                    "; additionally failed to terminate the sandbox process tree: \
+                     {terminate_error}"
+                );
+            }
+            if let Some(discard_error) = discard_error {
+                let _ = write!(
+                    message,
+                    "; additionally failed to stop and discard guarded WPR: {discard_error}"
+                );
+            }
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::LaunchFailed,
-                ..ScriptResponse::error(&format!(
-                    "ResumeThread failed for the BaseContainer child: {error:?}"
-                ))
+                ..ScriptResponse::error(&message)
             });
         }
 

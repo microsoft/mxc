@@ -13,11 +13,13 @@
 use core::ffi::c_void;
 use std::mem::size_of;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
-    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
     JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP,
     JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
@@ -25,7 +27,6 @@ use windows::Win32::System::JobObjects::{
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
 use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
-use windows::Win32::System::Threading::WaitForSingleObject;
 use windows_core::PCWSTR;
 
 use wxc_common::error::WxcError;
@@ -109,6 +110,8 @@ const MIN_BUILD_FOR_IME_LIMIT: u32 = 22621;
 /// with `ERROR_INVALID_PARAMETER`, so it is excluded from the supported
 /// UI-limit set on those builds.
 const MIN_BUILD_FOR_INJECTION_LIMIT: u32 = 26100;
+const JOB_EMPTY_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const JOB_EMPTY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Cached OS build number (queried once via `RtlGetVersion`).
 static OS_BUILD_NUMBER: OnceLock<u32> = OnceLock::new();
@@ -308,13 +311,37 @@ impl UiJobObject {
 
     /// Waits until no processes remain assigned to the job.
     pub fn wait_for_empty(&self) -> Result<(), WxcError> {
-        // SAFETY: `self.handle` is a valid waitable job handle owned by this
-        // struct. A job becomes signaled when its active process count is zero.
-        match unsafe { WaitForSingleObject(self.handle, u32::MAX) } {
-            WAIT_OBJECT_0 => Ok(()),
-            status => Err(WxcError::Process(format!(
-                "WaitForSingleObject(job) returned {status:?}"
-            ))),
+        let deadline = Instant::now() + JOB_EMPTY_WAIT_TIMEOUT;
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // SAFETY: `self.handle` is a valid job handle and `accounting`
+            // matches the requested information class and buffer length.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(self.handle),
+                    JobObjectBasicAccountingInformation,
+                    &mut accounting as *mut _ as *mut c_void,
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    None,
+                )
+            }
+            .map_err(|error| {
+                WxcError::Process(format!(
+                    "QueryInformationJobObject(BasicAccounting): {error}"
+                ))
+            })?;
+            if accounting.ActiveProcesses == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(WxcError::Process(format!(
+                    "timed out after {}ms waiting for sandbox job to become empty; {} process(es) \
+                     remain active",
+                    JOB_EMPTY_WAIT_TIMEOUT.as_millis(),
+                    accounting.ActiveProcesses
+                )));
+            }
+            std::thread::sleep(JOB_EMPTY_POLL_INTERVAL);
         }
     }
 
@@ -378,6 +405,21 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(25));
         }
+    }
+
+    #[test]
+    fn terminate_and_wait_observes_job_accounting_reach_zero() {
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        job.terminate_and_wait(u32::MAX)
+            .expect("terminated job should become empty");
+        assert!(child.wait().expect("reap child").code().is_some());
     }
 
     #[test]

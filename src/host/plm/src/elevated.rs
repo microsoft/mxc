@@ -821,9 +821,11 @@ impl JobProcessTracker {
                 PostQueuedCompletionStatus(self.completion_port.0, TRACKER_STOP_MESSAGE, 0, None)
             };
             if worker.join().is_err() {
-                if let Ok(mut state) = self.state.lock() {
-                    state.fail("guarded WPR job tracker thread panicked");
-                }
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.fail("guarded WPR job tracker thread panicked");
             }
         }
     }

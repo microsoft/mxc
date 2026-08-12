@@ -38,7 +38,7 @@ export interface BaseProcessUi {
 }
 
 /**
- * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Capture is incompatible with `processContainer.leastPrivilege` and `network.proxy`. Explicit `filesystem.deniedPaths` requires the host's V2 process security-environment support query to advertise native deny enforcement.
+ * Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Native capture requires the complete compatible PSEC plus V2 Learning Mode API set. Requests that native capture cannot represent use guarded WPR with a compatible legacy SBOX or AppContainer containment tier.
  */
 export interface CaptureDenials {
   /**
@@ -319,7 +319,7 @@ export interface ProcessContainer {
    */
   capabilities?: string[] | null;
   /**
-   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. Requires a host that exposes the complete official V2 Learning Mode and process security-environment API set. Cannot be combined with `leastPrivilege` or `network.proxy`; `filesystem.deniedPaths` additionally requires the V2 deny-support capability.
+   * Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. MXC prefers native PSEC plus V2 Learning Mode when that API set can fully honor the request. Otherwise it retains the highest compatible legacy containment tier and uses guarded WPR capture, so `leastPrivilege`, `network.proxy`, and deny-path policies can remain enforced without weakening the request.
    */
   captureDenials?: CaptureDenials | null;
   /**

@@ -1148,19 +1148,18 @@ impl AppContainerScriptRunner {
                             job.handle_value(),
                             process_handle.get().0 as usize,
                         ) {
-                            job.terminate_and_wait(u32::MAX)
-                                .map_err(|terminate_error| {
-                                    WxcError::Process(format!(
-                                        "captureDenials guarded WPR session failed to attach the \
-                                     sandbox process tree: {attach_error}; additionally failed to \
-                                     terminate the suspended sandbox: {terminate_error}"
-                                    ))
-                                })?;
+                            let termination_error = job.terminate_and_wait(u32::MAX).err();
                             let discard_error = session.discard().err();
                             let mut message = format!(
                                 "captureDenials guarded WPR session failed to attach the sandbox \
                                  process tree: {attach_error}"
                             );
+                            if let Some(terminate_error) = termination_error {
+                                message.push_str(&format!(
+                                    "; additionally failed to terminate the suspended sandbox: \
+                                     {terminate_error}"
+                                ));
+                            }
                             if let Some(discard_error) = discard_error {
                                 message.push_str(&format!(
                                     "; additionally failed to stop and discard guarded WPR: \
