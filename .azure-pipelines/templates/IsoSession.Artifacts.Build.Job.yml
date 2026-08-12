@@ -64,7 +64,7 @@ jobs:
       $release | ConvertTo-Json -Depth 10 |
           Set-Content -LiteralPath '$(workDirectory)\release-contract.json' -Encoding UTF8
       Write-Host "Validated release $($release.canonicalRelease) -> NuGet $($release.nugetVersion) / MSI $($release.msiVersion)"
-  displayName: Validate pipeline parameters and write release contract
+    displayName: Validate pipeline parameters and write release contract
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -92,9 +92,9 @@ jobs:
           throw 'drop.exe was not found in the downloaded client package.'
       }
       Write-Host "##vso[task.setvariable variable=dropExe]$($dropExe.FullName)"
-  displayName: Bootstrap drop.exe
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    displayName: Bootstrap drop.exe
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -107,9 +107,9 @@ jobs:
           -OutDir '$(payloadDirectory)' `
           -DropNameOverride $override `
           -OsBranch '${{ parameters.osBranch }}'
-  displayName: Download filtered OS IsoSession payload
-  env:
-    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    displayName: Download filtered OS IsoSession payload
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 
   - task: EsrpCodeSigning@5
     displayName: Test sign IsoSession payload
@@ -162,7 +162,7 @@ jobs:
       if ($LASTEXITCODE -ne 0) {
           throw "MSI build failed with exit code $LASTEXITCODE."
       }
-  displayName: Build native MSI
+    displayName: Build native MSI
 
   - task: EsrpCodeSigning@5
     displayName: Test sign MSI
@@ -213,7 +213,7 @@ jobs:
       if ($LASTEXITCODE -ne 0) {
           throw "Installer bundle build failed with exit code $LASTEXITCODE."
       }
-  displayName: Build installer EXE with signed MSI
+    displayName: Build installer EXE with signed MSI
 
   - task: EsrpCodeSigning@5
     displayName: Test sign installer EXE
@@ -276,7 +276,7 @@ jobs:
       }
       $verification | ConvertTo-Json -Depth 4 |
           Set-Content -LiteralPath '$(workDirectory)/signature-verification.json' -Encoding UTF8
-  displayName: Verify test signatures
+    displayName: Verify test signatures
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
@@ -301,7 +301,7 @@ jobs:
           }
           Copy-Item -LiteralPath $source -Destination '$(artifactDirectory)' -Force
       }
-  displayName: Assemble intermediate artifacts
+    displayName: Assemble intermediate artifacts
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: Publish $(artifactName)
