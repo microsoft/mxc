@@ -73,6 +73,7 @@ exact.
 | Client capability | MXC adds `privateNetworkClientServer` for contained-peer proxy mode |
 | Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
 | Peer | Package family name for a packaged app or AppContainer profile name for an unpackaged AppContainer |
+| Network policy | Keep `ingress.hostLoopback` at `"deny"`; it cannot be combined with `allowedProxyPeer` |
 | Enforcement | Per-container WinHTTP proxy plus scoped loopback; all direct egress remains blocked |
 
 When both `runtimeConfig.networkProxy` and
@@ -118,16 +119,20 @@ system for proxy information rather than proxy environment variables. The OS set
 BaseContainer, and the WinHTTP stack uses it transparently. The proxy process itself does not use the BaseContainer's
 configuration.
 
-As a cooperative fallback, MXC also sets the standard proxy environment variables for libraries that use them. The OS
-permits outbound traffic only to the configured loopback proxy address and port; direct or proxy-bypassing traffic is
-blocked.
+MXC also sets the standard proxy environment variables for libraries that use them. On BaseContainer paths with scoped
+proxy enforcement, these variables are a compatibility routing hint: the OS permits outbound traffic only to the
+configured loopback proxy address and port, so direct or proxy-bypassing traffic is blocked. On the AppContainer
+fallback, the variables are cooperative only; that path does not provide proxy-only enforcement and can permit direct
+private-network egress through the capability envelope.
 
 The omitted `network` block uses the default-deny posture. An explicit block with `egress.default: "deny"`,
 `ingress.default: "deny"`, and `ingress.hostLoopback: "deny"` is equivalent. Proxy mode cannot contain direct egress
 allow or deny rules.
 
-The proxy endpoint is runtime metadata, not shared network policy. MXC resolves `allowedProxyPeer` when provided, adds
-`privateNetworkClientServer` unless `ingress.hostLoopback` is `"allow"`, and configures the per-container WinHTTP proxy.
+The proxy endpoint is runtime metadata, not shared network policy. The identity-scoped and host-loopback paths are
+mutually exclusive. With `allowedProxyPeer`, `ingress.hostLoopback` must remain `"deny"` or omitted; MXC resolves the
+peer and adds `privateNetworkClientServer`. Without `allowedProxyPeer`, `ingress.hostLoopback: "allow"` selects the
+unpackaged non-AppContainer path and MXC does not add that capability. Requests that select both paths are invalid.
 
 The caller must:
 
