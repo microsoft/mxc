@@ -9,6 +9,20 @@ use windows::Win32::Foundation::{LocalFree, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::PSID;
 
+/// Compare Windows path strings using ordinal case-insensitive semantics.
+pub fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+
+    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+
+    let a: Vec<u16> = a.encode_utf16().collect();
+    let b: Vec<u16> = b.encode_utf16().collect();
+    // SAFETY: Both slices remain valid UTF-16 buffers for the duration of the call.
+    unsafe { CompareStringOrdinal(&a, &b, true) == CSTR_EQUAL }
+}
+
 /// Convert a UTF-8 string to a null-terminated UTF-16 wide string.
 pub fn to_wide(s: &str) -> Vec<u16> {
     U16CString::from_str_truncate(s).into_vec_with_nul()
@@ -325,6 +339,18 @@ mod tests {
         let value = OsString::from_wide(&[b'a' as u16, 0, b'b' as u16]);
 
         assert_eq!(os_str_to_wide(&value), Err(EmbeddedNulError));
+    }
+
+    #[test]
+    fn windows_path_comparison_handles_ascii_and_unicode_case() {
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\Tools\App.exe",
+            r"c:\tools\app.EXE"
+        ));
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\TÄST\app.exe",
+            r"c:\täst\APP.EXE"
+        ));
     }
 
     #[test]

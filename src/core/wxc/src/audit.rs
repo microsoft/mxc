@@ -204,9 +204,10 @@ fn read_bounded_output(mut reader: impl std::io::Read, limit: usize) -> std::io:
         truncated |= retained != count;
     }
     if truncated {
-        let marker_start = output.len().saturating_sub(OUTPUT_TRUNCATED_MARKER.len());
+        let marker = &OUTPUT_TRUNCATED_MARKER[..OUTPUT_TRUNCATED_MARKER.len().min(limit)];
+        let marker_start = output.len().saturating_sub(marker.len());
         output.truncate(marker_start);
-        output.extend_from_slice(OUTPUT_TRUNCATED_MARKER);
+        output.extend_from_slice(marker);
     }
     Ok(output)
 }
@@ -365,5 +366,13 @@ mod tests {
         assert_eq!(input.position(), input_len as u64);
         assert_eq!(captured.len(), MAX_PLM_OUTPUT_BYTES);
         assert!(captured.ends_with(OUTPUT_TRUNCATED_MARKER));
+    }
+
+    #[test]
+    fn analysis_output_reader_honors_limits_smaller_than_marker() {
+        let captured =
+            read_bounded_output(std::io::Cursor::new([b'x'; 32]), 8).expect("bounded output read");
+        assert_eq!(captured.len(), 8);
+        assert_eq!(captured, OUTPUT_TRUNCATED_MARKER[..8]);
     }
 }
