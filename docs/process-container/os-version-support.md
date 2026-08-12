@@ -33,13 +33,12 @@ available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
 |------|-----------|:--:|:--:|:--:|:--:|
-| **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
+| **T1** BaseContainer | CPIS | ❌ | ❌ | ❌ | ✅ when the OS feature is enabled, else T3 |
 | **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
 | **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
 
-- **T1 (BaseContainer)** requires `processmodel.dll` to export
-  `Experimental_CreateProcessInSandbox` *and* the OS feature to be enabled; this
-  is a 25H2+ capability. Usability is resolved up front by
+- **T1 (BaseContainer)** uses CPIS (`Experimental_CreateProcessInSandbox`) from `processmodel.dll` and requires the OS
+  feature to be enabled; this is a 25H2+ capability. Usability is resolved up front by
   `BaseContainerRunner::is_base_container_usable()` so tier selection never picks
   a T1 that cannot launch.
 - **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
@@ -51,13 +50,11 @@ available bounds what policy can be enforced.
 
 ## Schema 0.8 process security environment preference
 
-BaseContainer requests using schema versions through 0.7 use the SBOX contract
-and the T1/T2/T3 fallback chain above. Schema 0.8 and later prefer the PSEC
-process-security-environment contract when its complete export set resolves and
-`QueryProcessSecurityEnvironmentSupport` succeeds. During the transition from
-the experimental SBOX API to PSEC, an ordinary schema 0.8 request falls back to
-SBOX when PSEC is unavailable, then continues through the existing AppContainer
-fallback tiers when neither BaseContainer contract is usable.
+BaseContainer requests using schema versions through 0.7 pass the legacy SBOX FlatBuffer contract to CPIS and use the
+T1/T2/T3 fallback chain above. Schema 0.8 and later prefer the PSEC process-security-environment contract when its
+complete export set resolves and `QueryProcessSecurityEnvironmentSupport` succeeds. During the transition, an
+ordinary schema 0.8 request falls back to the SBOX contract through CPIS when PSEC is unavailable, then continues
+through the existing AppContainer fallback tiers when neither BaseContainer contract is usable.
 
 The PSEC probe requires:
 

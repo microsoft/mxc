@@ -8,21 +8,25 @@ the shared policy.
 
 | Schema 0.7 | Schema 0.8 | Change |
 |---|---|---|
-| `defaultPolicy: "allow"` | `egress.default: "allow"` | Same default action; 0.8 includes public and private destinations |
+| `defaultPolicy: "allow"` | `egress.default: "allow"` | Same outbound posture |
 | `defaultPolicy: "block"` | `egress.default: "deny"` | `block` is renamed `deny` |
 | `allowedHosts` | `egress.allow[].to[].cidr` | 0.8 uses IP/CIDR only and can scope by port/protocol |
 | `blockedHosts` | `egress.deny[].to[].cidr` | 0.8 uses IP/CIDR only and deny overrides allow |
-| `enforcementMode` | Removed | The caller no longer selects an enforcement mode |
-| `allowLocalNetwork` | `egress.default` and `ingress.default` | 0.8 separates outbound from inbound local-network access |
-| No equivalent | `ingress.hostLoopback` | New host-loopback connectivity control in either direction |
+| `enforcementMode` | Removed | The backend enforces the policy or rejects it |
+| `allowLocalNetwork` | `ingress.default` | Controls private-network communication |
+| No equivalent | `ingress.hostLoopback` | New host-loopback inbound control |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
 | `proxy.url` with a remote or non-loopback URL | No GA equivalent | Schema 0.8 accepts only loopback proxy URLs |
 
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
-`allowLocalNetwork` has no one-to-one replacement. Set `egress.default` and `ingress.default` to match the workload's
-required outbound and inbound local-network access.
+On directional backends, `egress` governs all outbound traffic and `ingress` governs traffic entering the sandbox.
+ProcessContainer maps `egress` to internet-bound traffic and maps `ingress.default` to Windows'
+`privateNetworkClientServer` capability, which enables private-network communication in both directions.
+
+`allowLocalNetwork` still maps only to `ingress.default`. This preserves existing ProcessContainer private-network
+behavior while allowing directional backends to enforce independent outbound and inbound policy.
 
 ## Direct egress
 
@@ -89,10 +93,34 @@ Schema 0.8 moves the endpoint to runtime metadata:
 
 The omitted 0.8 `network` block uses deny defaults.
 
-On ProcessContainer, the proxy also needs a reachable peer path. Set
-`processContainer.network.allowedProxyPeer` for a packaged app or unpackaged
-AppContainer proxy. For an unpackaged non-AppContainer proxy, omit
-`allowedProxyPeer` and set `ingress.hostLoopback` to `"allow"`.
+For example, this legacy policy:
+
+```jsonc
+{
+  "network": {
+    "defaultPolicy": "block",
+    "allowLocalNetwork": true
+  }
+}
+```
+
+migrates to deny-default egress with allowed private/LAN inbound:
+
+```jsonc
+{
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "deny"
+    }
+  }
+}
+```
+
+On directional backends, this does not grant outbound private-network or internet access. On ProcessContainer,
+`ingress.default: "allow"` preserves the legacy `allowLocalNetwork` behavior by granting bidirectional private-network
+communication, while internet-bound egress remains denied.
 
 ## Backend-specific schema 0.8 configuration
 
