@@ -791,9 +791,10 @@ impl BaseContainerRunner {
         if !Self::schema_prefers_process_security_environment(request) || !psec_usable {
             return false;
         }
-        if request.policy.capture_denials.is_some() {
-            return true;
-        }
+        Self::psec_policy_compatible(request, psec_supports_deny_paths)
+    }
+
+    fn psec_policy_compatible(request: &ExecutionRequest, psec_supports_deny_paths: bool) -> bool {
         !request.policy.least_privilege_mode
             && !request.policy.network_proxy.is_enabled()
             && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
@@ -810,14 +811,25 @@ impl BaseContainerRunner {
     fn uses_process_security_environment(&self, request: &ExecutionRequest) -> bool {
         if request.policy.capture_denials.is_some() {
             #[cfg(test)]
-            if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
-                return forced == "1";
-            }
+            let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE")
+                .map_or_else(
+                    |_| {
+                        self.process_security_environment_usable()
+                            && self.capture_support.check_apis(true).is_ok()
+                    },
+                    |forced| forced == "1",
+                );
+            #[cfg(not(test))]
+            let native_capture_usable = self.process_security_environment_usable()
+                && self.capture_support.check_apis(true).is_ok();
+
             return Self::schema_prefers_process_security_environment(request)
-                && self.process_security_environment_usable()
-                && self.capture_support.check_apis(true).is_ok()
-                && (request.policy.denied_paths.is_empty()
-                    || self.capture_support.supports_deny_paths().unwrap_or(false));
+                && native_capture_usable
+                && Self::psec_policy_compatible(
+                    request,
+                    request.policy.denied_paths.is_empty()
+                        || self.capture_support.supports_deny_paths().unwrap_or(false),
+                );
         }
         let supports_deny_paths = request.policy.capture_denials.is_some()
             || request.policy.denied_paths.is_empty()
@@ -886,17 +898,27 @@ impl BaseContainerRunner {
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
         #[cfg(test)]
-        if let Ok(forced) = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE") {
-            return forced == "1";
-        }
+        let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
+            |_| {
+                Self::is_process_security_environment_usable()
+                    && RealCapturePlatformSupport.check_apis(true).is_ok()
+            },
+            |forced| forced == "1",
+        );
+        #[cfg(not(test))]
+        let native_capture_usable = Self::is_process_security_environment_usable()
+            && RealCapturePlatformSupport.check_apis(true).is_ok();
+
         request.policy.capture_denials.is_some()
             && Self::schema_prefers_process_security_environment(request)
-            && Self::is_process_security_environment_usable()
-            && RealCapturePlatformSupport.check_apis(true).is_ok()
-            && (request.policy.denied_paths.is_empty()
-                || RealCapturePlatformSupport
-                    .supports_deny_paths()
-                    .unwrap_or(false))
+            && native_capture_usable
+            && Self::psec_policy_compatible(
+                request,
+                request.policy.denied_paths.is_empty()
+                    || RealCapturePlatformSupport
+                        .supports_deny_paths()
+                        .unwrap_or(false),
+            )
     }
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -3281,6 +3303,38 @@ mod tests {
         assert!(
             !runner.uses_process_security_environment(&request),
             "schema 0.8 proxy requests must build the legacy SBOX contract"
+        );
+    }
+
+    #[test]
+    fn schema_0_8_capture_proxy_uses_guarded_contract() {
+        let _guard = crate::test_env::CaptureCapabilityGuard::set(true, true);
+        let mut request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            ..Default::default()
+        };
+        request.policy.capture_denials = Some(Default::default());
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: None,
+            deny_supported: true,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
+
+        assert!(
+            !runner.uses_process_security_environment(&request),
+            "capture must not select PSEC when another requested policy is incompatible"
+        );
+        assert!(
+            !BaseContainerRunner::uses_native_capture_for_request(&request),
+            "dispatcher capability selection must reject policy-incompatible PSEC capture"
         );
     }
 
