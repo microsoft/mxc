@@ -143,6 +143,14 @@ pub struct MxcRunResult {
     pub error_utf8: *mut c_char,
     /// Structured output metadata JSON (UTF-8, NUL-terminated), or null.
     pub output_metadata_json_utf8: *mut c_char,
+    /// Security warnings raised during the run, as a JSON array of strings
+    /// (UTF-8, NUL-terminated), or null when the run raised none.
+    ///
+    /// The sandbox emits these when a policy relaxes containment — notably
+    /// `permissiveLearningMode`, which disables deny-by-default. They are not
+    /// written to the host's stderr, so this field is the only way an FFI
+    /// caller learns that containment was relaxed.
+    pub warnings_json_utf8: *mut c_char,
 }
 
 impl MxcRunResult {
@@ -155,6 +163,7 @@ impl MxcRunResult {
             stderr_utf8: ptr::null_mut(),
             error_utf8: ptr::null_mut(),
             output_metadata_json_utf8: ptr::null_mut(),
+            warnings_json_utf8: ptr::null_mut(),
         }
     }
 
@@ -172,6 +181,7 @@ impl MxcRunResult {
         free_cstr(&mut self.stderr_utf8);
         free_cstr(&mut self.error_utf8);
         free_cstr(&mut self.output_metadata_json_utf8);
+        free_cstr(&mut self.warnings_json_utf8);
     }
 }
 
@@ -296,19 +306,33 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
                 WaitOutcome::Exited(code) => (code, 0),
                 WaitOutcome::TimedOut => (-1, 1),
             };
-            let output_metadata_json_utf8 = match output
+            // Serialize both JSON payloads before allocating any C string, so a
+            // failure on the second one can't leak the first.
+            let output_metadata_json = match output
                 .output_metadata
                 .as_ref()
                 .map(serde_json::to_vec)
                 .transpose()
             {
-                Ok(Some(json)) => alloc_cstring(&json),
-                Ok(None) => ptr::null_mut(),
+                Ok(json) => json,
                 Err(error) => {
                     return MxcRunResult::error(
                         MXC_STATUS_BACKEND_ERROR,
                         format!("failed to serialize sandbox output metadata: {error}"),
                     )
+                }
+            };
+            let warnings_json = if output.warnings.is_empty() {
+                None
+            } else {
+                match serde_json::to_vec(&output.warnings) {
+                    Ok(json) => Some(json),
+                    Err(error) => {
+                        return MxcRunResult::error(
+                            MXC_STATUS_BACKEND_ERROR,
+                            format!("failed to serialize sandbox warnings: {error}"),
+                        )
+                    }
                 }
             };
             MxcRunResult {
@@ -318,7 +342,10 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
                 stdout_utf8: alloc_cstring(&output.stdout),
                 stderr_utf8: alloc_cstring(&output.stderr),
                 error_utf8: ptr::null_mut(),
-                output_metadata_json_utf8,
+                output_metadata_json_utf8: output_metadata_json
+                    .map_or(ptr::null_mut(), |json| alloc_cstring(&json)),
+                warnings_json_utf8: warnings_json
+                    .map_or(ptr::null_mut(), |json| alloc_cstring(&json)),
             }
         }
         Err(e) => MxcRunResult::error(status_from_error_code(e.code), e.message),

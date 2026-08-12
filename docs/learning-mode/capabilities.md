@@ -40,11 +40,19 @@ so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
 whenever it is present, both the AppContainer and BaseContainer runners record a
-**security warning**. It is not written to the host's stderr — a library must not
-write to an embedding process's terminal behind its back — so callers read it
-back through `Sandbox::warnings()` / `Output::warnings` and surface it in their
-own UI. It is a reserved internal capability enabled by the dedicated
-audit/capture entry points.
+**security warning**. The library does not write it to the host's stderr — it
+must not write to an embedding process's terminal behind its back — so each
+surface delivers it explicitly:
+
+| Surface | How the warning is delivered |
+|---------|------------------------------|
+| Rust | `Sandbox::warnings()` / `Output::warnings` |
+| C# | `RunResult.Warnings` |
+| C ABI (`mxc_ffi`) | `MxcRunResult::warnings_json_utf8` (JSON array of strings) |
+| `wxc-exec` | printed to stderr after the run — the CLI owns its terminal |
+
+It is a reserved internal capability enabled by the dedicated audit/capture
+entry points.
 
 The parser rejects both learning-mode capability names in
 `processContainer.capabilities`, case-insensitively. This prevents a policy from

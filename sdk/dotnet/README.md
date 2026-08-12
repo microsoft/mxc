@@ -42,6 +42,11 @@ Optional feature outputs are returned through `RunResult.OutputMetadata`; for
 `captureDenials`, `OutputMetadata.CaptureDenials.OutputPath` identifies the
 generated JSON document and carries its summary.
 
+`RunResult.Warnings` carries security warnings raised during the run — notably
+when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
+to the host's stderr, so inspecting `Warnings` is the only way to learn that
+containment was relaxed.
+
 ### Streaming
 
 `MxcSandbox.Spawn(policy, command)` returns a live `MxcSandboxProcess` you can

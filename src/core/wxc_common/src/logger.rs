@@ -357,4 +357,52 @@ mod tests {
         assert_eq!(logger.take_warnings(), ["security warning"]);
         assert!(logger.warnings().is_empty());
     }
+
+    /// The body of the child process spawned by
+    /// [`warning_line_writes_nothing_to_stderr`]. Ignored so the normal suite
+    /// run skips it; the parent invokes it by name with `--ignored`.
+    ///
+    /// Prints to both streams so the parent can tell "stderr was empty" apart
+    /// from "the child never ran".
+    #[test]
+    #[ignore]
+    fn warning_line_child() {
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.warning_line("*** SECURITY WARNING *** child canary");
+        println!("child-ran");
+    }
+
+    /// `warning_line` must not write to the process's stderr: `wxc_common` is
+    /// linked into libraries whose host owns the terminal.
+    ///
+    /// Runs in a child process because file descriptor 2 is process-global —
+    /// redirecting it in-process would race every other test in the binary.
+    /// `--nocapture` is required: without it libtest swallows the child's
+    /// streams and the assertion below would hold even if `warning_line`
+    /// started writing to stderr again.
+    #[test]
+    fn warning_line_writes_nothing_to_stderr() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "logger::tests::warning_line_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("RUST_BACKTRACE", "0")
+            .output()
+            .expect("spawn child test process");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("child-ran"),
+            "child did not run; stdout: {stdout}"
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("SECURITY WARNING"),
+            "warning_line wrote the warning to stderr: {stderr}"
+        );
+    }
 }
