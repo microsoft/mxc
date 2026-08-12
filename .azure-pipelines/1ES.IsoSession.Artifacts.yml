@@ -65,7 +65,7 @@ extends:
     - stage: Build_IsoSession_Artifacts
       displayName: Build IsoSession artifacts
       jobs:
-      - template: templates/IsoSession.Artifacts.Build.Job.yml@self
+      - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
           archTag: x64
           flavor: amd64fre
@@ -82,7 +82,7 @@ extends:
             signCertName: $(signCertName)
             clientId: $(clientId)
 
-      - template: templates/IsoSession.Artifacts.Build.Job.yml@self
+      - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
           archTag: arm64
           flavor: arm64fre

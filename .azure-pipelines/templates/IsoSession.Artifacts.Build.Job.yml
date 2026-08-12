@@ -74,9 +74,14 @@ jobs:
       $zipPath = Join-Path '$(dropClientDirectory)' 'drop.zip'
       $extractPath = Join-Path '$(dropClientDirectory)' 'client'
       New-Item -ItemType Directory -Force -Path '$(dropClientDirectory)' | Out-Null
+      if ([string]::IsNullOrWhiteSpace($env:SYSTEM_ACCESSTOKEN)) {
+          throw 'SYSTEM_ACCESSTOKEN is required to download drop.exe.'
+      }
+      $basicToken = [Convert]::ToBase64String(
+          [Text.Encoding]::ASCII.GetBytes(":$env:SYSTEM_ACCESSTOKEN"))
       Invoke-WebRequest `
           -Uri "$serviceRoot/_apis/drop/client/exe" `
-          -Headers @{ Authorization = "******" } `
+          -Headers @{ Authorization = "Basic $basicToken" } `
           -OutFile $zipPath `
           -UseBasicParsing
       Add-Type -AssemblyName System.IO.Compression.FileSystem
