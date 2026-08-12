@@ -13,19 +13,55 @@
 
 use appcontainer_common::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
 use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use std::os::windows::ffi::OsStringExt;
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+};
 
-/// Resolve `plm.exe`'s path, expected to sit next to the current executable
-/// (mirroring `wxc-exec --audit`'s own `plm_exe_path` convention — see
-/// `core/wxc/src/audit.rs`). `mxc_engine` cannot reuse that helper directly
-/// (`wxc` depends on `mxc_engine`, not the other way around), so it is
-/// duplicated here at the same, small scope.
+/// Resolve `plm.exe` next to the module containing `mxc_engine`.
+///
+/// This is the executor directory for `wxc-exec.exe` and the native runtime
+/// asset directory for `mxc_ffi.dll`. `current_exe()` is not sufficient for
+/// library consumers because a framework-dependent .NET app reports
+/// `dotnet.exe`, not the loaded MXC native module.
 fn plm_exe_path() -> Result<std::path::PathBuf, String> {
-    let exe = std::env::current_exe()
-        .map_err(|e| format!("failed to resolve the current executable's path: {e}"))?;
-    let dir = exe
+    let module = module_containing_plm_resolver()?;
+    let dir = module
         .parent()
-        .ok_or_else(|| "the current executable has no parent directory".to_string())?;
+        .ok_or_else(|| "the MXC native module has no parent directory".to_string())?;
     Ok(dir.join("plm.exe"))
+}
+
+fn module_containing_plm_resolver() -> Result<std::path::PathBuf, String> {
+    let mut module = HMODULE::default();
+    let address = plm_exe_path as *const () as *const u16;
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address),
+            &mut module,
+        )
+    }
+    .map_err(|error| format!("failed to locate the MXC native module: {error}"))?;
+
+    let mut path = vec![0u16; 32_768];
+    let len = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+    if len == 0 {
+        return Err(format!(
+            "failed to resolve the MXC native module path: {}",
+            windows::core::Error::from_thread()
+        ));
+    }
+    if len >= path.len() {
+        return Err("the MXC native module path exceeds the Windows path limit".to_string());
+    }
+    path.truncate(len);
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &path,
+    )))
 }
 
 /// [`GuardedCaptureSession`] backed by a live `plm::elevated::GuardedSession`.
@@ -34,6 +70,12 @@ struct PlmGuardedCaptureSession {
 }
 
 impl GuardedCaptureSession for PlmGuardedCaptureSession {
+    fn discard(&mut self) -> Result<(), String> {
+        self.session
+            .discard()
+            .map_err(|e| format!("guarded WPR discard failed: {e:#}"))
+    }
+
     fn stop_analyzed(&mut self, lifetimes: &[ProcessLifetime]) -> Result<AnalysisResult, String> {
         self.session
             .stop_analyzed(lifetimes)
@@ -117,5 +159,12 @@ mod tests {
         let mut request = wxc_common::models::ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
         assert!(factory_for_request(&request).is_some());
+    }
+
+    #[test]
+    fn resolver_locates_the_current_native_module() {
+        let module = module_containing_plm_resolver().expect("test module path should resolve");
+        assert!(module.is_absolute());
+        assert!(module.is_file());
     }
 }

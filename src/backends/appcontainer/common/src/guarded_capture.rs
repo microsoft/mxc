@@ -35,6 +35,11 @@ use learning_mode_core::{AnalysisResult, ProcessLifetime};
 ///
 /// [`stop_analyzed`]: GuardedCaptureSession::stop_analyzed
 pub trait GuardedCaptureSession: Send {
+    /// Stops the owned WPR trace and securely discards its raw ETL without
+    /// analysis. Used when process-lifetime tracking failed and no safe scope
+    /// can be supplied to [`Self::stop_analyzed`].
+    fn discard(&mut self) -> Result<(), String>;
+
     /// Stops the guarded capture and analyzes it, scoping every accepted
     /// denial event to one of `lifetimes` (an inclusive PID + timestamp
     /// window observed by the sandbox's tracked job object). Returns the
@@ -83,6 +88,10 @@ mod tests {
     }
 
     impl GuardedCaptureSession for FakeSession {
+        fn discard(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+
         fn stop_analyzed(
             &mut self,
             lifetimes: &[ProcessLifetime],

@@ -1963,7 +1963,7 @@ impl BaseContainerRunner {
         // is already running; it is a shell that has not yet run the user
         // command, so the pre-assignment window is empty in practice and the
         // later resume is a harmless no-op.
-        let mut job = match (if use_guarded_capture {
+        let job = match (if use_guarded_capture {
             UiJobObject::new_tracked()
         } else {
             UiJobObject::new()
@@ -2091,9 +2091,7 @@ impl BaseContainerRunner {
                 let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
             }
             if let Some(mut session) = guarded_capture_session.take() {
-                if let Ok(lifetimes) = job.finish_process_tracking() {
-                    let _ = session.stop_analyzed(&lifetimes);
-                }
+                let _ = session.discard();
             }
             unsafe {
                 let _ = CloseHandle(pi.hProcess);
@@ -2479,7 +2477,13 @@ impl BaseContainerSandboxProcess {
                         })?;
                         write_denials_document(analysis, exit_code, &output_path)
                     }),
-                Err(error) => Err(error),
+                Err(error) => match session.discard() {
+                    Ok(()) => Err(error),
+                    Err(discard_error) => Err(std::io::Error::other(format!(
+                        "{error}; additionally failed to stop and discard guarded WPR: \
+                         {discard_error}"
+                    ))),
+                },
             };
             if let Ok(metadata) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {

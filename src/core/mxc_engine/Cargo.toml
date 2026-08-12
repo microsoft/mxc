@@ -34,6 +34,7 @@ plm = { workspace = true }
 # ProcessLifetime / AnalysisResult types shared across the guarded-capture DI
 # boundary; appcontainer_common and plm already depend on this crate.
 learning_mode_core = { workspace = true }
+windows.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bwrap_common = { workspace = true }

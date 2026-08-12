@@ -422,7 +422,8 @@ fn select_backend_with_fallback(
                     AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
                         FilesystemMode::Bfs,
                         sid,
-                    ),
+                    )
+                    .with_external_denied_paths(),
                     capture_factory_for_appcontainer,
                 );
                 (SelectedBackend::AppContainer(runner), mgr)
@@ -687,6 +688,10 @@ impl SandboxProcess for DaclGuardedProcess {
 
     fn wait(&mut self) -> std::io::Result<i32> {
         self.inner.wait()
+    }
+
+    fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+        self.inner.output_metadata()
     }
 
     fn stdout_closer(&self) -> Option<Box<dyn wxc_common::sandbox_process::StreamCloser>> {
@@ -1234,6 +1239,7 @@ mod tests {
         struct FakeProcess {
             stdin_taken: bool,
             killed: bool,
+            output_metadata: wxc_common::models::SandboxOutputMetadata,
         }
         impl SandboxProcess for FakeProcess {
             fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
@@ -1259,6 +1265,9 @@ mod tests {
             fn wait(&mut self) -> std::io::Result<i32> {
                 Ok(7)
             }
+            fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+                Some(&self.output_metadata)
+            }
         }
 
         let _scope = ScopedStateDir::new();
@@ -1278,5 +1287,9 @@ mod tests {
         assert!(matches!(guarded.wait(), Ok(7)), "wait() must delegate");
         assert!(guarded.take_stdin().is_none(), "take_stdin() must delegate");
         assert!(guarded.kill().is_ok(), "kill() must delegate");
+        assert!(
+            guarded.output_metadata().is_some(),
+            "output_metadata() must delegate"
+        );
     }
 }

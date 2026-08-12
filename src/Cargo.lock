@@ -1525,6 +1525,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "windows",
  "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",

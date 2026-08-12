@@ -533,6 +533,7 @@ pub struct AppContainerScriptRunner {
     app_container_sid: PSID,
     proxy_address: Option<wxc_common::models::ProxyAddress>,
     filesystem_mode: FilesystemMode,
+    denied_paths_enforced_externally: bool,
     /// Optional pre-derived SID string supplied by the dispatcher.
     ///
     /// When `Some`, the runner uses this value for the firewall
@@ -563,6 +564,7 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: FilesystemMode::Bfs,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
             guarded_capture_factory: None,
         }
@@ -578,6 +580,7 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
             guarded_capture_factory: None,
         }
@@ -597,6 +600,7 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: Some(sid_string),
             guarded_capture_factory: None,
         }
@@ -616,6 +620,12 @@ impl AppContainerScriptRunner {
     /// layer (`mxc_engine`) that does.
     pub fn with_guarded_capture_factory(mut self, factory: Arc<dyn GuardedCaptureFactory>) -> Self {
         self.guarded_capture_factory = Some(factory);
+        self
+    }
+
+    /// Marks `deniedPaths` as enforced by the dispatcher's per-run DACL guard.
+    pub fn with_external_denied_paths(mut self) -> Self {
+        self.denied_paths_enforced_externally = true;
         self
     }
 
@@ -1257,17 +1267,14 @@ impl SpawnedChild {
     /// session, used when the sandboxed child failed to launch after the
     /// session was already started.
     ///
-    /// Stops through the authenticated guarded protocol only when the tracked
-    /// job can provide a valid process scope. If tracking itself failed, drop
-    /// the session so the guardian preserves recovery state rather than
-    /// sending an invalid empty scope or issuing a host-wide cancellation.
+    /// The child never ran successfully, so there is no analysis result to
+    /// preserve. Stop the trace through the authenticated discard protocol
+    /// without depending on process-lifetime tracking.
     fn discard_capture_session_after_launch_failure(&mut self) {
         let Some(mut session) = self.capture_session.take() else {
             return;
         };
-        if let Ok(lifetimes) = self.job.finish_process_tracking() {
-            let _ = session.stop_analyzed(&lifetimes);
-        }
+        let _ = session.discard();
     }
 }
 
@@ -1453,7 +1460,10 @@ impl SandboxBackend for AppContainerScriptRunner {
                 }
             }
         }
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+        if !request.policy.denied_paths.is_empty()
+            && self.filesystem_mode != FilesystemMode::Dacl
+            && !self.denied_paths_enforced_externally
+        {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
@@ -1647,7 +1657,12 @@ impl AppContainerSandboxProcess {
                     "captureDenials failed to stop and analyze the guarded WPR session: {error}"
                 ))),
             },
-            Err(error) => Err(error),
+            Err(error) => match session.discard() {
+                Ok(()) => Err(error),
+                Err(discard_error) => Err(std::io::Error::other(format!(
+                    "{error}; additionally failed to stop and discard guarded WPR: {discard_error}"
+                ))),
+            },
         };
         match result {
             Ok(metadata) => {
@@ -2060,6 +2075,10 @@ mod tests {
         fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
             struct FakeSession;
             impl GuardedCaptureSession for FakeSession {
+                fn discard(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+
                 fn stop_analyzed(
                     &mut self,
                     _lifetimes: &[ProcessLifetime],
@@ -2104,6 +2123,16 @@ mod tests {
             runner.validate(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
         );
+    }
+
+    #[test]
+    fn validate_runner_accepts_dispatcher_enforced_denied_paths_in_bfs_mode() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs)
+            .with_external_denied_paths();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        assert!(runner.validate(&request).is_ok());
     }
 
     #[test]

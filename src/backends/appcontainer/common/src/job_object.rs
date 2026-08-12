@@ -402,7 +402,7 @@ impl ProcessTrackerState {
 
     fn process_started(&mut self, pid: u32) {
         self.active_process_zero = false;
-        if self.active.len() >= MAX_TRACKED_PROCESSES {
+        if self.active.len() + self.completed.len() >= MAX_TRACKED_PROCESSES {
             self.fail(format!(
                 "sandbox job exceeded the {MAX_TRACKED_PROCESSES}-process tracking limit"
             ));
@@ -487,6 +487,31 @@ impl ProcessTrackerState {
         for pid in pids {
             self.process_exited(pid);
         }
+    }
+}
+
+#[cfg(test)]
+mod process_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn completed_processes_count_toward_tracking_limit() {
+        let mut state = ProcessTrackerState::new();
+        state.completed = vec![
+            ProcessLifetime {
+                pid: 1,
+                start_filetime: 1,
+                end_filetime: 2,
+            };
+            MAX_TRACKED_PROCESSES
+        ];
+
+        state.process_started(2);
+
+        assert!(state.active.is_empty());
+        assert!(state.error.as_deref().is_some_and(|error| {
+            error.contains("exceeded") && error.contains(&MAX_TRACKED_PROCESSES.to_string())
+        }));
     }
 }
 

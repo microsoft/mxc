@@ -59,12 +59,14 @@ const SW_HIDE: i32 = 0;
 const HANDSHAKE_READY: u8 = 0xa5;
 const CONTROL_STOP: u8 = 1;
 const CONTROL_STOP_AND_ANALYZE: u8 = 2;
+const CONTROL_STOP_AND_DISCARD: u8 = 3;
 static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardControl {
     Stop,
     StopAndAnalyze,
+    StopAndDiscard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -78,6 +80,7 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
     match value {
         CONTROL_STOP => Ok(GuardControl::Stop),
         CONTROL_STOP_AND_ANALYZE => Ok(GuardControl::StopAndAnalyze),
+        CONTROL_STOP_AND_DISCARD => Ok(GuardControl::StopAndDiscard),
         _ => anyhow::bail!("invalid guarded PLM control message {value}"),
     }
 }
@@ -86,6 +89,7 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
 pub enum Operation {
     Start,
     Stop,
+    Discard,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -286,7 +290,7 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self, None);
+                        return run_guarded_stop(pipe, self, None, false);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
                         let lifetimes = match read_process_lifetimes(pipe) {
@@ -298,7 +302,10 @@ impl GuardedOwner {
                                 );
                             }
                         };
-                        return run_guarded_stop(pipe, self, Some(&lifetimes));
+                        return run_guarded_stop(pipe, self, Some(&lifetimes), false);
+                    }
+                    Ok(GuardControl::StopAndDiscard) => {
+                        return run_guarded_stop(pipe, self, None, true);
                     }
                     Err(error) => {
                         self.preserve_after_pipe_break();
@@ -359,6 +366,7 @@ impl Operation {
         match self {
             Self::Start => "start",
             Self::Stop => "stop",
+            Self::Discard => "discard",
         }
     }
 }
@@ -462,10 +470,7 @@ impl GuardedSession {
         }
     }
 
-    pub fn stop_analyzed(
-        &mut self,
-        process_lifetimes: &[ProcessLifetime],
-    ) -> Result<AnalysisResult> {
+    pub fn discard(&mut self) -> Result<()> {
         if self.disarmed {
             anyhow::bail!("guarded PLM session is already stopped");
         }
@@ -473,9 +478,56 @@ impl GuardedSession {
             .pipe
             .take()
             .context("guarded PLM control connection is already closed")?;
+        pipe.write_all(&[CONTROL_STOP_AND_DISCARD])
+            .context("failed to send guarded PLM discard STOP")?;
+        pipe.flush()
+            .context("failed to flush guarded PLM discard STOP")?;
+
+        let stopped = std::cell::Cell::new(false);
+        let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
+        let result = read_response(
+            &mut pipe,
+            self.process.0,
+            Operation::Discard,
+            None,
+            deadline,
+            || {
+                stopped.set(true);
+                Ok(())
+            },
+        );
+        if stopped.get() {
+            self.disarmed = true;
+            drop(pipe);
+            let wait_result = wait_for_child_exit(
+                self.process.0,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            result?;
+            wait_result
+        } else {
+            self.pipe = Some(pipe);
+            result
+        }
+    }
+
+    pub fn stop_analyzed(
+        &mut self,
+        process_lifetimes: &[ProcessLifetime],
+    ) -> Result<AnalysisResult> {
+        if self.disarmed {
+            anyhow::bail!("guarded PLM session is already stopped");
+        }
+        let mut encoded_lifetimes = Vec::new();
+        write_process_lifetimes(&mut encoded_lifetimes, process_lifetimes)
+            .context("failed to encode guarded WPR process-lifetime scope")?;
+        let mut pipe = self
+            .pipe
+            .take()
+            .context("guarded PLM control connection is already closed")?;
         pipe.write_all(&[CONTROL_STOP_AND_ANALYZE])
             .context("failed to send guarded PLM analyzed STOP")?;
-        write_process_lifetimes(&mut pipe, process_lifetimes)
+        pipe.write_all(&encoded_lifetimes)
             .context("failed to send guarded WPR process-lifetime scope")?;
         pipe.flush()
             .context("failed to flush guarded PLM analyzed STOP")?;
@@ -759,8 +811,9 @@ fn run_guarded_stop(
     pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
     process_lifetimes: Option<&[ProcessLifetime]>,
+    discard: bool,
 ) -> Result<()> {
-    let result = run_guarded_stop_with_stopped(pipe, owner, process_lifetimes);
+    let result = run_guarded_stop_with_stopped(pipe, owner, process_lifetimes, discard);
     if let Err(error) = result {
         owner.preserve_after_start_error();
         write_error_response(pipe, &error)?;
@@ -773,6 +826,7 @@ fn run_guarded_stop_with_stopped(
     pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
     process_lifetimes: Option<&[ProcessLifetime]>,
+    discard: bool,
 ) -> Result<()> {
     crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
     let scratch = SecureScratch::new()?;
@@ -781,7 +835,11 @@ fn run_guarded_stop_with_stopped(
     write_header(pipe, ResponseKind::Stopped, 0)
         .and_then(|_| pipe.flush())
         .context("failed to return elevated PLM WPR-stopped milestone")?;
-    if let Some(lifetimes) = process_lifetimes {
+    if discard {
+        write_header(pipe, ResponseKind::Success, 0)
+            .and_then(|_| pipe.flush())
+            .context("failed to return elevated PLM discard success")
+    } else if let Some(lifetimes) = process_lifetimes {
         write_analysis_response(pipe, &scratch, lifetimes)
     } else {
         write_trace_response(pipe, &scratch)
@@ -1126,7 +1184,7 @@ fn accept_response_headers(
     read_next: impl FnOnce() -> Result<crate::elevated_protocol::ResponseHeader>,
 ) -> Result<(crate::elevated_protocol::ResponseHeader, bool)> {
     if first_header.kind == ResponseKind::Stopped {
-        if operation != Operation::Stop {
+        if operation != Operation::Stop && operation != Operation::Discard {
             anyhow::bail!("unexpected WPR-stopped milestone for elevated {operation:?}");
         }
         on_stopped().context("failed to handle PLM WPR-stopped milestone")?;
@@ -1628,7 +1686,11 @@ mod tests {
             parse_guard_control(CONTROL_STOP_AND_ANALYZE).unwrap(),
             GuardControl::StopAndAnalyze
         );
-        for invalid in [0, 3, u8::MAX] {
+        assert_eq!(
+            parse_guard_control(CONTROL_STOP_AND_DISCARD).unwrap(),
+            GuardControl::StopAndDiscard
+        );
+        for invalid in [0, 4, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
         }
     }
