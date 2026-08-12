@@ -1374,6 +1374,16 @@ fn main() {
         release_audit_singleton();
     }
 
+    // Surface security warnings (e.g. permissiveLearningMode relaxing
+    // deny-by-default under --audit). The logger only records these rather than
+    // writing them itself, so that `mxc_engine` embedders don't get unannounced
+    // writes to a terminal they own. wxc-exec *does* own its terminal, so it
+    // opts in here. Messages carry their own banner; print them verbatim.
+    // Emitted before the dry-run branch below, which exits the process.
+    for warning in logger.warnings() {
+        eprintln!("{warning}");
+    }
+
     if cli.dry_run {
         handle_dry_run_exit(&response, &mut logger);
     }
