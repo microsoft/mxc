@@ -9,7 +9,7 @@ const MAGIC: &[u8; 8] = b"MXCPLM01";
 const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 20;
 const ATTACH_HANDLES_MAGIC: &[u8; 8] = b"MXCATT01";
-const ATTACH_HANDLES_LEN: usize = 24;
+pub const ATTACH_HANDLES_LEN: usize = 24;
 
 pub const MAX_ERROR_BYTES: u64 = 64 * 1024;
 pub const MAX_TRACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;

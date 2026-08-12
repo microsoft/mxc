@@ -2017,7 +2017,7 @@ impl BaseContainerRunner {
                 let capture_cleanup_error = capture_session
                     .take()
                     .and_then(|session| session.finish(None).err());
-                if capture_denials.is_some() {
+                if capture_denials.is_some() && use_process_security_environment {
                     self.cleanup_capture_begin_failure(logger);
                 } else if legacy_destroy_on_exit {
                     run_sandbox_cleanup(

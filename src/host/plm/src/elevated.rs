@@ -67,13 +67,14 @@ use windows::Win32::System::IO::{
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 use crate::elevated_protocol::{
-    read_attach_handles, read_header, write_attach_handles, write_header, ResponseKind, HEADER_LEN,
-    MAX_ANALYSIS_BYTES, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
+    read_attach_handles, read_header, write_attach_handles, write_header, ResponseKind,
+    ATTACH_HANDLES_LEN, HEADER_LEN, MAX_ANALYSIS_BYTES, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
 };
 use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
+const ATTACH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TRANSFER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SW_HIDE: i32 = 0;
@@ -354,7 +355,10 @@ impl GuardedOwner {
                         return run_guarded_stop(pipe, self, StopDisposition::Discard);
                     }
                     Ok(GuardControl::AttachJob) => {
-                        let (job_handle, root_process_handle) = match read_attach_handles(pipe) {
+                        let deadline = Instant::now() + ATTACH_HANDOFF_TIMEOUT;
+                        let handles =
+                            read_attach_handles_polling(pipe, deadline, || self.has_exited());
+                        let (job_handle, root_process_handle) = match handles {
                             Ok(handles) => handles,
                             Err(error) => {
                                 self.preserve_after_pipe_break();
@@ -1386,6 +1390,43 @@ enum StopDisposition {
     Discard,
 }
 
+fn read_attach_handles_polling(
+    pipe: &mut std::fs::File,
+    deadline: Instant,
+    mut owner_exited: impl FnMut() -> Result<bool>,
+) -> Result<(usize, usize)> {
+    let mut payload = [0u8; ATTACH_HANDLES_LEN];
+    let mut offset = 0;
+    while offset < payload.len() {
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out receiving guarded WPR sandbox attach handles");
+        }
+        if owner_exited()? {
+            anyhow::bail!("guarded PLM owner exited during sandbox handle attachment");
+        }
+        match pipe_state(pipe)? {
+            PipeState::Empty => std::thread::sleep(TRANSFER_POLL_INTERVAL),
+            PipeState::Closed(error) => anyhow::bail!(
+                "guarded PLM control pipe closed during sandbox handle attachment \
+                 (PeekNamedPipe error {error})"
+            ),
+            PipeState::Data(available) => {
+                let amount = (payload.len() - offset).min(available as usize);
+                let read = pipe
+                    .read(&mut payload[offset..offset + amount])
+                    .context("failed to read guarded WPR sandbox attach handles")?;
+                if read == 0 {
+                    std::thread::sleep(TRANSFER_POLL_INTERVAL);
+                } else {
+                    offset += read;
+                }
+            }
+        }
+    }
+    read_attach_handles(&mut payload.as_slice())
+        .context("invalid guarded WPR sandbox attach handles")
+}
+
 fn run_guarded_stop(
     pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
@@ -2389,8 +2430,7 @@ mod tests {
         child.wait().unwrap();
     }
 
-    #[test]
-    fn empty_connected_pipe_is_not_reported_as_closed() {
+    fn connected_pipe_pair() -> (std::fs::File, std::fs::File) {
         let pipe_name = new_pipe_name().unwrap();
         let server = OwnedHandle(create_pipe(&pipe_name).unwrap());
         let client_name = pipe_name.clone();
@@ -2422,12 +2462,18 @@ mod tests {
             }
         }
 
-        let mut client = client_thread.join().unwrap();
-        assert_eq!(pipe_state(&client).unwrap(), PipeState::Empty);
-
+        let client = client_thread.join().unwrap();
         let raw = server.0 .0;
         std::mem::forget(server);
-        let mut server_file = unsafe { std::fs::File::from_raw_handle(raw) };
+        let server_file = unsafe { std::fs::File::from_raw_handle(raw) };
+        (client, server_file)
+    }
+
+    #[test]
+    fn empty_connected_pipe_is_not_reported_as_closed() {
+        let (mut client, mut server_file) = connected_pipe_pair();
+        assert_eq!(pipe_state(&client).unwrap(), PipeState::Empty);
+
         server_file.write_all(&[CONTROL_STOP]).unwrap();
         server_file.flush().unwrap();
         assert_eq!(pipe_state(&client).unwrap(), PipeState::Data(1));
@@ -2444,6 +2490,23 @@ mod tests {
             std::thread::sleep(POLL_INTERVAL);
         }
         panic!("closed test pipe remained connected");
+    }
+
+    #[test]
+    fn partial_attach_payload_times_out_without_blocking() {
+        let (mut client, mut server_file) = connected_pipe_pair();
+        server_file.write_all(b"MXCATT01").unwrap();
+        server_file.flush().unwrap();
+
+        let started = Instant::now();
+        let error =
+            read_attach_handles_polling(&mut client, started + Duration::from_millis(25), || {
+                Ok(false)
+            })
+            .expect_err("partial attach payload must time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     fn armed_lifecycle() -> GuardLifecycle {
