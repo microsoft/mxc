@@ -48,6 +48,27 @@ jobs:
 
   - powershell: |
       $ErrorActionPreference = 'Stop'
+      $configPath =
+          '$(Build.SourcesDirectory)\packaging\isolation-session\installer\NuGet.Config'
+      $config = @'
+      <?xml version="1.0" encoding="utf-8"?>
+      <configuration>
+        <packageSources>
+          <clear />
+          <add
+            key="Dart_PublicPackages"
+            value="https://pkgs.dev.azure.com/microsoft/Dart/_packaging/Dart_PublicPackages/nuget/v3/index.json" />
+        </packageSources>
+      </configuration>
+      '@
+      Set-Content -LiteralPath $configPath -Value $config -Encoding UTF8
+    displayName: Configure authenticated NuGet source
+
+  - task: NuGetAuthenticate@1
+    displayName: Authenticate NuGet source
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
       if ('${{ parameters.buildGuid }}' -eq '00000000-0000-0000-0000-000000000000') {
           throw 'A Windows OS BNS BuildGuid must be supplied.'
       }
