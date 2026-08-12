@@ -56,8 +56,9 @@ pub(crate) struct KernelProcessLifetime {
 /// Reconciles job membership evidence with complete kernel process generations.
 ///
 /// Every generation has exact creation and exit times from a retained process
-/// handle whose job membership the guardian verified. The ETL must contain the
-/// same exact start/end pair for each descendant.
+/// handle whose job membership the guardian verified. The ETL must contain a
+/// lifecycle pair with the same exact creation time and a corresponding exit
+/// event no earlier than the handle-attested exit.
 pub(crate) fn reconcile_job_membership(
     membership: &JobMembershipSnapshot,
     kernel_lifetimes: &[KernelProcessLifetime],
@@ -113,16 +114,32 @@ pub(crate) fn reconcile_job_membership(
 
     let mut selected = selected
         .into_iter()
-        .map(|selected| {
-            selected
-                .map(|(_, lifetime)| lifetime)
-                .ok_or_else(|| AnalyzeError::Decode("incomplete reconciliation".to_string()))
+        .enumerate()
+        .map(|(index, selected)| {
+            selected.map_or_else(
+                || {
+                    Err(AnalyzeError::Decode(
+                        "incomplete reconciliation".to_string(),
+                    ))
+                },
+                |(_, kernel)| {
+                    let process = membership.processes[index];
+                    Ok((
+                        kernel.start_order,
+                        ProcessLifetime {
+                            pid: process.pid,
+                            start_filetime: process.creation_filetime,
+                            end_filetime: process.exit_filetime,
+                        },
+                    ))
+                },
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    selected.sort_unstable_by_key(|lifetime| lifetime.start_order);
+    selected.sort_unstable_by_key(|(start_order, _)| *start_order);
     let mut reconciled = Vec::with_capacity(selected.len() + 1);
     reconciled.push(membership.root_process);
-    reconciled.extend(selected.into_iter().map(|lifetime| lifetime.lifetime));
+    reconciled.extend(selected.into_iter().map(|(_, lifetime)| lifetime));
     reconciled.sort_unstable_by_key(|lifetime| lifetime.start_filetime);
     Ok(reconciled)
 }
@@ -268,7 +285,7 @@ fn generation_matches(
     let lifetime = kernel.lifetime;
     lifetime.pid == process.pid
         && lifetime.start_filetime == process.creation_filetime
-        && lifetime.end_filetime == process.exit_filetime
+        && lifetime.end_filetime >= process.exit_filetime
         && lifetime.end_filetime >= membership.attached_filetime
         && lifetime.start_filetime <= membership.completed_filetime
         && lifetime.end_filetime <= membership.completed_filetime
@@ -322,7 +339,7 @@ mod tests {
     #[test]
     fn short_lived_process_that_exited_before_notification_is_reconciled() {
         let membership = snapshot(member(42, 110, 120));
-        let lifetimes = reconcile_job_membership(&membership, &[kernel(42, 110, 120, 0)])
+        let lifetimes = reconcile_job_membership(&membership, &[kernel(42, 110, 125, 0)])
             .expect("short-lived process should reconcile from sealed ETL");
 
         assert_eq!(
