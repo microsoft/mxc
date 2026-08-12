@@ -627,10 +627,14 @@ impl NetworkIptablesManager {
 
     /// The bridge-port form of [`Self::build_forward_return_iface_rule_args`].
     ///
-    /// Mirrors the ingress pair for the same reason it exists there: on the
-    /// default bridged topology the packet's output interface is `lxcbr0`, not
-    /// the veth, so the `-o <veth>` rule matches nothing and only
-    /// `--physdev-out` names the specific container.
+    /// `--physdev-out` names a bridge port that has already been selected,
+    /// which happens for a packet being bridged. A reply from outside arrives
+    /// on the host's uplink and is routed toward `lxcbr0`, so on the default
+    /// bridged topology no port is selected while FORWARD runs and this rule
+    /// does not match -- nor does the interface form, whose output device is
+    /// `lxcbr0` rather than the veth. The ingress pair is not symmetric with
+    /// it: `--physdev-in` matches because the packet demonstrably arrived on
+    /// the veth.
     fn build_forward_return_physdev_rule_args(op: &str, iface: &str) -> Vec<String> {
         vec![
             op.to_string(),

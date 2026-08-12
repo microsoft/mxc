@@ -127,9 +127,16 @@ destination — `0.0.0.0/0`, or a CIDR containing the blocked address — silent
 defeats the block, and the resulting chain looks fully populated while
 filtering nothing.
 
-Two limits on that guarantee are worth stating plainly, because "deny always
+Three limits on that guarantee are worth stating plainly, because "deny always
 wins" is not true without them:
 
+- **An already-established flow is exempt.** The base chain accepts
+  `ESTABLISHED,RELATED` unconditionally and is installed ahead of the generated
+  policy rules. A flow that conntrack already knows keeps matching that rule
+  rather than its `blockedHosts` DROP, so the guarantee covers flows opened
+  after the chain exists — not one opened during the window between container
+  start and rule application, nor one surviving in the host's conntrack table
+  from an earlier run of a container with the same name.
 - **DNS is exempt.** The base chain accepts UDP and TCP destination port 53
   unconditionally and is installed ahead of the generated policy rules, so
   port-53 traffic to a blocked destination is accepted before its DROP rule is
