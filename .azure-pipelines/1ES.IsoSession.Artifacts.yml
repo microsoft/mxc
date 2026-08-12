@@ -145,40 +145,36 @@ extends:
         displayName: Publish IsoSession SDK NuGet
         dependsOn: Build_IsoSession_Artifacts
         jobs:
-        - deployment: publish_isosession_sdk
+        - job: publish_isosession_sdk
           displayName: Publish restricted SDK package
-          environment: IsoSession-Restricted-Feed
-          strategy:
-            runOnce:
-              deploy:
-                steps:
-                - checkout: self
+          steps:
+          - checkout: self
 
-                - task: NuGetToolInstaller@1
-                  displayName: Install NuGet client
+          - task: NuGetToolInstaller@1
+            displayName: Install NuGet client
 
-                - task: NuGetAuthenticate@1
-                  displayName: Authenticate Azure Artifacts
+          - task: NuGetAuthenticate@1
+            displayName: Authenticate Azure Artifacts
 
-                - task: DownloadPipelineArtifact@2
-                  displayName: Download aggregated IsoSession artifact
-                  inputs:
-                    artifact: isosession-artifacts
-                    path: $(Pipeline.Workspace)\isosession-publish
+          - task: DownloadPipelineArtifact@2
+            displayName: Download aggregated IsoSession artifact
+            inputs:
+              artifact: isosession-artifacts
+              path: $(Pipeline.Workspace)\isosession-publish
 
-                - powershell: |
-                    $ErrorActionPreference = 'Stop'
-                    if ([string]::IsNullOrWhiteSpace('${{ parameters.publishFeedUrl }}')) {
-                        throw 'publishFeedUrl must be supplied when publishToRestrictedFeed=true.'
-                    }
-                    $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
-                    $package = Get-ChildItem -LiteralPath '$(Pipeline.Workspace)\isosession-publish' -File -Filter '*.nupkg' |
-                        Select-Object -First 1
-                    if (-not $package) {
-                        throw 'The aggregated artifact does not contain a NuGet package to publish.'
-                    }
-                    & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Publish-IsoSessionNuGet.ps1' `
-                        -NuGetExe $nugetExe `
-                        -PackagePath $package.FullName `
-                        -FeedUrl '${{ parameters.publishFeedUrl }}'
-                  displayName: Publish the final SDK NuGet
+          - powershell: |
+              $ErrorActionPreference = 'Stop'
+              if ([string]::IsNullOrWhiteSpace('${{ parameters.publishFeedUrl }}')) {
+                  throw 'publishFeedUrl must be supplied when publishToRestrictedFeed=true.'
+              }
+              $nugetExe = (Get-Command nuget.exe -ErrorAction Stop).Source
+              $package = Get-ChildItem -LiteralPath '$(Pipeline.Workspace)\isosession-publish' -File -Filter '*.nupkg' |
+                  Select-Object -First 1
+              if (-not $package) {
+                  throw 'The aggregated artifact does not contain a NuGet package to publish.'
+              }
+              & '$(Build.SourcesDirectory)/.azure-pipelines/scripts/isolation-session/Publish-IsoSessionNuGet.ps1' `
+                  -NuGetExe $nugetExe `
+                  -PackagePath $package.FullName `
+                  -FeedUrl '${{ parameters.publishFeedUrl }}'
+            displayName: Publish the final SDK NuGet
