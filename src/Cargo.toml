@@ -100,11 +100,12 @@ windows-core = "0.62"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
+# SHA-256 for the canonical policy hash (`wxc_common::policy_identity`).
+sha2 = "0.10"
 unicode-general-category = "1"
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
-sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 quick-xml = "0.41"

@@ -32,10 +32,15 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
+use wxc_common::audit::{
+    sanitize_identity, AuditEvent, AuditEventName, KillMethod, OperationStatus, TeardownSkipReason,
+    TeardownStatus,
+};
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+    ContainmentBackend, ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy,
+    ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -393,6 +398,20 @@ pub enum FilesystemMode {
     /// Skip BFS setup; the caller has handled filesystem policy via host
     /// DACL augmentation (Tier 3 path).
     Dacl,
+}
+
+impl FilesystemMode {
+    /// The isolation tier this filesystem mode corresponds to.
+    ///
+    /// The dispatcher picks the mode *from* a tier and the audit records need
+    /// the tier back; keeping the mapping in one place stops the two directions
+    /// from drifting.
+    pub fn isolation_tier(self) -> crate::fallback_detector::IsolationTier {
+        match self {
+            FilesystemMode::Bfs => crate::fallback_detector::IsolationTier::AppContainerBfs,
+            FilesystemMode::Dacl => crate::fallback_detector::IsolationTier::AppContainerDacl,
+        }
+    }
 }
 
 /// Config capability string that enables **learning mode**: the OS logs every
@@ -1268,13 +1287,78 @@ impl AppContainerScriptRunner {
         }
 
         let mut network_manager = NetworkManager::new();
-        match network_manager.start(
+        let network_result = network_manager.start(
             &principal_id,
             &self.app_container_name,
             &request.policy,
             self.app_container_sid,
             logger,
-        ) {
+        );
+
+        // Record what network policy was actually installed, on both the
+        // success and failure arms — "the policy I tried to install and failed"
+        // is as auditable a fact as a successful one.
+        if logger.has_diagnostic_sink() {
+            // `firewall_applied` reflects the actual apply outcome (rules
+            // installed), NOT the policy plan. Deriving the audit field from
+            // the plan would report `firewall_applied=true` on a
+            // partially-failed install with zero rules on-device — an operator
+            // reading the record would see a green enforcement claim on a run
+            // whose enforcement never landed.
+            let firewall_applied = network_manager.firewall_applied();
+            // Aggregate status: a proxy-only success with no firewall step
+            // remains a success; a firewall-plan run whose install failed is a
+            // failure regardless of `network_result` (the caller may have kept
+            // the run going after a proxy-only failure). Both terms must be
+            // green for the record to be green.
+            let plan = NetworkManager::describe_policy(&request.policy);
+            let firewall_ok = !plan.rules_will_be_installed
+                || matches!(network_manager.firewall_apply_ok(), Some(true));
+            let network_status = if network_result.is_ok() && firewall_ok {
+                OperationStatus::Success.as_str()
+            } else {
+                OperationStatus::Failure.as_str()
+            };
+            let record = AuditEvent::new(AuditEventName::NetworkPolicyApplied)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                .str("identity", sanitize_identity(&self.app_container_name))
+                .str("tier", self.tier_str())
+                .str(
+                    "enforcement_mode",
+                    request.policy.network_enforcement_mode.as_str(),
+                )
+                .str(
+                    "default_policy",
+                    request.policy.default_network_policy.as_str(),
+                )
+                .u64(
+                    "proxy_port",
+                    network_manager
+                        .proxy_address()
+                        .map(|a| a.port as u64)
+                        .unwrap_or(0),
+                )
+                .u64(
+                    "firewall_rules_created",
+                    network_manager.rule_count() as u64,
+                )
+                .bool("firewall_applied", firewall_applied)
+                .str("status", network_status);
+            logger.log_audit_event(&record);
+        }
+        if wxc_common::telemetry::is_active() {
+            wxc_common::telemetry::log_network_policy_applied(
+                sanitize_identity(&self.app_container_name),
+                request.policy.network_enforcement_mode.as_str(),
+                request.policy.default_network_policy.as_str(),
+                network_manager
+                    .proxy_address()
+                    .map(|a| a.port as u64)
+                    .unwrap_or(0),
+            );
+        }
+
+        match network_result {
             Ok(()) => {
                 self.proxy_address = network_manager.proxy_address().cloned();
             }
@@ -1291,14 +1375,69 @@ impl AppContainerScriptRunner {
 
     /// Tear down the per-run firewall and filesystem policy. Idempotent at the
     /// manager level; called once after the child exits.
+    ///
+    /// This path can run after network policy was installed but before the
+    /// child process was created, so cleanup failures must remain observable.
     fn teardown(&self, prepared: &mut Prepared, preserve_policy: bool, logger: &mut Logger) {
-        prepared.network_manager.stop_all(!preserve_policy, logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
+        let network = prepared.network_manager.stop_all(!preserve_policy, logger);
+        // BFS removal is only attempted when we asked for it; the manager
+        // reports back whether the removal actually landed. Capture the
+        // per-call result so a requested-but-failed removal can downgrade the
+        // aggregate status to `failure`, instead of being silently discarded
+        // and reported as a clean teardown.
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && prepared.bfs_manager.configured()
-            && !preserve_policy
-        {
-            prepared.bfs_manager.remove_configuration(logger);
+            && !preserve_policy;
+        let bfs_removed = if bfs_requested {
+            prepared.bfs_manager.remove_configuration(logger)
+        } else {
+            false
+        };
+        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+            preserve_policy,
+            network.firewall_removal_ok,
+            bfs_requested,
+            bfs_removed,
+        );
+        if logger.has_diagnostic_sink() {
+            let mut record = AuditEvent::new(AuditEventName::SandboxTornDown)
+                .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+                // The AppContainer profile name is the caller's `containerId`,
+                // i.e. a config value — sanitize identically to the successful
+                // teardown path so caller-supplied non-opaque ids can't reach a
+                // record from the early-failure teardown either.
+                .str("identity", sanitize_identity(&self.app_container_name))
+                .str("tier", self.tier_str())
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", network.rules_removed as u64)
+                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .bool("bfs_removed", bfs_removed)
+                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("preserve_policy", preserve_policy)
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            logger.log_audit_event(&record);
         }
+        if wxc_common::telemetry::is_active() {
+            let released_resources = format_released_resources(
+                network.rules_removed,
+                bfs_removed,
+                network.proxy_stopped,
+            );
+            wxc_common::telemetry::log_sandbox_torn_down(
+                sanitize_identity(&self.app_container_name),
+                status.as_str(),
+                &released_resources,
+            );
+        }
+    }
+
+    /// The isolation tier this runner implements, as
+    /// [`crate::fallback_detector::IsolationTier::as_str`].
+    fn tier_str(&self) -> &'static str {
+        self.filesystem_mode.isolation_tier().as_str()
     }
 }
 
@@ -1356,6 +1495,8 @@ impl SandboxBackend for AppContainerScriptRunner {
             prepared,
             self.filesystem_mode,
             request,
+            self.app_container_name.clone(),
+            logger,
         )))
     }
 
@@ -1390,6 +1531,18 @@ struct AppContainerSandboxProcess {
     preserve_policy: bool,
     timeout_ms: u32,
     teardown_done: bool,
+    /// Sandbox identity join key — the AppContainer profile name MXC created
+    /// this sandbox under. Carried so the audit records emitted from `wait()`,
+    /// `kill()`, and `run_teardown()` can be joined to the OS-side records
+    /// without recomputing it.
+    identity: String,
+    /// The isolation tier this handle is running under, as
+    /// [`crate::fallback_detector::IsolationTier::as_str`].
+    tier: &'static str,
+    /// Detached clone of the caller's diagnostic sinks, so audit records emitted
+    /// from `wait()` / `Drop` (neither of which receives a `Logger`) are
+    /// actually observable. See [`Logger::clone_diagnostic_sink`].
+    audit_logger: Logger,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -1416,6 +1569,8 @@ impl AppContainerSandboxProcess {
         prepared: Prepared,
         filesystem_mode: FilesystemMode,
         request: &ExecutionRequest,
+        identity: String,
+        logger: &Logger,
     ) -> Self {
         let process = SendOwnedHandle::take(&mut child.process);
         let thread = SendOwnedHandle::take(&mut child.thread);
@@ -1424,6 +1579,7 @@ impl AppContainerSandboxProcess {
         let stderr = child.stderr_read.take().map(InterruptiblePipeReader::new);
         let stdout_canceller = stdout.as_ref().map(InterruptiblePipeReader::canceller);
         let stderr_canceller = stderr.as_ref().map(InterruptiblePipeReader::canceller);
+        let tier = filesystem_mode.isolation_tier().as_str();
         Self {
             process,
             _thread: thread,
@@ -1439,7 +1595,28 @@ impl AppContainerSandboxProcess {
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
             teardown_done: false,
+            // The AppContainer profile name is the caller's `containerId`, i.e.
+            // a config value — sanitize before it can reach a record.
+            identity: sanitize_identity(&identity).to_string(),
+            tier,
+            audit_logger: logger.clone_diagnostic_sink(),
         }
+    }
+
+    /// Start an audit record pre-populated with this handle's attribution
+    /// (backend, identity, tier, pid) so no call site can forget one of them.
+    fn audit(&self, name: AuditEventName) -> AuditEvent {
+        AuditEvent::new(name)
+            .str("backend", ContainmentBackend::ProcessContainer.wire_name())
+            .str("identity", &self.identity)
+            .str("tier", self.tier)
+            .u64("pid", self.pid as u64)
+    }
+
+    /// Whether an audit record built here would reach a sink. Checked before
+    /// building one so a run with no diagnostic sink pays nothing.
+    fn audit_enabled(&self) -> bool {
+        self.audit_logger.has_diagnostic_sink()
     }
 
     fn run_teardown(&mut self) {
@@ -1447,16 +1624,116 @@ impl AppContainerSandboxProcess {
             return;
         }
         self.teardown_done = true;
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        self.prepared
+        // Reuse the sink-preserving audit logger for the firewall/BFS
+        // cleanup calls below, not a throwaway buffer-only logger: partial
+        // cleanup warnings from `stop_all`/`remove_configuration` are
+        // real diagnostics and must reach the same file/pipe sinks as the
+        // structured `SandboxTornDown` record emitted at the end of this
+        // function, not be silently dropped with the buffer.
+        let network = self
+            .prepared
             .network_manager
-            .stop_all(!self.preserve_policy, &mut logger);
-        if self.filesystem_mode == FilesystemMode::Bfs
+            .stop_all(!self.preserve_policy, &mut self.audit_logger);
+        // Whether BFS removal was actually requested this teardown, vs whether
+        // it landed. The two used to be conflated: `bfs_removed` was inferred
+        // from `filesystem_mode` alone, so a failed `remove_configuration`
+        // still recorded `bfs_removed=true` and did not affect `status`.
+        let bfs_requested = self.filesystem_mode == FilesystemMode::Bfs
             && self.prepared.bfs_manager.configured()
-            && !self.preserve_policy
-        {
-            self.prepared.bfs_manager.remove_configuration(&mut logger);
+            && !self.preserve_policy;
+        let bfs_removed = if bfs_requested {
+            self.prepared
+                .bfs_manager
+                .remove_configuration(&mut self.audit_logger)
+        } else {
+            false
+        };
+
+        let (status, skip_reason) = appcontainer_teardown_status_with_bfs(
+            self.preserve_policy,
+            network.firewall_removal_ok,
+            bfs_requested,
+            bfs_removed,
+        );
+        if self.audit_enabled() {
+            let mut record = self
+                .audit(AuditEventName::SandboxTornDown)
+                .str("status", status.as_str())
+                .u64("firewall_rules_removed", network.rules_removed as u64)
+                .bool("firewall_removal_ok", network.firewall_removal_ok)
+                .bool("bfs_removed", bfs_removed)
+                .bool("proxy_stopped", network.proxy_stopped)
+                .bool("preserve_policy", self.preserve_policy)
+                // The AppContainer tiers delete no profile here (the runner's own
+                // `Drop` owns profile deletion), so this handle releases no
+                // container.
+                .bool("container_released", false);
+            if let Some(reason) = skip_reason {
+                record = record.str("skip_reason", reason.as_str());
+            }
+            self.audit_logger.log_audit_event(&record);
         }
+        let released_resources = if wxc_common::telemetry::is_active() {
+            format_released_resources(network.rules_removed, bfs_removed, network.proxy_stopped)
+        } else {
+            String::new()
+        };
+        wxc_common::telemetry::log_sandbox_torn_down(
+            &self.identity,
+            status.as_str(),
+            &released_resources,
+        );
+    }
+}
+
+fn format_released_resources(
+    firewall_rules_removed: usize,
+    bfs_removed: bool,
+    proxy_stopped: bool,
+) -> String {
+    format!(
+        "firewall_rules_removed={firewall_rules_removed},bfs_removed={bfs_removed},proxy_stopped={proxy_stopped},container_released=false"
+    )
+}
+
+/// Decide the audit `status` / `skip_reason` for an AppContainer teardown.
+///
+/// Pure so the mapping is unit-testable without launching a sandbox: the
+/// emission site in `run_teardown` only supplies the two facts it already has.
+///
+/// `preserve_policy` is a deliberate request to leave enforcement in place, so
+/// it is `skipped` rather than a success or a failure — the record must not
+/// claim a release that was never attempted.
+/// Extended teardown-status mapping that additionally accounts for the BFS
+/// removal outcome. A requested-but-failed BFS removal downgrades the aggregate
+/// status to `failure`, so the audit stream cannot show a green
+/// `SandboxTornDown` on a run that left the BFS configuration behind.
+///
+/// `bfs_requested` and `bfs_removed` are independent facts: `bfs_removed` is
+/// meaningful only when `bfs_requested` is true. A caller that did not request
+/// BFS removal (either not the BFS tier, or `preserve_policy`) passes
+/// `bfs_requested = false` and the BFS outcome does not affect the status.
+///
+/// `preserve_policy` is a deliberate request to leave enforcement in place, so
+/// it is `skipped` rather than a success or a failure — the record must not
+/// claim a release that was never attempted.
+fn appcontainer_teardown_status_with_bfs(
+    preserve_policy: bool,
+    firewall_removal_ok: bool,
+    bfs_requested: bool,
+    bfs_removed: bool,
+) -> (TeardownStatus, Option<TeardownSkipReason>) {
+    if preserve_policy {
+        return (
+            TeardownStatus::Skipped,
+            Some(TeardownSkipReason::PreservePolicy),
+        );
+    }
+    let bfs_ok = !bfs_requested || bfs_removed;
+    if firewall_removal_ok && bfs_ok {
+        (TeardownStatus::Success, None)
+    } else {
+        (TeardownStatus::Failure, None)
     }
 }
 
@@ -1502,7 +1779,24 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        self.job.terminate(u32::MAX);
+        //
+        if let Err(error) = self.job.terminate(u32::MAX) {
+            wxc_common::telemetry::log_process_event(
+                sanitize_identity(&self.identity),
+                self.pid,
+                wxc_common::telemetry::ProcessEvent::KillFailed(
+                    KillMethod::TerminateJobObject.as_str(),
+                    error.code().0,
+                ),
+            );
+            if self.audit_enabled() {
+                let record = self
+                    .audit(AuditEventName::ProcessKillFailed)
+                    .str("kill_method", KillMethod::TerminateJobObject.as_str())
+                    .i64("error_code", error.code().0 as i64);
+                self.audit_logger.log_audit_event(&record);
+            }
+        }
         Ok(())
     }
 
@@ -1523,13 +1817,46 @@ impl SandboxProcess for AppContainerSandboxProcess {
                 if unsafe { GetExitCodeProcess(self.process.get(), &mut code) }.is_err() {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
-                    Ok(code as i32)
+                    let exit_code = code as i32;
+                    // Always emit exactly one terminal outcome record here,
+                    // even when an external caller cancelled via `kill()`
+                    // before this natural exit was observed: a prior design
+                    // suppressed `ProcessExited` whenever a kill had been
+                    // requested, which left a successful proactive
+                    // cancellation (and a failed kill followed by a natural
+                    // exit) with no process outcome record at all, violating
+                    // the process-outcome contract (M-ETW-1).
+                    wxc_common::telemetry::log_process_event(
+                        sanitize_identity(&self.identity),
+                        self.pid,
+                        wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                    );
+                    if self.audit_enabled() {
+                        let record = self
+                            .audit(AuditEventName::ProcessExited)
+                            .i64("exit_code", exit_code as i64);
+                        self.audit_logger.log_audit_event(&record);
+                    }
+                    Ok(exit_code)
                 }
             }
-            WAIT_TIMEOUT => Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                format!("script timed out after {}ms", self.timeout_ms),
-            )),
+            WAIT_TIMEOUT => {
+                wxc_common::telemetry::log_process_event(
+                    sanitize_identity(&self.identity),
+                    self.pid,
+                    wxc_common::telemetry::ProcessEvent::TimedOut(self.timeout_ms as u64),
+                );
+                if self.audit_enabled() {
+                    let record = self
+                        .audit(AuditEventName::ProcessTimedOut)
+                        .u64("timeout_ms", self.timeout_ms as u64);
+                    self.audit_logger.log_audit_event(&record);
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("script timed out after {}ms", self.timeout_ms),
+                ))
+            }
             _ => Err(std::io::Error::other("WaitForSingleObject failed")),
         };
 
@@ -1567,6 +1894,95 @@ impl Drop for AppContainerSandboxProcess {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn released_resources_format_is_stable() {
+        assert_eq!(
+            super::format_released_resources(2, true, false),
+            "firewall_rules_removed=2,bfs_removed=true,proxy_stopped=false,container_released=false"
+        );
+    }
+
+    /// `preserve_policy` is an explicit request to leave enforcement in place,
+    /// so it must be reported as `skipped` — never as a green `success` that
+    /// implies a release the code never attempted, and never as a `failure`.
+    #[test]
+    fn teardown_status_reports_preserve_policy_as_skipped() {
+        use super::appcontainer_teardown_status_with_bfs;
+        use wxc_common::audit::{TeardownSkipReason, TeardownStatus};
+
+        for firewall_ok in [true, false] {
+            for (bfs_req, bfs_ok) in [(false, false), (true, true), (true, false)] {
+                let (status, reason) =
+                    appcontainer_teardown_status_with_bfs(true, firewall_ok, bfs_req, bfs_ok);
+                assert_eq!(status, TeardownStatus::Skipped);
+                assert_eq!(reason, Some(TeardownSkipReason::PreservePolicy));
+            }
+        }
+    }
+
+    /// A partially-failed firewall removal must be distinguishable from a clean
+    /// one — that distinction is the whole reason `stop_all` stopped discarding
+    /// its `Result`.
+    #[test]
+    fn teardown_status_distinguishes_failed_firewall_removal() {
+        use super::appcontainer_teardown_status_with_bfs;
+        use wxc_common::audit::TeardownStatus;
+
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, false, false),
+            (TeardownStatus::Success, None)
+        );
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, false, false, false),
+            (TeardownStatus::Failure, None)
+        );
+    }
+
+    /// A failed BFS removal must downgrade the aggregate status to `failure`,
+    /// so a reader cannot look at a green `SandboxTornDown` on a run whose BFS
+    /// configuration was still installed at teardown. Firewall-clean case:
+    /// only the BFS outcome makes the difference.
+    #[test]
+    fn teardown_status_reports_failed_bfs_removal_as_failure() {
+        use super::appcontainer_teardown_status_with_bfs;
+        use wxc_common::audit::TeardownStatus;
+
+        // Requested + landed → success.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, true, true),
+            (TeardownStatus::Success, None)
+        );
+        // Requested + failed → failure, regardless of the firewall outcome.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, true, false),
+            (TeardownStatus::Failure, None)
+        );
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, false, true, false),
+            (TeardownStatus::Failure, None)
+        );
+        // Not requested → does not affect status.
+        assert_eq!(
+            appcontainer_teardown_status_with_bfs(false, true, false, false),
+            (TeardownStatus::Success, None)
+        );
+    }
+
+    #[test]
+    fn filesystem_mode_maps_to_exactly_one_tier() {
+        use super::FilesystemMode;
+        use crate::fallback_detector::IsolationTier;
+
+        assert_eq!(
+            FilesystemMode::Bfs.isolation_tier(),
+            IsolationTier::AppContainerBfs
+        );
+        assert_eq!(
+            FilesystemMode::Dacl.isolation_tier(),
+            IsolationTier::AppContainerDacl
+        );
+    }
+
     #[test]
     fn attr_count_neither() {
         assert_eq!(super::compute_attr_count(false, false, false), 1);
@@ -1909,5 +2325,192 @@ mod tests {
             error.error_message,
             CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
         );
+    }
+
+    /// Runner-level end-to-end tests: a real Win32 process, a real job
+    /// object, and a real file-backed `Logger`, driven through
+    /// `AppContainerSandboxProcess::wait`/`kill`/`Drop` exactly as
+    /// `wxc-exec` does. These exercise the actual runner-to-audit-log wiring
+    /// (unit tests elsewhere only exercise the pure status-computation
+    /// helpers in isolation), so a real regression in that wiring — e.g. the
+    /// `ProcessExited` suppression bug fixed alongside these tests — shows up
+    /// as a missing line in a real log file, not just a wrong argument to a
+    /// mocked call.
+    mod runner_e2e {
+        use super::super::*;
+        use std::io::Read as _;
+        use std::os::windows::io::IntoRawHandle;
+        use std::process::Command;
+        use windows::Win32::Foundation::HANDLE;
+        use wxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+        use wxc_common::sandbox_process::SandboxProcess;
+
+        /// Spawn a real, ordinary (non-AppContainer) child process for the
+        /// test to drive through the runner's real `wait`/`kill`/
+        /// `run_teardown` logic. Returns the process's raw handle — now
+        /// owned by the caller, since `Command`'s `Child` is consumed via
+        /// `IntoRawHandle` so nothing double-closes it — and its OS pid.
+        fn spawn_test_child(args: &[&str]) -> (SendOwnedHandle, u32) {
+            let child = Command::new("cmd.exe")
+                .args(args)
+                .spawn()
+                .expect("spawn cmd.exe for runner e2e test");
+            let pid = child.id();
+            let raw = child.into_raw_handle();
+            let mut owned = OwnedHandle::new(HANDLE(raw));
+            (SendOwnedHandle::take(&mut owned), pid)
+        }
+
+        /// Build a minimal, real `AppContainerSandboxProcess` around
+        /// `process`/`pid`: a real `UiJobObject` assigned to the process, an
+        /// unconfigured (no-op) `NetworkManager`/`FileSystemBfsManager` pair
+        /// (`FilesystemMode::Dacl` skips the BFS path entirely, and the
+        /// default `NetworkManager` has no firewall rules to remove), and
+        /// `logger`'s diagnostic sinks — so audit records land wherever the
+        /// caller attached a file sink on `logger`.
+        fn make_test_process(
+            process: SendOwnedHandle,
+            pid: u32,
+            timeout_ms: u32,
+            logger: &Logger,
+        ) -> AppContainerSandboxProcess {
+            let job = UiJobObject::new().expect("create job object");
+            job.assign_process(process.get())
+                .expect("assign process to job");
+            AppContainerSandboxProcess {
+                process,
+                _thread: SendOwnedHandle::take(&mut OwnedHandle::new(HANDLE::default())),
+                job,
+                pid,
+                stdin: None,
+                stdout: None,
+                stderr: None,
+                stdout_canceller: None,
+                stderr_canceller: None,
+                prepared: Prepared {
+                    network_manager: crate::network_manager::NetworkManager::new(),
+                    bfs_manager: crate::filesystem_bfs::FileSystemBfsManager::new(
+                        "wxc-e2e-test".to_string(),
+                        None,
+                    ),
+                },
+                filesystem_mode: FilesystemMode::Dacl,
+                preserve_policy: false,
+                timeout_ms,
+                teardown_done: false,
+                identity: "wxc-e2e-test".to_string(),
+                tier: "app_container_dacl",
+                audit_logger: logger.clone_diagnostic_sink(),
+            }
+        }
+
+        fn read_audit_file(path: &std::path::Path) -> String {
+            let mut contents = String::new();
+            std::fs::File::open(path)
+                .expect("open audit log file")
+                .read_to_string(&mut contents)
+                .expect("read audit log file");
+            contents
+        }
+
+        /// Unique-per-test log path so parallel test threads never share a
+        /// file sink.
+        fn test_log_path(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "wxc-e2e-{name}-{}-{:?}.log",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+        }
+
+        #[test]
+        fn natural_exit_emits_process_exited_and_torn_down_records() {
+            let log_path = test_log_path("natural-exit");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            let (process, pid) = spawn_test_child(&["/C", "exit 7"]);
+            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
+
+            let exit_code = sandbox.wait().expect("natural exit should succeed");
+            assert_eq!(exit_code, 7);
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessExited""#),
+                "expected a ProcessExited audit record; got: {audit}"
+            );
+            assert!(
+                audit.contains(r#""exit_code":7"#),
+                "ProcessExited record must carry the real exit code; got: {audit}"
+            );
+            assert!(
+                audit.contains(r#""event":"mxc.SandboxTornDown""#),
+                "expected a SandboxTornDown audit record; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
+
+        #[test]
+        fn proactive_kill_before_natural_exit_still_emits_process_exited() {
+            let log_path = test_log_path("proactive-kill");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            // A process that would otherwise run far longer than this test.
+            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
+            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
+
+            // Simulate an external caller (e.g. an FFI/SDK cancellation)
+            // cancelling before the process would otherwise exit on its own.
+            sandbox.kill().expect("kill should succeed");
+            let exit_code = sandbox
+                .wait()
+                .expect("wait after a successful kill should still resolve");
+            let _ = exit_code;
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessExited""#),
+                "a successful proactive cancellation must still leave exactly \
+                 one terminal process-outcome record instead of none; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
+
+        #[test]
+        fn timeout_emits_process_timed_out_record() {
+            let log_path = test_log_path("timeout");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
+            // A timeout far shorter than the child's runtime.
+            let mut sandbox = make_test_process(process, pid, 200, &logger);
+
+            let err = sandbox
+                .wait()
+                .expect_err("the child must still be running past the timeout");
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessTimedOut""#),
+                "expected a ProcessTimedOut audit record; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
     }
 }

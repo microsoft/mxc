@@ -120,7 +120,7 @@ Write-Host "`n--- Starting ETW trace session '$sessionName' ---" -ForegroundColo
 logman stop  $sessionName -ets 2>$null | Out-Null
 logman delete $sessionName -ets 2>$null | Out-Null
 
-logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 2>&1 | Out-Host
+logman create trace $sessionName -ets -o "$etlFile" -p $providerGuid 0xFFFFFFFFFFFFFFFF 5 2>&1 | Out-Host
 if ($LASTEXITCODE -ne 0) {
     throw "Failed to create ETW trace session"
 }
@@ -186,9 +186,26 @@ $xmlContent = Get-Content -Path $xmlFile -Raw
 $eventCount = ([regex]::Matches($xmlContent, '<Event ')).Count
 Write-Host "Events captured: $eventCount"
 
-if ($eventCount -gt 0) {
+$providerCaptured = $xmlContent -match [regex]::Escape($providerGuid)
+if ($eventCount -gt 0 -and $providerCaptured) {
     Write-Host "`n=== ETW CAPTURE SMOKE TEST PASSED ===" -ForegroundColor Green
     Write-Host "$eventCount event(s) captured from the MXC provider."
+
+    $specializedEvents = @(
+        'MXC.ProcessExited',
+        'MXC.ProcessTimedOut',
+        'MXC.ProcessKillFailed',
+        'MXC.PolicyHash',
+        'MXC.SandboxNetworkPolicyApplied',
+        'MXC.SandboxTornDown',
+        'MXC.ConfigRejected'
+    )
+    $specializedMatches = @($specializedEvents | Where-Object { $xmlContent -match [regex]::Escape($_) })
+    if ($specializedMatches.Count -gt 0) {
+        Write-Host "Specialized MXC events: $($specializedMatches -join ', ')"
+    } else {
+        Write-Host "Specialized event names were not rendered by tracerpt for this TraceLogging ETL." -ForegroundColor Yellow
+    }
 
     # Check for expected field names (public, not private).
     $expectedFields = @('mxc.backend', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
@@ -199,9 +216,13 @@ if ($eventCount -gt 0) {
             Write-Host "  [--] Field not found: $field (may not be in this event type)" -ForegroundColor Yellow
         }
     }
-} else {
+} elseif ($eventCount -eq 0) {
     Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
     Write-Host "ETL file had content ($etlSize bytes) but no parseable events were found." -ForegroundColor Red
+    exit 1
+} else {
+    Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
+    Write-Host "The ETL contains events, but none identify the Microsoft.MXC provider ($providerGuid)." -ForegroundColor Red
     exit 1
 }
 

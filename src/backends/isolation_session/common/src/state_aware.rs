@@ -10,6 +10,7 @@ use std::io::IsTerminal;
 
 use serde::Serialize;
 
+use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
@@ -19,7 +20,7 @@ use wxc_common::state_aware_backend::{
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::IsolationSessionManager;
+use super::manager::{log_sandbox_torn_down, IsolationSessionManager, TeardownOutcome};
 use super::policy::{validate_post_provision_policy, validate_provision_policy};
 use super::process_options::build_process_options;
 use super::sandbox_id::{self, SandboxIdPayload};
@@ -121,7 +122,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
-        manager.stop_session().map_err(map_lifecycle_error)?;
+        let stopped = manager.stop_session();
+        // Report the release before propagating a failure, so a stop that did
+        // not land is auditable rather than only surfacing as an error envelope.
+        log_sandbox_torn_down(
+            &mut Logger::inherit_thread_diagnostic_sink(),
+            &agent_user_name,
+            "stop",
+            TeardownOutcome {
+                session_stopped: Some(stopped.is_ok()),
+                ..Default::default()
+            },
+        );
+        stopped.map_err(map_lifecycle_error)?;
         Ok(StopResult { metadata: None })
     }
 
@@ -135,9 +148,17 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
-        manager
-            .deprovision_agent_user()
-            .map_err(map_lifecycle_error)?;
+        let deprovisioned = manager.deprovision_agent_user();
+        log_sandbox_torn_down(
+            &mut Logger::inherit_thread_diagnostic_sink(),
+            &agent_user_name,
+            "deprovision",
+            TeardownOutcome {
+                agent_user_deprovisioned: Some(deprovisioned.is_ok()),
+                ..Default::default()
+            },
+        );
+        deprovisioned.map_err(map_lifecycle_error)?;
         Ok(DeprovisionResult { metadata: None })
     }
 
@@ -229,9 +250,18 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
 
         let interactive = std::io::stdout().is_terminal();
         let options = build_process_options(request, interactive);
+        // Inherit any diagnostic sinks (--log-file, diagnostic console pipe)
+        // the driver installed on this thread. When the driver has not
+        // installed anything this behaves identically to `Logger::new(Buffer)`,
+        // so the environment-driven pipe fallback below is still exercised.
+        let mut logger = Logger::inherit_thread_diagnostic_sink();
+        let diagnostic_config = wxc_common::diagnostic::DiagnosticConfig::from_environment();
+        if diagnostic_config.console_enabled {
+            logger.enable_diagnostics(&diagnostic_config);
+        }
 
         let exit_code = manager
-            .create_process(&options)
+            .create_process(&options, Some(&mut logger))
             .map_err(map_lifecycle_error)?;
 
         // The output relay completed inside `create_process`. The dispatcher

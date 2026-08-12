@@ -8,18 +8,20 @@ use std::fmt::Write;
 use std::fs;
 use std::process;
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
+use wxc_common::audit::{AuditEvent, AuditEventName, RejectionReason};
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
+#[cfg(target_os = "windows")]
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
-use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
+use wxc_common::mxc_error::{MxcError, MxcErrorCode, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
 use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -335,6 +337,163 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
     logger.log_diagnostic_line(&error.to_string());
 }
 
+/// Record `mxc.ConfigRejected` for a request that was refused before it could
+/// run.
+///
+/// **Bounded content only.** The `reason` is a closed [`RejectionReason`]
+/// variant and `offending_field` is a *config field path* (e.g.
+/// `process.commandLine`) — never a field value, never the rich error text.
+/// The human-readable diagnostic still reaches the operator on stderr and, for
+/// state-aware phases, in the JSON error envelope; this record exists so the
+/// same rejection is machine-readable without parsing prose.
+///
+/// Unlike the ETW path this replaces, there is no initialisation-ordering
+/// problem: `Logger` is constructed from CLI flags before any config is read,
+/// so *every* rejection site — including "the input was not JSON at all" — can
+/// reach it.
+fn log_config_rejected(
+    logger: &mut Logger,
+    reason: RejectionReason,
+    backend: &str,
+    offending_field: &str,
+    phase: &str,
+) {
+    let correlation_id = wxc_common::audit::process_correlation_id();
+    wxc_common::telemetry::log_config_rejected(
+        correlation_id,
+        backend,
+        reason.as_str(),
+        offending_field,
+        phase,
+    );
+    let record = AuditEvent::new(AuditEventName::ConfigRejected)
+        // No sandbox exists yet — the config was refused — so M-ETW-7's
+        // "correlation id (or identity if assigned)" resolves to the
+        // correlation id here. It groups every rejection from one invocation
+        // on a sink that concurrent sandboxes share.
+        .str("correlation_id", correlation_id)
+        .str("backend", backend)
+        .str("reason", reason.as_str())
+        .str_opt("offending_field", offending_field)
+        .str_opt("phase", phase);
+    logger.log_audit_event(&record);
+}
+
+/// Extract the bounded field path already rendered by the config parser.
+///
+/// Parse failures intentionally keep their rich human-readable message for
+/// stderr or the state-aware response envelope. The audit event only needs the
+/// path between the parser's backticks, never the surrounding error text.
+fn offending_field_from_message(message: &str) -> &str {
+    const PREFIX: &str = "Invalid configuration at `";
+    let Some(start) = message.find(PREFIX) else {
+        return "";
+    };
+    let field = &message[start + PREFIX.len()..];
+    field.split('`').next().unwrap_or("")
+}
+
+/// Backend name for a rejection that happened before (or without) backend
+/// resolution.
+const UNKNOWN_BACKEND: &str = "unknown";
+
+/// Resolve the wire backend name for a parsed state-aware request, falling back
+/// to [`UNKNOWN_BACKEND`] when the request is too malformed to name one.
+fn backend_name_for_state_aware(parsed: &ParsedStateAwareRequest) -> String {
+    resolve_backend(parsed)
+        .map(|b| b.wire_name().to_string())
+        .unwrap_or_else(|_| UNKNOWN_BACKEND.to_string())
+}
+
+/// Map a state-aware [`MxcError`] to its bounded [`RejectionReason`].
+///
+/// Driven by the error's own `code`, which is already an exhaustive closed set —
+/// no message-text matching.
+fn config_rejection_reason_for(error: &MxcError) -> Option<RejectionReason> {
+    match error.code {
+        MxcErrorCode::MalformedRequest => Some(RejectionReason::SchemaViolation),
+        MxcErrorCode::MalformedId => Some(RejectionReason::IdentityShapeInvalid),
+        MxcErrorCode::PolicyValidation => Some(RejectionReason::UnsupportedFieldForBackend),
+        MxcErrorCode::UnsupportedContainment => Some(RejectionReason::UnsupportedContainment),
+        MxcErrorCode::UnsupportedPhase => Some(RejectionReason::UnsupportedPhase),
+        MxcErrorCode::BackendUnavailable
+        | MxcErrorCode::StaleId
+        | MxcErrorCode::NotProvisioned
+        | MxcErrorCode::NotStarted
+        | MxcErrorCode::AlreadyStarted
+        | MxcErrorCode::AlreadyStopped
+        | MxcErrorCode::BackendError => None,
+    }
+}
+
+fn rejection_reason_for(error: &MxcError) -> RejectionReason {
+    config_rejection_reason_for(error).unwrap_or(RejectionReason::RunnerUnavailable)
+}
+
+/// Marker logged for the `MXC.PolicyHash` identity field when the caller
+/// supplied a `sandboxId` for this phase. This call happens before the
+/// dispatcher validates the id against real backend state (see the
+/// `install_thread_diagnostic_sink` comment below), so a caller-chosen string
+/// that merely *looks* like an MXC-minted `iso:`/`wsb:` id would otherwise
+/// pass `redact_identity`'s shape check unverified. Since MXC has not
+/// confirmed the id yet, the field records only that a caller-provided id was
+/// present, not its value; the later, post-dispatch `SandboxIdentity` audit
+/// record (see `sandbox_id_for_identity_record` below) is unaffected and
+/// still discloses the real, backend-verified identity on success.
+const UNVERIFIED_SANDBOX_ID_MARKER: &str = "unverified";
+
+fn state_aware_policy_identity(sandbox_id: Option<&str>) -> String {
+    match sandbox_id.filter(|id| !id.is_empty()) {
+        None => wxc_common::policy_identity::redact_identity("CLI"),
+        Some(_) => UNVERIFIED_SANDBOX_ID_MARKER.to_string(),
+    }
+}
+
+fn emit_state_aware_early_rejection(
+    telemetry_active: bool,
+    parsed: &ParsedStateAwareRequest,
+    error: &MxcError,
+) {
+    let backend = backend_name_for_state_aware(parsed);
+    let outcome = Err(error.clone());
+    telemetry::emit_state_aware(
+        telemetry_active,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: parsed.phase.as_str(),
+            correlation_vector: "",
+        },
+        &outcome,
+        Duration::ZERO,
+    );
+}
+
+/// Resolve the sandbox id to report on `mxc.SandboxIdentity` for a completed
+/// state-aware dispatch.
+///
+/// `provision` mints the id, so it is read out of the result envelope; every
+/// later phase carries the id inbound. Returns `None` when the phase failed —
+/// a failed dispatch produced no sandbox to identify, and emitting an identity
+/// record for one would be a lie.
+fn sandbox_id_for_identity_record(
+    outcome: &Result<DispatchOutcome, MxcError>,
+    incoming_sandbox_id: Option<&str>,
+) -> Option<String> {
+    let Ok(outcome) = outcome else {
+        return None;
+    };
+    if let DispatchOutcome::Envelope(value) = outcome {
+        if let Some(minted) = value
+            .get("result")
+            .and_then(|r| r.get("sandboxId"))
+            .and_then(|v| v.as_str())
+        {
+            return Some(minted.to_string());
+        }
+    }
+    incoming_sandbox_id.map(str::to_string)
+}
+
 /// Drives the state-aware dispatch flow. On envelope success, writes the
 /// JSON to stdout and exits 0. On exec success, exits with the script's
 /// exit code (output already streamed). On failure, writes a JSON error
@@ -344,7 +503,7 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
 fn run_state_aware_main(
     parsed: ParsedStateAwareRequest,
     dry_run: bool,
-    experimental: bool,
+    telemetry_active: bool,
     logger: &mut Logger,
 ) -> ! {
     // Resolve attribution (phase + backend) and telemetry enablement BEFORE
@@ -374,18 +533,6 @@ fn run_state_aware_main(
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let telemetry_active = if experimental {
-        parsed
-            .request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
-
     // Compute this phase's Microsoft Correlation Vector (MS-CV), executing the
     // pure seed-vs-spin plan against the operators. Only computed when telemetry
     // is active so an inactive provider does no work and provision output is
@@ -411,8 +558,69 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
+    // Captured before `run_state_aware` consumes `parsed`. On provision the id
+    // does not exist yet and is read back out of the result envelope below.
+    let incoming_sandbox_id = parsed.sandbox_id.clone();
+    // State-aware dispatch bypasses the one-shot runner funnel, so anchor the
+    // effective lifecycle policy here before the request is consumed.
+    let phase_config = parsed.experimental_raw.as_ref().and_then(|raw| {
+        resolved_backend.as_ref().and_then(|backend| {
+            raw.get(backend.wire_name())
+                .and_then(|section| section.get(phase))
+        })
+    });
+    let diagnostics_active = logger.has_diagnostic_sink();
+    if telemetry_active || diagnostics_active {
+        let policy_hash = wxc_common::policy_identity::state_aware_policy_hash(
+            &parsed.request,
+            backend,
+            phase,
+            phase_config,
+        );
+        let identity = state_aware_policy_identity(parsed.sandbox_id.as_deref());
+        wxc_common::telemetry::log_policy_hash(
+            &identity,
+            &policy_hash,
+            &parsed.request.schema_version,
+        );
+        if diagnostics_active {
+            let record = AuditEvent::new(AuditEventName::PolicyHash)
+                .str("backend", backend)
+                .str("policy_hash", &policy_hash)
+                .str("config_schema_version", &parsed.request.schema_version);
+            logger.log_audit_event(&record);
+        }
+    }
+    // Publish the driver's diagnostic sinks (--log-file, and the diagnostic
+    // console pipe on Windows) on this thread so a backend whose
+    // `StatefulSandboxBackend::exec` signature has no `Logger` parameter
+    // can inherit them via `Logger::inherit_thread_diagnostic_sink` instead
+    // of building a throwaway `Logger::new(Mode::Buffer)` and silently
+    // dropping every record. The returned guard clears the sink when it
+    // drops at the end of this scope -- including if `run_state_aware`
+    // panics -- so we never leak duplicated handles across independent
+    // invocations even on an unwind.
+    let _diag_sink_guard = logger.install_thread_diagnostic_sink();
     let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    drop(_diag_sink_guard);
     let elapsed = started.elapsed();
+
+    // Record the sandbox identity join key. For `isolation_session` the
+    // `sandboxId` tail is the OS-side `provisionId`, which is what joins an MXC
+    // record to the `Microsoft.Windows.IsolationSession` OS records. Emitted on
+    // success only: a failed phase produced no sandbox to identify.
+    if let Some(sandbox_id) =
+        sandbox_id_for_identity_record(&outcome, incoming_sandbox_id.as_deref())
+    {
+        let record = AuditEvent::new(AuditEventName::SandboxIdentity)
+            .str("backend", backend)
+            .str(
+                "identity",
+                &wxc_common::policy_identity::redact_identity(&sandbox_id),
+            )
+            .str_opt("phase", phase);
+        logger.log_audit_event(&record);
+    }
 
     // For provision, return the freshly-seeded correlation vector to the client
     // by injecting it into the result envelope so it can be relayed into later
@@ -424,6 +632,19 @@ fn run_state_aware_main(
 
     // Emit lifecycle telemetry (and shut the provider down) before flushing the
     // diagnostic buffer / envelope. Terminal path — safe to shutdown here.
+    if let Err(error) = &outcome {
+        if let Some(reason) = config_rejection_reason_for(error) {
+            let message = error.message.as_str();
+            log_config_rejected(
+                logger,
+                reason,
+                backend,
+                offending_field_from_message(message),
+                phase,
+            );
+        }
+    }
+
     telemetry::emit_state_aware(
         telemetry_active,
         telemetry::TelemetryContext {
@@ -947,6 +1168,15 @@ fn main() {
         }
     }
 
+    // Initialize the diagnostic console before parsing so early rejection
+    // records have an active sink.
+    #[cfg(target_os = "windows")]
+    let diag_config = DiagnosticConfig::from_environment();
+    #[cfg(target_os = "windows")]
+    if diag_config.console_enabled {
+        logger.enable_diagnostics(&diag_config);
+    }
+
     // Delete mode
     if cli.delete {
         let name = match cli.containername {
@@ -973,12 +1203,31 @@ fn main() {
     let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {
+            let telemetry_active = if cli.experimental {
+                parsed
+                    .request
+                    .experimental
+                    .telemetry
+                    .as_ref()
+                    .map(|c| telemetry::init(c, &mut logger))
+                    .unwrap_or(false)
+            } else {
+                false
+            };
             let context =
                 match command_override_context_for_state_aware(&parsed, has_command_override) {
                     Ok(context) => context,
                     Err(e) => {
+                        log_config_rejected(
+                            &mut logger,
+                            rejection_reason_for(&e),
+                            &backend_name_for_state_aware(&parsed),
+                            "",
+                            parsed.phase.as_str(),
+                        );
                         print_error_envelope(&e);
                         eprint!("{}", logger.get_buffer());
+                        emit_state_aware_early_rejection(telemetry_active, &parsed, &e);
                         process::exit(1);
                     }
                 };
@@ -988,10 +1237,18 @@ fn main() {
             {
                 Ok(command_override) => command_override.flatten(),
                 Err(e) => {
-                    print_error_envelope(&MxcError::malformed_request(format!(
-                        "invalid CLI command override: {e}"
-                    )));
+                    log_config_rejected(
+                        &mut logger,
+                        RejectionReason::InvalidCommandOverride,
+                        &backend_name_for_state_aware(&parsed),
+                        "process.commandLine",
+                        parsed.phase.as_str(),
+                    );
+                    let error =
+                        MxcError::malformed_request(format!("invalid CLI command override: {e}"));
+                    print_error_envelope(&error);
                     eprint!("{}", logger.get_buffer());
+                    emit_state_aware_early_rejection(telemetry_active, &parsed, &error);
                     process::exit(1);
                 }
             };
@@ -1010,13 +1267,55 @@ fn main() {
             // `--experimental` on the CLI.
             parsed.request.experimental_enabled = cli.experimental;
             parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
+            run_state_aware_main(parsed, cli.dry_run, telemetry_active, &mut logger)
         }
-        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
+        Err(ParseError::Decode(_)) => {
+            // The payload could not even be decoded into JSON, so no backend or
+            // field path is known — the record still exists so a rejected run
+            // is never invisible.
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                "",
+                "",
+            );
+            eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::OneShotMalformed(error)) => {
+            let message = error.to_string();
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::MalformedJson,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
+            eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::OneShot(error)) => {
+            let message = error.to_string();
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::SchemaViolation,
+                UNKNOWN_BACKEND,
+                offending_field_from_message(&message),
+                "",
+            );
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
         Err(ParseError::StateAware(e)) => {
+            let offending_field = offending_field_from_message(&e.message);
+            log_config_rejected(
+                &mut logger,
+                rejection_reason_for(&e),
+                UNKNOWN_BACKEND,
+                offending_field,
+                "",
+            );
             print_error_envelope(&e);
             eprint!("{}", logger.get_buffer());
             process::exit(1);
@@ -1057,6 +1356,13 @@ fn main() {
     ) {
         Ok(command_override) => command_override,
         Err(e) => {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::InvalidCommandOverride,
+                request.containment.wire_name(),
+                "process.commandLine",
+                "",
+            );
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit(
@@ -1083,6 +1389,13 @@ fn main() {
     #[cfg(target_os = "windows")]
     if cli.audit {
         if let Err(message) = validate_audit_request(&request) {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::UnsupportedFieldForBackend,
+                request.containment.wire_name(),
+                "containment",
+                "",
+            );
             eprintln!("Error: {message}");
             telemetry::emit_early_exit(
                 telemetry_active,
@@ -1103,6 +1416,13 @@ fn main() {
     // Final validation: a command line must come from somewhere. If neither
     // the policy nor the CLI supplied one we cannot proceed.
     if request.script_code.is_empty() {
+        log_config_rejected(
+            &mut logger,
+            RejectionReason::MissingCommand,
+            request.containment.wire_name(),
+            "process.commandLine",
+            "",
+        );
         eprintln!(
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
@@ -1116,7 +1436,17 @@ fn main() {
     }
 
     // Inject learningModeLogging capability when diagnostic console is enabled.
-    let learning_mode_injected = if DiagnosticConfig::force_learning_mode()
+    let learning_mode_requested = {
+        #[cfg(target_os = "windows")]
+        {
+            DiagnosticConfig::force_learning_mode()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    };
+    let learning_mode_injected = if learning_mode_requested
         && !request.policy.capabilities.iter().any(|c| {
             c.eq_ignore_ascii_case("learningModeLogging")
                 || c.eq_ignore_ascii_case("permissiveLearningMode")
@@ -1130,60 +1460,83 @@ fn main() {
         false
     };
 
-    // Initialize diagnostic logging (registry/env-controlled).
-    let diag_config = DiagnosticConfig::from_environment();
-    if diag_config.console_enabled {
-        logger.enable_diagnostics(&diag_config);
-
-        // Log the preamble
-        let exe_path = std::env::current_exe()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| "unknown".to_string());
-        let parent_info = wxc_common::diagnostic::get_parent_process_info();
-        let _ = writeln!(
-            logger,
-            "wxc-exec v{} (PID {})",
-            env!("CARGO_PKG_VERSION"),
-            std::process::id()
-        );
-        let _ = writeln!(logger, "\tpath: {}", exe_path);
-        let _ = writeln!(logger, "\tparent: {}", parent_info);
-
-        // Log if we're injecting Learning Mode
-        if learning_mode_injected {
+    // Emit the diagnostic preamble after the request is available.
+    #[cfg(target_os = "windows")]
+    {
+        if diag_config.console_enabled {
+            // Log the preamble
+            let exe_path = std::env::current_exe()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unknown".to_string());
+            let parent_info = wxc_common::diagnostic::get_parent_process_info();
             let _ = writeln!(
+                logger,
+                "wxc-exec v{} (PID {})",
+                env!("CARGO_PKG_VERSION"),
+                std::process::id()
+            );
+            let _ = writeln!(logger, "\tpath: {}", exe_path);
+            let _ = writeln!(logger, "\tparent: {}", parent_info);
+
+            // Log if we're injecting Learning Mode
+            if learning_mode_injected {
+                let _ = writeln!(
                 logger,
                 "WARNING: injected 'learningModeLogging' capability via ForceLearningMode registry key"
             );
+            }
         }
 
-        // Log the raw input JSON config before any transformation.
-        let raw_json = if is_base64 {
-            wxc_common::encoding::base64_decode(&config_data)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        } else {
-            fs::read_to_string(&config_data).ok()
-        };
-        if let Some(json) = raw_json {
-            let _ = writeln!(logger, "SECTION: JSON Config");
-            let _ = writeln!(logger, "{}", json.trim());
+        // Log the raw input JSON config before any transformation. Skipped
+        // entirely when no diagnostic sink is attached: this re-reads the
+        // config and redacts/renders it just to have `log_diagnostic_line`
+        // discard the result, so gate the work itself rather than only its
+        // output (mirrors `Logger::has_diagnostic_sink`'s existing contract
+        // for `log_audit_event`).
+        if logger.has_diagnostic_sink() {
+            let raw_json = if is_base64 {
+                wxc_common::encoding::base64_decode(&config_data)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+            } else {
+                fs::read_to_string(&config_data).ok()
+            };
+            if let Some(json) = raw_json {
+                // Redact secret-bearing fields (e.g. `experimental.isolationSession.user.{upn,wamToken}`)
+                // before writing: a one-shot IsolationSession request's credential
+                // bundle is only rejected by the runner after this point, so the
+                // raw config as received from the caller may still contain it.
+                let _ = writeln!(logger, "SECTION: JSON Config (redacted)");
+                let _ = writeln!(
+                    logger,
+                    "{}",
+                    wxc_common::diagnostic::redact_raw_config_json(json.trim())
+                );
+            }
         }
     }
 
     let _ = writeln!(logger, "SECTION: Request simplified");
     log_request(&request, &mut logger);
 
-    // Emit the full (redacted) request policy for diagnostics.
-    let _ = writeln!(
-        logger,
-        "SECTION: Full `ExecutionRequest` configuration (redacted)"
-    );
-    let _ = writeln!(
-        logger,
-        "{}",
-        wxc_common::diagnostic::redacted_request_json(&request)
-    );
+    #[cfg(target_os = "windows")]
+    {
+        // Emit the full (redacted) request policy for diagnostics. Gated on
+        // an attached sink for the same reason as the raw-config block above:
+        // rendering the whole request is comparatively expensive and would
+        // otherwise run unconditionally only to be discarded.
+        if logger.has_diagnostic_sink() {
+            let _ = writeln!(
+                logger,
+                "SECTION: Full `ExecutionRequest` configuration (redacted)"
+            );
+            let _ = writeln!(
+                logger,
+                "{}",
+                wxc_common::diagnostic::redacted_request_json(&request)
+            );
+        }
+    }
 
     // Run script in the selected containment backend. Backend selection and
     // runner construction — including the ProcessContainer BaseContainer /
@@ -1203,6 +1556,13 @@ fn main() {
             resolved.runner
         }
         Err(e) => {
+            log_config_rejected(
+                &mut logger,
+                RejectionReason::RunnerUnavailable,
+                request.containment.wire_name(),
+                "containment",
+                "",
+            );
             eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
             telemetry::emit_early_exit(
@@ -1376,6 +1736,170 @@ mod tests {
         Logger::new(Mode::Buffer)
     }
 
+    /// Every rejection reason must come from the error's own closed `code`, not
+    /// from matching its message text — the message is prose that can embed
+    /// paths and is not a stable vocabulary.
+    #[test]
+    fn rejection_reason_is_driven_by_the_error_code() {
+        let cases = [
+            (
+                MxcError::malformed_request("x"),
+                RejectionReason::SchemaViolation,
+            ),
+            (
+                MxcError::malformed_id("x"),
+                RejectionReason::IdentityShapeInvalid,
+            ),
+            (
+                MxcError::policy_validation("x"),
+                RejectionReason::UnsupportedFieldForBackend,
+            ),
+            (
+                MxcError::unsupported_containment("x"),
+                RejectionReason::UnsupportedContainment,
+            ),
+            (
+                MxcError::unsupported_phase("x"),
+                RejectionReason::UnsupportedPhase,
+            ),
+            (
+                MxcError::backend_unavailable("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (MxcError::stale_id("x"), RejectionReason::RunnerUnavailable),
+            (
+                MxcError::not_provisioned("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::not_started("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::already_started("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::already_stopped("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+            (
+                MxcError::backend_error("x"),
+                RejectionReason::RunnerUnavailable,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                rejection_reason_for(&error),
+                expected,
+                "code {:?} mapped to the wrong reason",
+                error.code
+            );
+        }
+    }
+
+    #[test]
+    fn offending_field_is_extracted_without_error_text() {
+        assert_eq!(
+            offending_field_from_message(
+                "Configuration parse error: Invalid configuration at `process.timeout`: invalid number"
+            ),
+            "process.timeout"
+        );
+        assert_eq!(
+            offending_field_from_message("Invalid JSON syntax: expected value at line 1 column 2"),
+            ""
+        );
+    }
+
+    /// The record must carry the bounded reason and the field *path* — never
+    /// the offending value, and never the rich error text.
+    #[test]
+    fn config_rejected_record_carries_no_free_form_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&path).expect("file sink");
+
+        log_config_rejected(
+            &mut logger,
+            RejectionReason::MissingCommand,
+            "processcontainer",
+            "process.commandLine",
+            "",
+        );
+        drop(logger);
+
+        let contents = std::fs::read_to_string(&path).expect("read log");
+        assert!(
+            contents.contains(r#""reason":"missing_command""#),
+            "got: {contents}"
+        );
+        assert!(
+            contents.contains(r#""offending_field":"process.commandLine""#),
+            "got: {contents}"
+        );
+        // A one-shot run has no lifecycle phase, so the field is omitted rather
+        // than emitted as a meaningless empty string.
+        assert!(!contents.contains("\"phase\""), "got: {contents}");
+    }
+
+    #[test]
+    fn identity_record_reads_the_minted_id_out_of_a_provision_envelope() {
+        let outcome = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({"result": {"sandboxId": "iso:wxc-abcd1234"}}),
+        ));
+        assert_eq!(
+            sandbox_id_for_identity_record(&outcome, None).as_deref(),
+            Some("iso:wxc-abcd1234")
+        );
+    }
+
+    #[test]
+    fn identity_record_falls_back_to_the_inbound_id_for_later_phases() {
+        // Later phases return an envelope with no `sandboxId` (the client
+        // already has it), so the inbound id is the one to report.
+        let outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({"result": {}})));
+        assert_eq!(
+            sandbox_id_for_identity_record(&outcome, Some("iso:wxc-abcd1234")).as_deref(),
+            Some("iso:wxc-abcd1234")
+        );
+
+        // Exec completes without an envelope at all.
+        let exec = Ok(DispatchOutcome::ExecCompleted { exit_code: 0 });
+        assert_eq!(
+            sandbox_id_for_identity_record(&exec, Some("iso:wxc-abcd1234")).as_deref(),
+            Some("iso:wxc-abcd1234")
+        );
+    }
+
+    #[test]
+    fn no_identity_record_for_a_failed_phase() {
+        // A failed dispatch produced no sandbox to identify; claiming one would
+        // be a lie.
+        let outcome = Err(MxcError::backend_unavailable("nope"));
+        assert!(sandbox_id_for_identity_record(&outcome, Some("iso:wxc-abcd1234")).is_none());
+    }
+
+    #[test]
+    fn entra_provision_ids_are_never_logged_verbatim() {
+        // `state_aware.rs::provision` sets `provision_id = user.upn` for Entra
+        // sandboxes, so the sandboxId tail is a real user identifier. It must not
+        // reach a log file in any recoverable form.
+        let outcome = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({"result": {"sandboxId": "iso:alice@contoso.com"}}),
+        ));
+        let id = sandbox_id_for_identity_record(&outcome, None).expect("id");
+        let rendered = wxc_common::policy_identity::redact_identity(&id);
+        assert!(!rendered.contains("alice"), "got: {rendered}");
+        assert!(!rendered.contains('@'), "got: {rendered}");
+        assert_eq!(
+            rendered,
+            wxc_common::policy_identity::ENTRA_UPN_MARKER,
+            "got: {rendered}"
+        );
+    }
+
     #[test]
     fn audit_mode_replaces_deny_and_record_capability() {
         let mut capabilities = vec![
@@ -1509,6 +2033,52 @@ mod tests {
             log.matches("experimental.wslc.start.portMappings[0].windowsPort")
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn config_rejection_reason_classifies_only_validation_errors() {
+        for code in [
+            MxcErrorCode::MalformedRequest,
+            MxcErrorCode::UnsupportedContainment,
+            MxcErrorCode::UnsupportedPhase,
+            MxcErrorCode::MalformedId,
+            MxcErrorCode::PolicyValidation,
+        ] {
+            assert!(
+                config_rejection_reason_for(&MxcError::new(code, "validation")).is_some(),
+                "{code} should emit configuration rejection telemetry"
+            );
+        }
+        for code in [
+            MxcErrorCode::BackendUnavailable,
+            MxcErrorCode::StaleId,
+            MxcErrorCode::NotProvisioned,
+            MxcErrorCode::NotStarted,
+            MxcErrorCode::AlreadyStarted,
+            MxcErrorCode::AlreadyStopped,
+            MxcErrorCode::BackendError,
+        ] {
+            assert!(
+                config_rejection_reason_for(&MxcError::new(code, "runtime")).is_none(),
+                "{code} should remain a runtime error"
+            );
+        }
+    }
+
+    #[test]
+    fn state_aware_policy_identity_uses_sandbox_join_key() {
+        assert_eq!(state_aware_policy_identity(None), "CLI");
+        // A caller-supplied sandbox id is not yet backend-verified at this
+        // logging call site, so it must not be echoed back even when it
+        // happens to match the shape of an MXC-minted id.
+        assert_eq!(
+            state_aware_policy_identity(Some("wsb:0123abcd")),
+            "unverified"
+        );
+        assert_eq!(
+            state_aware_policy_identity(Some("some-caller-chosen-string")),
+            "unverified"
         );
     }
 

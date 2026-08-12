@@ -49,7 +49,7 @@ pub use policy::{
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-pub use run::{resolve_runner, run, ResolvedRunner};
+pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
 
 use wxc_common::logger::{Logger, Mode};

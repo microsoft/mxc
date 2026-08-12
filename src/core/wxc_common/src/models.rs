@@ -287,6 +287,17 @@ pub enum NetworkPolicy {
     Block,
 }
 
+impl NetworkPolicy {
+    /// Canonical wire string, matching the JSON schema enum. Bounded
+    /// vocabulary for structured logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Allow => "allow",
+            Self::Block => "block",
+        }
+    }
+}
+
 impl From<crate::wire::NetworkPolicy> for NetworkPolicy {
     fn from(p: crate::wire::NetworkPolicy) -> Self {
         match p {
@@ -303,6 +314,18 @@ pub enum NetworkEnforcementMode {
     Capabilities,
     Firewall,
     Both,
+}
+
+impl NetworkEnforcementMode {
+    /// Canonical wire string, matching the JSON schema enum. Bounded
+    /// vocabulary for structured logs.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Capabilities => "capabilities",
+            Self::Firewall => "firewall",
+            Self::Both => "both",
+        }
+    }
 }
 
 impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {

@@ -24,7 +24,11 @@ use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryC
 use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
-pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use events::{
+    log_config_rejected, log_enforcement_degraded, log_error, log_execution,
+    log_network_policy_applied, log_policy_hash, log_process_event, log_sandbox_torn_down,
+    ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext,
+};
 
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
@@ -182,6 +186,11 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 /// will clean up the provider registration at process termination.
 pub fn shutdown() {
     mxc_telemetry::shutdown();
+}
+
+/// Returns whether the process-scoped Windows ETW provider is registered.
+pub fn is_active() -> bool {
+    mxc_telemetry::is_active()
 }
 
 /// Classify a failed execution into a bounded [`FailureReason`].
@@ -657,8 +666,12 @@ mod tests {
     /// Serializes tests that touch the process-global emit slot / context
     /// (`HAS_EMITTED`, `PROCESS_BACKEND`, `PROCESS_PHASE`, `PROCESS_CORRELATION_VECTOR`)
     /// or drive the emit paths, so their global state can't leak across tests.
-    /// Mirrors the `TEST_LOCK` pattern in `mxc_telemetry`.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// Shared with `events::test_sink`, since both this module's tests and
+    /// the requirement-payload test in `events.rs` touch the same
+    /// process-global capture state; a lock private to this module alone
+    /// would not serialize against that test. Mirrors the `TEST_LOCK`
+    /// pattern in `mxc_telemetry`.
+    use super::events::test_sink::TEST_LOCK;
 
     #[test]
     fn is_enabled_explicit_true() {
