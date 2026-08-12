@@ -563,7 +563,7 @@ pub fn spawn() -> Result<SessionHandle> {
                                     // post-admission Ok write failed) but the run
                                     // already happened. Record the result so a
                                     // completed exec is never silently lost.
-                                    worker.logger.warning_line(&format!(
+                                    worker.logger.log_line(&format!(
                                         "exec on {sandbox_id} completed after the client \
                                          disconnected; orphaned result: {orphaned:?}"
                                     ));
