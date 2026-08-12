@@ -77,7 +77,6 @@ jobs:
           name: wxc-binaries-${{ matrix.target }}
           path: |
             src/target/${{ matrix.target }}/release/wxc-exec.exe
-            src/target/${{ matrix.target }}/release/plm.exe
             src/target/${{ matrix.target }}/release/wxc-host-prep.exe
             src/target/${{ matrix.target }}/release/winhttp-proxy-shim.exe
             src/target/${{ matrix.target }}/release/wxc-windows-sandbox-daemon.exe
