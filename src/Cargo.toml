@@ -28,6 +28,7 @@ members = [
     "backends/lxc/common",
     "backends/bubblewrap/common",
     "backends/wslc/common",
+    "backends/wslc/daemon",
     "backends/seatbelt/common",
     "host/wxc_host_prep",
     "host/wxc_winhttp_proxy_shim",
@@ -103,6 +104,7 @@ unicode-general-category = "1"
 thiserror = "2"
 anyhow = "1"
 base64 = "0.22"
+sha2 = "0.10"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 quick-xml = "0.41"

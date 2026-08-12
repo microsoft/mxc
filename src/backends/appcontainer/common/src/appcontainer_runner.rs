@@ -31,7 +31,6 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
-use crate::base_container_runner::BaseContainerRunner;
 use crate::capture_output;
 use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
 use crate::job_object::UiJobObject;
@@ -57,14 +56,6 @@ pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
     "captureDenials requires either the native BaseContainer learning-mode APIs or an \
      AppContainer runner explicitly configured with the guarded-WPR capture fallback \
      (see AppContainerScriptRunner::with_guarded_capture_factory)";
-
-/// captureDenials was requested and a guarded-WPR capture factory is
-/// configured, but the request's schema version predates the
-/// `processContainer.captureDenials` schema floor (0.8.0). Mirrors
-/// `BaseContainerRunner`'s equivalent message so the schema-gate error is
-/// identical regardless of which tier ultimately handles the capture.
-pub(crate) const CAPTURE_DENIALS_SCHEMA_TOO_OLD_MSG: &str =
-    "processContainer.captureDenials requires schema version 0.8.0 or later";
 
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
@@ -1001,12 +992,15 @@ impl AppContainerScriptRunner {
         // --- Build command line ---
         let mut cmd_line_wide = string_util::to_wide(&request.script_code);
 
-        let working_dir_wide = string_util::to_wide(&request.working_directory);
-        let working_dir_pcwstr = if request.working_directory.is_empty() {
-            PCWSTR::null()
-        } else {
-            PCWSTR(working_dir_wide.as_ptr())
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(request);
+        logger.log_line(&format!(
+            "working directory: {}",
+            working_directory.describe()
+        ));
+        let working_dir_wide = string_util::to_wide(&working_directory.path);
+        let working_dir_pcwstr = PCWSTR(working_dir_wide.as_ptr());
 
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
@@ -1068,7 +1062,13 @@ impl AppContainerScriptRunner {
                 &mut pi,
             )
         }
-        .map_err(|err| WxcError::Process(format!("CreateProcessW failed: {}", err)))?;
+        .map_err(|err| {
+            WxcError::Process(format!(
+                "CreateProcessW failed: {} (working directory: {})",
+                err,
+                working_directory.describe()
+            ))
+        })?;
 
         logger.log_line(&format!(
             "Process created successfully (PID: {})",
@@ -1478,15 +1478,7 @@ impl SandboxBackend for AppContainerScriptRunner {
                         ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
                     });
                 }
-                Some(_) => {
-                    // A configured factory means the dispatcher explicitly
-                    // opted this runner into the guarded-WPR fallback; the
-                    // only remaining gate is the same schema floor the
-                    // native BaseContainer path enforces.
-                    if !BaseContainerRunner::schema_prefers_process_security_environment(request) {
-                        return Err(ScriptResponse::error(CAPTURE_DENIALS_SCHEMA_TOO_OLD_MSG));
-                    }
-                }
+                Some(_) => {}
             }
         }
         if !request.policy.denied_paths.is_empty()
@@ -2100,7 +2092,6 @@ mod tests {
 
     use super::{
         AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
-        CAPTURE_DENIALS_SCHEMA_TOO_OLD_MSG,
     };
     use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
     use learning_mode_core::AnalysisResult;
@@ -2133,13 +2124,6 @@ mod tests {
                 }
             }
             Ok(Box::new(FakeSession))
-        }
-    }
-
-    fn schema_0_8_request() -> ExecutionRequest {
-        ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..ExecutionRequest::default()
         }
     }
 
@@ -2229,29 +2213,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_accepts_capture_denials_with_guarded_factory_on_schema_0_8() {
-        let runner = AppContainerScriptRunner::new()
-            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
-        let mut request = schema_0_8_request();
-        request.policy.capture_denials = Some(Default::default());
-
-        assert!(
-            runner.validate(&request).is_ok(),
-            "a runner explicitly configured with a guarded capture factory must accept \
-             captureDenials on schema 0.8+"
-        );
-    }
-
-    #[test]
-    fn validate_runner_rejects_capture_denials_with_guarded_factory_before_schema_0_8() {
+    fn validate_runner_accepts_capture_denials_with_guarded_factory() {
         let runner = AppContainerScriptRunner::new()
             .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
         let mut request = ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
 
-        let error = runner
-            .validate(&request)
-            .expect_err("captureDenials still requires schema 0.8+ even with a guarded factory");
-        assert_eq!(error.error_message, CAPTURE_DENIALS_SCHEMA_TOO_OLD_MSG);
+        assert!(
+            runner.validate(&request).is_ok(),
+            "a runner explicitly configured with a guarded capture factory must accept \
+             captureDenials"
+        );
     }
 }

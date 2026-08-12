@@ -21,6 +21,8 @@ use wxc_common::logger::Logger;
 
 const PLM_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 const PLM_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const MAX_PLM_OUTPUT_BYTES: usize = 1024 * 1024;
+const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[PLM output truncated]\n";
 
 /// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
 /// same install directory. Returns `None` when the current exe path
@@ -104,8 +106,6 @@ fn wait_with_output_timeout(
     mut child: std::process::Child,
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
-    use std::io::Read as _;
-
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -118,11 +118,8 @@ fn wait_with_output_timeout(
     };
     let stdout_reader = match std::thread::Builder::new()
         .name("plm-audit-stdout".to_string())
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            let mut stdout = stdout;
-            stdout.read_to_end(&mut bytes).map(|_| bytes)
-        }) {
+        .spawn(move || read_bounded_output(stdout, MAX_PLM_OUTPUT_BYTES))
+    {
         Ok(reader) => reader,
         Err(error) => {
             let _ = child.kill();
@@ -132,11 +129,8 @@ fn wait_with_output_timeout(
     };
     let stderr_reader = match std::thread::Builder::new()
         .name("plm-audit-stderr".to_string())
-        .spawn(move || {
-            let mut bytes = Vec::new();
-            let mut stderr = stderr;
-            stderr.read_to_end(&mut bytes).map(|_| bytes)
-        }) {
+        .spawn(move || read_bounded_output(stderr, MAX_PLM_OUTPUT_BYTES))
+    {
         Ok(reader) => reader,
         Err(error) => {
             let _ = child.kill();
@@ -193,6 +187,29 @@ fn wait_with_output_timeout(
         stdout,
         stderr,
     })
+}
+
+fn read_bounded_output(mut reader: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(output.len());
+        let retained = remaining.min(count);
+        output.extend_from_slice(&buffer[..retained]);
+        truncated |= retained != count;
+    }
+    if truncated {
+        let marker = &OUTPUT_TRUNCATED_MARKER[..OUTPUT_TRUNCATED_MARKER.len().min(limit)];
+        let marker_start = output.len().saturating_sub(marker.len());
+        output.truncate(marker_start);
+        output.extend_from_slice(marker);
+    }
+    Ok(output)
 }
 
 fn report_plm_output(
@@ -338,5 +355,24 @@ mod tests {
         unsafe {
             let _ = CloseHandle(process);
         }
+    }
+
+    #[test]
+    fn analysis_output_reader_caps_and_drains_child_output() {
+        let input_len = MAX_PLM_OUTPUT_BYTES + 4096;
+        let mut input = std::io::Cursor::new(vec![b'x'; input_len]);
+        let captured =
+            read_bounded_output(&mut input, MAX_PLM_OUTPUT_BYTES).expect("bounded output read");
+        assert_eq!(input.position(), input_len as u64);
+        assert_eq!(captured.len(), MAX_PLM_OUTPUT_BYTES);
+        assert!(captured.ends_with(OUTPUT_TRUNCATED_MARKER));
+    }
+
+    #[test]
+    fn analysis_output_reader_honors_limits_smaller_than_marker() {
+        let captured =
+            read_bounded_output(std::io::Cursor::new([b'x'; 32]), 8).expect("bounded output read");
+        assert_eq!(captured.len(), 8);
+        assert_eq!(captured, OUTPUT_TRUNCATED_MARKER[..8]);
     }
 }

@@ -352,12 +352,7 @@ fn same_config_target(a: &Path, b: &Path) -> bool {
 }
 
 fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
-    use windows::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
-
-    let a: Vec<u16> = a.encode_utf16().collect();
-    let b: Vec<u16> = b.encode_utf16().collect();
-    // SAFETY: Both slices are valid UTF-16 buffers for the duration of the call.
-    unsafe { CompareStringOrdinal(&a, &b, true) == CSTR_EQUAL }
+    wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
 }
 
 fn target_comparison_key(path: &Path) -> String {

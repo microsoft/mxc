@@ -317,7 +317,7 @@ Same model and enforcement as WSLc (model 2 achievable; iptables/nftables on the
 ### Other backends
 
 - **Windows Sandbox:** Guest-side firewall only, with hardcoded rules. In GA for development/testing scenarios where network isolation is not critical.
-- **Isolation Session:** No network configuration support (all network/proxy fields rejected at validation time). In GA for process isolation only (filesystem, identity, lifecycle).
+- **Isolation Session:** No network filtering or denial is possible — outbound is open and a process inside can listen on a localhost-reachable port. Provision therefore requires the canonical unrestricted-network acknowledgment (`network.defaultPolicy=allow` + `network.allowLocalNetwork=true`) and rejects every other network/proxy policy at validation time. In GA for process isolation only (identity, lifecycle).
 - **Hyperlight, Nanvix:** Not in this GA scope doc. Additional follow up is needed to confirm their capabilities and whether they align with this doc.
 
 ## Gaps and limitations

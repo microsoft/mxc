@@ -26,7 +26,6 @@ learning_mode_windows.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
-    "Win32_Globalization",
     "Win32_System_EventLog",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

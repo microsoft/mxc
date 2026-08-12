@@ -179,6 +179,7 @@ fn backend_from_prefix(prefix: &str) -> Result<ContainmentBackend, MxcError> {
     match prefix {
         "iso" => Ok(ContainmentBackend::IsolationSession),
         "wsb" => Ok(ContainmentBackend::WindowsSandbox),
+        "wslc" => Ok(ContainmentBackend::Wslc),
         // Future state-aware backends extend this list.
         other => Err(MxcError::unsupported_containment(format!(
             "no state-aware backend registered for prefix {:?}",
@@ -602,6 +603,61 @@ mod tests {
         assert_eq!(env, json!({"result": {}}));
     }
 
+    // The remaining three phases complete the dry-run contract: `--dry-run`
+    // must run the validation hook and then NOT execute the phase body.
+    //
+    // These exist because the E2E harness cannot pin this. For `start`, `stop`
+    // and `deprovision` the real backends return `metadata: None`, which the
+    // dispatcher renders as `{"result":{}}` — byte-identical to the dry-run
+    // short-circuit's own envelope. So no observable at the process boundary
+    // distinguishes "the phase ran" from "the phase was skipped"; only a
+    // call-counting backend can. A per-arm regression that stopped honouring
+    // `dry_run` in one of these phases would otherwise be invisible.
+
+    #[test]
+    fn dispatch_start_dry_run_skips_start_call_but_runs_validate() {
+        let mut b = StubBackend::new();
+        let env = assert_envelope(
+            dispatch_state_aware(&mut b, parsed(Phase::Start, Some("stubd:abc"), None), true)
+                .unwrap(),
+        );
+        assert_eq!(b.validate_start_calls.get(), 1);
+        assert_eq!(b.start_calls.get(), 0, "dry-run must not start the sandbox");
+        assert_eq!(env, json!({"result": {}}));
+    }
+
+    #[test]
+    fn dispatch_stop_dry_run_skips_stop_call_but_runs_validate() {
+        let mut b = StubBackend::new();
+        let env = assert_envelope(
+            dispatch_state_aware(&mut b, parsed(Phase::Stop, Some("stubd:abc"), None), true)
+                .unwrap(),
+        );
+        assert_eq!(b.validate_stop_calls.get(), 1);
+        assert_eq!(b.stop_calls.get(), 0, "dry-run must not stop the sandbox");
+        assert_eq!(env, json!({"result": {}}));
+    }
+
+    #[test]
+    fn dispatch_deprovision_dry_run_skips_deprovision_call_but_runs_validate() {
+        let mut b = StubBackend::new();
+        let env = assert_envelope(
+            dispatch_state_aware(
+                &mut b,
+                parsed(Phase::Deprovision, Some("stubd:abc"), None),
+                true,
+            )
+            .unwrap(),
+        );
+        assert_eq!(b.validate_deprovision_calls.get(), 1);
+        assert_eq!(
+            b.deprovision_calls.get(),
+            0,
+            "dry-run must not deprovision the sandbox"
+        );
+        assert_eq!(env, json!({"result": {}}));
+    }
+
     #[test]
     fn dispatch_stop_routes_correctly() {
         let mut b = StubBackend::new();
@@ -737,6 +793,20 @@ mod tests {
             resolve_backend(&p).unwrap(),
             ContainmentBackend::WindowsSandbox
         );
+    }
+
+    #[test]
+    fn resolve_backend_for_wslc_prefix_returns_wslc() {
+        let p = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Start,
+            containment: None,
+            sandbox_id: Some("wslc:deadbeef".into()),
+            correlation_vector: None,
+            experimental_raw: None,
+            source_text: None,
+        };
+        assert_eq!(resolve_backend(&p).unwrap(), ContainmentBackend::Wslc);
     }
 
     #[test]

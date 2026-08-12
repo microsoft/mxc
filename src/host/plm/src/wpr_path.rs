@@ -47,42 +47,18 @@ use std::sync::OnceLock;
 /// Cached absolute path to `wpr.exe`, resolved on first use.
 static WPR_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
-/// Resolve `<System32>\wpr.exe` via `GetSystemDirectoryW`. The kernel
-/// publishes this value at process creation and the env block cannot
-/// override it, so this is safe even when the parent (unelevated)
-/// process set `SystemRoot` to an attacker-controlled directory.
-///
-/// If `GetSystemDirectoryW` reports the initial 260-wide buffer is
-/// insufficient (return value `>= buf.len()`, per Win32 semantics),
-/// we retry once with the required size. Only if the API returns 0
-/// (a Win32 failure, which does not happen on a real Windows install)
-/// do we surface `None` to the caller.
+/// Resolve `<System32>\wpr.exe`. The System directory comes from
+/// `GetSystemDirectoryW` (kernel-published, not env-spoofable), so this is
+/// safe even when the parent (unelevated) process set `SystemRoot` to an
+/// attacker-controlled directory. Returns `None` only when
+/// `GetSystemDirectoryW` fails outright (a broken Windows install, which does
+/// not happen on a real one).
 #[cfg(target_os = "windows")]
 fn resolve_wpr_path() -> Option<PathBuf> {
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-
-    let mut buf = vec![0u16; 260];
-    // SAFETY: buf is initialized; we pass a valid length and own the
-    // memory for the duration of the call.
-    let mut n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
-    if n == 0 {
-        return None;
-    }
-    // Per docs: on success `n` is the length WITHOUT the terminating
-    // NUL and is strictly less than the buffer size. If `n` is >=
-    // buffer size, the buffer was too small and `n` is the required
-    // size INCLUDING the NUL — grow and retry once.
-    if (n as usize) >= buf.len() {
-        buf = vec![0u16; n as usize];
-        n = unsafe { GetSystemDirectoryW(Some(&mut buf)) };
-        if n == 0 || (n as usize) >= buf.len() {
-            return None;
-        }
-    }
-    let dir = wxc_common::string_util::from_wide(&buf[..n as usize]);
-    let mut p = PathBuf::from(dir);
-    p.push("wpr.exe");
-    Some(p)
+    wxc_common::system_dir::resolve_system_directory().map(|mut dir| {
+        dir.push("wpr.exe");
+        dir
+    })
 }
 
 /// Sanity-check that the resolved `wpr.exe` actually exists on disk.

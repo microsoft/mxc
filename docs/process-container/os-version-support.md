@@ -33,15 +33,15 @@ available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
 |------|-----------|:--:|:--:|:--:|:--:|
-| **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
+| **T1** BaseContainer | PSEC `CreateProcessSecurityEnvironment`, with transitional `Experimental_CreateProcessInSandbox` fallback (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when an OS contract is enabled, else falls back to T3 |
 | **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
 | **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
 
-- **T1 (BaseContainer)** requires `processmodel.dll` to export
-  `Experimental_CreateProcessInSandbox` *and* the OS feature to be enabled; this
-  is a 25H2+ capability. Usability is resolved up front by
-  `BaseContainerRunner::is_base_container_usable()` so tier selection never picks
-  a T1 that cannot launch.
+- **T1 (BaseContainer)** requires an enabled processmodel.dll BaseContainer
+  contract. MXC prefers PSEC when its runtime probe succeeds and otherwise
+  checks the transitional SBOX contract. This is a 25H2+ capability. Usability
+  is resolved up front by `BaseContainerRunner::is_usable_for_request()` so tier
+  selection never picks a T1 that cannot launch the requested policy.
 - **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
   later, but the `tier2_bfs` Cargo feature is **off** in all shipping builds
   because invoking `bfscfg.exe` can deadlock the host on 25H2. Treat T2 as
@@ -49,15 +49,14 @@ available bounds what policy can be enforced.
 - **T3 (AppContainer + DACL)** is the universal fallback and enforces
   filesystem policy via host path ACEs on every release.
 
-## Schema 0.8 process security environment preference
+## Process security environment preference
 
-BaseContainer requests using schema versions through 0.7 use the SBOX contract
-and the T1/T2/T3 fallback chain above. Schema 0.8 and later prefer the PSEC
-process-security-environment contract when its complete export set resolves and
-`QueryProcessSecurityEnvironmentSupport` succeeds. During the transition from
-the experimental SBOX API to PSEC, an ordinary schema 0.8 request falls back to
-SBOX when PSEC is unavailable, then continues through the existing AppContainer
-fallback tiers when neither BaseContainer contract is usable.
+BaseContainer requests prefer the PSEC process-security-environment contract
+whenever its runtime probe succeeds, independent of schema version. During the
+transition from the experimental SBOX API to PSEC, an ordinary request falls
+back to SBOX when PSEC is unavailable or cannot represent the requested policy,
+then continues through the existing AppContainer fallback tiers when neither
+BaseContainer contract is usable.
 
 The PSEC probe requires:
 
@@ -100,9 +99,9 @@ build `26663.1000` is accepted. These builds are validation points, not a
 public release-floor commitment; runtime probing is the source of truth.
 
 The PSEC contract cannot represent `processContainer.leastPrivilege`, so
-ordinary schema 0.8 requests using that option use the transitional SBOX
-contract instead of failing. MXC also does not yet supply the AppContainer peer
-identity required by the current model-2 SBOX proxy contract. On hosts with
+requests using that option use the transitional SBOX contract instead of
+failing. MXC also does not yet supply the AppContainer peer identity required by
+the current model-2 SBOX proxy contract. On hosts with
 `Experimental_QuerySandboxSupport`, proxy requests therefore skip
 BaseContainer and continue to the AppContainer fallback; older query-less hosts
 retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses

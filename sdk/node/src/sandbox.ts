@@ -9,7 +9,7 @@ import { parse as semverParse } from 'semver';
 import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
-import { MxcError, mxcErrorFromCode } from './errors.js';
+import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const SUPPORTED_VERSION = '0.8.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
@@ -287,9 +287,11 @@ export function createConfigFromPolicy(
                 );
             }
         }
-        // Unix backends accept host lists without allowOutbound. Bubblewrap,
-        // LXC, and WSLC enforce them; Seatbelt accepts them for SDK compatibility
-        // and leaves its limitations to native validation.
+        // Unix backends accept host lists without allowOutbound. Bubblewrap and
+        // LXC enforce them; WSLC does not (per-host filtering is non-functional —
+        // no in-kernel iptables + no CAP_NET_ADMIN — and is rejected at parse
+        // time); Seatbelt accepts them for SDK compatibility and leaves its
+        // limitations to native validation.
         const acceptsHostRulesWithoutOutbound =
             containment === 'wslc' ||
             containment === 'seatbelt' ||
@@ -730,7 +732,7 @@ function tryParseErrorEnvelopeFromLines(output: string): MxcError | null {
       if (parsed && typeof parsed === 'object' && 'error' in parsed) {
         const env = parsed.error;
         if (env && typeof env.code === 'string' && typeof env.message === 'string') {
-          return mxcErrorFromCode(env.code, env.message, env.details);
+          return mxcErrorFromEnvelope(env);
         }
       }
     } catch {

@@ -765,7 +765,13 @@ fn main() {
 
     // --probe is a detection-only fast path used by SDK
     // `getPlatformSupport()` on every first call. It does not spawn a
-    // sandbox, never parks a DaclManager, and never calls into COM/WinRT.
+    // sandbox and never parks a DaclManager.
+    //
+    // It does activate WinRT: `isolation_session_available()` resolves the
+    // IsolationSession activation factory. That probe owns and releases its
+    // own COM apartment, so it neither needs nor disturbs the process-wide
+    // init below — this ordering is not a claim that the probe is COM-free.
+    //
     // Run it AFTER recovery (so consumers that rely on `--probe`-as-
     // reaper still get it) but BEFORE COM init / SetConsoleCtrlHandler
     // (which probe doesn't need; deferring them shaves cold-start cost
@@ -788,6 +794,16 @@ fn main() {
             wxc_common::models::ContainerPolicy::default()
         };
         let output = appcontainer_common::probe::run_probe(&policy);
+        // appcontainer_common has no dependency on the isolation-session
+        // backend, so it reports `isolationSessionAvailable` as `false`. When
+        // the backend is compiled in, override it with a read-only activation
+        // probe of the in-proc service.
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        let output = {
+            let mut output = output;
+            output.probes.isolation_session_available = mxc_engine::isolation_session_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -1215,6 +1231,7 @@ fn main() {
                     "error: plm start failed; refusing to run --audit without an \
                      active trace. See logs for details."
                 );
+                drop(take_parked_dacl());
                 std::process::exit(1);
             }
         }

@@ -92,7 +92,6 @@ dependencies = [
  "learning_mode_windows",
  "process_security_environment_spec",
  "sandbox_spec",
- "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1190,8 +1189,10 @@ dependencies = [
 name = "isolation_session_common"
 version = "0.7.0"
 dependencies = [
+ "base64",
  "isolation_session_bindings",
  "serde",
+ "serde_json",
  "windows",
  "windows-collections",
  "windows-core",
@@ -1396,6 +1397,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "wxc_common",
 ]
@@ -3120,10 +3122,14 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "wslc_common"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "libloading",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "uuid",
  "windows",
  "wxc_common",
  "zip",
@@ -3264,6 +3270,22 @@ dependencies = [
  "mxc_build_common",
  "windows",
  "windows-core",
+ "wxc_common",
+]
+
+[[package]]
+name = "wxc_wslc_daemon"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "mxc_build_common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "wslc_common",
  "wxc_common",
 ]
 

@@ -216,22 +216,20 @@ fn is_self_access(object_name: &str, app_path: &str) -> bool {
     let app_path = strip_dos_namespace_prefix(app_path);
     match (path_namespace(object_name), path_namespace(app_path)) {
         (Some(object_namespace), Some(app_namespace)) if object_namespace == app_namespace => {
-            object_name.eq_ignore_ascii_case(app_path)
+            windows_paths_equal_ignore_case(object_name, app_path)
         }
-        (Some(_), Some(_)) => {
-            match (
-                volume_relative_path(object_name),
-                volume_relative_path(app_path),
-            ) {
-                (Some(object_relative), Some(app_relative)) => {
-                    !object_relative.is_empty()
-                        && object_relative.eq_ignore_ascii_case(app_relative)
-                }
-                _ => false,
-            }
+        (Some(PathNamespace::Dos), Some(PathNamespace::DeviceVolume)) => {
+            crate::path_norm::device_path_matches_dos(app_path, object_name)
+        }
+        (Some(PathNamespace::DeviceVolume), Some(PathNamespace::Dos)) => {
+            crate::path_norm::device_path_matches_dos(object_name, app_path)
         }
         _ => false,
     }
+}
+
+fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -259,25 +257,6 @@ fn strip_dos_namespace_prefix(path: &str) -> &str {
         }
     }
     path
-}
-
-fn volume_relative_path(path: &str) -> Option<&str> {
-    let bytes = path.as_bytes();
-    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
-        return path.get(2..);
-    }
-
-    const VOLUME_PREFIX: &str = r"\Device\HarddiskVolume";
-    if path
-        .get(..VOLUME_PREFIX.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VOLUME_PREFIX))
-    {
-        return path
-            .get(VOLUME_PREFIX.len()..)?
-            .find('\\')
-            .and_then(|separator| path.get(VOLUME_PREFIX.len() + separator..));
-    }
-    None
 }
 
 /// Builds a [`RawDenial`] from a `LearningModeViolation` (event 27) payload.
@@ -558,21 +537,76 @@ mod tests {
 
     #[test]
     fn access_check_drops_workload_self_access() {
+        let drive_map = crate::path_norm::rebuild_drive_map_for_tests();
+        let (drive, device) = drive_map
+            .first()
+            .expect("Windows test host has a drive map");
+        let object_name = format!(r#""\??\{drive}\Tools\App.EXE""#);
         for app_path in [
-            r#""\Device\HarddiskVolume3\Tools\app.exe""#,
-            r#""C:\Tools\app.exe""#,
+            format!(r#""{device}\Tools\app.exe""#),
+            format!(r#""{drive}\Tools\app.exe""#),
         ] {
             let p = parts(
                 14,
                 &[
                     ("ObjectType", "\"File\""),
-                    ("ObjectName", r#""\??\C:\Tools\App.EXE""#),
-                    ("AppPath", app_path),
+                    ("ObjectName", &object_name),
+                    ("AppPath", &app_path),
                     ("AccessMask", "0x1"),
                 ],
             );
             assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
         }
+    }
+
+    #[test]
+    fn access_check_preserves_mixed_namespace_path_on_another_volume() {
+        let drive_map = crate::path_norm::rebuild_drive_map_for_tests();
+        let (drive, device) = drive_map
+            .first()
+            .expect("Windows test host has a drive map");
+        let other_drive = if drive.eq_ignore_ascii_case("C:") {
+            "D:"
+        } else {
+            "C:"
+        };
+        let object_name = format!(r#""{other_drive}\Tools\app.exe""#);
+        let app_path = format!(r#""{device}\Tools\app.exe""#);
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", &object_name),
+                ("AppPath", &app_path),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn access_check_preserves_unmapped_device_path() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\Tools\app.exe""#),
+                (
+                    "AppPath",
+                    r#""\Device\HarddiskVolume4294967295\Tools\app.exe""#,
+                ),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn windows_path_comparison_uses_unicode_ordinal_case_folding() {
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\TÄST\app.exe",
+            r"c:\täst\APP.EXE"
+        ));
     }
 
     #[test]

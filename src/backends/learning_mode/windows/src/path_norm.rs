@@ -108,6 +108,31 @@ fn map_device_path(kernel_path: &str, map: &[(String, String)]) -> Option<String
     None
 }
 
+/// Compares a device-form path (first argument) with a DOS-form path (second).
+pub(crate) fn device_path_matches_dos(device_path: &str, dos_path: &str) -> bool {
+    device_path_matches_dos_with_map(device_path, dos_path, DRIVE_MAP.get_or_init(load_drive_map))
+}
+
+fn device_path_matches_dos_with_map(
+    device_path: &str,
+    dos_path: &str,
+    map: &[(String, String)],
+) -> bool {
+    map.iter().any(|(letter, prefix)| {
+        device_path
+            .strip_prefix(prefix.as_str())
+            .filter(|rest| rest.is_empty() || rest.starts_with('\\'))
+            .is_some_and(|rest| {
+                dos_path
+                    .get(..letter.len())
+                    .is_some_and(|dos_letter| dos_letter.eq_ignore_ascii_case(letter))
+                    && dos_path.get(letter.len()..).is_some_and(|dos_rest| {
+                        wxc_common::string_util::windows_paths_equal_ignore_case(rest, dos_rest)
+                    })
+            })
+    })
+}
+
 /// Returns whether `path` is already an absolute user-visible DOS or UNC path.
 pub fn is_user_visible_absolute(path: &str) -> bool {
     let bytes = path.as_bytes();
@@ -287,5 +312,25 @@ mod tests {
     fn device_prefix_requires_component_boundary() {
         let map = vec![("C:".to_string(), r"\Device\HarddiskVolume42".to_string())];
         assert!(to_user_visible_with_map(r"\Device\HarddiskVolume420\Windows", &map).is_none());
+    }
+
+    #[test]
+    fn compares_device_and_dos_paths_without_materializing_a_path() {
+        let map = vec![("C:".to_string(), r"\Device\HarddiskVolume42".to_string())];
+        assert!(device_path_matches_dos_with_map(
+            r"\Device\HarddiskVolume42\TÄST\App.exe",
+            r"c:\täst\app.EXE",
+            &map
+        ));
+        assert!(!device_path_matches_dos_with_map(
+            r"\Device\HarddiskVolume42\Tools\App.exe",
+            r"D:\Tools\App.exe",
+            &map
+        ));
+        assert!(!device_path_matches_dos_with_map(
+            r"\Device\HarddiskVolume420\Tools\App.exe",
+            r"C:\Tools\App.exe",
+            &map
+        ));
     }
 }
