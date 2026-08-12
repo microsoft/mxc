@@ -577,8 +577,9 @@ mod tests {
         command.args([
             "-NoProfile",
             "-Command",
-            "$p = Start-Process powershell.exe -NoNewWindow -PassThru -ArgumentList \
-             '-NoProfile','-Command','Start-Sleep -Seconds 60'; Write-Output \"PID=$($p.Id)\"",
+            "[Console]::Out.WriteLine('INHERITED_HANDLE_SENTINEL'); [Console]::Out.Flush(); \
+             Start-Process powershell.exe -NoNewWindow -ArgumentList \
+             '-NoProfile','-Command','Start-Sleep -Seconds 4'",
         ]);
         let started = Instant::now();
 
@@ -586,26 +587,8 @@ mod tests {
             run_wpr_command(command, "test", "powershell.exe", Duration::from_secs(5)).unwrap_err();
         let control_elapsed = started.elapsed();
         let message = format!("{error:#}");
-        let pid = message
-            .split("PID=")
-            .nth(1)
-            .and_then(|suffix| {
-                suffix
-                    .chars()
-                    .take_while(char::is_ascii_digit)
-                    .collect::<String>()
-                    .parse::<u32>()
-                    .ok()
-            })
-            .expect("descendant PID should be retained in partial stdout");
-        let _ = Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"),
-            ])
-            .status();
 
+        assert!(message.contains("INHERITED_HANDLE_SENTINEL"));
         assert!(message.contains("output drain failed"));
         assert!(may_have_changed_wpr_state(&error));
         assert!(control_elapsed < Duration::from_secs(15));
