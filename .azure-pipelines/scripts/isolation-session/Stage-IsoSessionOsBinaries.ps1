@@ -40,13 +40,13 @@ $requiredBinaries = @(
     'IsolationProxy.exe',
     'IsoSessionCli.exe'
 )
-$requiredWinmds = @(
+$optionalWinmds = @(
     'windows.ai.isolationsession.winmd',
     'windows.ai.isolationsession.preview.winmd'
 )
-$expectedFiles = @($requiredBinaries + $requiredWinmds)
+$recognizedFiles = @($requiredBinaries + $optionalWinmds)
 $expectedFileLookup = @{}
-foreach ($name in $expectedFiles) {
+foreach ($name in $recognizedFiles) {
     $expectedFileLookup[$name.ToLowerInvariant()] = $name
 }
 
@@ -62,7 +62,7 @@ Get-ChildItem -LiteralPath $DropRoot -Recurse -File | ForEach-Object {
 }
 
 $missing = @(
-    $expectedFiles | Where-Object {
+    $requiredBinaries | Where-Object {
         -not $foundByName.ContainsKey($_.ToLowerInvariant())
     })
 if ($missing.Count -gt 0) {
@@ -72,8 +72,12 @@ if ($missing.Count -gt 0) {
 $stageDir = Join-Path $OutDir "bin\$ArchTag"
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 $dropRootPath = (Resolve-Path -LiteralPath $DropRoot).Path.TrimEnd('\')
+$filesToStage = @(
+    $recognizedFiles | Where-Object {
+        $foundByName.ContainsKey($_.ToLowerInvariant())
+    })
 
-$files = foreach ($name in $expectedFiles) {
+$files = foreach ($name in $filesToStage) {
     $source = $foundByName[$name.ToLowerInvariant()]
     $destination = Join-Path $stageDir $name
     Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
@@ -82,7 +86,7 @@ $files = foreach ($name in $expectedFiles) {
 
     [ordered]@{
         name = $name
-        kind = if ($requiredWinmds -contains $name) { 'winmd' } else { 'binary' }
+        kind = if ($optionalWinmds -contains $name) { 'winmd' } else { 'binary' }
         sizeBytes = $item.Length
         sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
         fileVersion = $item.VersionInfo.FileVersion
@@ -106,5 +110,5 @@ $manifestPath = Join-Path $OutDir 'source-manifest.json'
 $manifest | ConvertTo-Json -Depth 6 |
     Set-Content -LiteralPath $manifestPath -Encoding UTF8
 
-Write-Host "Staged $($expectedFiles.Count) IsoSession files in '$stageDir'."
+Write-Host "Staged $($filesToStage.Count) IsoSession files in '$stageDir'."
 Write-Host "Source manifest: $manifestPath"

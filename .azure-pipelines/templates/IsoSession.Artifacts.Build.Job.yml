@@ -41,7 +41,7 @@ jobs:
     payloadBinDirectory: $(payloadDirectory)/bin/${{ parameters.archTag }}
     installerOutputDirectory: $(workDirectory)/installer
     artifactDirectory: $(Build.SourcesDirectory)/out/isosession/${{ parameters.archTag }}
-    artifactName: isosession-intermediate-${{ parameters.archTag }}
+    artifactName: isosession-installers-${{ parameters.archTag }}
 
   steps:
   - checkout: self
@@ -63,7 +63,7 @@ jobs:
       New-Item -ItemType Directory -Force -Path '$(workDirectory)' | Out-Null
       $release | ConvertTo-Json -Depth 10 |
           Set-Content -LiteralPath '$(workDirectory)\release-contract.json' -Encoding UTF8
-      Write-Host "Validated release $($release.canonicalRelease) -> NuGet $($release.nugetVersion) / MSI $($release.msiVersion)"
+      Write-Host "Validated release $($release.canonicalRelease) -> MSI $($release.msiVersion)"
     displayName: Validate pipeline parameters and write release contract
 
   - powershell: |
@@ -301,7 +301,7 @@ jobs:
           }
           Copy-Item -LiteralPath $source -Destination '$(artifactDirectory)' -Force
       }
-    displayName: Assemble intermediate artifacts
+    displayName: Assemble installer artifacts
 
   - task: 1ES.PublishPipelineArtifact@1
     displayName: Publish $(artifactName)

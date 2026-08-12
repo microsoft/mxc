@@ -21,27 +21,18 @@ from crates.io and npmjs, helping ensure secure and vetted consumption of thirdâ
 `1ES.IsoSession.Artifacts.yml` is a manually queued 1ES pipeline that:
 
 1. Resolves x64 and ARM64 Windows `BIN` drops from a BNS `BuildGuid`.
-2. Downloads the required IsolationSession binaries plus both
-   `Windows.AI.IsolationSession` WinMD files.
+2. Downloads the six required IsolationSession runtime binaries.
 3. Builds and test-signs x64 and ARM64 MSI/bootstrapper EXE artifacts in
    parallel.
-4. Aggregates the signed payloads into one multi-architecture
-   `Microsoft.Windows.AI.IsolationSession.SDK` NuGet.
-5. Publishes per-architecture intermediate artifacts plus a final aggregated
-   artifact containing release metadata, provenance, and the aggregate
-   manifest.
+4. Publishes separate x64 and ARM64 installer artifacts with release metadata
+   and provenance.
 
-Queue parameters include `buildGuid`, `monthId`, `patch`, and the optional
-internal-feed publication controls. The canonical release contract is
-`monthId + patch`, rendered as NuGet `0.YYYYMM.patch` and MSI/bundle
-`YY.M.patch.0`.
+Queue parameters include `buildGuid`, `monthId`, and `patch`. The canonical
+release contract is `monthId + patch`, rendered as MSI/bundle `YY.M.patch.0`.
 
-This pipeline does not publish publicly. WinMD redistribution still requires
-documented approval, and test-signed artifacts must be production-signed
-before release. The opt-in feed publication stage is disabled by default and
-uses `NuGetAuthenticate@1` with the build identity instead of a PAT. Its
-default publish destination is the existing private Dart feed
-`Mxc-Azure-Feed`.
+This pipeline does not build or publish the SDK NuGet because the BNS `BIN`
+drop does not contain the two IsolationSession WinMDs. Test-signed installer
+artifacts must be production-signed before release.
 
 ### PR Pipelines
 - GitHub Actions runs the PR validation build automatically on every pull

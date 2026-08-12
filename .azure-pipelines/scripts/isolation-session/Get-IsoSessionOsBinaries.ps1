@@ -56,9 +56,7 @@ $filters = @(
     '/IsoSessionApp.dll',
     '/IsoSessionProxyStub.dll',
     '/IsolationProxy.exe',
-    '/IsoSessionCli.exe',
-    '/windows.ai.isolationsession.winmd',
-    '/windows.ai.isolationsession.preview.winmd'
+    '/IsoSessionCli.exe'
 ) -join ';'
 
 try {

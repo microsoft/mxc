@@ -65,17 +65,14 @@ dotnet build Microsoft.Mxc.Sdk.slnx
 `.azure-pipelines/1ES.IsoSession.Artifacts.yml` is a manually queued 1ES
 pipeline that accepts a Windows OS `BuildGuid`, `MonthId`, and `Patch`. It
 performs filtered drop acquisition for the six required IsolationSession
-binaries plus both IsolationSession WinMDs, then builds signed x64 and ARM64
-MSI/bootstrapper outputs in parallel and aggregates them into one
-multi-architecture `Microsoft.Windows.AI.IsolationSession.SDK` NuGet.
+binaries, then builds signed x64 and ARM64 MSI/bootstrapper outputs in
+parallel.
 
 Maintained packaging inputs live under `packaging/isolation-session/`. The
-canonical release contract is `MonthId + Patch`, rendered as NuGet
-`0.YYYYMM.patch` and MSI/bundle `YY.M.patch.0`. The initial pipeline uses test
-signing, emits aggregate provenance and release metadata, and exposes an
-opt-in internal-feed publication stage through `NuGetAuthenticate@1`. WinMD
-redistribution approval and production signing are still required before any
-public release.
+canonical release contract is `MonthId + Patch`, rendered as MSI/bundle
+`YY.M.patch.0`. The current pipeline uses test signing and publishes separate
+x64 and ARM64 installer artifacts. SDK NuGet generation is deferred because
+the BNS `BIN` drop does not contain the two IsolationSession WinMDs.
 
 ### Lint and format
 
