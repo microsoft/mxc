@@ -108,6 +108,7 @@ fn map_device_path(kernel_path: &str, map: &[(String, String)]) -> Option<String
     None
 }
 
+/// Compares a device-form path (first argument) with a DOS-form path (second).
 pub(crate) fn device_path_matches_dos(device_path: &str, dos_path: &str) -> bool {
     device_path_matches_dos_with_map(device_path, dos_path, DRIVE_MAP.get_or_init(load_drive_map))
 }
