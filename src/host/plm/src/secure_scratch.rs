@@ -397,8 +397,14 @@ fn open_protected_recovery_directory(
 ) -> Result<(PathBuf, Vec<OwnedHandle>)> {
     let mut handles = pin_program_data_components(program_data, root)?;
     let parent = program_data.join(RECOVERY_STATE_PARENT);
-    let parent_handle = open_pinned_directory(&parent)
-        .with_context(|| format!("failed to pin PLM recovery parent {}", parent.display()))?;
+    let parent_handle = open_handle(
+        &parent,
+        (FILE_READ_ATTRIBUTES | READ_CONTROL).0,
+        PIN_SHARE,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+    .with_context(|| format!("failed to pin PLM recovery parent {}", parent.display()))?;
+    verify_file_kind(parent_handle.0, true)?;
     if !has_trusted_owner(parent_handle.0)? {
         bail!("PLM recovery parent has an untrusted owner");
     }
