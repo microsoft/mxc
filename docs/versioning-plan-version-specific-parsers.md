@@ -273,8 +273,8 @@ runtime model evolves.
 The adapter must explicitly destructure every source field and explicitly fill
 every internal field. Do not use a catch-all `..`.
 
-Add semantic-equivalence tests that run representative `0.6` requests through
-the adapter and the existing conversion code.
+Add wire-equivalence tests proving that representative `0.6` requests adapt to
+the same `wire::MxcConfig` produced by the current deserializer.
 
 ### Phase 4: Add `0.7.0-alpha`
 
@@ -332,6 +332,12 @@ For matching inputs:
 2. Parse through the selected version contract.
 3. Adapt both to the runtime model.
 4. Assert semantic equivalence.
+
+Semantic-equivalence tests belong here, where both complete parsing paths
+exist. For valid inputs, Phase 3's wire-equivalence tests establish that the
+same deterministic wire-to-runtime conversion receives the same value; Phase 6
+adds end-to-end coverage for runtime results, acceptance differences, and
+diagnostic behavior.
 
 Explicitly classify known expected incompatibilities, especially configs that
 declare `0.6.0-alpha` while carrying experimental fields.
