@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Reconciliation between OS-attested job membership and kernel process events.
+//! Validation of OS-attested sandbox job process lifetimes.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 use learning_mode_core::{AnalyzeError, ProcessLifetime};
 
@@ -42,110 +42,35 @@ pub struct JobMembershipSnapshot {
     pub total_processes: u32,
     /// Number of ordered PID-bearing completion-port notifications retained.
     pub notification_count: usize,
-    /// Completed descendant generations attested by job notifications.
+    /// Completed descendant generations attested by retained process handles.
     pub processes: Vec<JobProcessMembership>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct KernelProcessLifetime {
-    pub(crate) lifetime: ProcessLifetime,
-    pub(crate) start_order: usize,
-    pub(crate) end_order: usize,
-}
-
-/// Reconciles job membership evidence with complete kernel process generations.
+/// Validates job evidence and returns exact handle-attested process lifetimes.
 ///
-/// Every generation has exact creation and exit times from a retained process
-/// handle whose job membership the guardian verified. The ETL must contain a
-/// lifecycle pair with the same exact creation time and a corresponding exit
-/// event no earlier than the handle-attested exit.
-pub(crate) fn reconcile_job_membership(
+/// Every descendant handle is opened from a job new-process notification and
+/// verified against the duplicated sandbox job. Retaining the handle pins that
+/// exact process generation even after exit, so PID reuse does not require ETL
+/// lifecycle inference.
+pub(crate) fn attested_process_lifetimes(
     membership: &JobMembershipSnapshot,
-    kernel_lifetimes: &[KernelProcessLifetime],
 ) -> Result<Vec<ProcessLifetime>, AnalyzeError> {
     validate_membership(membership)?;
 
-    let mut members_by_pid = HashMap::<u32, Vec<(usize, JobProcessMembership)>>::new();
-    for (index, process) in membership.processes.iter().copied().enumerate() {
-        members_by_pid
-            .entry(process.pid)
-            .or_default()
-            .push((index, process));
-    }
-    let mut lifetimes_by_pid = HashMap::<u32, Vec<(usize, KernelProcessLifetime)>>::new();
-    for (index, lifetime) in kernel_lifetimes.iter().copied().enumerate() {
-        lifetimes_by_pid
-            .entry(lifetime.lifetime.pid)
-            .or_default()
-            .push((index, lifetime));
-    }
-
-    let mut selected = vec![None; membership.processes.len()];
-    for (pid, members) in members_by_pid {
-        let lifetimes = lifetimes_by_pid.remove(&pid).unwrap_or_default();
-        let matches = unique_monotonic_matches(membership, pid, &members, &lifetimes)?;
-        for ((member_index, _), lifetime_index) in members.into_iter().zip(matches) {
-            selected[member_index] = Some(lifetimes[lifetime_index]);
-        }
-    }
-
-    let mut ordered_events = Vec::with_capacity(membership.notification_count);
-    for (index, process) in membership.processes.iter().enumerate() {
-        let (_, lifetime) = selected[index].ok_or_else(|| {
-            AnalyzeError::Decode(format!(
-                "missing reconciled kernel generation for job-attested PID {}",
-                process.pid
-            ))
-        })?;
-        ordered_events.push((process.start_sequence, lifetime.start_order));
-        if let Some(end_sequence) = process.end_sequence {
-            ordered_events.push((end_sequence, lifetime.end_order));
-        }
-    }
-    ordered_events.sort_unstable_by_key(|(membership_order, _)| *membership_order);
-    if ordered_events
-        .windows(2)
-        .any(|events| events[0].1 >= events[1].1)
-    {
-        return Err(AnalyzeError::Decode(
-            "job membership order disagrees with kernel process lifecycle order".to_string(),
-        ));
-    }
-
-    let mut selected = selected
-        .into_iter()
-        .enumerate()
-        .map(|(index, selected)| {
-            selected.map_or_else(
-                || {
-                    Err(AnalyzeError::Decode(
-                        "incomplete reconciliation".to_string(),
-                    ))
-                },
-                |(_, kernel)| {
-                    let process = membership.processes[index];
-                    Ok((
-                        kernel.start_order,
-                        ProcessLifetime {
-                            pid: process.pid,
-                            start_filetime: process.creation_filetime,
-                            end_filetime: process.exit_filetime,
-                        },
-                    ))
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    selected.sort_unstable_by_key(|(start_order, _)| *start_order);
-    let mut reconciled = Vec::with_capacity(selected.len() + 1);
-    reconciled.push(membership.root_process);
-    reconciled.extend(selected.into_iter().map(|(_, lifetime)| lifetime));
-    reconciled.sort_unstable_by_key(|lifetime| lifetime.start_filetime);
-    Ok(reconciled)
+    let mut lifetimes = Vec::with_capacity(membership.processes.len() + 1);
+    lifetimes.push(membership.root_process);
+    lifetimes.extend(membership.processes.iter().map(|process| ProcessLifetime {
+        pid: process.pid,
+        start_filetime: process.creation_filetime,
+        end_filetime: process.exit_filetime,
+    }));
+    lifetimes.sort_unstable_by_key(|lifetime| lifetime.start_filetime);
+    Ok(lifetimes)
 }
 
 fn validate_membership(membership: &JobMembershipSnapshot) -> Result<(), AnalyzeError> {
     if membership.root_process.pid == 0
+        || membership.root_process.start_filetime == 0
         || membership.root_process.end_filetime < membership.root_process.start_filetime
     {
         return Err(AnalyzeError::Decode(
@@ -176,8 +101,31 @@ fn validate_membership(membership: &JobMembershipSnapshot) -> Result<(), Analyze
         ));
     }
 
+    let mut generations = HashSet::with_capacity(retained_processes);
+    generations.insert((
+        membership.root_process.pid,
+        membership.root_process.start_filetime,
+    ));
     let mut sequences = Vec::with_capacity(membership.notification_count);
     for process in &membership.processes {
+        if process.pid == 0
+            || process.creation_filetime < membership.attached_filetime
+            || process.exit_filetime < process.creation_filetime
+            || process.creation_filetime > process.start_observed_filetime
+            || process.exit_filetime > process.end_observed_filetime
+            || process.exit_filetime > membership.completed_filetime
+        {
+            return Err(AnalyzeError::Decode(format!(
+                "job-attested PID {} has an invalid handle-attested lifetime",
+                process.pid
+            )));
+        }
+        if !generations.insert((process.pid, process.creation_filetime)) {
+            return Err(AnalyzeError::Decode(format!(
+                "job-attested PID {} repeats an already retained process generation",
+                process.pid
+            )));
+        }
         sequences.push(process.start_sequence);
         if let Some(end_sequence) = process.end_sequence {
             if end_sequence <= process.start_sequence {
@@ -208,108 +156,23 @@ fn validate_membership(membership: &JobMembershipSnapshot) -> Result<(), Analyze
     Ok(())
 }
 
-fn unique_monotonic_matches(
-    membership: &JobMembershipSnapshot,
-    pid: u32,
-    members: &[(usize, JobProcessMembership)],
-    lifetimes: &[(usize, KernelProcessLifetime)],
-) -> Result<Vec<usize>, AnalyzeError> {
-    let member_count = members.len();
-    let lifetime_count = lifetimes.len();
-    let width = lifetime_count + 1;
-    let mut ways = vec![0u8; (member_count + 1) * width];
-    ways[..width].fill(1);
-
-    for member_index in 1..=member_count {
-        for lifetime_index in 1..=lifetime_count {
-            let without = ways[member_index * width + lifetime_index - 1];
-            let with = if generation_matches(
-                membership,
-                members[member_index - 1].1,
-                lifetimes[lifetime_index - 1].1,
-            ) {
-                ways[(member_index - 1) * width + lifetime_index - 1]
-            } else {
-                0
-            };
-            ways[member_index * width + lifetime_index] = without.saturating_add(with).min(2);
-        }
-    }
-
-    match ways[member_count * width + lifetime_count] {
-        0 => {
-            return Err(AnalyzeError::Decode(format!(
-                "missing exact kernel process generation for job-attested PID {pid}"
-            )))
-        }
-        2.. => {
-            return Err(AnalyzeError::Decode(format!(
-                "ambiguous kernel process generations for job-attested PID {pid}"
-            )))
-        }
-        _ => {}
-    }
-
-    let mut matches = Vec::with_capacity(member_count);
-    let mut member_index = member_count;
-    let mut lifetime_index = lifetime_count;
-    while member_index > 0 {
-        if lifetime_index == 0 {
-            return Err(AnalyzeError::Decode(format!(
-                "missing exact kernel process generation for job-attested PID {pid}"
-            )));
-        }
-        let without = ways[member_index * width + lifetime_index - 1];
-        let can_take = generation_matches(
-            membership,
-            members[member_index - 1].1,
-            lifetimes[lifetime_index - 1].1,
-        ) && ways[(member_index - 1) * width + lifetime_index - 1] == 1;
-        if without == 0 && can_take {
-            matches.push(lifetime_index - 1);
-            member_index -= 1;
-            lifetime_index -= 1;
-        } else {
-            lifetime_index -= 1;
-        }
-    }
-    matches.reverse();
-    Ok(matches)
-}
-
-fn generation_matches(
-    membership: &JobMembershipSnapshot,
-    process: JobProcessMembership,
-    kernel: KernelProcessLifetime,
-) -> bool {
-    let lifetime = kernel.lifetime;
-    lifetime.pid == process.pid
-        && lifetime.start_filetime == process.creation_filetime
-        && lifetime.end_filetime >= process.exit_filetime
-        && lifetime.end_filetime >= membership.attached_filetime
-        && lifetime.start_filetime <= membership.completed_filetime
-        && lifetime.end_filetime <= membership.completed_filetime
-        && lifetime.start_filetime <= process.start_observed_filetime
-        && lifetime.end_filetime <= process.end_observed_filetime
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn member(pid: u32, start: u64, end: u64) -> JobProcessMembership {
+    fn member(pid: u32, start_sequence: usize) -> JobProcessMembership {
         JobProcessMembership {
             pid,
-            creation_filetime: start,
-            exit_filetime: end,
-            start_sequence: 0,
-            start_observed_filetime: end + 30,
-            end_sequence: Some(1),
-            end_observed_filetime: end + 40,
+            creation_filetime: 110 + start_sequence as u64,
+            exit_filetime: 120 + start_sequence as u64,
+            start_sequence,
+            start_observed_filetime: 150 + start_sequence as u64,
+            end_sequence: Some(start_sequence + 1),
+            end_observed_filetime: 160 + start_sequence as u64,
         }
     }
 
-    fn snapshot(process: JobProcessMembership) -> JobMembershipSnapshot {
+    fn snapshot(processes: Vec<JobProcessMembership>) -> JobMembershipSnapshot {
         JobMembershipSnapshot {
             root_process: ProcessLifetime {
                 pid: 7,
@@ -318,119 +181,18 @@ mod tests {
             },
             attached_filetime: 100,
             completed_filetime: 200,
-            total_processes: 2,
-            notification_count: 2,
-            processes: vec![process],
-        }
-    }
-
-    fn kernel(pid: u32, start: u64, end: u64, order: usize) -> KernelProcessLifetime {
-        KernelProcessLifetime {
-            lifetime: ProcessLifetime {
-                pid,
-                start_filetime: start,
-                end_filetime: end,
-            },
-            start_order: order,
-            end_order: order + 1,
+            total_processes: (processes.len() + 1) as u32,
+            notification_count: processes.len() * 2,
+            processes,
         }
     }
 
     #[test]
-    fn short_lived_process_that_exited_before_notification_is_reconciled() {
-        let membership = snapshot(member(42, 110, 120));
-        let lifetimes = reconcile_job_membership(&membership, &[kernel(42, 110, 125, 0)])
-            .expect("short-lived process should reconcile from sealed ETL");
+    fn returns_exact_handle_attested_lifetimes() {
+        let membership = snapshot(vec![member(42, 0)]);
 
-        assert_eq!(
-            lifetimes,
-            vec![
-                ProcessLifetime {
-                    pid: 7,
-                    start_filetime: 90,
-                    end_filetime: 180,
-                },
-                ProcessLifetime {
-                    pid: 42,
-                    start_filetime: 110,
-                    end_filetime: 120,
-                }
-            ]
-        );
-    }
-
-    #[test]
-    fn pid_reuse_selects_only_generation_inside_attested_window() {
-        let membership = snapshot(member(42, 110, 120));
-        let kernel_lifetimes = [
-            kernel(42, 10, 20, 0),
-            kernel(42, 110, 120, 2),
-            kernel(42, 210, 220, 4),
-        ];
-
-        let lifetimes = reconcile_job_membership(&membership, &kernel_lifetimes)
-            .expect("the attested generation should be unique");
-
-        assert_eq!(
-            lifetimes,
-            vec![membership.root_process, kernel_lifetimes[1].lifetime]
-        );
-    }
-
-    #[test]
-    fn repeated_job_pid_maps_to_distinct_ordered_generations() {
-        let membership = JobMembershipSnapshot {
-            root_process: ProcessLifetime {
-                pid: 7,
-                start_filetime: 90,
-                end_filetime: 280,
-            },
-            attached_filetime: 100,
-            completed_filetime: 300,
-            total_processes: 3,
-            notification_count: 4,
-            processes: vec![
-                JobProcessMembership {
-                    pid: 42,
-                    creation_filetime: 110,
-                    exit_filetime: 120,
-                    start_sequence: 0,
-                    start_observed_filetime: 150,
-                    end_sequence: Some(1),
-                    end_observed_filetime: 160,
-                },
-                JobProcessMembership {
-                    pid: 42,
-                    creation_filetime: 210,
-                    exit_filetime: 220,
-                    start_sequence: 2,
-                    start_observed_filetime: 250,
-                    end_sequence: Some(3),
-                    end_observed_filetime: 260,
-                },
-            ],
-        };
-        let kernel_lifetimes = [kernel(42, 110, 120, 0), kernel(42, 210, 220, 2)];
-
-        let lifetimes = reconcile_job_membership(&membership, &kernel_lifetimes)
-            .expect("both PID generations should reconcile in order");
-
-        assert_eq!(
-            lifetimes,
-            std::iter::once(membership.root_process)
-                .chain(kernel_lifetimes.iter().map(|kernel| kernel.lifetime))
-                .collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn handle_attestation_excludes_other_generations_in_the_same_window() {
-        let membership = snapshot(member(42, 110, 120));
-        let lifetimes = reconcile_job_membership(
-            &membership,
-            &[kernel(42, 90, 105, 0), kernel(42, 110, 120, 2)],
-        )
-        .expect("the exact handle-attested generation should be selected");
+        let lifetimes =
+            attested_process_lifetimes(&membership).expect("valid evidence should pass");
 
         assert_eq!(
             lifetimes,
@@ -446,74 +208,86 @@ mod tests {
     }
 
     #[test]
-    fn missing_generation_fails_closed() {
-        let error = reconcile_job_membership(&snapshot(member(42, 110, 120)), &[])
-            .expect_err("missing generation must fail");
+    fn repeated_pid_generations_remain_distinct() {
+        let membership = snapshot(vec![member(42, 0), member(42, 2)]);
 
-        assert!(error.to_string().contains("missing exact"));
+        let lifetimes =
+            attested_process_lifetimes(&membership).expect("retained handles disambiguate reuse");
+
+        assert_eq!(lifetimes.len(), 3);
+        assert_eq!(lifetimes[1].pid, 42);
+        assert_eq!(lifetimes[2].pid, 42);
+        assert_ne!(lifetimes[1].start_filetime, lifetimes[2].start_filetime);
+    }
+
+    #[test]
+    fn duplicate_generation_identity_fails_closed() {
+        let first = member(42, 0);
+        let mut duplicate = member(42, 2);
+        duplicate.creation_filetime = first.creation_filetime;
+        duplicate.exit_filetime = first.exit_filetime;
+
+        let error = attested_process_lifetimes(&snapshot(vec![first, duplicate]))
+            .expect_err("one process generation cannot satisfy two notifications");
+
+        assert!(error.to_string().contains("repeats"));
+    }
+
+    #[test]
+    fn descendant_matching_root_generation_fails_closed() {
+        let mut process = member(7, 0);
+        process.creation_filetime = 90;
+
+        attested_process_lifetimes(&snapshot(vec![process]))
+            .expect_err("the root generation cannot also count as a descendant");
+    }
+
+    #[test]
+    fn invalid_descendant_lifetime_fails_closed() {
+        let mut process = member(42, 0);
+        process.exit_filetime = process.end_observed_filetime + 1;
+
+        let error = attested_process_lifetimes(&snapshot(vec![process]))
+            .expect_err("impossible handle evidence must fail");
+
+        assert!(error
+            .to_string()
+            .contains("invalid handle-attested lifetime"));
     }
 
     #[test]
     fn membership_limit_is_enforced() {
-        let processes = (0..=MAX_JOB_PROCESS_LIFETIMES)
-            .map(|index| JobProcessMembership {
-                pid: index as u32,
-                creation_filetime: 110,
-                exit_filetime: 120,
-                start_sequence: index * 2,
-                start_observed_filetime: 150,
-                end_sequence: Some(index * 2 + 1),
-                end_observed_filetime: 160,
-            })
+        let processes = (0..MAX_JOB_PROCESS_LIFETIMES)
+            .map(|index| member(index as u32 + 1, index * 2))
             .collect();
-        let membership = JobMembershipSnapshot {
-            root_process: ProcessLifetime {
-                pid: u32::MAX,
-                start_filetime: 90,
-                end_filetime: 190,
-            },
-            attached_filetime: 100,
-            completed_filetime: 200,
-            total_processes: (MAX_JOB_PROCESS_LIFETIMES + 2) as u32,
-            notification_count: (MAX_JOB_PROCESS_LIFETIMES + 1) * 2,
-            processes,
-        };
+        let membership = snapshot(processes);
 
         let error =
-            reconcile_job_membership(&membership, &[]).expect_err("oversized membership must fail");
+            attested_process_lifetimes(&membership).expect_err("oversized membership must fail");
 
         assert!(error.to_string().contains("4096"));
     }
 
     #[test]
-    fn attested_root_does_not_require_an_etl_start_event() {
-        let membership = JobMembershipSnapshot {
-            root_process: ProcessLifetime {
-                pid: 42,
-                start_filetime: 90,
-                end_filetime: 180,
-            },
-            attached_filetime: 100,
-            completed_filetime: 200,
-            total_processes: 1,
-            notification_count: 0,
-            processes: Vec::new(),
-        };
+    fn job_accounting_mismatch_fails_closed() {
+        let mut membership = snapshot(vec![member(42, 0)]);
+        membership.total_processes = 3;
 
-        let lifetimes = reconcile_job_membership(&membership, &[])
-            .expect("the handle-attested root must reconcile without ETL lifecycle events");
+        let error = attested_process_lifetimes(&membership)
+            .expect_err("lost process notifications must fail");
 
-        assert_eq!(lifetimes, vec![membership.root_process]);
+        assert!(error.to_string().contains("accounting"));
     }
 
     #[test]
-    fn job_accounting_mismatch_fails_closed() {
-        let mut membership = snapshot(member(42, 110, 120));
-        membership.total_processes = 3;
+    fn incomplete_notification_order_fails_closed() {
+        let mut process = member(42, 0);
+        process.end_sequence = Some(2);
+        let membership = snapshot(vec![process]);
 
-        let error = reconcile_job_membership(&membership, &[kernel(42, 110, 120, 0)])
-            .expect_err("lost process notifications must fail closed");
+        let error = attested_process_lifetimes(&membership)
+            .expect_err("missing notification sequence must fail");
 
-        assert!(error.to_string().contains("accounting"));
+        assert!(error.to_string().contains("order is incomplete"));
     }
 }

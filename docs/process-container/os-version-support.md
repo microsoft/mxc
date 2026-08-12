@@ -84,9 +84,9 @@ retains the stable process handle. The root generation uses exact kernel
 creation/exit FILETIMEs read from that handle (with the exit time read only
 after WPR stops). For every descendant new-process notification, the guardian
 opens and retains a process handle, verifies membership in the duplicated job,
-and reads exact creation/exit FILETIMEs; the sealed ETL must contain the same
-exact creation time and a corresponding exit event. Denial filtering uses the
-handle-attested lifetime, not the wider ETL observation window. At finish, job accounting
+and reads exact creation/exit FILETIMEs. Denial filtering uses those
+handle-attested lifetimes directly; it does not infer process generations from
+host-wide ETL lifecycle timestamps. At finish, job accounting
 `TotalProcesses` must equal the retained unique root-plus-descendant
 generations, so missing or inconsistent membership notifications fail closed.
 The owner never supplies PID/time scopes. Only bounded canonical denial data
