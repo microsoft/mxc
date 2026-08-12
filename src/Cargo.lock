@@ -3168,6 +3168,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
+ "mxc_config_contract",
  "mxc_telemetry",
  "nanvix_common",
  "schemars",
