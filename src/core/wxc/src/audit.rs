@@ -5,41 +5,24 @@
 //!
 //! **Invariant: `wxc-exec.exe` runs unelevated.** Starting a WPR
 //! kernel ETW session requires administrator, so `--audit` does NOT
-//! self-elevate `wxc-exec`; instead it delegates the privileged work
-//! to `plm.exe`, which carries a `requireAdministrator` manifest and
-//! is spawned via `ShellExecuteExW` + `runas` (UAC). See
-//! [`crate::plm_launch::run_plm_elevated`] for the spawn wrapper.
-//! Every `run_plm_command(...)` call in this module therefore
-//! triggers a UAC prompt when invoked from a medium-IL shell — one
-//! prompt per `plm start`, one per `plm stop`.
+//! self-elevate `wxc-exec`; instead it launches PLM's hidden, fixed-operation
+//! START child through UAC and retains its authenticated control pipe.
 //!
-//! `--audit` runs `plm.exe start`, which leaves a live WPR ETW session
-//! in the kernel for the duration of the workload. The matching
-//! `plm.exe stop` tears it down. If anything between those two calls
-//! aborts wxc-exec — Ctrl-C, panic, `process::exit`, container-runner
-//! kill — the kernel session stays allocated until reboot or manual
-//! `wpr -cancel`, blocking all other WPR consumers on the host (only
-//! one NT Kernel Logger session can exist at a time).
+//! The child opens and validates the wxc-exec owner before starting WPR, stays
+//! alive through the workload, and cancels on owner death or pipe break.
+//! The retained child also performs the fixed stop and ETL transfer operation,
+//! so the normal audit lifecycle needs only the original UAC prompt. The
+//! singleton is released only after that child reports the trace stopped.
 //!
-//! We bracket the live-trace window with `AUDIT_ACTIVE` plus a stack-
-//! owned `AuditTraceGuard`. Cleanup paths:
-//!  * Normal exit and panic unwind — `AuditTraceGuard::drop` invokes
-//!    `cancel_active_audit_trace()`.
-//!  * Ctrl-C / Ctrl-Break / console close — the `dacl_ctrl_handler`
-//!    (in `main.rs`) also calls `cancel_active_audit_trace()` after
-//!    handling DACLs.
-//!
-//! `cancel_active_audit_trace()` is idempotent via the AtomicBool, so
-//! it is safe for both paths to call it.
-//!
-//! The host-wide named-mutex singleton (`Global\Mxc_Plm_Audit`) is
-//! shared with `plm.exe`; both binaries acquire and release it via
-//! `plm::coordination::singleton` so their retry-on-conflict paths can
-//! never silently `wpr -cancel` a peer trace.
-
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+//! The retained child exclusively owns the protected host-wide named-mutex
+//! singleton (`Global\Mxc_Plm_Audit`) together with its WPR session.
 
 use wxc_common::logger::Logger;
+
+const PLM_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const PLM_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const MAX_PLM_OUTPUT_BYTES: usize = 1024 * 1024;
+const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[PLM output truncated]\n";
 
 /// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
 /// same install directory. Returns `None` when the current exe path
@@ -50,24 +33,39 @@ pub fn plm_exe_path() -> Option<std::path::PathBuf> {
         .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
 }
 
-/// Run `plm.exe <subcommand> <args...>` synchronously via
-/// `run_plm_elevated`, which captures the child's stdout/stderr into
-/// temp files (the UAC broker can't inherit our stdio) and replays
-/// them only on non-zero exit or when `verbose` is set — the happy
-/// path is deliberately silent. Audit tracing is a best-effort
-/// diagnostic: missing-binary / spawn / non-zero-exit conditions are
-/// logged and returned as `false` — this function never calls
-/// `process::exit` on its own. The caller (currently the `--audit`
-/// entry point) is responsible for deciding whether a `false` return
-/// should abort the workload; today the `plm start` caller does abort
-/// rather than run --audit without an active trace, while `plm stop`
-/// merely falls through to the `wpr -cancel` cleanup path.
-///
-/// Returns `true` iff the spawn succeeded **and** plm.exe exited with
-/// a zero status. The caller needs this signal to decide whether to
-/// clear `AUDIT_ACTIVE` (only after a successful `plm stop`); without
-/// it, `AUDIT_ACTIVE.store(false)` would run unconditionally and
-/// silently leak the kernel ETW session on every failure path.
+pub struct CapturedAudit {
+    pub log_dir: std::path::PathBuf,
+    pub trace_path: std::path::PathBuf,
+}
+
+pub fn capture_and_stop(
+    guard: &mut AuditTraceGuard,
+    logger: &mut Logger,
+) -> Result<CapturedAudit, String> {
+    use std::fmt::Write as _;
+
+    let log_dir = plm::stop::default_log_dir();
+    std::fs::create_dir_all(&log_dir)
+        .map_err(|error| format!("failed to create audit log directory: {error}"))?;
+    let trace_path = log_dir.join("trace.etl");
+
+    let _ = writeln!(
+        logger,
+        "[audit] stopping trace into {}",
+        trace_path.display()
+    );
+    guard.stop(&trace_path, logger).map_err(|error| {
+        let message = format!("failed to stop and transfer PLM trace: {error:#}");
+        let _ = writeln!(logger, "[audit] {message}");
+        message
+    })?;
+    Ok(CapturedAudit {
+        log_dir,
+        trace_path,
+    })
+}
+
+/// Run a normal public PLM command after wxc-exec has released the singleton.
 pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: bool) -> bool {
     use std::fmt::Write as _;
 
@@ -94,36 +92,153 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
         eprintln!("{summary}");
     }
 
-    // plm.exe normally acquires the `Global\Mxc_Plm_Audit` named-
-    // mutex singleton on direct operator invocations (`plm log` /
-    // `plm start` / `plm stop`) so its retry-on-conflict path can't
-    // silently `wpr -cancel` a peer trace. When wxc-exec spawns
-    // plm.exe we already hold that mutex for the whole audit window
-    // — tell the child to skip its own acquisition so we don't
-    // deadlock on the same global name. The signal used to be an env
-    // var (SINGLETON_HELD_BY_PARENT_ENV) but `ShellExecuteExW` +
-    // `runas` (used by run_plm_elevated) does not propagate the
-    // caller's environment across the elevation boundary, so it now
-    // rides on a hidden CLI flag.
-    match crate::plm_launch::run_plm_elevated(&plm, args, true) {
-        Ok(run) if run.exit_code == 0 => {
+    let output = std::process::Command::new(&plm)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn public plm.exe: {error}"))
+        .and_then(|child| wait_with_output_timeout(child, PLM_ANALYSIS_TIMEOUT));
+    report_plm_output(output, logger, verbose)
+}
+
+fn wait_with_output_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("public plm.exe stdout was not captured".to_string());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("public plm.exe stderr was not captured".to_string());
+    };
+    let stdout_reader = match std::thread::Builder::new()
+        .name("plm-audit-stdout".to_string())
+        .spawn(move || read_bounded_output(stdout, MAX_PLM_OUTPUT_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to start plm stdout reader: {error}"));
+        }
+    };
+    let stderr_reader = match std::thread::Builder::new()
+        .name("plm-audit-stderr".to_string())
+        .spawn(move || read_bounded_output(stderr, MAX_PLM_OUTPUT_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            return Err(format!("failed to start plm stderr reader: {error}"));
+        }
+    };
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(PLM_WAIT_POLL_INTERVAL);
+            }
+            Ok(None) => {
+                child.kill().map_err(|error| {
+                    format!(
+                        "public plm.exe exceeded the {} second audit-analysis timeout, \
+                         but termination failed: {error}",
+                        timeout.as_secs()
+                    )
+                })?;
+                child.wait().map_err(|error| {
+                    format!(
+                        "public plm.exe exceeded the {} second audit-analysis timeout, \
+                         was terminated, but could not be reaped: {error}",
+                        timeout.as_secs()
+                    )
+                })?;
+                return Err(format!(
+                    "public plm.exe exceeded the {} second audit-analysis timeout and was terminated",
+                    timeout.as_secs()
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to poll public plm.exe: {error}"));
+            }
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| "public plm.exe stdout reader panicked".to_string())?
+        .map_err(|error| format!("failed to read public plm.exe stdout: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "public plm.exe stderr reader panicked".to_string())?
+        .map_err(|error| format!("failed to read public plm.exe stderr: {error}"))?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_bounded_output(mut reader: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(limit.min(64 * 1024));
+    let mut buffer = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(output.len());
+        let retained = remaining.min(count);
+        output.extend_from_slice(&buffer[..retained]);
+        truncated |= retained != count;
+    }
+    if truncated {
+        let marker = &OUTPUT_TRUNCATED_MARKER[..OUTPUT_TRUNCATED_MARKER.len().min(limit)];
+        let marker_start = output.len().saturating_sub(marker.len());
+        output.truncate(marker_start);
+        output.extend_from_slice(marker);
+    }
+    Ok(output)
+}
+
+fn report_plm_output(
+    output: Result<std::process::Output, String>,
+    logger: &mut Logger,
+    verbose: bool,
+) -> bool {
+    use std::fmt::Write as _;
+
+    match output {
+        Ok(run) if run.status.success() => {
             if verbose {
                 replay_captured(logger, &run.stdout, &run.stderr);
             }
             true
         }
         Ok(run) => {
-            let _ = writeln!(logger, "[audit] plm exited with code {}", run.exit_code);
+            let code = run.status.code().unwrap_or(-1);
+            let _ = writeln!(logger, "[audit] plm exited with code {code}");
             replay_captured(logger, &run.stdout, &run.stderr);
             if verbose {
-                eprintln!("[audit] plm exited with code {}", run.exit_code);
+                eprintln!("[audit] plm exited with code {code}");
             }
             false
         }
-        Err(msg) => {
-            let _ = writeln!(logger, "[audit] failed to launch elevated plm: {msg}");
+        Err(error) => {
+            let _ = writeln!(logger, "[audit] failed to launch plm: {error}");
             if verbose {
-                eprintln!("[audit] failed to launch elevated plm: {msg}");
+                eprintln!("[audit] failed to launch plm: {error}");
             }
             false
         }
@@ -131,11 +246,8 @@ pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: 
 }
 
 /// Replay captured stdout/stderr bytes to the current process's own
-/// streams. Used on failure (and in verbose mode on success) so the
-/// happy path can stay silent while diagnostics still surface. Byte
-/// slices come from `ShellExecuteExW`-elevated child capture, which
-/// cannot go through OS pipe inheritance and is redirected to temp
-/// files at the plm.exe end (see `plm_launch::run_plm_elevated`).
+/// streams. Used on failure (and in verbose mode on success) so the happy path
+/// can stay silent while diagnostics still surface.
 fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
     use std::fmt::Write as _;
     use std::io::Write as _;
@@ -149,105 +261,118 @@ fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
     }
 }
 
-pub static AUDIT_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Set to `true` while `plm start` is being spawned and has not yet
-/// returned. `AUDIT_ACTIVE` is flipped to `true` BEFORE `plm.exe` is
-/// spawned (because `mark_audit_active()` has to run early to cover a
-/// Ctrl+C arriving mid-spawn), but the kernel ETW session is not
-/// actually engaged until `plm.exe`'s child `wpr -start` returns. A
-/// Ctrl+C in that gap would fire `wpr -cancel` against a not-yet-
-/// existing session, then `wpr -start` would silently succeed AFTER
-/// the cancel — leaking the session past `wxc-exec`'s own cleanup. We
-/// close the race by making the Ctrl+C handler wait (bounded) until
-/// `plm start` has finished its spawn round-trip before deciding
-/// whether to issue the cancel.
-pub static AUDIT_START_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// Mark that the wxc-exec process owns a live PLM audit trace. Called
-/// just before `plm start` is spawned so a Ctrl-C arriving mid-spawn
-/// still triggers cleanup (over-cancelling a not-yet-started session
-/// is harmless — `wpr -cancel` returns non-zero and we discard).
-pub fn mark_audit_active() {
-    AUDIT_ACTIVE.store(true, Ordering::SeqCst);
+/// Stack-owned guarded START session.
+#[derive(Debug)]
+pub struct AuditTraceGuard {
+    session: plm::elevated::GuardedSession,
 }
 
-/// Cancel an in-flight PLM audit trace iff one is active, then clear
-/// the flag. Idempotent; safe to call from the Ctrl-C handler and the
-/// stack guard's Drop. Failures (no active session, missing wpr.exe)
-/// are silenced because the call is best-effort cleanup.
-///
-/// Invokes `wpr.exe` by absolute path (`%SystemRoot%\System32\wpr.exe`)
-/// rather than as a bare name so `CreateProcessW`'s implicit CWD-first
-/// search order can't be abused to substitute a planted binary.
-/// `wxc-exec` itself runs unelevated; the privileged `wpr -start` /
-/// `wpr -stop` calls are delegated to the elevated `plm.exe` child
-/// (see [`crate::plm_launch::run_plm_elevated`]). We still resolve
-/// wpr by absolute path here for the best-effort panic / ctrl-c
-/// cleanup so behavior is consistent with the plm.exe side, which
-/// applies the same hardening in its own resolver.
-pub fn cancel_active_audit_trace() {
-    if AUDIT_ACTIVE.swap(false, Ordering::SeqCst) {
-        let _ = plm::wpr_path::wpr_command()
-            .arg("-cancel")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+impl AuditTraceGuard {
+    pub fn start(logger: &mut Logger, verbose: bool) -> Result<Self, String> {
+        use std::fmt::Write as _;
+
+        let plm = plm_exe_path().ok_or_else(|| {
+            let message = "could not resolve plm.exe path".to_string();
+            let _ = writeln!(logger, "[audit] {message}");
+            message
+        })?;
+        if !plm.exists() {
+            let message = format!("plm.exe not found at {}", plm.display());
+            let _ = writeln!(logger, "[audit] {message}");
+            return Err(message);
+        }
+
+        let summary = format!("[audit] running {} start", plm.display());
+        let _ = writeln!(logger, "{summary}");
+        if verbose {
+            eprintln!("{summary}");
+        }
+        let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        plm::elevated::start_guarded_session_with_executable(&plm, owner_pid)
+            .map(|session| Self { session })
+            .map_err(|error| {
+                let message = format!("guarded plm start failed: {error:#}");
+                let _ = writeln!(logger, "[audit] {message}");
+                if verbose {
+                    eprintln!("[audit] {message}");
+                }
+                message
+            })
+    }
+
+    pub fn stop(
+        &mut self,
+        trace_destination: &std::path::Path,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        use std::fmt::Write as _;
+
+        self.session.stop(trace_destination).map_err(|error| {
+            let message = format!("guarded PLM stop failed: {error:#}");
+            let _ = writeln!(logger, "[audit] {message}");
+            message
+        })
+    }
+
+    pub fn cancel(&mut self, logger: &mut Logger) -> Result<(), String> {
+        use std::fmt::Write as _;
+
+        self.session.cancel().map_err(|error| {
+            let message = format!("guarded PLM cancellation failed: {error:#}");
+            let _ = writeln!(logger, "[audit] {message}");
+            message
+        })
     }
 }
 
-/// Stack-owned guard: ensures the audit trace is cancelled on panic
-/// unwind and on normal function return.
-pub struct AuditTraceGuard;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
 
-impl Drop for AuditTraceGuard {
-    fn drop(&mut self) {
-        cancel_active_audit_trace();
+    #[test]
+    fn analysis_watchdog_terminates_timed_out_child() {
+        let child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn long-running child");
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child.id()) }
+            .expect("open child synchronization handle");
+
+        let error = wait_with_output_timeout(child, std::time::Duration::from_millis(50))
+            .expect_err("watchdog should time out");
+        assert!(error.contains("timeout"));
+        assert_eq!(
+            unsafe { WaitForSingleObject(process, 1_000) },
+            WAIT_OBJECT_0,
+            "timed-out child should be terminated and reaped"
+        );
+        unsafe {
+            let _ = CloseHandle(process);
+        }
     }
-}
 
-/// Raw handle of the host-wide single-instance mutex for PLM audit
-/// mode. Two concurrent `wxc-exec --audit` runs would share a single
-/// NT Kernel Logger session, so the second one's `wpr -start` would
-/// either steal the first's session or fail and silently corrupt the
-/// first run's findings. `wxc-exec` (unelevated) acquires the named
-/// mutex (`Global\\` so it's machine-wide across sessions) and
-/// refuses to start if another wxc-exec audit is already running.
-/// The elevated `plm.exe` child skips its own acquisition of the
-/// same mutex via the `--wxc-singleton-held-by-parent` flag so the
-/// parent's handle remains the sole owner for the trace lifetime.
-///
-/// The handle is stashed in a static atomic (not just the stack guard)
-/// so the explicit cleanup before `process::exit` — which skips
-/// destructors — can release it too. `AuditSingletonGuard::drop` is
-/// a thin shim over `release_audit_singleton`; both paths are
-/// idempotent.
-static AUDIT_SINGLETON_HANDLE: AtomicIsize = AtomicIsize::new(0);
-
-pub struct AuditSingletonGuard;
-
-impl Drop for AuditSingletonGuard {
-    fn drop(&mut self) {
-        release_audit_singleton();
+    #[test]
+    fn analysis_output_reader_caps_and_drains_child_output() {
+        let input_len = MAX_PLM_OUTPUT_BYTES + 4096;
+        let mut input = std::io::Cursor::new(vec![b'x'; input_len]);
+        let captured =
+            read_bounded_output(&mut input, MAX_PLM_OUTPUT_BYTES).expect("bounded output read");
+        assert_eq!(input.position(), input_len as u64);
+        assert_eq!(captured.len(), MAX_PLM_OUTPUT_BYTES);
+        assert!(captured.ends_with(OUTPUT_TRUNCATED_MARKER));
     }
-}
 
-/// Release the host-wide audit singleton if held. Idempotent: safe to
-/// call from `Drop`, from the explicit pre-`process::exit` cleanup,
-/// and from error paths.
-pub fn release_audit_singleton() {
-    plm::coordination::singleton::release(&AUDIT_SINGLETON_HANDLE);
-}
-
-pub fn try_acquire_audit_singleton() -> Result<AuditSingletonGuard, String> {
-    use plm::coordination::singleton::{try_acquire, AcquireError};
-    match try_acquire(&AUDIT_SINGLETON_HANDLE) {
-        Ok(()) => Ok(AuditSingletonGuard),
-        Err(AcquireError::AlreadyHeld) => Err(String::from(
-            "another wxc-exec --audit run holds the Global\\Mxc_Plm_Audit mutex; \
-             refusing to start a second concurrent PLM trace (only one NT Kernel \
-             Logger session can exist per host)",
-        )),
-        Err(AcquireError::CreateFailed(e)) => Err(format!("CreateMutexW failed: {e}")),
+    #[test]
+    fn analysis_output_reader_honors_limits_smaller_than_marker() {
+        let captured =
+            read_bounded_output(std::io::Cursor::new([b'x'; 32]), 8).expect("bounded output read");
+        assert_eq!(captured.len(), 8);
+        assert_eq!(captured, OUTPUT_TRUNCATED_MARKER[..8]);
     }
 }

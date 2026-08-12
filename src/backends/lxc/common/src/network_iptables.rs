@@ -10,6 +10,7 @@
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
 
+use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode, NetworkPolicy};
 
@@ -56,8 +57,9 @@ impl FirewallRuleArgs {
 /// Records exactly which per-family chains and FORWARD hooks a single apply
 /// attempt created, so rollback and teardown remove only what this manager
 /// installed. Without this, a partial-failure rollback would tear down chains
-/// this attempt never created, and because chain names truncate at 20 chars a
-/// torn-down chain can belong to a different container.
+/// this attempt never created: the chain name is a pure function of the
+/// container name, so a chain already present under our name belongs to an
+/// earlier or concurrent run and is not ours to remove.
 ///
 /// Visible to the crate (with private fields) purely so `signal_cleanup` can
 /// carry the value from the runner thread to the watchdog thread. The watchdog
@@ -169,7 +171,7 @@ enum HostIpv6State {
 
 /// Manages iptables rules for an LXC container's network policy.
 pub struct NetworkIptablesManager {
-    /// Chain name unique to this container (e.g., "MXC-<container-name>").
+    /// Chain name unique to this container, as built by [`chain_name_for`].
     chain_name: String,
     /// Whether rules have been applied.
     rules_applied: bool,
@@ -180,22 +182,99 @@ pub struct NetworkIptablesManager {
     created: CreatedResources,
 }
 
+/// iptables rejects chain names of 29 characters or more, so 28 is the ceiling
+/// every generated name must respect.
+pub const CHAIN_NAME_MAX_LEN: usize = 28;
+
+/// SHA-256 bytes folded into the chain-name suffix. Ten bytes is 80 bits, and
+/// encodes to exactly 16 base32 characters with no padding.
+const CHAIN_HASH_BYTES: usize = 10;
+
+/// Characters of the original container name kept as a human-readable hint.
+/// This carries no identity; two containers may share a slug.
+const CHAIN_SLUG_LEN: usize = 7;
+
+/// RFC 4648 base32 alphabet, lowercased. Base32 packs 5 bits per character
+/// against hex's 4, so 80 bits needs 16 characters here where hex would need
+/// 20. `MXC-`, the slug, and the slug's separator take 12 of the 28 bytes,
+/// leaving exactly 16 for the hash, so hex could not carry 80 bits without
+/// giving up the slug entirely.
+const BASE32_LOWER: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
+
+/// Encode bytes as lowercase base32 without padding.
+fn base32_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let mut accumulator: u16 = 0;
+    let mut pending_bits: u8 = 0;
+
+    for &byte in bytes {
+        accumulator = (accumulator << 8) | u16::from(byte);
+        pending_bits += 8;
+        while pending_bits >= 5 {
+            pending_bits -= 5;
+            let index = ((accumulator >> pending_bits) & 0x1f) as usize;
+            out.push(BASE32_LOWER[index] as char);
+        }
+    }
+
+    if pending_bits > 0 {
+        let index = ((accumulator << (5 - pending_bits)) & 0x1f) as usize;
+        out.push(BASE32_LOWER[index] as char);
+    }
+
+    out
+}
+
+/// Build the iptables chain name for a container.
+///
+/// Produces `MXC-<slug>-<hash>`, or `MXC-<hash>` when the container name
+/// contains no characters a slug may keep. The result is always ASCII, always
+/// at most [`CHAIN_NAME_MAX_LEN`] bytes, and always the same for the same
+/// input.
+///
+/// The slug keeps the first [`CHAIN_SLUG_LEN`] ASCII alphanumeric, `-`, or `_`
+/// characters of the container name, in order, discarding everything else. It
+/// is a debugging hint only.
+///
+/// The hash is taken over the *original* container name, so container names
+/// that differ only in characters the slug drops, or only past the slug's
+/// length, still receive different chains. Two names collide only if their
+/// SHA-256 digests collide in the leading 80 bits.
+///
+/// This defends against accidental collision, not against an adversary who
+/// chooses container names; that requires a persisted ownership record rather
+/// than a longer name, because 28 characters caps the available entropy.
+pub fn chain_name_for(container_name: &str) -> String {
+    let digest = Sha256::digest(container_name.as_bytes());
+    let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
+
+    let slug: String = container_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .take(CHAIN_SLUG_LEN)
+        .collect();
+
+    if slug.is_empty() {
+        format!("MXC-{hash}")
+    } else {
+        format!("MXC-{slug}-{hash}")
+    }
+}
+
 impl NetworkIptablesManager {
     /// Create a new manager for the given container name.
     pub fn new(container_name: &str) -> Self {
-        // Sanitize container name for use in iptables chain name
-        let sanitized: String = container_name
-            .chars()
-            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-            .take(20)
-            .collect();
-
         Self {
-            chain_name: format!("MXC-{}", sanitized),
+            chain_name: chain_name_for(container_name),
             rules_applied: false,
             veth_interface: None,
             created: CreatedResources::default(),
         }
+    }
+
+    /// The iptables chain name this manager owns.
+    pub fn chain_name(&self) -> &str {
+        &self.chain_name
     }
 
     /// Whether rules have been applied and need cleanup.
@@ -1074,10 +1153,11 @@ impl NetworkIptablesManager {
     /// Best-effort removal of the FORWARD hooks and per-container chains that
     /// `created` records were installed, in both tables. Only resources marked
     /// as created are touched, so a partial-failure rollback never tears down
-    /// a chain this attempt did not create — which matters because chain names
-    /// truncate at 20 characters and can collide across containers. A missing
-    /// rule/chain still makes an individual `-D`/`-F`/`-X` call a no-op, so it
-    /// doubles as the rollback path for a failed apply.
+    /// a chain this attempt did not create — which matters because the chain
+    /// name is derived solely from the container name, so every run of that
+    /// name shares it. A missing rule/chain still makes an individual
+    /// `-D`/`-F`/`-X` call a no-op, so it doubles as the rollback path for a
+    /// failed apply.
     ///
     /// Returns the **residual** set: the resources whose removal command
     /// failed and which therefore may still exist. Clearing ownership for a
@@ -1170,10 +1250,10 @@ impl NetworkIptablesManager {
     /// `created` is the ownership record the runner published as it installed
     /// each resource, carried across the thread boundary by `signal_cleanup`.
     /// Using it — rather than assuming every chain and hook exists — is what
-    /// keeps this path from flushing a *different* container's live chain:
-    /// chain names sanitize and truncate to 20 characters, so a name collision
-    /// would otherwise let a signal delivered to container A empty container
-    /// B's chain, silently failing B open.
+    /// keeps this path from flushing a live chain we do not own: the chain
+    /// name is a pure function of the container name, so a signal delivered
+    /// to one run would otherwise empty the chain belonging to a later run of
+    /// the same name, silently failing it open.
     ///
     /// The sole caller (`signal_cleanup::run_watchdog`) is Linux-only, so this
     /// is dead code elsewhere. It stays compiled on every target rather than
@@ -1411,10 +1491,7 @@ mod tests {
         );
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-racer-that-won"]),
-                strings(&["iptables", "-X", "MXC-racer-that-won"]),
-            ],
+            flush_and_delete("iptables", "racer-that-won"),
             "only the published chain may be flushed and deleted, and only it"
         );
     }
@@ -1442,10 +1519,7 @@ mod tests {
         let _ = manager.remove_firewall_rules(&mut after_partial);
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-survivor"]),
-                strings(&["iptables", "-X", "MXC-survivor"]),
-            ],
+            flush_and_delete("iptables", "survivor"),
             "a chain that survived rollback must still be torn down later"
         );
 
@@ -1504,10 +1578,7 @@ mod tests {
         let _ = manager.remove_firewall_rules(&mut teardown_log);
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-adopted"]),
-                strings(&["iptables", "-X", "MXC-adopted"]),
-            ],
+            flush_and_delete("iptables", "adopted"),
             "what the rollback could not remove must still be torn down later"
         );
 
@@ -1586,7 +1657,8 @@ mod tests {
         assert!(!still_owned, "a chain whose -X succeeded is no longer ours");
 
         // A chain this attempt never created is not ours to touch at all --
-        // chain names truncate and can collide with a live container.
+        // the name is shared by every run of the same container name, so it
+        // may belong to a run that is still live.
         let mut logger = Logger::new(Mode::Buffer);
         let mut flushed = false;
         let still_owned = teardown_chain(false, false, &mut logger, |_| flushed = true, |_| true);
@@ -1614,10 +1686,7 @@ mod tests {
         let _ = manager.remove_firewall_rules(&mut first);
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-stubborn"]),
-                strings(&["iptables", "-X", "MXC-stubborn"]),
-            ],
+            flush_and_delete("iptables", "stubborn"),
             "the first removal must attempt the teardown"
         );
 
@@ -1629,10 +1698,7 @@ mod tests {
         let _ = manager.remove_firewall_rules(&mut second);
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-stubborn"]),
-                strings(&["iptables", "-X", "MXC-stubborn"]),
-            ],
+            flush_and_delete("iptables", "stubborn"),
             "a removal that failed must leave the chain owned so Drop retries it"
         );
     }
@@ -1652,10 +1718,7 @@ mod tests {
         let _ = manager.remove_firewall_rules(&mut first);
         assert_eq!(
             fake.issued(),
-            vec![
-                strings(&["iptables", "-F", "MXC-released"]),
-                strings(&["iptables", "-X", "MXC-released"]),
-            ],
+            flush_and_delete("iptables", "released"),
             "the teardown must flush the chain and then delete it"
         );
 
@@ -1722,12 +1785,12 @@ mod tests {
         }
         let issued = fake.issued();
         assert!(
-            issued.contains(&strings(&["iptables", "-N", "MXC-fresh"])),
+            issued.contains(&strings(&["iptables", "-N", &chain_name_for("fresh")])),
             "the apply must create the IPv4 chain, got: {:?}",
             issued
         );
         assert!(
-            issued.contains(&strings(&["ip6tables", "-N", "MXC-fresh"])),
+            issued.contains(&strings(&["ip6tables", "-N", &chain_name_for("fresh")])),
             "a host whose ip6tables probe succeeds must get the parallel v6 chain, got: {:?}",
             issued
         );
@@ -1737,18 +1800,27 @@ mod tests {
         args.iter().map(|arg| arg.to_string()).collect()
     }
 
-    #[test]
-    fn chain_name_sanitization() {
-        let mgr = NetworkIptablesManager::new("my-container_123");
-        assert_eq!(mgr.chain_name, "MXC-my-container_123");
+    /// The flush-then-delete pair a teardown issues for `container`'s chain.
+    fn flush_and_delete(binary: &str, container: &str) -> Vec<Vec<String>> {
+        let chain = chain_name_for(container);
+        vec![
+            vec![binary.to_string(), "-F".to_string(), chain.clone()],
+            vec![binary.to_string(), "-X".to_string(), chain],
+        ]
     }
 
     #[test]
-    fn chain_name_truncation() {
+    fn chain_name_sanitization() {
+        let mgr = NetworkIptablesManager::new("my-container_123");
+        assert_eq!(mgr.chain_name, chain_name_for("my-container_123"));
+        assert!(mgr.chain_name.starts_with("MXC-my-cont-"));
+    }
+
+    #[test]
+    fn chain_name_respects_the_length_ceiling() {
         let long_name = "a".repeat(50);
         let mgr = NetworkIptablesManager::new(&long_name);
-        // 4 chars for "MXC-" + 20 chars max
-        assert!(mgr.chain_name.len() <= 24);
+        assert!(mgr.chain_name.len() <= CHAIN_NAME_MAX_LEN);
     }
 
     #[test]
@@ -2573,25 +2645,20 @@ mod tests {
     }
 
     #[test]
-    fn chain_names_have_mxc_prefix_and_total_length_cap_of_twenty_four() {
-        let short_name = "short";
-        let short_manager = NetworkIptablesManager::new(short_name);
-        assert_eq!(
-            short_manager.chain_name, "MXC-short",
-            "short container name {short_name} should be preserved after MXC- prefix"
+    fn chain_names_carry_the_mxc_prefix_within_the_iptables_length_ceiling() {
+        let short_manager = NetworkIptablesManager::new("short");
+        assert!(
+            short_manager.chain_name.starts_with("MXC-short-"),
+            "a short ASCII name should stay legible in the slug; actual: {}",
+            short_manager.chain_name
         );
 
         let long_name = "abcdefghijklmnopqrstuvwxyz";
         let long_manager = NetworkIptablesManager::new(long_name);
-        let expected = "MXC-abcdefghijklmnopqrst";
-        assert_eq!(
-            long_manager.chain_name, expected,
-            "long container name should be truncated to 20 chars after MXC- prefix"
-        );
-        assert_eq!(
-            long_manager.chain_name.len(),
-            24,
-            "chain name length cap should apply to total length including MXC- prefix"
+        assert!(
+            long_manager.chain_name.len() <= CHAIN_NAME_MAX_LEN,
+            "chain name must fit the iptables ceiling; actual: {}",
+            long_manager.chain_name
         );
         assert!(
             long_manager.chain_name.starts_with("MXC-"),

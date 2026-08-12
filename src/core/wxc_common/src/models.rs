@@ -498,6 +498,15 @@ pub struct ContainerPolicy {
     /// never on the wire.
     #[serde(skip)]
     pub network_specified: bool,
+    /// Whether the caller supplied any network *mode* field (`defaultPolicy`,
+    /// `enforcementMode`, `allowLocalNetwork`, `allowedHosts`, `blockedHosts`) —
+    /// i.e. anything other than `proxy`. Distinguishes an explicit
+    /// `defaultPolicy: "block"` from an omitted network block (both leave
+    /// `default_network_policy == Block`), so backends can reject a mode change
+    /// on a phase where the network posture is immutable while still honouring a
+    /// proxy-only network block. Parse-derived, never on the wire.
+    #[serde(skip)]
+    pub network_mode_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
     /// Whether the caller supplied a `ui` block on the wire (any field
@@ -730,6 +739,79 @@ pub struct ExecutionRequest {
     pub dry_run: bool,
 }
 
+/// Where a [`ResolvedWorkingDirectory`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkingDirectorySource {
+    /// The caller's explicit `process.cwd`.
+    Explicit,
+    /// Derived from the filesystem policy because `process.cwd` was omitted.
+    Policy,
+}
+
+/// The working directory a backend should launch the sandboxed child in,
+/// together with where it came from (for logging and error context).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedWorkingDirectory<'a> {
+    /// The selected directory. Never empty.
+    pub path: &'a str,
+    /// Whether `path` is the caller's `process.cwd` or a policy fallback.
+    pub source: WorkingDirectorySource,
+}
+
+impl ExecutionRequest {
+    /// Resolve the working directory for the sandboxed child: an explicit
+    /// `working_directory`, else the first filesystem-policy grant that is an
+    /// existing directory (`readwrite` paths before `readonly` ones), else
+    /// `None`.
+    ///
+    /// Backends that must not let the child inherit the host process's cwd use
+    /// this to fall back to a policy-granted path. It matters most on Windows:
+    /// a `NULL` current directory makes `CreateProcessW` inherit the parent's
+    /// cwd, and when the AppContainer token can't open it the kernel silently
+    /// resets the child to the drive root (`C:\`) instead of failing the launch.
+    ///
+    /// Policy grants may name individual *files* or directories that do not
+    /// exist yet, neither of which a process can be launched in, so only
+    /// existing directories are considered. An explicit `working_directory` is
+    /// returned unchecked — the caller asked for it, so a bad one must fail the
+    /// launch loudly rather than be silently replaced.
+    ///
+    /// Callers whose policy paths need normalizing before they can be probed
+    /// (e.g. Seatbelt's `~` expansion) should use
+    /// [`ExecutionRequest::resolved_working_directory_with`].
+    pub fn resolved_working_directory(&self) -> Option<ResolvedWorkingDirectory<'_>> {
+        self.resolved_working_directory_with(|path| std::path::Path::new(path).is_dir())
+    }
+
+    /// [`ExecutionRequest::resolved_working_directory`] with an injectable
+    /// "is this an existing directory?" probe, so backends can normalize a
+    /// policy path before testing it and unit tests can run without touching
+    /// the filesystem. The returned path is always the *unnormalized* policy
+    /// entry; normalize it again if `is_dir` did.
+    pub fn resolved_working_directory_with(
+        &self,
+        is_dir: impl Fn(&str) -> bool,
+    ) -> Option<ResolvedWorkingDirectory<'_>> {
+        if !self.working_directory.trim().is_empty() {
+            return Some(ResolvedWorkingDirectory {
+                path: self.working_directory.as_str(),
+                source: WorkingDirectorySource::Explicit,
+            });
+        }
+        self.policy
+            .readwrite_paths
+            .iter()
+            .chain(self.policy.readonly_paths.iter())
+            .map(String::as_str)
+            .filter(|path| !path.trim().is_empty())
+            .find(|path| is_dir(path))
+            .map(|path| ResolvedWorkingDirectory {
+                path,
+                source: WorkingDirectorySource::Policy,
+            })
+    }
+}
+
 /// Distinguishes whether an error occurred during process creation (launch)
 /// or after the process started but exited with a failure code.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -843,6 +925,123 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn request_with_paths(readwrite: &[&str], readonly: &[&str]) -> ExecutionRequest {
+        ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: readwrite.iter().map(|s| s.to_string()).collect(),
+                readonly_paths: readonly.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Resolve against a fake filesystem: every path in `dirs` is an existing
+    /// directory, everything else is not (a file, or nonexistent).
+    fn resolve<'a>(
+        req: &'a ExecutionRequest,
+        dirs: &'a [&'a str],
+    ) -> Option<ResolvedWorkingDirectory<'a>> {
+        req.resolved_working_directory_with(|path| dirs.contains(&path))
+    }
+
+    #[test]
+    fn resolved_working_directory_prefers_explicit_value() {
+        let mut req = request_with_paths(&["C:\\rw"], &["C:\\ro"]);
+        req.working_directory = "C:\\explicit".to_string();
+        let resolved = resolve(&req, &["C:\\rw", "C:\\ro"]).expect("explicit cwd");
+        assert_eq!(resolved.path, "C:\\explicit");
+        assert_eq!(resolved.source, WorkingDirectorySource::Explicit);
+    }
+
+    /// An explicit cwd is the caller's own choice, so it is returned unchecked
+    /// rather than silently swapped for a policy path when it does not exist.
+    #[test]
+    fn resolved_working_directory_returns_explicit_value_unchecked() {
+        let mut req = request_with_paths(&["C:\\rw"], &[]);
+        req.working_directory = "C:\\does-not-exist".to_string();
+        let resolved = resolve(&req, &["C:\\rw"]).expect("explicit cwd");
+        assert_eq!(resolved.path, "C:\\does-not-exist");
+        assert_eq!(resolved.source, WorkingDirectorySource::Explicit);
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readwrite() {
+        let req = request_with_paths(&["C:\\rw1", "C:\\rw2"], &["C:\\ro"]);
+        let resolved = resolve(&req, &["C:\\rw1", "C:\\rw2", "C:\\ro"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\rw1");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_falls_back_to_first_readonly() {
+        let req = request_with_paths(&[], &["C:\\ro1", "C:\\ro2"]);
+        let resolved = resolve(&req, &["C:\\ro1", "C:\\ro2"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\ro1");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_none_when_no_dir_and_no_paths() {
+        let req = request_with_paths(&[], &[]);
+        assert_eq!(resolve(&req, &[]), None);
+    }
+
+    /// Policy grants may name individual files; `CreateProcessW` fails with
+    /// `ERROR_DIRECTORY` on one, so files must be skipped.
+    #[test]
+    fn resolved_working_directory_skips_policy_files() {
+        let req = request_with_paths(&["C:\\inputs\\config.json", "C:\\workspace"], &[]);
+        let resolved = resolve(&req, &["C:\\workspace"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\workspace");
+    }
+
+    /// A grant for a directory the caller intends to create later must not be
+    /// used as the cwd — the launch would fail before it could be created.
+    #[test]
+    fn resolved_working_directory_skips_nonexistent_policy_paths() {
+        let req = request_with_paths(&["C:\\not-yet"], &["C:\\ro"]);
+        let resolved = resolve(&req, &["C:\\ro"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\ro");
+    }
+
+    #[test]
+    fn resolved_working_directory_skips_blank_entries() {
+        let req = request_with_paths(&["", "   "], &[]);
+        assert_eq!(resolve(&req, &["", "   "]), None);
+    }
+
+    /// A whitespace-only `process.cwd` is not a caller choice; fall through to
+    /// the policy rather than treating it as an explicit directory.
+    #[test]
+    fn resolved_working_directory_ignores_blank_explicit_value() {
+        let mut req = request_with_paths(&["C:\\rw"], &[]);
+        req.working_directory = "   ".to_string();
+        let resolved = resolve(&req, &["C:\\rw"]).expect("policy path");
+        assert_eq!(resolved.path, "C:\\rw");
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
+
+    #[test]
+    fn resolved_working_directory_none_when_no_policy_path_is_a_directory() {
+        let req = request_with_paths(&["C:\\a.txt"], &["C:\\b.txt"]);
+        assert_eq!(resolve(&req, &[]), None);
+    }
+
+    /// Covers the real (non-injected) filesystem probe used in production.
+    #[test]
+    fn resolved_working_directory_probes_the_real_filesystem() {
+        let temp_dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let missing = std::env::temp_dir()
+            .join("mxc-resolver-nonexistent-4f1c9a")
+            .to_string_lossy()
+            .into_owned();
+        let req = request_with_paths(&[&missing], &[&temp_dir]);
+        let resolved = req.resolved_working_directory().expect("policy path");
+        assert_eq!(resolved.path, temp_dir);
+        assert_eq!(resolved.source, WorkingDirectorySource::Policy);
+    }
 
     #[test]
     fn script_response_backend_unavailable_round_trips() {

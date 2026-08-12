@@ -267,3 +267,69 @@ fn seatbelt_timeout_kills_before_completion() {
         result.wall_time_ms
     );
 }
+
+/// End-to-end guard for the macOS root-symlink resolution in
+/// `seatbelt_common::profile_builder` (`resolve_macos_root_symlinks`).
+///
+/// On macOS `/var` is a symlink to `/private/var`, and Seatbelt matches
+/// `subpath` filters against the **resolved** path, so a grant emitted as
+/// `(subpath "/var/folders/…")` matches nothing at all. The ordinary spelling
+/// of `$TMPDIR` (`_CS_DARWIN_USER_TEMP_DIR`) *is* `/var/folders/<a>/<b>/T/`,
+/// so without that resolution a caller passing `$TMPDIR` straight through
+/// gets a grant that silently never matches — the profile loads fine and the
+/// access is still denied.
+///
+/// The resolution itself is unit-tested in the builder; this test exists
+/// because those unit tests assert on the *generated profile text* and so
+/// cannot show that the kernel actually honors it. It covers the two things
+/// only a real sandbox launch can: that the profile still **loads** with the
+/// rewritten rules, and that a write under the un-resolved path genuinely
+/// **succeeds**.
+///
+/// It deliberately does **not** canonicalize the path. Every other filesystem
+/// test in this file calls `fs::canonicalize` first, which resolves the
+/// symlink itself — so none of them would notice this class of bug.
+#[test]
+fn seatbelt_honors_uncanonicalized_var_readwrite_path() {
+    if !has_platform_exec() {
+        return;
+    }
+    // `env::temp_dir()` returns the host's real per-user `$TMPDIR`, so this
+    // needs no machine-specific container id — but only exercises the
+    // regression when it is genuinely the un-resolved `/var` spelling.
+    let temp_root = std::env::temp_dir();
+    if !temp_root.starts_with("/var") {
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = temp_root.join(format!("mxc-char-uncanon-{nanos}"));
+    fs::create_dir_all(&dir).expect("create temp dir");
+
+    let probe = "char_uncanon_probe.txt";
+    let mut cfg = config("uncanon", &format!("echo CHAR_OK > {probe}"));
+    cfg["process"]["cwd"] = json!(dir.to_string_lossy());
+    cfg["filesystem"] = json!({ "readwritePaths": [dir.to_string_lossy()] });
+
+    let result = run_platform_config_value("seatbelt uncanonicalized rw path", &cfg, &[], None);
+    let exists = dir.join(probe).exists();
+    let _ = fs::remove_dir_all(&dir);
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "sandbox run failed for the un-resolved /var spelling of {} \
+         (the profile must both load and grant the path):\n{}",
+        dir.display(),
+        result.combined_output()
+    );
+    assert!(
+        exists,
+        "expected the probe file under the un-resolved /var path {}; the grant \
+         was emitted but never matched\n{}",
+        dir.display(),
+        result.combined_output()
+    );
+}

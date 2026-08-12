@@ -343,6 +343,22 @@ fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
 
 fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     for path in paths {
+        // A blank entry names nothing: backends would either grant nothing or,
+        // worse, treat it as "unset" (e.g. a NULL working directory).
+        if path.trim().is_empty() {
+            return Err(WxcError::ConfigParse(
+                "Filesystem path is empty".to_string(),
+            ));
+        }
+        // An interior NUL silently truncates the path once it is converted to a
+        // C/UTF-16 string, so the enforced grant would not be the one requested.
+        if path.contains('\0') {
+            let msg = format!(
+                "Filesystem path '{}' contains an embedded NUL character",
+                config_deserialize::escape_diagnostic_text(path)
+            );
+            return Err(WxcError::ConfigParse(msg));
+        }
         if path.contains('"') {
             let msg = format!(
                 "Filesystem path '{}' contains invalid character '\"'",
@@ -956,6 +972,14 @@ fn convert_wire_config(
     // to `Block` either way).
     policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
+        // Presence of any network *mode* field (everything except `proxy`), so
+        // post-provision phases can reject an immutable-posture change by
+        // presence while still accepting a proxy-only network block.
+        policy.network_mode_specified = net.default_policy.is_some()
+            || net.enforcement_mode.is_some()
+            || net.allow_local_network.is_some()
+            || net.allowed_hosts.is_some()
+            || net.blocked_hosts.is_some();
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
@@ -1363,6 +1387,20 @@ fn convert_wire_state_aware(
         .as_ref()
         .map(|c| map_wire_containment(Some(c)));
 
+    // `containment` is a provision-only field: the backend is selected once at
+    // provision, and every later phase routes by `sandboxId`. A stray
+    // `containment` on a non-provision phase would otherwise leak into the
+    // shared converter's per-backend network guards and produce contradictory
+    // policy behavior (e.g. an exec `containment:"wslc"` + proxy is rejected
+    // either as "proxy requires allow" or as an immutable post-provision mode
+    // change). Reject it once, clearly, as a malformed envelope.
+    if phase != Phase::Provision && cfg.containment.is_some() {
+        return Err(WxcError::ConfigParse(format!(
+            "State-aware '{phase}' requests must not carry 'containment'; the backend is fixed \
+             at provision and later phases route by 'sandboxId'."
+        )));
+    }
+
     // Mirror the one-shot rejection of moved-to-stable experimental sections.
     // The one-shot path errors on `experimental.seatbelt` in `convert_wire_config`,
     // but the state-aware path peels `experimental` into `experimental_raw`
@@ -1733,6 +1771,82 @@ mod tests {
         }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_rejects_containment_on_non_provision_phase() {
+        // `containment` is provision-only; later phases route by `sandboxId`.
+        // A stray `containment` on start/exec/stop/deprovision is a malformed
+        // envelope, rejected once rather than leaking into per-backend guards.
+        for phase in ["start", "exec", "stop", "deprovision"] {
+            let json = format!(
+                r#"{{
+                    "phase": "{phase}",
+                    "sandboxId": "iso:abcd1234",
+                    "containment": "wslc"
+                }}"#
+            );
+            let opts = LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            };
+            let r = load_mxc_with_opts(&json, opts);
+            assert!(
+                matches!(r, Err(ParseError::StateAware(_))),
+                "phase {phase}: expected state-aware rejection, got {:?}",
+                r
+            );
+        }
+    }
+
+    /// Parse a provision request and return the resolved cross-cutting policy.
+    fn provision_policy(network_json: &str) -> ContainerPolicy {
+        let json = format!(
+            r#"{{
+                "phase": "provision",
+                "containment": "processcontainer",
+                "network": {network_json}
+            }}"#
+        );
+        match load_mxc(&json).unwrap() {
+            MxcRequest::StateAware(p) => p.request.policy,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_network_mode_specified_true_for_each_mode_field() {
+        // Every network *mode* field (everything except `proxy`) must flip the
+        // presence bit so post-provision phases can reject an immutable-posture
+        // change by presence.
+        for net in [
+            r#"{"defaultPolicy": "allow"}"#,
+            r#"{"enforcementMode": "firewall"}"#,
+            r#"{"allowLocalNetwork": true}"#,
+            r#"{"allowedHosts": ["example.com"]}"#,
+            r#"{"blockedHosts": ["example.com"]}"#,
+        ] {
+            let policy = provision_policy(net);
+            assert!(
+                policy.network_mode_specified,
+                "network {net} should set network_mode_specified"
+            );
+            assert!(policy.network_specified);
+        }
+    }
+
+    #[test]
+    fn state_aware_proxy_only_block_leaves_network_mode_unspecified() {
+        // A proxy-only block sets `network_specified` (the block is present) but
+        // NOT `network_mode_specified`, so the cooperative proxy stays honourable
+        // at exec while no immutable mode change is falsely detected.
+        let policy = provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
+        assert!(policy.network_specified);
+        assert!(
+            !policy.network_mode_specified,
+            "proxy-only block must not set network_mode_specified"
+        );
+        assert!(policy.network_proxy.is_enabled());
     }
 
     #[test]
@@ -3011,6 +3125,47 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    /// A blank grant names nothing, and previously flowed through to backends
+    /// that treat an empty path as "unset" (e.g. a NULL working directory).
+    #[test]
+    fn block_blank_filesystem_paths() {
+        for blank in ["", "   "] {
+            let json = format!(
+                r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "filesystem": {{ "readwritePaths": ["{blank}", "C:\\workspace"] }}
+            }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let result = load_request(&encoded, &mut logger, true);
+            let err = result.expect_err("blank path should be rejected");
+            assert!(
+                format!("{err}").contains("empty"),
+                "unexpected error for {blank:?}: {err}"
+            );
+        }
+    }
+
+    /// An interior NUL truncates the path once converted to a C/UTF-16 string,
+    /// so the grant enforced would not be the one requested.
+    #[test]
+    fn block_filesystem_paths_with_embedded_nul() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readonlyPaths": ["C:\\workspace\u0000\\..\\secrets"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.expect_err("embedded NUL should be rejected");
+        assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
     }
 
     #[test]

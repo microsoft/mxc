@@ -15,12 +15,26 @@
 //! been built or the host is missing process prerequisites. They therefore
 //! never red-fail on incapable CI, but lock in behavior on a prepared box.
 //!
-//! Scope note: env/cwd inheritance is intentionally not characterized here —
-//! the AppContainer "clean environment" model differs from the Unix backends,
-//! and the PR's env/cwd regressions were Seatbelt-specific. These tests cover
-//! the universally-meaningful contracts: exit-code propagation, stdout capture,
-//! and timeout enforcement.
+//! Scope note: env inheritance is intentionally not characterized here — the
+//! AppContainer "clean environment" model differs from the Unix backends. cwd
+//! *is* characterized (see the two `*_process_cwd*` tests below), because both
+//! Windows runners resolve an empty `process.cwd` to a concrete directory
+//! rather than passing `NULL` to the launch API.
+//!
+//! Tier note: the ProcessContainer tier (BaseContainer vs AppContainer+DACL) is
+//! **not** independently selectable from a config — the dispatcher derives it
+//! purely from host capability, and the `MXC_FORCE_TIER` seam is `cfg(test)`-only
+//! so it has no effect on the production `wxc-exec.exe`. These tests therefore
+//! exercise whichever tier the prepared lane resolves to; running them on both a
+//! BaseContainer-capable and a downlevel host covers both tiers. Because that is
+//! not enforceable in ordinary CI, the tier-independent guarantee — that neither
+//! runner can resolve a `NULL` cwd — is additionally locked in by the unit tests
+//! on the shared `appcontainer_common::working_directory` mapping both launch
+//! sites call, which run on every lane with no host prerequisites.
 #![cfg(target_os = "windows")]
+
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use wxc_e2e_tests::{
@@ -42,6 +56,46 @@ fn config(label: &str, command_line: &str) -> serde_json::Value {
         "containerId": format!("char-pc-{label}"),
         "process": { "commandLine": command_line }
     })
+}
+
+/// Scope-bound temporary directory for cwd characterization.
+///
+/// Cleanup is tied to `Drop` rather than an explicit call before the
+/// assertions, so the tree survives long enough to be inspected when an
+/// assertion fails, and is still removed when a helper panics early.
+struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mxc-char-pc-{tag}-{nanos}"));
+        fs::create_dir_all(&path).expect("create temp dir");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Whether `name` exists directly inside this directory.
+    fn contains(&self, name: &str) -> bool {
+        self.path.join(name).exists()
+    }
+
+    fn to_config_value(&self) -> serde_json::Value {
+        json!(self.path.to_string_lossy())
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 /// Skip (rather than fail) when the local host cannot launch a sandboxed
@@ -132,5 +186,98 @@ fn processcontainer_timeout_kills_before_completion() {
         result.wall_time_ms < 6000,
         "timeout should fire well before the workload finishes; took {}ms",
         result.wall_time_ms
+    );
+}
+
+/// REGRESSION GUARD (both Windows runners).
+///
+/// With an empty `process.cwd`, neither ProcessContainer runner may pass a
+/// `NULL` current directory to the launch API: the child would then inherit the
+/// launcher's cwd, and when the sandbox token can't open it the kernel silently
+/// resets the child to the drive root (`C:\`). Instead the runners resolve the
+/// cwd via `appcontainer_common::working_directory::launch_working_directory()`
+/// — here, the first `readwritePaths` entry.
+///
+/// The unit tests on that mapping cover selection and the never-`NULL`
+/// guarantee, but not that the resolved value actually reaches the launch API.
+/// This test observes the child's actual cwd by having it create a file through
+/// a *relative* path and checking which directory it lands in.
+///
+/// `launch_dir` is the launcher's cwd and is *also* a granted readwrite path, so
+/// a `NULL`-cwd regression would be openable by the token and the probe would
+/// land there — making the two outcomes distinguishable.
+#[test]
+fn processcontainer_runs_in_first_readwrite_path_when_process_cwd_empty() {
+    if !ready() {
+        return;
+    }
+    let write_dir = TempDir::new("cwd-write");
+    let launch_dir = TempDir::new("cwd-launch");
+    let probe = "char_cwd_default_probe.txt";
+    let mut cfg = config("cwd-default", &format!("cmd /c echo CHAR_OK> {probe}"));
+    cfg["filesystem"] = json!({
+        "readwritePaths": [write_dir.to_config_value(), launch_dir.to_config_value()]
+    });
+    let result = run_platform_config_value(
+        "processcontainer cwd default",
+        &cfg,
+        &[],
+        Some(launch_dir.path()),
+    );
+    if skip_if_missing_prereq(&result) {
+        return;
+    }
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    let in_launch = launch_dir.contains(probe);
+    let in_write = write_dir.contains(probe);
+    assert!(
+        in_write && !in_launch,
+        "expected the probe in the first readwrite policy path {} (resolved cwd \
+         with empty process.cwd); in_write={in_write} in_launch={in_launch}\n{}",
+        write_dir.path().display(),
+        result.combined_output()
+    );
+}
+
+/// Locks in that an explicit `process.cwd` still wins over the policy-path
+/// fallback in `working_directory::launch_working_directory()`.
+#[test]
+fn processcontainer_honors_explicit_process_cwd() {
+    if !ready() {
+        return;
+    }
+    let explicit_dir = TempDir::new("cwd-explicit");
+    let other_dir = TempDir::new("cwd-other");
+    let probe = "char_cwd_explicit_probe.txt";
+    let mut cfg = config("cwd-explicit", &format!("cmd /c echo CHAR_OK> {probe}"));
+    cfg["process"]["cwd"] = explicit_dir.to_config_value();
+    // `other_dir` is listed first so the fallback would resolve to it; the
+    // explicit cwd must take precedence.
+    cfg["filesystem"] = json!({
+        "readwritePaths": [other_dir.to_config_value(), explicit_dir.to_config_value()]
+    });
+    let result = run_platform_config_value("processcontainer cwd explicit", &cfg, &[], None);
+    if skip_if_missing_prereq(&result) {
+        return;
+    }
+    assert_eq!(
+        result.code,
+        Some(0),
+        "run failed:\n{}",
+        result.combined_output()
+    );
+    let in_explicit = explicit_dir.contains(probe);
+    let in_other = other_dir.contains(probe);
+    assert!(
+        in_explicit && !in_other,
+        "expected the probe file in the explicit process.cwd {}; \
+         in_explicit={in_explicit} in_other={in_other}\n{}",
+        explicit_dir.path().display(),
+        result.combined_output()
     );
 }

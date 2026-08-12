@@ -31,11 +31,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use wslc_common::container_steps::{self, ProcessSettings};
 use wslc_common::daemon_protocol::{
-    DeprovisionConfig, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
 };
 use wslc_common::policy_mapping;
 use wslc_common::wslc_bindings::{
-    WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
+    WslcContainer, WslcContainerGuard, WslcContainerNetworkingMode, WslcSdk, WslcSessionGuard,
 };
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ScriptResponse;
@@ -57,31 +57,78 @@ fn sr_err(resp: ScriptResponse) -> anyhow::Error {
     anyhow::anyhow!(resp.error_message)
 }
 
+/// A typed worker failure. The control server maps [`WorkerError::kind`] onto
+/// the protocol's [`ErrKind`] so clients can react (e.g. distinguish an unknown
+/// sandbox from a backend fault) without string-matching the message.
+#[derive(Debug)]
+pub enum WorkerError {
+    /// The referenced sandbox id is unknown to the daemon.
+    NotProvisioned(String),
+    /// The sandbox exists but has not been started.
+    NotStarted(String),
+    /// A backend/SDK-level failure, or an internal worker/channel fault.
+    Backend(anyhow::Error),
+}
+
+impl WorkerError {
+    /// The protocol classification the control server returns for this error.
+    pub fn kind(&self) -> ErrKind {
+        match self {
+            WorkerError::NotProvisioned(_) => ErrKind::NotProvisioned,
+            WorkerError::NotStarted(_) => ErrKind::NotStarted,
+            WorkerError::Backend(_) => ErrKind::Backend,
+        }
+    }
+}
+
+impl std::fmt::Display for WorkerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WorkerError::NotProvisioned(id) => write!(f, "unknown sandbox {id}"),
+            WorkerError::NotStarted(id) => write!(f, "sandbox {id} is not started"),
+            WorkerError::Backend(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
+impl std::error::Error for WorkerError {}
+
+impl From<anyhow::Error> for WorkerError {
+    fn from(e: anyhow::Error) -> Self {
+        WorkerError::Backend(e)
+    }
+}
+
 /// A unit of work dispatched from an async pipe handler to the WSLc worker
 /// thread. Each variant carries a `oneshot` reply channel the worker fulfils.
 pub enum WorkerCommand {
     Provision {
         config: ProvisionConfig,
-        reply: oneshot::Sender<Result<String>>,
+        reply: oneshot::Sender<Result<String, WorkerError>>,
     },
     Start {
         config: StartConfig,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
-    /// Run a command to completion, returning its exit code. Live stdio
-    /// streaming is layered on in the fill-in phase; for now this is
-    /// request/response only.
+    /// Validate the sandbox (exists + started) and, if admitted, run the
+    /// command to completion. The two replies make admission **atomic** with the
+    /// run: because the worker services this whole command on its single thread
+    /// without yielding, no `Stop`/`Deprovision` can interleave between the
+    /// validation and the run. `admit` carries the pre-run decision (so an
+    /// unknown/not-started sandbox is a pre-admission typed error, never a
+    /// post-admission stream `Error`); `done` carries the run's exit code.
     Exec {
         config: ExecConfig,
-        reply: oneshot::Sender<Result<i32>>,
+        admit: oneshot::Sender<Result<(), WorkerError>>,
+        done: oneshot::Sender<Result<i32, WorkerError>>,
     },
     Stop {
         config: StopConfig,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     Deprovision {
         config: DeprovisionConfig,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<(), WorkerError>>,
     },
     /// Report the current live-container count (drives the idle watchdog).
     ContainerCount { reply: oneshot::Sender<usize> },
@@ -97,63 +144,78 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     /// Provision a container, returning its minted `sandbox_id`.
-    pub async fn provision(&self, config: ProvisionConfig) -> Result<String> {
+    pub async fn provision(&self, config: ProvisionConfig) -> Result<String, WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::Provision { config, reply })?;
         rx.await.map_err(worker_gone)?
     }
 
     /// Start a provisioned container.
-    pub async fn start(&self, config: StartConfig) -> Result<()> {
+    pub async fn start(&self, config: StartConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::Start { config, reply })?;
         rx.await.map_err(worker_gone)?
     }
 
-    /// Run a command in a started container to completion.
-    pub async fn exec(&self, config: ExecConfig) -> Result<i32> {
-        let (reply, rx) = oneshot::channel();
-        self.send(WorkerCommand::Exec { config, reply })?;
-        rx.await.map_err(worker_gone)?
+    /// Admit and run a command in a started container. Awaits the worker's
+    /// **admission** decision first: on rejection (unknown/not-started sandbox)
+    /// this returns the typed error *before* the caller writes any admission to
+    /// the client. On admission it returns the completion receiver, which
+    /// resolves to the run's exit code. Admission and the start of the run are
+    /// atomic on the worker thread, so no lifecycle command can invalidate the
+    /// checked state between the two.
+    pub async fn exec(
+        &self,
+        config: ExecConfig,
+    ) -> Result<oneshot::Receiver<Result<i32, WorkerError>>, WorkerError> {
+        let (admit, admit_rx) = oneshot::channel();
+        let (done, done_rx) = oneshot::channel();
+        self.send(WorkerCommand::Exec {
+            config,
+            admit,
+            done,
+        })?;
+        admit_rx.await.map_err(worker_gone)??;
+        Ok(done_rx)
     }
 
     /// Stop a running container.
-    pub async fn stop(&self, config: StopConfig) -> Result<()> {
+    pub async fn stop(&self, config: StopConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::Stop { config, reply })?;
         rx.await.map_err(worker_gone)?
     }
 
     /// Deprovision (delete) a container.
-    pub async fn deprovision(&self, config: DeprovisionConfig) -> Result<()> {
+    pub async fn deprovision(&self, config: DeprovisionConfig) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::Deprovision { config, reply })?;
         rx.await.map_err(worker_gone)?
     }
 
     /// Current number of live containers (0 means the daemon is idle).
-    pub async fn container_count(&self) -> Result<usize> {
+    pub async fn container_count(&self) -> Result<usize, WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::ContainerCount { reply })?;
         rx.await.map_err(worker_gone)
     }
 
     /// Ask the worker to release everything and stop. Awaits confirmation.
-    pub async fn shutdown(&self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<(), WorkerError> {
         let (reply, rx) = oneshot::channel();
         self.send(WorkerCommand::Shutdown { reply })?;
         rx.await.map_err(worker_gone)
     }
 
-    fn send(&self, cmd: WorkerCommand) -> Result<()> {
+    fn send(&self, cmd: WorkerCommand) -> Result<(), WorkerError> {
         self.tx
             .send(cmd)
-            .map_err(|_| anyhow::anyhow!("WSLc worker thread is gone"))
+            .map_err(|_| WorkerError::Backend(anyhow::anyhow!("WSLc worker thread is gone")))
     }
 }
 
-fn worker_gone(_e: oneshot::error::RecvError) -> anyhow::Error {
-    anyhow::anyhow!("WSLc worker dropped the reply channel")
+fn worker_gone(_e: oneshot::error::RecvError) -> WorkerError {
+    WorkerError::Backend(anyhow::anyhow!("WSLc worker dropped the reply channel"))
 }
 
 /// Per-container bookkeeping held by the worker: whether the container is
@@ -216,7 +278,7 @@ impl Worker {
         Ok(())
     }
 
-    fn provision(&mut self, config: ProvisionConfig) -> Result<String> {
+    fn provision(&mut self, config: ProvisionConfig) -> Result<String, WorkerError> {
         self.ensure_session()?;
 
         let sdk = self.sdk.as_ref().expect("session ensured");
@@ -278,11 +340,11 @@ impl Worker {
         Ok(sandbox_id)
     }
 
-    fn start(&mut self, config: StartConfig) -> Result<()> {
+    fn start(&mut self, config: StartConfig) -> Result<(), WorkerError> {
         // Existence check first, so an unknown sandbox errors without needing the
         // SDK (keeps the no-WSL unit tests self-contained).
         if !self.containers.contains_key(&config.sandbox_id) {
-            anyhow::bail!("unknown sandbox {}", config.sandbox_id);
+            return Err(WorkerError::NotProvisioned(config.sandbox_id));
         }
         let sdk = self
             .sdk
@@ -301,14 +363,21 @@ impl Worker {
         Ok(())
     }
 
-    fn exec(&mut self, config: ExecConfig) -> Result<i32> {
-        let (container, started) = match self.containers.get(&config.sandbox_id) {
-            Some(e) => (e.container.as_raw(), e.started),
-            None => anyhow::bail!("unknown sandbox {}", config.sandbox_id),
-        };
-        if !started {
-            anyhow::bail!("sandbox {} is not started", config.sandbox_id);
+    /// Validate that a sandbox exists and is started, returning the live handle
+    /// needed to run. Sole owner of the exists+started invariant: [`exec`] trusts
+    /// the handle it is given and never re-checks, because the worker services
+    /// admission and the run on one thread without yielding between them.
+    fn validate_exec(&self, sandbox_id: &str) -> Result<WslcContainer, WorkerError> {
+        match self.containers.get(sandbox_id) {
+            None => Err(WorkerError::NotProvisioned(sandbox_id.to_string())),
+            Some(entry) if !entry.started => Err(WorkerError::NotStarted(sandbox_id.to_string())),
+            Some(entry) => Ok(entry.container.as_raw()),
         }
+    }
+
+    /// Run a command in a sandbox whose existence/started state was already
+    /// confirmed by [`validate_exec`]; `container` is that validated handle.
+    fn exec(&mut self, config: ExecConfig, container: WslcContainer) -> Result<i32, WorkerError> {
         let sdk = self
             .sdk
             .as_ref()
@@ -347,15 +416,18 @@ impl Worker {
                 };
             }
             self.containers.remove(&config.sandbox_id);
-            anyhow::bail!(
+            return Err(WorkerError::Backend(anyhow::anyhow!(
                 "exec on sandbox {} could not be confirmed terminated; the container was \
                  quarantined",
                 config.sandbox_id
-            );
+            )));
         }
 
         if outcome.timed_out {
-            anyhow::bail!("exec timed out after {}ms", config.timeout_ms);
+            return Err(WorkerError::Backend(anyhow::anyhow!(
+                "exec timed out after {}ms",
+                config.timeout_ms
+            )));
         }
         // NOTE: outcome.stdout/stderr are captured but not yet forwarded — live
         // stdio streaming over the control pipe is a later fill-in; the PR1
@@ -363,9 +435,9 @@ impl Worker {
         Ok(outcome.exit_code)
     }
 
-    fn stop(&mut self, config: StopConfig) -> Result<()> {
+    fn stop(&mut self, config: StopConfig) -> Result<(), WorkerError> {
         if !self.containers.contains_key(&config.sandbox_id) {
-            anyhow::bail!("unknown sandbox {}", config.sandbox_id);
+            return Err(WorkerError::NotProvisioned(config.sandbox_id));
         }
         let sdk = self
             .sdk
@@ -384,10 +456,10 @@ impl Worker {
         Ok(())
     }
 
-    fn deprovision(&mut self, config: DeprovisionConfig) -> Result<()> {
+    fn deprovision(&mut self, config: DeprovisionConfig) -> Result<(), WorkerError> {
         let container_raw = match self.containers.get(&config.sandbox_id) {
             Some(e) => e.container.as_raw(),
-            None => anyhow::bail!("unknown sandbox {}", config.sandbox_id),
+            None => return Err(WorkerError::NotProvisioned(config.sandbox_id)),
         };
 
         if let Some(sdk) = self.sdk.as_ref() {
@@ -467,8 +539,38 @@ pub fn spawn() -> Result<SessionHandle> {
                     WorkerCommand::Start { config, reply } => {
                         let _ = reply.send(worker.start(config));
                     }
-                    WorkerCommand::Exec { config, reply } => {
-                        let _ = reply.send(worker.exec(config));
+                    WorkerCommand::Exec {
+                        config,
+                        admit,
+                        done,
+                    } => {
+                        // Validate and run in one handler so admission is atomic
+                        // with the start of the run: the worker never yields
+                        // between the two, so no Stop/Deprovision can interleave.
+                        match worker.validate_exec(&config.sandbox_id) {
+                            Err(e) => {
+                                let _ = admit.send(Err(e));
+                            }
+                            // Only run if the admission receiver is still there:
+                            // if the client handler was dropped before it read
+                            // admission, the blocking exec would otherwise starve
+                            // every other lifecycle command for its full timeout.
+                            Ok(container) if admit.send(Ok(())).is_ok() => {
+                                let sandbox_id = config.sandbox_id.clone();
+                                let outcome = worker.exec(config, container);
+                                if let Err(orphaned) = done.send(outcome) {
+                                    // The client handler is gone (e.g. its
+                                    // post-admission Ok write failed) but the run
+                                    // already happened. Record the result so a
+                                    // completed exec is never silently lost.
+                                    worker.logger.warning_line(&format!(
+                                        "exec on {sandbox_id} completed after the client \
+                                         disconnected; orphaned result: {orphaned:?}"
+                                    ));
+                                }
+                            }
+                            Ok(_) => {}
+                        }
                     }
                     WorkerCommand::Stop { config, reply } => {
                         let _ = reply.send(worker.stop(config));
@@ -589,6 +691,36 @@ mod tests {
         handle.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn unknown_sandbox_maps_to_not_provisioned_kind() {
+        let handle = spawn().unwrap();
+        let err = handle
+            .start(StartConfig {
+                sandbox_id: "wslc:does-not-exist".to_string(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrKind::NotProvisioned);
+        handle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn exec_unknown_sandbox_admission_is_not_provisioned() {
+        let handle = spawn().unwrap();
+        let err = handle
+            .exec(ExecConfig {
+                sandbox_id: "wslc:does-not-exist".to_string(),
+                script_code: "echo hi".to_string(),
+                working_directory: String::new(),
+                env: Vec::new(),
+                timeout_ms: 0,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), ErrKind::NotProvisioned);
+        handle.shutdown().await.unwrap();
+    }
+
     // ---- Full lifecycle integration test (WSL2 host only) ----
     //
     // Exercises the real SDK path end to end: provision (boot VM + create
@@ -630,6 +762,9 @@ mod tests {
                 timeout_ms: 30_000,
             })
             .await
+            .unwrap()
+            .await
+            .unwrap()
             .unwrap();
         assert_eq!(code, 0);
 

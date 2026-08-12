@@ -3,11 +3,11 @@
 
 //! `BaseContainerRunner` — executes scripts through the Windows BaseContainer APIs.
 //!
-//! Schema versions through 0.7 use the legacy `SandboxSpec` / one-shot
-//! `Experimental_CreateProcessInSandbox` path. Schema 0.8 and later prefer the
-//! PSEC 1.0 / `CreateProcessSecurityEnvironment` two-phase contract and attach
-//! the resulting environment to `CreateProcessW`, but temporarily fall back to
-//! the legacy SBOX contract when PSEC is unavailable.
+//! The runner prefers the PSEC 1.0 / `CreateProcessSecurityEnvironment`
+//! two-phase contract whenever its runtime probe succeeds and attaches the
+//! resulting environment to `CreateProcessW`. It temporarily falls back to the
+//! legacy `SandboxSpec` / one-shot `Experimental_CreateProcessInSandbox`
+//! contract when PSEC is unavailable or cannot represent the requested policy.
 
 use std::ffi::c_void;
 use std::fmt::Write;
@@ -23,8 +23,6 @@ use learning_mode_windows::{
     CaptureSession, EtlDenialAnalyzer, LearningModeApi, ProcessSecurityEnvironment,
     SecurityEnvironmentApi, SecurityEnvironmentStartupInfo, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
 };
-use semver::Version;
-
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, SetHandleInformation, ERROR_CALL_NOT_IMPLEMENTED,
     ERROR_NOT_SUPPORTED, E_NOTIMPL, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -236,10 +234,10 @@ const SANDBOX_CAP_NETWORK_PROXY: u64 = 0x0000_0000_0000_0004;
 const CAPTURE_API_AVAILABLE_LOG: &str =
     "captureDenials: learning-mode trace API available (processmodel.dll)";
 const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
-    "schema version 0.8.0 and later with filesystem.deniedPaths requires \
-     QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; \
-     this OS build does not support that policy, and the process-security-environment \
-     path cannot fall back to AppContainer or host-DACL enforcement";
+    "filesystem.deniedPaths on the process-security-environment path requires \
+     QueryProcessSecurityEnvironmentSupport to advertise PSE_SUPPORT_FS_DENY; this OS \
+     build does not support that policy, and the process-security-environment path \
+     cannot fall back to AppContainer or host-DACL enforcement";
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
@@ -250,18 +248,17 @@ fn is_api_not_implemented(err: u32) -> bool {
     err == ERROR_CALL_NOT_IMPLEMENTED.0 || err == E_NOTIMPL.0 as u32
 }
 
-/// The schema 0.8 proxy compatibility path deliberately selects transitional
-/// SBOX because PSEC cannot yet supply the proxy peer identity. If that older
-/// contract reports `ERROR_NOT_SUPPORTED`, expose it as backend availability
-/// without changing error classification for unrelated SBOX policies.
-fn is_schema_0_8_proxy_fallback_unavailable(
+/// Proxy compatibility deliberately selects transitional SBOX because PSEC
+/// cannot yet supply the proxy peer identity. If that older contract reports
+/// `ERROR_NOT_SUPPORTED`, expose it as backend availability without changing
+/// error classification for unrelated SBOX policies.
+fn is_proxy_fallback_unavailable(
     err: u32,
     request: &ExecutionRequest,
     use_process_security_environment: bool,
 ) -> bool {
     err == ERROR_NOT_SUPPORTED.0
         && !use_process_security_environment
-        && BaseContainerRunner::schema_prefers_process_security_environment(request)
         && request.policy.network_proxy.is_enabled()
 }
 
@@ -789,19 +786,12 @@ impl BaseContainerRunner {
         }
     }
 
-    pub(crate) fn schema_prefers_process_security_environment(request: &ExecutionRequest) -> bool {
-        Version::parse(&request.schema_version).is_ok_and(|version| {
-            let comparable = Version::new(version.major, version.minor, version.patch);
-            comparable >= Version::new(0, 8, 0)
-        })
-    }
-
     fn should_use_process_security_environment(
         request: &ExecutionRequest,
         psec_usable: bool,
         psec_supports_deny_paths: bool,
     ) -> bool {
-        if !Self::schema_prefers_process_security_environment(request) || !psec_usable {
+        if !psec_usable {
             return false;
         }
         if request.policy.capture_denials.is_some() {
@@ -838,7 +828,7 @@ impl BaseContainerRunner {
         }
         let psec_usable = Self::is_process_security_environment_usable();
         if request.policy.capture_denials.is_some() {
-            return Self::schema_prefers_process_security_environment(request) && psec_usable;
+            return psec_usable;
         }
         let psec_supports_deny_paths = request.policy.denied_paths.is_empty()
             || SecurityEnvironmentApi::load()
@@ -1312,8 +1302,9 @@ impl BaseContainerRunner {
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
-        // Schema versions through 0.7 use the SBOX one-shot API. Schema 0.8+
-        // uses only the process-security-environment APIs.
+        // Prefer the process-security-environment APIs whenever they are usable
+        // and compatible with the requested policy; otherwise use transitional
+        // SBOX.
         let create_process_in_sandbox = if !use_process_security_environment {
             let api = match Self::load_api() {
                 Ok(f) => f,
@@ -1333,14 +1324,16 @@ impl BaseContainerRunner {
         // 3. Build the command line (passed directly, same as AppContainerScriptRunner).
         let mut cmd_wide = string_util::to_wide(&request.script_code);
 
-        // Working directory (NULL falls back to the current directory).
-        let cwd_wide;
-        let cwd_ptr = if request.working_directory.is_empty() {
-            ptr::null()
-        } else {
-            cwd_wide = string_util::to_wide(&request.working_directory);
-            cwd_wide.as_ptr()
-        };
+        // Resolved via the shared helper so both Windows launch paths agree and
+        // neither can pass a NULL cwd (see `working_directory`).
+        let working_directory = crate::working_directory::launch_working_directory(&request);
+        let _ = writeln!(
+            logger,
+            "working directory: {}",
+            working_directory.describe()
+        );
+        let cwd_wide = string_util::to_wide(&working_directory.path);
+        let cwd_ptr = cwd_wide.as_ptr();
 
         let legacy_destroy_on_exit =
             !use_process_security_environment && request.lifecycle.destroy_on_exit;
@@ -1609,9 +1602,9 @@ impl BaseContainerRunner {
         let current_env_ptr = env_ptr;
         let current_creation_flags = creation_flags;
 
-        // Schema 0.8 and later prefer a process security environment when its
-        // runtime probe succeeds. During the SBOX-to-PSEC transition, ordinary
-        // requests fall back to the legacy contract when PSEC is unavailable.
+        // Prefer a process security environment when its runtime probe succeeds.
+        // During the SBOX-to-PSEC transition, ordinary requests fall back to the
+        // legacy contract when PSEC is unavailable or policy-incompatible.
         // captureDenials still requires PSEC because SBOX cannot provide the
         // environment handle needed to key the trace.
         let mut capture_session: Option<Box<dyn CaptureSessionOps>> = None;
@@ -1619,7 +1612,7 @@ impl BaseContainerRunner {
         if use_process_security_environment {
             let psec_spec = process_security_environment_spec
                 .as_deref()
-                .expect("PSEC spec is initialized for schema version 0.8 and later");
+                .expect("PSEC spec is initialized when the PSEC path is selected");
             if capture_denials.is_some() {
                 match self
                     .capture_factory
@@ -1840,7 +1833,10 @@ impl BaseContainerRunner {
                 &request.policy.readonly_paths,
             );
 
-            let mut extended_error = format!("{launch_api_name} failed: {err:?}");
+            let mut extended_error = format!(
+                "{launch_api_name} failed: {err:?} (working directory: {})",
+                working_directory.describe()
+            );
             if let Some(cleanup_error) = capture_cleanup_error {
                 let _ = write!(
                     extended_error,
@@ -1858,11 +1854,8 @@ impl BaseContainerRunner {
             // Classify a disabled-feature error as BackendUnavailable; any
             // other launch error stays LaunchFailed.
             let failure_phase = if is_api_not_implemented(err.0)
-                || is_schema_0_8_proxy_fallback_unavailable(
-                    err.0,
-                    &request,
-                    use_process_security_environment,
-                ) {
+                || is_proxy_fallback_unavailable(err.0, &request, use_process_security_environment)
+            {
                 FailurePhase::BackendUnavailable
             } else {
                 FailurePhase::LaunchFailed
@@ -2036,8 +2029,8 @@ struct BaseChild {
     /// is configured and the OS API is available). Sealed in `run_teardown`
     /// after the child exits.
     capture_session: Option<Box<dyn CaptureSessionOps>>,
-    /// Non-capture PSEC environment for schema 0.8+ requests. Retained until
-    /// the child exits so policy enforcement outlives the process tree.
+    /// Non-capture PSEC environment retained until the child exits so policy
+    /// enforcement outlives the process tree.
     security_environment: Option<ProcessSecurityEnvironment>,
     /// Internal runner-managed temp `.etl` the broker seals into. Decoded
     /// then deleted in `run_teardown`. `Some` iff `capture_session` is `Some`.
@@ -2050,14 +2043,7 @@ struct BaseChild {
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         let capture_denials = request.policy.capture_denials.is_some();
-        let schema_prefers_process_security_environment =
-            Self::schema_prefers_process_security_environment(request);
         let use_process_security_environment = self.uses_process_security_environment(request);
-        if capture_denials && !schema_prefers_process_security_environment {
-            return Err(ScriptResponse::error(
-                "processContainer.captureDenials requires schema version 0.8.0 or later",
-            ));
-        }
         if capture_denials && !use_process_security_environment {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -2070,16 +2056,14 @@ impl SandboxBackend for BaseContainerRunner {
         }
         if use_process_security_environment && request.policy.least_privilege_mode {
             return Err(ScriptResponse::error(
-                "schema version 0.8.0 and later cannot be combined with \
-                 processContainer.leastPrivilege because the Windows process \
-                 security-environment contract does not support LPAC tokens",
+                "the process-security-environment path cannot be combined with \
+                 processContainer.leastPrivilege because it does not support LPAC tokens",
             ));
         }
         if use_process_security_environment && request.policy.network_proxy.is_enabled() {
             return Err(ScriptResponse::error(
-                "schema version 0.8.0 and later cannot be combined with network.proxy \
-                 until the process-security-environment path can supply the required \
-                 proxy AppContainer peer identity",
+                "the process-security-environment path cannot be combined with network.proxy \
+                 until it can supply the required proxy AppContainer peer identity",
             ));
         }
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
@@ -2098,8 +2082,8 @@ impl SandboxBackend for BaseContainerRunner {
                 .map_err(|detail| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
                     ..ScriptResponse::error(&format!(
-                        "schema version 0.8.0 and later requires the official process \
-                         security-environment APIs ({detail})"
+                        "the selected process-security-environment path requires the official \
+                         process security-environment APIs ({detail})"
                     ))
                 })?;
         }
@@ -2986,9 +2970,9 @@ mod tests {
     }
 
     #[test]
-    fn error_not_supported_is_backend_unavailable_only_for_schema_0_8_proxy_fallback() {
+    fn error_not_supported_is_backend_unavailable_only_for_proxy_fallback() {
         let mut proxy_request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
+            schema_version: "0.6.0-alpha".to_string(),
             ..Default::default()
         };
         proxy_request.policy.network_proxy = ProxyConfig {
@@ -2996,29 +2980,26 @@ mod tests {
             builtin_test_server: false,
         };
 
-        assert!(is_schema_0_8_proxy_fallback_unavailable(
+        assert!(is_proxy_fallback_unavailable(
             ERROR_NOT_SUPPORTED.0,
             &proxy_request,
             false
         ));
-        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+        assert!(!is_proxy_fallback_unavailable(
             ERROR_NOT_SUPPORTED.0,
             &proxy_request,
             true
         ));
 
         proxy_request.schema_version = "0.7.0-alpha".to_string();
-        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+        assert!(is_proxy_fallback_unavailable(
             ERROR_NOT_SUPPORTED.0,
             &proxy_request,
             false
         ));
 
-        let ordinary_request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..Default::default()
-        };
-        assert!(!is_schema_0_8_proxy_fallback_unavailable(
+        let ordinary_request = ExecutionRequest::default();
+        assert!(!is_proxy_fallback_unavailable(
             ERROR_NOT_SUPPORTED.0,
             &ordinary_request,
             false
@@ -3315,31 +3296,23 @@ mod tests {
     }
 
     #[test]
-    fn process_security_environment_preference_uses_schema_version() {
-        for (version, expected) in [
-            ("", false),
-            ("0.6.0-alpha", false),
-            ("0.7.99", false),
-            ("0.8.0-alpha", true),
-            ("0.8.0", true),
-            ("1.0.0", true),
-        ] {
+    fn process_security_environment_preference_is_schema_independent() {
+        for version in ["", "0.6.0-alpha", "0.7.99", "0.8.0-alpha", "1.0.0"] {
             let request = ExecutionRequest {
                 schema_version: version.to_string(),
                 ..Default::default()
             };
-            assert_eq!(
-                BaseContainerRunner::schema_prefers_process_security_environment(&request),
-                expected,
-                "schema version {version}"
+            assert!(
+                BaseContainerRunner::should_use_process_security_environment(&request, true, true),
+                "PSEC should be preferred for schema version {version}"
             );
         }
     }
 
     #[test]
-    fn schema_0_8_uses_psec_only_when_runtime_probe_succeeds() {
+    fn psec_is_used_only_when_runtime_probe_succeeds() {
         let request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
+            schema_version: "0.6.0-alpha".to_string(),
             ..Default::default()
         };
 
@@ -3350,11 +3323,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_0_8_proxy_uses_legacy_contract() {
-        let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..Default::default()
-        };
+    fn proxy_uses_legacy_contract() {
+        let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
@@ -3366,16 +3336,13 @@ mod tests {
         );
         assert!(
             !runner.uses_process_security_environment(&request),
-            "schema 0.8 proxy requests must build the legacy SBOX contract"
+            "proxy requests must build the legacy SBOX contract"
         );
     }
 
     #[test]
-    fn schema_0_8_least_privilege_uses_legacy_contract() {
-        let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..Default::default()
-        };
+    fn least_privilege_uses_legacy_contract() {
+        let mut request = ExecutionRequest::default();
         request.policy.least_privilege_mode = true;
 
         assert!(
@@ -3384,11 +3351,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_0_8_denied_paths_use_legacy_contract_when_psec_lacks_support() {
-        let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
-            ..Default::default()
-        };
+    fn denied_paths_use_legacy_contract_when_psec_lacks_support() {
+        let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec![r"C:\secret".to_string()];
 
         assert!(
@@ -3604,7 +3568,15 @@ mod tests {
     #[test]
     fn validate_runner_rejects_denied_paths_when_unsupported() {
         let _guard = crate::test_env::DenyPathsGuard::supported(false);
-        let runner = BaseContainerRunner::new();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: None,
+            deny_supported: false,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(fake_capture_factory(), support);
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
@@ -3747,7 +3719,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_0_8_without_capture_requires_only_security_environment_api() {
+    fn psec_without_capture_requires_only_security_environment_api() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
@@ -3759,13 +3731,13 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
+            schema_version: "0.6.0-alpha".to_string(),
             ..Default::default()
         };
 
         runner
             .validate(&request)
-            .expect("schema 0.8 requires PSEC but not Learning Mode");
+            .expect("PSEC requires the security-environment API but not Learning Mode");
 
         assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
@@ -3774,7 +3746,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_0_8_dry_run_skips_host_api_probes() {
+    fn psec_dry_run_skips_host_api_probes() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: Some("V2 exports unavailable"),
@@ -3786,7 +3758,7 @@ mod tests {
         });
         let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
+            schema_version: "0.6.0-alpha".to_string(),
             dry_run: true,
             ..Default::default()
         };
@@ -3804,10 +3776,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_allows_schema_0_8_least_privilege_via_legacy_contract() {
+    fn validate_runner_allows_least_privilege_via_legacy_contract() {
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
             dry_run: true,
             ..Default::default()
         };
@@ -3819,10 +3790,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_allows_schema_0_8_proxy_via_legacy_contract() {
+    fn validate_runner_allows_proxy_via_legacy_contract() {
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
-            schema_version: "0.8.0-alpha".to_string(),
             dry_run: true,
             ..Default::default()
         };
@@ -3837,8 +3807,17 @@ mod tests {
     }
 
     #[test]
-    fn validate_runner_rejects_capture_denials_before_schema_0_8() {
-        let runner = BaseContainerRunner::new();
+    fn validate_runner_allows_capture_denials_on_older_schema() {
+        let factory = fake_capture_factory();
+        let support = Arc::new(FakeCaptureSupport {
+            api_error: None,
+            deny_error: None,
+            deny_supported: true,
+            api_calls: AtomicUsize::new(0),
+            learning_mode_api_calls: AtomicUsize::new(0),
+            deny_calls: AtomicUsize::new(0),
+        });
+        let runner = BaseContainerRunner::with_capture_components(factory.clone(), support.clone());
         let mut request = ExecutionRequest {
             schema_version: "0.7.0-alpha".to_string(),
             dry_run: true,
@@ -3846,10 +3825,11 @@ mod tests {
         };
         request.policy.capture_denials = Some(Default::default());
 
-        let error = runner
+        runner
             .validate(&request)
-            .expect_err("captureDenials is part of the schema 0.8 PSEC contract");
-
-        assert!(error.error_message.contains("schema version 0.8.0"));
+            .expect("captureDenials should use PSEC regardless of schema version");
+        assert_eq!(support.api_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
     }
 }

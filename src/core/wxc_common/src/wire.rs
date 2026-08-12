@@ -167,7 +167,13 @@ pub enum Containment {
 pub struct Process {
     /// Command line (or script) to execute.
     pub command_line: Option<String>,
-    /// Working directory for the process.
+    /// Working directory for the process. When omitted, backends substitute a
+    /// directory the sandbox can use rather than inheriting the launcher's cwd:
+    /// Windows ProcessContainer picks the first `readwritePaths` entry that is
+    /// an existing directory, else the first such `readonlyPaths` entry, else
+    /// the system drive root; Seatbelt applies the same precedence with a `/`
+    /// fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a
+    /// working directory outright. See `docs/schema.md` ("Working Directory").
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
     pub env: Option<Vec<String>>,
@@ -520,6 +526,33 @@ pub struct Wslc {
     /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
     /// for UDP port mappings.
     pub port_mappings: Option<Vec<PortMapping>>,
+    /// State-aware provision-phase configuration
+    /// (`experimental.wslc.provision`). Carries the container-creation knobs
+    /// for the state-aware lifecycle; the flat sibling fields above remain the
+    /// one-shot surface. Absent on one-shot configs and non-provision phases.
+    pub provision: Option<WslcProvisionPhase>,
+}
+
+/// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested
+/// under `experimental.wslc.provision`. Carries only what the amortized daemon
+/// session honors: the container image (or a local tarball to import).
+///
+/// Filesystem mounts and network mode derive from the top-level `policy`
+/// section (readwrite / readonly paths, network), not from here. The
+/// one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`
+/// / `portMappings`) are deliberately absent: the daemon shares a single session
+/// across sandboxes and does not apply per-sandbox sizing. start / exec / stop /
+/// deprovision carry no backend-specific config (the exec command flows through
+/// the top-level `process` section), so they have no phase struct.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct WslcProvisionPhase {
+    /// Container image reference (e.g. `alpine:latest`). Defaults to
+    /// `alpine:latest` when omitted.
+    pub image: Option<String>,
+    /// Path to a local image tarball to import instead of pulling.
+    pub image_tar_path: Option<String>,
 }
 
 /// A single host → container port forward. Reachable only under the permissive

@@ -619,8 +619,7 @@ pub(crate) fn parse_hex_string_into(hex_input: &str, out: &mut Vec<u8>) -> Resul
     // ACE blobs per trace that added up.
     //
     // iterate `as_bytes()` rather than `chars()`. The
-    // input is always ASCII hex emitted by the Windows event renderer
-    // (`<ComplexData>` text nodes from EvtRender), so per-codepoint
+    // input is ASCII hex copied from an ETW diagnostic payload, so per-codepoint
     // UTF-8 decoding is pure overhead. Non-hex / non-whitespace bytes
     // still surface the same error.
     out.clear();
@@ -729,8 +728,7 @@ fn read_ace_at_offset(buf: &[u8], cursor: usize) -> Result<AceSlice<'_>> {
 /// names in `found` *and* returns `Err`. Callers that feed a security
 /// policy must therefore treat `Err` as fail-closed: stage per blob and
 /// discard on error rather than pointing this at an accumulated set.
-/// See `access_failure::consume_access_failure`, which stages into
-/// `AceWalkState::matches` and only promotes on `Ok`.
+/// Production callers must similarly stage matches and only promote on `Ok`.
 fn walk_aces(
     buf: &[u8],
     index: &CapabilityIndex,
@@ -1215,7 +1213,7 @@ mod tests {
     #[test]
     fn truncated_tail_writes_partially_so_callers_must_stage() {
         // Pins the low-level contract that motivates fail-closed
-        // staging in `consume_access_failure`: the walker DOES leave
+        // staging in production callers: the walker DOES leave
         // matches behind on error, which is exactly why a caller must
         // not point it at an accumulated policy set.
         let sid = well_world_sid();

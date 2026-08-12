@@ -255,7 +255,7 @@ export interface Process {
    */
   commandLine?: string | null;
   /**
-   * Working directory for the process.
+   * Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` ("Working Directory").
    */
   cwd?: string | null;
   /**
@@ -440,6 +440,10 @@ export interface Wslc {
    */
   portMappings?: PortMapping[] | null;
   /**
+   * State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
+   */
+  provision?: WslcProvisionPhase | null;
+  /**
    * Storage path override.
    */
   storagePath?: string | null;
@@ -447,6 +451,23 @@ export interface Wslc {
    * OS inside the WSL container.
    */
   targetOs?: string | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
+ * 
+ * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
+ */
+export interface WslcProvisionPhase {
+  /**
+   * Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.
+   */
+  image?: string | null;
+  /**
+   * Path to a local image tarball to import instead of pulling.
+   */
+  imageTarPath?: string | null;
   [k: string]: unknown;
 }
 

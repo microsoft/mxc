@@ -34,7 +34,10 @@ production configs and the dev schema when working on experimental features:
 
     "process": {
         "commandLine": "python app.py",    // Required: command to execute
-        "cwd": "C:\\workspace",            // Working directory
+        "cwd": "C:\\workspace",            // Working directory (optional; when omitted each
+                                           //  backend substitutes a granted directory rather
+                                           //  than inheriting the launcher's — see
+                                           //  "Working Directory" below)
         "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
@@ -128,6 +131,27 @@ production configs and the dev schema when working on experimental features:
 > [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
 > and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md#correlating-a-lifecycle).
 
+### Working Directory
+
+`process.cwd` is optional. When it is set, it is passed to the backend
+verbatim — an unusable value fails the launch rather than being silently
+replaced. When it is **omitted**, backends do not simply inherit the launcher's
+working directory: under a deny-by-default sandbox that directory is usually
+unreadable, and the result ranges from a confusing silent relocation (Windows
+restarts the child at the drive root) to `getcwd()` errors on the child's
+stderr. Each backend therefore substitutes a directory the sandbox can actually
+use:
+
+| Backend | Default when `process.cwd` is omitted |
+|---------|----------------------------------------|
+| Windows ProcessContainer (AppContainer / BaseContainer) | First `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root (`%SystemDrive%\`). Never `NULL`. |
+| Seatbelt (macOS) | Same precedence, with `~` expanded as the profile expands it; falls back to `/`. |
+| LXC / WSL Container | The container root — see [`docs/lxc-support/lxc-backend.md`](lxc-support/lxc-backend.md). |
+| MicroVM (NanVix) / Hyperlight | Not applicable — these backends reject a working directory outright. |
+
+Policy entries that are blank, name a file, or do not exist yet are skipped:
+a process cannot be launched in any of them.
+
 ### Filesystem Policy
 
 The `filesystem` section defines path access policy shared across backends:
@@ -149,6 +173,23 @@ containment tier selected at runtime:
   Because the ACEs are keyed on the sandbox's derived AppContainer SID, two concurrent
   runs sharing the same `containerId` can revoke each other's ACEs — use distinct
   `containerId` values for parallel runs.
+
+#### Path grants and root directories for Windows BaseContainer
+
+For Windows BaseContainer, a path grant in `readwritePaths` applies to that directory
+and its descendants with the exception of root directories. Granting access to a
+**volume root** (e.g. `C:\`) does **not** cascade to its child folders to prevent over-provisioning. 
+
+For example, `"readwritePaths": ["C:\\"]` does **not** grant access to files
+under `C:\data`.
+
+#### Upward directory traversal for Windows BaseContainer
+
+Many tools search **upward** from the working directory toward the volume root,
+looking for a marker file that defines their project. With Windows BaseContainer, when such a tool reaches a parent directory that is not in the allowlist, `ACCESS_DENIED` will be returned. 
+
+When resolving this error, grant only the specific directories the tool must reach and keep that set as small as possible. 
+Avoid resolving this error by granting broad profile roots. Each 'readwritePaths' grant also exposes that directory's descendants and granting broad profile roots may result in over-permissioning.
 
 ### UI Policy
 
