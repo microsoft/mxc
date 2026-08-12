@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_isolation_session_common"
+name = "mxc-alpha-isolation-session-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Windows IsolationSession backend support for the MXC execution engine."
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
 serde = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -15,4 +15,4 @@ windows = { workspace = true }
 windows-core = { workspace = true }
 windows-future = "0.3"
 windows-collections = "0.3"
-mxc_alpha_isolation_session_bindings = { workspace = true }
+mxc-alpha-isolation-session-bindings = { workspace = true }

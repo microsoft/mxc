@@ -167,7 +167,7 @@ child.on('close', (code) => console.log('Exit code:', code));
 
 ### Rust SDK
 
-The Rust SDK (`mxc_alpha_mxc_sdk`) runs WSLC **in-process** — it does not spawn
+The Rust SDK (`mxc-alpha-mxc-sdk`) runs WSLC **in-process** — it does not spawn
 `wxc-exec.exe`. Build the crate with its `wslc` feature, select the backend with
 `build_request_with_containment`, and opt into experimental features on the
 request (the library-side equivalent of `--experimental`):
@@ -175,7 +175,7 @@ request (the library-side equivalent of `--experimental`):
 ```toml
 # Cargo.toml
 [target.'cfg(target_os = "windows")'.dependencies]
-mxc_alpha_mxc_sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
+mxc-alpha-mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
 ```
 
 ```rust

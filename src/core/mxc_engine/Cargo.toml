@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_mxc_engine"
+name = "mxc-alpha-mxc-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,29 +11,29 @@ name = "mxc_alpha_mxc_engine"
 path = "src/lib.rs"
 
 [dependencies]
-mxc_alpha_wxc_common.workspace = true
+mxc-alpha-wxc-common.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 # MicroVM runner — used by the Windows and Linux run-to-completion bodies under
 # the `microvm` feature. Never built on hosts/features that don't select it.
-mxc_alpha_nanvix_runner = { workspace = true, optional = true }
+mxc-alpha-nanvix-runner = { workspace = true, optional = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
-mxc_alpha_test_hyperlight_common = { workspace = true, optional = true }
+mxc-alpha-test-hyperlight-common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 mxc-alpha-basecontainer-common = { workspace = true }
-mxc_alpha_windows_sandbox_lifecycle = { workspace = true }
-mxc_alpha_isolation_session_common = { workspace = true, optional = true }
-mxc_alpha_isolation_session_bindings = { workspace = true, optional = true }
-mxc_alpha_wslc_common = { workspace = true, optional = true }
+mxc-alpha-windows-sandbox-lifecycle = { workspace = true }
+mxc-alpha-isolation-session-common = { workspace = true, optional = true }
+mxc-alpha-isolation-session-bindings = { workspace = true, optional = true }
+mxc-alpha-wslc-common = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-mxc_alpha_bwrap_common = { workspace = true }
-mxc_alpha_lxc_common = { workspace = true }
+mxc-alpha-bwrap-common = { workspace = true }
+mxc-alpha-lxc-common = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-mxc_alpha_seatbelt_common = { workspace = true }
+mxc-alpha-seatbelt-common = { workspace = true }
 
 [features]
 default = []
@@ -41,12 +41,12 @@ default = []
 # backend. Mirrors the executor binaries' feature set so backend selection can
 # live in one place. The build-time binary-staging that some backends also need
 # (e.g. NanVix's `nanvix_binaries`) stays with the executor crates.
-microvm = ["dep:mxc_alpha_nanvix_runner"]
-wslc = ["dep:mxc_alpha_wslc_common", "mxc_alpha_wslc_common/link-wslcsdk"]
-hyperlight = ["dep:mxc_alpha_test_hyperlight_common", "mxc_alpha_test_hyperlight_common/hyperlight"]
+microvm = ["dep:mxc-alpha-nanvix-runner"]
+wslc = ["dep:mxc-alpha-wslc-common", "mxc-alpha-wslc-common/link-wslcsdk"]
+hyperlight = ["dep:mxc-alpha-test-hyperlight-common", "mxc-alpha-test-hyperlight-common/hyperlight"]
 isolation_session = [
-    "dep:mxc_alpha_isolation_session_bindings",
-    "dep:mxc_alpha_isolation_session_common",
+    "dep:mxc-alpha-isolation-session-bindings",
+    "dep:mxc-alpha-isolation-session-common",
 ]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["mxc-alpha-basecontainer-common/tier2_bfs"]

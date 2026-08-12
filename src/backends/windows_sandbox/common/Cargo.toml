@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_windows_sandbox_common"
+name = "mxc-alpha-windows-sandbox-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Shared protocol and state types for the MXC Windows Sandbox backend."
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 getrandom = { workspace = true }

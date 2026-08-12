@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_learning_mode_windows"
+name = "mxc-alpha-learning-mode-windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,11 +10,11 @@ description = "Windows learning-mode backend for MXC: captures AppInfo-brokered 
 thiserror = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-mxc_alpha_wxc_common = { workspace = true }
-mxc_alpha_learning_mode_core = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
+mxc-alpha-learning-mode-core = { workspace = true }
 windows = { workspace = true }
 windows-core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 flatbuffers = { workspace = true }
-mxc_alpha_process_security_environment_spec = { workspace = true }
+mxc-alpha-process-security-environment-spec = { workspace = true }

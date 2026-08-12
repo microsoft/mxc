@@ -157,7 +157,7 @@ contract of this API.
 ### 7.1 Separate from `platform_support()`
 
 `platform_support()` (in `mxc_alpha_mxc_engine::platform`) answers a deliberately
-narrower question: "Which backends can the `mxc_alpha_mxc_sdk` library actually launch?"
+narrower question: "Which backends can the `mxc-alpha-mxc-sdk` library actually launch?"
 Its `available_methods` list is contractually the subset the SDK can drive. On
 Linux it may only ever report `bubblewrap`, and unit tests lock that down.
 `available_backends()` answers the broader host-capability question, so it is
@@ -217,7 +217,7 @@ is Rust-only either way.
 | --- | --- | --- |
 | Cheap CLI/feature checks (`lxc-ls`, `bwrap`, `dism`, build number) | Already present; ergonomic `execSync` | Equally cheap as `platform_support()` already<br>shells `bwrap --version` |
 | Windows isolation **tier** | Cannot compute it:<br>`populateIsolationFromProbe()` shells out to `wxc-exec --probe`<br>and parses its JSON `tier` | Native — `is_base_container_usable()` loads<br>`processmodel.dll` and calls the OS API directly |
-| Non-Node consumers (`mxc_alpha_mxc_sdk`, `mxc_ffi` → C# SDK, executor/CLI) | Must shell out to Node or duplicate the logic | First-class; call the API directly |
+| Non-Node consumers (`mxc-alpha-mxc-sdk`, `mxc_ffi` → C# SDK, executor/CLI) | Must shell out to Node or duplicate the logic | First-class; call the API directly |
 | Source of truth for wire names / tier strings | Hand-re-encoded from Rust → drift | Owns `Containment` and `IsolationTier::as_str()` |
 | Existing drift | Widens it since TS reports `[lxc, bubblewrap]`, Rust reports `[bubblewrap]` | A single probe eliminates the disagreement |
 | Stated architectural goal | Reverses the `platform.rs` goal of *"stop depending on the*<br>*TypeScript SDK for platform discovery"* | Advances it |
@@ -225,6 +225,6 @@ is Rust-only either way.
 
 
 Decision: keep the canonical probe in Rust (single source of truth,
-reused by `mxc_alpha_mxc_sdk` / `mxc_ffi` / CLI), and let the TS `getPlatformSupport()`
+reused by `mxc-alpha-mxc-sdk` / `mxc_ffi` / CLI), and let the TS `getPlatformSupport()`
 become a thin wrapper over the native probe instead of re-implementing the
 checks.

@@ -20,7 +20,7 @@ The backend has two execution surfaces:
 ```text
 wxc-exec.exe
   |
-  `-- mxc_alpha_mxc_engine
+  `-- mxc-alpha-mxc-engine
         |
         `-- mxc_alpha_windows_sandbox_lifecycle::WindowsSandboxRunner
               |-- one-shot ScriptRunner

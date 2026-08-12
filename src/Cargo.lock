@@ -1289,10 +1289,10 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
- "mxc_alpha_lxc_common",
- "mxc_alpha_mxc_engine",
- "mxc_alpha_test_hyperlight_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-lxc-common",
+ "mxc-alpha-mxc-engine",
+ "mxc-alpha-test-hyperlight-common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_build_common",
@@ -1374,11 +1374,11 @@ version = "0.7.0"
 dependencies = [
  "flatbuffers",
  "getrandom 0.2.17",
+ "mxc-alpha-learning-mode-core",
+ "mxc-alpha-learning-mode-windows",
+ "mxc-alpha-process-security-environment-spec",
  "mxc-alpha-windows-secenv-projection",
- "mxc_alpha_learning_mode_core",
- "mxc_alpha_learning_mode_windows",
- "mxc_alpha_process_security_environment_spec",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "semver",
  "serde",
  "serde_json",
@@ -1391,18 +1391,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc-alpha-windows-secenv-projection"
+name = "mxc-alpha-bwrap-common"
 version = "0.7.0"
 dependencies = [
- "flatbuffers",
-]
-
-[[package]]
-name = "mxc_alpha_bwrap_common"
-version = "0.7.0"
-dependencies = [
- "mxc_alpha_lxc_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-lxc-common",
+ "mxc-alpha-wxc-common",
  "nix",
  "serde",
  "serde_json",
@@ -1411,7 +1404,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_isolation_session_bindings"
+name = "mxc-alpha-isolation-session-bindings"
 version = "0.7.0"
 dependencies = [
  "semver",
@@ -1422,11 +1415,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_isolation_session_common"
+name = "mxc-alpha-isolation-session-common"
 version = "0.7.0"
 dependencies = [
- "mxc_alpha_isolation_session_bindings",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-isolation-session-bindings",
+ "mxc-alpha-wxc-common",
  "serde",
  "windows",
  "windows-collections",
@@ -1435,7 +1428,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_learning_mode_core"
+name = "mxc-alpha-learning-mode-core"
 version = "0.7.0"
 dependencies = [
  "serde",
@@ -1444,25 +1437,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_learning_mode_windows"
+name = "mxc-alpha-learning-mode-windows"
 version = "0.7.0"
 dependencies = [
  "flatbuffers",
- "mxc_alpha_learning_mode_core",
- "mxc_alpha_process_security_environment_spec",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-learning-mode-core",
+ "mxc-alpha-process-security-environment-spec",
+ "mxc-alpha-wxc-common",
  "thiserror",
  "windows",
  "windows-core",
 ]
 
 [[package]]
-name = "mxc_alpha_lxc_common"
+name = "mxc-alpha-lxc-common"
 version = "0.7.0"
 dependencies = [
  "libc",
- "mxc_alpha_mxc_pty",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-mxc-pty",
+ "mxc-alpha-wxc-common",
  "nix",
  "serde",
  "serde_json",
@@ -1470,26 +1463,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_mxc_engine"
+name = "mxc-alpha-mxc-engine"
 version = "0.7.0"
 dependencies = [
  "mxc-alpha-basecontainer-common",
- "mxc_alpha_bwrap_common",
- "mxc_alpha_isolation_session_bindings",
- "mxc_alpha_isolation_session_common",
- "mxc_alpha_lxc_common",
- "mxc_alpha_nanvix_runner",
- "mxc_alpha_seatbelt_common",
- "mxc_alpha_test_hyperlight_common",
- "mxc_alpha_windows_sandbox_lifecycle",
- "mxc_alpha_wslc_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-bwrap-common",
+ "mxc-alpha-isolation-session-bindings",
+ "mxc-alpha-isolation-session-common",
+ "mxc-alpha-lxc-common",
+ "mxc-alpha-nanvix-runner",
+ "mxc-alpha-seatbelt-common",
+ "mxc-alpha-test-hyperlight-common",
+ "mxc-alpha-windows-sandbox-lifecycle",
+ "mxc-alpha-wslc-common",
+ "mxc-alpha-wxc-common",
  "serde",
  "serde_json",
 ]
 
 [[package]]
-name = "mxc_alpha_mxc_pty"
+name = "mxc-alpha-mxc-pty"
 version = "0.7.0"
 dependencies = [
  "libc",
@@ -1497,16 +1490,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_mxc_sdk"
+name = "mxc-alpha-mxc-sdk"
 version = "0.7.0"
 dependencies = [
  "libc",
- "mxc_alpha_mxc_engine",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-mxc-engine",
+ "mxc-alpha-wxc-common",
 ]
 
 [[package]]
-name = "mxc_alpha_mxc_telemetry"
+name = "mxc-alpha-mxc-telemetry"
 version = "0.7.0"
 dependencies = [
  "tracelogging",
@@ -1514,7 +1507,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_nanvix_common"
+name = "mxc-alpha-nanvix-common"
 version = "0.7.0"
 dependencies = [
  "serde",
@@ -1522,57 +1515,57 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_nanvix_runner"
+name = "mxc-alpha-nanvix-runner"
 version = "0.7.0"
 dependencies = [
  "libc",
- "mxc_alpha_nanvix_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-nanvix-common",
+ "mxc-alpha-wxc-common",
  "uuid",
  "windows",
 ]
 
 [[package]]
-name = "mxc_alpha_process_security_environment_spec"
+name = "mxc-alpha-process-security-environment-spec"
 version = "0.7.0"
 dependencies = [
  "flatbuffers",
 ]
 
 [[package]]
-name = "mxc_alpha_seatbelt_common"
+name = "mxc-alpha-seatbelt-common"
 version = "0.7.0"
 dependencies = [
  "libc",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
 ]
 
 [[package]]
-name = "mxc_alpha_test_hyperlight_common"
+name = "mxc-alpha-test-hyperlight-common"
 version = "0.7.0"
 dependencies = [
  "hyperlight-unikraft",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
 ]
 
 [[package]]
-name = "mxc_alpha_windows_sandbox_common"
+name = "mxc-alpha-windows-sandbox-common"
 version = "0.7.0"
 dependencies = [
  "getrandom 0.2.17",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "serde",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "mxc_alpha_windows_sandbox_lifecycle"
+name = "mxc-alpha-windows-sandbox-lifecycle"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "mxc_alpha_windows_sandbox_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-windows-sandbox-common",
+ "mxc-alpha-wxc-common",
  "serde",
  "serde_json",
  "tempfile",
@@ -1582,11 +1575,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_wslc_common"
+name = "mxc-alpha-windows-secenv-projection"
+version = "0.7.0"
+dependencies = [
+ "flatbuffers",
+]
+
+[[package]]
+name = "mxc-alpha-wslc-common"
 version = "0.7.0"
 dependencies = [
  "libloading",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "sha2 0.10.9",
  "tar",
  "tempfile",
@@ -1595,14 +1595,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mxc_alpha_wxc_common"
+name = "mxc-alpha-wxc-common"
 version = "0.7.0"
 dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
- "mxc_alpha_mxc_telemetry",
- "mxc_alpha_nanvix_common",
+ "mxc-alpha-mxc-telemetry",
+ "mxc-alpha-nanvix-common",
  "schemars",
  "semver",
  "serde",
@@ -1631,8 +1631,8 @@ name = "mxc_darwin"
 version = "0.7.0"
 dependencies = [
  "clap",
- "mxc_alpha_mxc_engine",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-mxc-engine",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
 ]
 
@@ -1641,7 +1641,7 @@ name = "mxc_diagnostic_console"
 version = "0.7.0"
 dependencies = [
  "clap",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "serde",
  "serde_json",
@@ -1654,7 +1654,7 @@ name = "mxc_ffi"
 version = "0.7.0"
 dependencies = [
  "csbindgen",
- "mxc_alpha_mxc_sdk",
+ "mxc-alpha-mxc-sdk",
  "serde_json",
 ]
 
@@ -1662,14 +1662,14 @@ dependencies = [
 name = "mxc_schema_gen"
 version = "0.7.0"
 dependencies = [
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
 ]
 
 [[package]]
 name = "nanvix_binaries"
 version = "0.7.0"
 dependencies = [
- "mxc_alpha_nanvix_common",
+ "mxc-alpha-nanvix-common",
  "nanvix_build_common",
 ]
 
@@ -1677,7 +1677,7 @@ dependencies = [
 name = "nanvix_build_common"
 version = "0.7.0"
 dependencies = [
- "mxc_alpha_nanvix_common",
+ "mxc-alpha-nanvix-common",
 ]
 
 [[package]]
@@ -1823,7 +1823,7 @@ dependencies = [
  "chrono",
  "clap",
  "embed-manifest",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "quick-xml",
  "serde_json",
@@ -3155,10 +3155,10 @@ dependencies = [
  "anyhow",
  "clap",
  "mxc-alpha-basecontainer-common",
- "mxc_alpha_mxc_engine",
- "mxc_alpha_test_hyperlight_common",
- "mxc_alpha_wslc_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-mxc-engine",
+ "mxc-alpha-test-hyperlight-common",
+ "mxc-alpha-wslc-common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "nanvix_binaries",
  "nanvix_build_common",
@@ -3173,7 +3173,7 @@ name = "wxc_e2e_tests"
 version = "0.7.0"
 dependencies = [
  "base64",
- "mxc_alpha_bwrap_common",
+ "mxc-alpha-bwrap-common",
  "serde",
  "serde_json",
 ]
@@ -3184,7 +3184,7 @@ version = "0.7.0"
 dependencies = [
  "clap",
  "embed-manifest",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "serde",
  "serde_json",
@@ -3226,9 +3226,9 @@ name = "wxc_windows_sandbox_daemon"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "mxc_alpha_windows_sandbox_common",
- "mxc_alpha_windows_sandbox_lifecycle",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-windows-sandbox-common",
+ "mxc-alpha-windows-sandbox-lifecycle",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "serde",
  "serde_json",
@@ -3242,8 +3242,8 @@ name = "wxc_windows_sandbox_guest"
 version = "0.7.0"
 dependencies = [
  "anyhow",
- "mxc_alpha_windows_sandbox_common",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-windows-sandbox-common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "serde_json",
  "tokio",
@@ -3255,7 +3255,7 @@ name = "wxc_winhttp_proxy_shim"
 version = "0.7.0"
 dependencies = [
  "clap",
- "mxc_alpha_wxc_common",
+ "mxc-alpha-wxc-common",
  "mxc_build_common",
  "windows",
  "windows-core",

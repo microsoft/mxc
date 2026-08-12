@@ -16,7 +16,7 @@ FFI is required.
                 │  Direct Rust function calls
                 ▼
 ┌──────────────────────────────────────────────────────┐
-│  mxc_alpha_mxc_telemetry (Rust crate)                          │
+│  mxc-alpha-mxc-telemetry (Rust crate)                          │
 │  src/lib.rs — define_provider! + write_event!        │
 │                                                      │
 │  Windows: ETW events via tracelogging crate          │
@@ -279,11 +279,11 @@ GUID do not set this variable — the provider is registered without a group GUI
 ```powershell
 # Test with a dummy group GUID (not the real one)
 $env:MXC_TELEMETRY_PROVIDER_GROUP_GUID = '00000000-1111-2222-3333-444444444444'
-cargo build -p mxc_alpha_mxc_telemetry
+cargo build -p mxc-alpha-mxc-telemetry
 
 # Test without (public build)
 Remove-Item Env:\MXC_TELEMETRY_PROVIDER_GROUP_GUID
-cargo build -p mxc_alpha_mxc_telemetry
+cargo build -p mxc-alpha-mxc-telemetry
 ```
 
 ### What's public vs. private

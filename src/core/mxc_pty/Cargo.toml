@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_mxc_pty"
+name = "mxc-alpha-mxc-pty"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

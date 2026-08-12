@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_nanvix_runner"
+name = "mxc-alpha-nanvix-runner"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,8 +7,8 @@ repository.workspace = true
 description = "NanVix micro-VM runner used by the MXC execution engine."
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true, features = ["microvm"] }
-mxc_alpha_nanvix_common = { path = "../common", version = "0.7.0" }
+mxc-alpha-wxc-common = { workspace = true, features = ["microvm"] }
+mxc-alpha-nanvix-common = { path = "../common", version = "0.7.0" }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

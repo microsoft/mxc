@@ -80,7 +80,7 @@ match the pinned SDK.
 
    ```powershell
    cd src
-   cargo build -p mxc_alpha_wslc_common
+   cargo build -p mxc-alpha-wslc-common
    ```
 
    If the header changed struct layout, sizes, signatures, or enum names, one of
@@ -98,9 +98,9 @@ match the pinned SDK.
 
    ```powershell
    cd src
-   cargo test -p mxc_alpha_wslc_common      # includes ABI size/enum asserts
-   cargo fmt -p mxc_alpha_wslc_common -- --check
-   cargo clippy -p mxc_alpha_wslc_common --all-targets -- -D warnings
+   cargo test -p mxc-alpha-wslc-common      # includes ABI size/enum asserts
+   cargo fmt -p mxc-alpha-wslc-common -- --check
+   cargo clippy -p mxc-alpha-wslc-common --all-targets -- -D warnings
    ```
 
 7. **Run the WSLC E2E suite on a live WSL host** (cannot run in GitHub Actions —

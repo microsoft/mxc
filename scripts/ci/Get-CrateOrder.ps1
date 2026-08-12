@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 #
-# Prints the crates.io release closure of mxc_alpha_mxc_sdk, leaf-first.
+# Prints the crates.io release closure of mxc-alpha-mxc-sdk, leaf-first.
 #
 # Two callers:
 #   Package.Crates.Job.yml   at run time, to build the cargo package -p list
@@ -16,7 +16,7 @@ param
 
     # The crate whose dependency closure ships.  Everything reachable from it
     # is released; everything else in the workspace is internal.
-    [string] $RootCrate = 'mxc_alpha_mxc_sdk',
+    [string] $RootCrate = 'mxc-alpha-mxc-sdk',
 
     # Emits the YAML list body ready to paste under crateOrder.
     [switch] $Yaml

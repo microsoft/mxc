@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_mxc_sdk"
+name = "mxc-alpha-mxc-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,11 +14,11 @@ path = "src/lib.rs"
 default = []
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
-wslc = ["mxc_alpha_mxc_engine/wslc"]
+wslc = ["mxc-alpha-mxc-engine/wslc"]
 
 [dependencies]
-mxc_alpha_wxc_common.workspace = true
-mxc_alpha_mxc_engine = { workspace = true }
+mxc-alpha-wxc-common.workspace = true
+mxc-alpha-mxc-engine = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }

@@ -113,8 +113,8 @@ interface.
 
 | File | Change |
 |---|---|
-| `src/Cargo.toml` | Add `mxc_alpha_isolation_session_bindings` to workspace members |
-| `src/core/wxc_common/Cargo.toml` | Add optional dependency on `mxc_alpha_isolation_session_bindings` |
+| `src/Cargo.toml` | Add `mxc-alpha-isolation-session-bindings` to workspace members |
+| `src/core/wxc_common/Cargo.toml` | Add optional dependency on `mxc-alpha-isolation-session-bindings` |
 | `src/core/wxc_common/src/lib.rs` | Add `pub mod isolation_session_runner` (cfg-gated) |
 | `src/core/wxc_common/src/models.rs` | Add `IsolationSession` to `ContainmentBackend`; add `IsolationSessionConfig` |
 | `src/core/wxc_common/src/config_parser.rs` | Parse `"isolation_session"` containment and the `experimental.isolation_session` section |

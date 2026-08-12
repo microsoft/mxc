@@ -15,7 +15,7 @@ description = "Windows AppContainer/BaseContainer backend support for MXC sandbo
 tier2_bfs = []
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,11 +27,11 @@ windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 mxc-alpha-windows-secenv-projection = { workspace = true }
-mxc_alpha_process_security_environment_spec = { workspace = true }
+mxc-alpha-process-security-environment-spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
-mxc_alpha_learning_mode_windows = { workspace = true }
-mxc_alpha_learning_mode_core = { workspace = true }
+mxc-alpha-learning-mode-windows = { workspace = true }
+mxc-alpha-learning-mode-core = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -29,7 +29,7 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-co
 runs schemars and post-processes the result to replace schemars' Rust-specific
 integer `format`s (`uint32`, …) — undefined in JSON Schema draft-07 — with
 standard constraints (`minimum: 0` for unsigned). The `schema-gen` feature on
-`mxc_alpha_wxc_common` gates the schemars dependency so production builds don't carry it.
+`mxc-alpha-wxc-common` gates the schemars dependency so production builds don't carry it.
 
 ## CI gates (`Versioning Checks` job)
 

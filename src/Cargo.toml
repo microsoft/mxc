@@ -107,32 +107,32 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 quick-xml = "0.41"
-mxc_alpha_wxc_common = { path = "core/wxc_common", version = "0.7.0" }
-mxc_alpha_mxc_engine = { path = "core/mxc_engine", version = "0.7.0" }
-mxc_alpha_mxc_sdk = { path = "core/mxc-sdk", version = "0.7.0" }
+mxc-alpha-wxc-common = { path = "core/wxc_common", version = "0.7.0" }
+mxc-alpha-mxc-engine = { path = "core/mxc_engine", version = "0.7.0" }
+mxc-alpha-mxc-sdk = { path = "core/mxc-sdk", version = "0.7.0" }
 mxc-alpha-basecontainer-common = { path = "backends/appcontainer/common", version = "0.7.0" }
-mxc_alpha_windows_sandbox_common = { path = "backends/windows_sandbox/common", version = "0.7.0" }
-mxc_alpha_windows_sandbox_lifecycle = { path = "backends/windows_sandbox/lifecycle", version = "0.7.0" }
-mxc_alpha_isolation_session_common = { path = "backends/isolation_session/common", version = "0.7.0" }
-mxc_alpha_test_hyperlight_common = { path = "backends/hyperlight/common", version = "0.7.0" }
-mxc_alpha_learning_mode_windows = { path = "backends/learning_mode/windows", version = "0.7.0" }
-mxc_alpha_learning_mode_core = { path = "core/learning_mode_core", version = "0.7.0" }
-mxc_alpha_nanvix_runner = { path = "backends/nanvix/runner", version = "0.7.0" }
+mxc-alpha-windows-sandbox-common = { path = "backends/windows_sandbox/common", version = "0.7.0" }
+mxc-alpha-windows-sandbox-lifecycle = { path = "backends/windows_sandbox/lifecycle", version = "0.7.0" }
+mxc-alpha-isolation-session-common = { path = "backends/isolation_session/common", version = "0.7.0" }
+mxc-alpha-test-hyperlight-common = { path = "backends/hyperlight/common", version = "0.7.0" }
+mxc-alpha-learning-mode-windows = { path = "backends/learning_mode/windows", version = "0.7.0" }
+mxc-alpha-learning-mode-core = { path = "core/learning_mode_core", version = "0.7.0" }
+mxc-alpha-nanvix-runner = { path = "backends/nanvix/runner", version = "0.7.0" }
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 getrandom = "0.2"
 libc = "0.2"
 nix = { version = "0.29", features = ["fs", "mount", "sched", "signal", "net", "process", "user", "term"] }
-mxc_alpha_lxc_common = { path = "backends/lxc/common", version = "0.7.0" }
-mxc_alpha_bwrap_common = { path = "backends/bubblewrap/common", version = "0.7.0" }
-mxc_alpha_seatbelt_common = { path = "backends/seatbelt/common", version = "0.7.0" }
-mxc_alpha_wslc_common = { path = "backends/wslc/common", version = "0.7.0" }
-mxc_alpha_isolation_session_bindings = { path = "backends/isolation_session/bindings", version = "0.7.0" }
-mxc_alpha_mxc_pty = { path = "core/mxc_pty", version = "0.7.0" }
+mxc-alpha-lxc-common = { path = "backends/lxc/common", version = "0.7.0" }
+mxc-alpha-bwrap-common = { path = "backends/bubblewrap/common", version = "0.7.0" }
+mxc-alpha-seatbelt-common = { path = "backends/seatbelt/common", version = "0.7.0" }
+mxc-alpha-wslc-common = { path = "backends/wslc/common", version = "0.7.0" }
+mxc-alpha-isolation-session-bindings = { path = "backends/isolation_session/bindings", version = "0.7.0" }
+mxc-alpha-mxc-pty = { path = "core/mxc_pty", version = "0.7.0" }
 flatbuffers = "25"
 mxc-alpha-windows-secenv-projection = { path = "core/generated/base_container_specification", version = "0.7.0" }
-mxc_alpha_process_security_environment_spec = { path = "core/generated/process_security_environment_specification", version = "0.7.0" }
-mxc_alpha_mxc_telemetry = { path = "mxc_telemetry", version = "0.7.0" }
+mxc-alpha-process-security-environment-spec = { path = "core/generated/process_security_environment_specification", version = "0.7.0" }
+mxc-alpha-mxc-telemetry = { path = "mxc_telemetry", version = "0.7.0" }
 widestring = "1"
 url = "2"
 winreg = "0.55"

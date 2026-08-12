@@ -1286,7 +1286,7 @@ descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` 
 `stderr` and writes to `stdin`, awaits exit via `waiter`, and calls `terminator` on
 cancellation signals.
 
-`mint_random_token()` is a small helper in `mxc_alpha_wxc_common` that produces a short hex string
+`mint_random_token()` is a small helper in `mxc-alpha-wxc-common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
 default `provision` body to construct synthetic ids for stateless-underneath backends.
 
@@ -1330,7 +1330,7 @@ that shape and reuses `ExecutionRequest` for five concrete reasons:
 
 4. **The existing extraction helpers already work for state-aware exec.** The
    `IsolationSessionRunner::build_process_options(&ExecutionRequest)` function in
-   `mxc_alpha_isolation_session_common` extracts process info into the runner's
+   `mxc-alpha-isolation-session-common` extracts process info into the runner's
    internal `ProcessOptions` struct used to populate `IsoSessionProcessOptions` for
    `RunProcessWithOptionsAsync`. State-aware `exec` calls the same function with the
    same `&ExecutionRequest` argument; no new public Rust type closes a semantic gap that

@@ -44,7 +44,7 @@ jobs:
       # ships alongside mxc-exec-mac.
       - name: Build
         run: cargo build --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p mxc_alpha_seatbelt_common -p mxc_alpha_wxc_common -p wxc_e2e_tests
+             -p mxc_darwin -p mxc-alpha-seatbelt-common -p mxc-alpha-wxc-common -p wxc_e2e_tests
              -p unix_test_proxy
 
       # wxc_e2e_tests includes the Seatbelt executor characterization tests.
@@ -53,7 +53,7 @@ jobs:
       # no elevation, so they run in this standard macOS job.
       - name: Test
         run: cargo test --locked --release --target aarch64-apple-darwin
-             -p mxc_darwin -p mxc_alpha_seatbelt_common -p mxc_alpha_wxc_common -p wxc_e2e_tests
+             -p mxc_darwin -p mxc-alpha-seatbelt-common -p mxc-alpha-wxc-common -p wxc_e2e_tests
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4

@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_mxc_telemetry"
+name = "mxc-alpha-mxc-telemetry"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

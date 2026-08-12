@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Regenerates the FlatBuffers Rust bindings for the
-    mxc_alpha_process_security_environment_spec crate, reproducibly.
+    mxc-alpha-process-security-environment-spec crate, reproducibly.
 
 .DESCRIPTION
     Runs `flatc` against external/windows-sdk/ProcessSecurityEnvironment.fbs and
@@ -114,7 +114,7 @@ $libRs = Join-Path $srcDir "lib.rs"
 Write-Host "Formatting with cargo fmt..." -ForegroundColor Cyan
 Push-Location src
 try {
-    & cargo fmt -p mxc_alpha_process_security_environment_spec
+    & cargo fmt -p mxc-alpha-process-security-environment-spec
     if ($LASTEXITCODE -ne 0) {
         throw "cargo fmt failed with exit code $LASTEXITCODE"
     }

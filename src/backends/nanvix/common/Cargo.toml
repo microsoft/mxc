@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_nanvix_common"
+name = "mxc-alpha-nanvix-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

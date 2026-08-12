@@ -47,7 +47,7 @@ scheme is approved.
 
 One name is deliberately not the obvious one.  The Hyperlight backend crate in
 `src/backends/hyperlight/common` is named
-`mxc_alpha_test_hyperlight_common`, not `hyperlight_common`, because crates.io
+`mxc-alpha-test-hyperlight-common`, not `hyperlight_common`, because crates.io
 treats `-` and `_` as equivalent when checking name collisions and
 `hyperlight-common` is already published from
 github.com/hyperlight-dev/hyperlight.  That crate is also marked
@@ -76,7 +76,7 @@ pwsh scripts/ci/Get-CrateOrder.ps1 -Yaml
 `-Yaml` prints paste-ready `- name` lines. Run it after adding or removing a
 crate and replace the `crateOrder` default with its output. Because packaging
 calls the same script, the packaged set is always the true closure of
-`mxc_alpha_mxc_sdk`, whatever the literal says — the literal only decides what gets
+`mxc-alpha-mxc-sdk`, whatever the literal says — the literal only decides what gets
 published.
 
 Nothing validates the literal against the packaged set before the release, and

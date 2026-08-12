@@ -198,8 +198,8 @@ Testing is a key component in the development workflow. We expect contributors t
 ```bash
 # Rust unit tests (from src/)
 cargo test --workspace
-cargo test -p mxc_alpha_wxc_common                    # Single crate
-cargo test -p mxc_alpha_wxc_common -- config_parser   # Filter by test name
+cargo test -p mxc-alpha-wxc-common                    # Single crate
+cargo test -p mxc-alpha-wxc-common -- config_parser   # Filter by test name
 
 # SDK unit and integration tests (from sdk/node/)
 npm test

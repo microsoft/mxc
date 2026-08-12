@@ -26,10 +26,10 @@ parameters:
       os: macos
       triplet: aarch64-apple-darwin
       component: MAC
-      # macOS-only crates (mxc_darwin, mxc_alpha_seatbelt_common) — the workspace
+      # macOS-only crates (mxc_darwin, mxc-alpha-seatbelt-common) — the workspace
       # has Windows-only crates that do not compile on macOS, so we can't
       # use --all-features here.
-      clippyArgs: --locked --release -p mxc_darwin -p mxc_alpha_seatbelt_common
+      clippyArgs: --locked --release -p mxc_darwin -p mxc-alpha-seatbelt-common
 
 jobs:
 - ${{ each item in parameters.matrix }}:

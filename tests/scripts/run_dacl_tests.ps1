@@ -34,15 +34,15 @@ try {
         $profileArgs += "--release"
     }
 
-    Write-Host "Building mxc_alpha_wxc_common..." -ForegroundColor Cyan
-    & cargo build -p mxc_alpha_wxc_common @profileArgs
+    Write-Host "Building mxc-alpha-wxc-common..." -ForegroundColor Cyan
+    & cargo build -p mxc-alpha-wxc-common @profileArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ERROR: cargo build failed" -ForegroundColor Red
         exit $LASTEXITCODE
     }
 
     Write-Host "Running filesystem_dacl tests..." -ForegroundColor Cyan
-    & cargo test -p mxc_alpha_wxc_common @profileArgs filesystem_dacl:: -- `
+    & cargo test -p mxc-alpha-wxc-common @profileArgs filesystem_dacl:: -- `
         --test-threads=$TestThreads --nocapture
     $exit = $LASTEXITCODE
 }

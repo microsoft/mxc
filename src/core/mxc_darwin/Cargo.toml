@@ -12,6 +12,6 @@ path = "src/main.rs"
 mxc_build_common.workspace = true
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true }
-mxc_alpha_mxc_engine = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
+mxc-alpha-mxc-engine = { workspace = true }
 clap = { workspace = true }

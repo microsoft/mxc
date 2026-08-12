@@ -155,7 +155,7 @@ Run with: `wxc-exec.exe config.json --experimental --debug`
 
 ### Phase 3 — WSLC SDK Backend (Core Work)
 
-**Goal:** Implement `WSLContainerRunner` — a new `ScriptRunner` implementation that uses the WSL Container SDK (WSLC SDK) to manage Linux container lifecycle, I/O, and cleanup. This is added directly to `mxc_alpha_wxc_common` as new modules alongside the existing AppContainer code.
+**Goal:** Implement `WSLContainerRunner` — a new `ScriptRunner` implementation that uses the WSL Container SDK (WSLC SDK) to manage Linux container lifecycle, I/O, and cleanup. This is added directly to `mxc-alpha-wxc-common` as new modules alongside the existing AppContainer code.
 
 **Why WSLC SDK instead of raw containerd:** The WSLC SDK is a first-party Microsoft C API that abstracts away containerd, OCI spec building, namespace setup, and image management behind a clean Session → Container → Process model. This eliminates the need to build a custom gRPC client, OCI spec builder, or image snapshot manager. The SDK provides native Win32 HANDLEs for stdout/stderr, avoiding gRPC stream bridging.
 
@@ -167,7 +167,7 @@ Run with: `wxc-exec.exe config.json --experimental --debug`
 mxc/src/
 ├── Cargo.toml                    # Add workspace deps: windows-sys (for Win32 types)
 ├── wxc/
-│   ├── Cargo.toml                # No new deps (imports WSLContainerRunner from mxc_alpha_wxc_common)
+│   ├── Cargo.toml                # No new deps (imports WSLContainerRunner from mxc-alpha-wxc-common)
 │   └── src/main.rs               # Backend selection (Phase 2)
 ├── wxc_common/
 │   ├── Cargo.toml                # Add windows-sys dep (for HANDLE, HRESULT, ReadFile)
@@ -346,7 +346,7 @@ and run with `wxc-exec.exe --experimental --debug config.json`.
 
 ## Important Constraint
 
-WLXC is a **prototype / not production-ready**. We are using it as a **reference for patterns and approach only**. The actual container runtime interface uses the **WSL Container SDK (WSLC SDK)** — a first-party Microsoft C API. All functionality is implemented directly in MXC's existing Rust workspace (`mxc_alpha_wxc_common` crate) via Rust FFI bindings to the WSLC SDK. The WSLC backend shares the same binary (`wxc-exec.exe`) and has no runtime dependency on WLXC.
+WLXC is a **prototype / not production-ready**. We are using it as a **reference for patterns and approach only**. The actual container runtime interface uses the **WSL Container SDK (WSLC SDK)** — a first-party Microsoft C API. All functionality is implemented directly in MXC's existing Rust workspace (`mxc-alpha-wxc-common` crate) via Rust FFI bindings to the WSLC SDK. The WSLC backend shares the same binary (`wxc-exec.exe`) and has no runtime dependency on WLXC.
 
 ## Open Design Questions
 
@@ -534,7 +534,7 @@ management is the caller's responsibility.
 
 ## Testing Strategy
 
-- **Unit tests (Rust):** FFI binding safety, policy-to-WSLC-settings translation, config parsing — no WSLC runtime needed. These live in `mxc_alpha_wxc_common` alongside the new modules.
+- **Unit tests (Rust):** FFI binding safety, policy-to-WSLC-settings translation, config parsing — no WSLC runtime needed. These live in `mxc-alpha-wxc-common` alongside the new modules.
 - **Integration tests:** Require WSL2 + WSLC SDK runtime; run `wxc-exec.exe` end-to-end with WSLC configs, verify stdout/stderr capture and exit code propagation
 - **Regression:** Existing AppContainer tests must pass unchanged — the AppContainer code path is not modified
 - **WSLC SDK smoke test:** Ensure `alpine:latest` is pre-pulled → `WslcGetMissingComponents()` → create session → run `echo hello` → verify output → cleanup

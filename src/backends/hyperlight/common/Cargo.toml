@@ -2,7 +2,7 @@
 # Not `hyperlight_common`: crates.io treats `-` and `_` as equivalent for name
 # collisions, and `hyperlight-common` is already published from
 # github.com/hyperlight-dev/hyperlight.  See docs/crates-release.md.
-name = "mxc_alpha_test_hyperlight_common"
+name = "mxc-alpha-test-hyperlight-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 description = "Hyperlight micro-VM backend support for the MXC execution engine."
 
 [dependencies]
-mxc_alpha_wxc_common = { workspace = true }
+mxc-alpha-wxc-common = { workspace = true }
 
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 hyperlight-unikraft = { version = "0.12.1", optional = true }

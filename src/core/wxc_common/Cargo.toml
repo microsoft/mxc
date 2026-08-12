@@ -1,5 +1,5 @@
 [package]
-name = "mxc_alpha_wxc_common"
+name = "mxc-alpha-wxc-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 description = "Shared core types (execution requests, policies, wire model) for MXC sandboxing."
 
 [features]
-microvm = ["dep:mxc_alpha_nanvix_common", "dep:uuid"]
+microvm = ["dep:mxc-alpha-nanvix-common", "dep:uuid"]
 # Enables JSON Schema generation from the dedicated wire model. Off by default
 # so normal builds don't carry schemars.
 schema-gen = ["dep:schemars"]
@@ -23,9 +23,9 @@ url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
 schemars = { version = "0.8", optional = true }
-mxc_alpha_nanvix_common = { path = "../../backends/nanvix/common", version = "0.7.0", optional = true }
+mxc-alpha-nanvix-common = { path = "../../backends/nanvix/common", version = "0.7.0", optional = true }
 uuid = { workspace = true, optional = true }
-mxc_alpha_mxc_telemetry = { workspace = true }
+mxc-alpha-mxc-telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
