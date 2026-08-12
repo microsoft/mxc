@@ -219,12 +219,10 @@ fn is_self_access(object_name: &str, app_path: &str) -> bool {
             windows_paths_equal_ignore_case(object_name, app_path)
         }
         (Some(PathNamespace::Dos), Some(PathNamespace::DeviceVolume)) => {
-            crate::path_norm::to_user_visible(app_path)
-                .is_some_and(|mapped| windows_paths_equal_ignore_case(object_name, &mapped))
+            crate::path_norm::device_path_matches_dos(app_path, object_name)
         }
         (Some(PathNamespace::DeviceVolume), Some(PathNamespace::Dos)) => {
-            crate::path_norm::to_user_visible(object_name)
-                .is_some_and(|mapped| windows_paths_equal_ignore_case(&mapped, app_path))
+            crate::path_norm::device_path_matches_dos(object_name, app_path)
         }
         _ => false,
     }
