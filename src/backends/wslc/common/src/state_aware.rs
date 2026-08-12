@@ -13,8 +13,7 @@
 //!
 //! Windows-only: the daemon and its pipe transport are a Windows feature.
 
-use std::io::{IsTerminal, Write};
-use std::time::{Duration, Instant};
+use std::io::Write;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
@@ -37,42 +36,6 @@ use crate::policy::{
 
 /// Default image when a provision request omits `experimental.wslc.provision.image`.
 const DEFAULT_IMAGE: &str = "alpine:latest";
-
-/// Bytes accumulated on a non-TTY exec output stream before [`FlushGate`] forces
-/// a flush, bounding how much newline-free output can sit buffered.
-const NON_TTY_FLUSH_BYTES: usize = 32 * 1024;
-/// Max wall-clock between flushes on a non-TTY exec output stream, so slow
-/// carriage-return progress output reaches a pipe consumer promptly.
-const NON_TTY_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
-
-/// Bounded flush policy for non-TTY exec output: flush once enough bytes have
-/// accumulated or enough wall-clock has elapsed, so a pipe consumer sees
-/// newline-free progress output promptly without a syscall per chunk.
-struct FlushGate {
-    last: Instant,
-    pending: usize,
-}
-
-impl FlushGate {
-    fn new() -> Self {
-        Self {
-            last: Instant::now(),
-            pending: 0,
-        }
-    }
-
-    /// Record `n` freshly-written bytes and report whether to flush now.
-    fn should_flush(&mut self, n: usize) -> bool {
-        self.pending += n;
-        if self.pending >= NON_TTY_FLUSH_BYTES || self.last.elapsed() >= NON_TTY_FLUSH_INTERVAL {
-            self.pending = 0;
-            self.last = Instant::now();
-            true
-        } else {
-            false
-        }
-    }
-}
 
 /// State-aware WSLc backend. Zero-sized: every phase opens a fresh
 /// [`DaemonClient`] connection (the daemon holds all persistent state).
@@ -190,15 +153,11 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
 
         let client = connect_daemon()?;
 
-        // Relay each chunk to our own stdio as it arrives. Best-effort: a failed
-        // local write must not mask the container's exit code. A `FlushGate`
-        // bounds latency on a non-TTY pipe consumer; a TTY flushes every chunk.
+        // Relay each chunk to our own stdio as it arrives, flushing every chunk
+        // so newline-free progress output reaches the consumer promptly.
+        // Best-effort: a failed local write must not mask the container's exit code.
         let mut stdout = std::io::stdout();
         let mut stderr = std::io::stderr();
-        let stdout_is_tty = stdout.is_terminal();
-        let stderr_is_tty = stderr.is_terminal();
-        let mut stdout_gate = FlushGate::new();
-        let mut stderr_gate = FlushGate::new();
 
         let exit_code = client
             .exec_streaming(
@@ -212,15 +171,11 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
                 |stream, bytes| match stream {
                     OutStream::Stdout => {
                         let _ = stdout.write_all(bytes);
-                        if stdout_is_tty || stdout_gate.should_flush(bytes.len()) {
-                            let _ = stdout.flush();
-                        }
+                        let _ = stdout.flush();
                     }
                     OutStream::Stderr => {
                         let _ = stderr.write_all(bytes);
-                        if stderr_is_tty || stderr_gate.should_flush(bytes.len()) {
-                            let _ = stderr.flush();
-                        }
+                        let _ = stderr.flush();
                     }
                 },
             )
@@ -643,6 +598,64 @@ mod tests {
             .expect("aliasing conflict should tighten the policy");
         assert!(tightened.readwrite_paths.is_empty());
         assert_eq!(tightened.readonly_paths, vec![d]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provision_delegation_tightens_rw_alias_of_denied_and_drops_mount() {
+        // A writable path that resolves to the same object as a `denied` entry
+        // (here a case-variant string on case-insensitive NTFS) must tighten to
+        // denied, and the daemon volumes must be built from that tightened policy
+        // — otherwise the writable alias would still be mounted, granting access
+        // the deny was meant to block.
+        let dir = tempfile::tempdir().unwrap();
+        let denied = dir.path().to_str().unwrap().to_string();
+        let rw_alias = denied.to_uppercase();
+        let raw = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec![rw_alias],
+                denied_paths: vec![denied],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Pre-fix behaviour the bug relied on: the raw request WOULD mount the
+        // alias writable.
+        let raw_mounts = build_daemon_volumes(&raw).unwrap();
+        assert_eq!(raw_mounts.len(), 1);
+        assert!(!raw_mounts[0].read_only);
+
+        let tightened = normalize_and_check_delegation(&raw)
+            .unwrap()
+            .expect("rw alias of a denied object should tighten");
+        assert!(tightened.readwrite_paths.is_empty());
+        assert!(!tightened.denied_paths.is_empty());
+        let tightened_req = ExecutionRequest {
+            policy: tightened,
+            ..raw.clone()
+        };
+        assert!(build_daemon_volumes(&tightened_req).unwrap().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn provision_delegation_rejects_inaccessible_path() {
+        // A delegated path the invoking user cannot access must fail closed
+        // before provisioning mounts anything. `C:\mxc_invalid<name` is an
+        // illegal name → ERROR_INVALID_NAME → not-accessible (not merely
+        // missing), so delegation rejects it.
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readonly_paths: vec!["C:\\mxc_invalid<name".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = normalize_and_check_delegation(&req).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
     }
 
     #[test]

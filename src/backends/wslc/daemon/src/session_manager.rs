@@ -153,6 +153,26 @@ pub type OutputChunk = (OutStream, Vec<u8>);
 /// [`SessionHandle::exec`]) rather than dropping bytes.
 const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
 
+/// Max bytes per enqueued live-output chunk. A single SDK callback can deliver
+/// an arbitrarily large buffer; splitting it here bounds each queue entry's
+/// allocation and keeps the resulting `Stdout`/`Stderr` frame well under the
+/// protocol's `MAX_FRAME_SIZE` (a `Vec<u8>` serializes as a JSON number array,
+/// ~4x expansion), so a large callback can never overflow a frame and abort the
+/// stream before its terminal frame.
+const LIVE_OUTPUT_MAX_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Enqueue an SDK output callback, splitting it into `LIVE_OUTPUT_MAX_CHUNK_BYTES`
+/// pieces so each queue entry and its resulting frame stay bounded regardless of
+/// the callback's buffer size. Stops early once the receiver is gone (client
+/// left / leak-path `close()`), so a leaked callback never parks forever.
+fn enqueue_output(tx: &mpsc::Sender<OutputChunk>, kind: OutStream, bytes: &[u8]) {
+    for chunk in bytes.chunks(LIVE_OUTPUT_MAX_CHUNK_BYTES) {
+        if tx.blocking_send((kind, chunk.to_vec())).is_err() {
+            break;
+        }
+    }
+}
+
 /// An admitted exec: the completion receiver (the run's exit code) plus the
 /// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames.
 #[derive(Debug)]
@@ -203,7 +223,7 @@ impl SessionHandle {
         // gone, or the leak-path `close()` in the pipe handler) makes the send
         // return `Err`, so a leaked callback never parks forever.
         let sink: OutputSink = Box::new(move |kind, bytes| {
-            let _ = stream_tx.blocking_send((kind, bytes.to_vec()));
+            enqueue_output(&stream_tx, kind, bytes);
         });
         self.send(WorkerCommand::Exec {
             config,
@@ -767,7 +787,36 @@ mod tests {
         handle.shutdown().await.unwrap();
     }
 
-    // ---- Full lifecycle integration test (WSL2 host only) ----
+    #[tokio::test]
+    async fn large_callback_split_into_frame_safe_chunks() {
+        use wslc_common::daemon_protocol::{encode_frame, StreamFrame, MAX_FRAME_SIZE};
+
+        let (tx, mut rx) = mpsc::channel::<OutputChunk>(LIVE_OUTPUT_CHANNEL_CAPACITY);
+        // A single callback far larger than one chunk (and, unsplit, larger than
+        // one frame once number-array-encoded): must arrive as many bounded chunks.
+        let payload = vec![b'x'; LIVE_OUTPUT_MAX_CHUNK_BYTES * 3 + 7];
+        let producer = tokio::task::spawn_blocking({
+            let payload = payload.clone();
+            move || enqueue_output(&tx, OutStream::Stdout, &payload)
+        });
+
+        let mut reassembled = Vec::new();
+        let mut chunks = 0usize;
+        while let Some((kind, data)) = rx.recv().await {
+            assert_eq!(kind, OutStream::Stdout);
+            assert!(data.len() <= LIVE_OUTPUT_MAX_CHUNK_BYTES);
+            let encoded = encode_frame(&StreamFrame::Stdout { data: data.clone() }).unwrap();
+            assert!(encoded.len() <= MAX_FRAME_SIZE);
+            reassembled.extend_from_slice(&data);
+            chunks += 1;
+        }
+        producer.await.unwrap();
+        assert_eq!(reassembled, payload);
+        assert!(
+            chunks >= 4,
+            "expected the callback to be split, got {chunks}"
+        );
+    }
     //
     // Exercises the real SDK path end to end: provision (boot VM + create
     // container) → start → exec → stop → deprovision → refcount back to 0. It
