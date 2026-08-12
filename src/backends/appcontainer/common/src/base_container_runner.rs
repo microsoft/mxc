@@ -815,7 +815,9 @@ impl BaseContainerRunner {
             }
             return Self::schema_prefers_process_security_environment(request)
                 && self.process_security_environment_usable()
-                && self.capture_support.check_apis(true).is_ok();
+                && self.capture_support.check_apis(true).is_ok()
+                && (request.policy.denied_paths.is_empty()
+                    || self.capture_support.supports_deny_paths().unwrap_or(false));
         }
         let supports_deny_paths = request.policy.capture_denials.is_some()
             || request.policy.denied_paths.is_empty()
@@ -891,6 +893,10 @@ impl BaseContainerRunner {
             && Self::schema_prefers_process_security_environment(request)
             && Self::is_process_security_environment_usable()
             && RealCapturePlatformSupport.check_apis(true).is_ok()
+            && (request.policy.denied_paths.is_empty()
+                || RealCapturePlatformSupport
+                    .supports_deny_paths()
+                    .unwrap_or(false))
     }
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -2161,12 +2167,22 @@ impl SandboxBackend for BaseContainerRunner {
         let capture_denials = request.policy.capture_denials.is_some();
         let schema_prefers_process_security_environment =
             Self::schema_prefers_process_security_environment(request);
-        let use_process_security_environment = self.uses_process_security_environment(request);
         if capture_denials && !schema_prefers_process_security_environment {
             return Err(ScriptResponse::error(
                 "processContainer.captureDenials requires schema version 0.8.0 or later",
             ));
         }
+        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
+            return Err(ScriptResponse::error(
+                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        // Dry-run validates the schema and policy shape without selecting or
+        // probing a host capture provider.
+        if request.dry_run {
+            return Ok(());
+        }
+        let use_process_security_environment = self.uses_process_security_environment(request);
         if capture_denials
             && !use_process_security_environment
             && self.guarded_capture_factory.is_none()
@@ -2194,19 +2210,9 @@ impl SandboxBackend for BaseContainerRunner {
                  proxy AppContainer peer identity",
             ));
         }
-        if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
-            return Err(ScriptResponse::error(
-                wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
-            ));
-        }
-        // Dry-run validates the schema and policy shape without requiring the
-        // current host to expose the selected schema's OS APIs.
-        if request.dry_run {
-            return Ok(());
-        }
-        if use_process_security_environment {
+        if use_process_security_environment && !capture_denials {
             self.capture_support
-                .check_apis(capture_denials)
+                .check_apis(false)
                 .map_err(|detail| ScriptResponse {
                     failure_phase: FailurePhase::BackendUnavailable,
                     ..ScriptResponse::error(&format!(
@@ -2475,7 +2481,7 @@ impl BaseContainerSandboxProcess {
         }
         self.proxy_coordinator.stop(&mut logger);
         let result = capture_result
-            .and_then(|_| guarded_capture_result)
+            .and(guarded_capture_result)
             .map(|_| ())
             .map_err(|error| error.to_string());
         self.teardown_result = Some(result.clone());
@@ -3580,7 +3586,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_validation_fails_closed_when_v2_api_is_unavailable() {
+    fn capture_validation_requires_guarded_fallback_when_v2_api_is_unavailable() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: Some("missing CloseLearningModeTrace"),
@@ -3597,9 +3603,7 @@ mod tests {
             .expect_err("missing V2 API must fail closed");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error
-            .error_message
-            .contains("missing CloseLearningModeTrace"));
+        assert!(error.error_message.contains("guarded-WPR fallback"));
         assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.deny_calls.load(Ordering::SeqCst), 0);
@@ -3607,7 +3611,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_validation_fails_closed_when_deny_query_fails() {
+    fn capture_validation_requires_guarded_fallback_when_native_deny_query_fails() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
@@ -3624,14 +3628,14 @@ mod tests {
             .expect_err("deny query failure must fail closed");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert!(error.error_message.contains("query failed"));
+        assert!(error.error_message.contains("guarded-WPR fallback"));
         assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
-    fn capture_validation_fails_closed_when_deny_bit_is_clear() {
+    fn capture_validation_requires_guarded_fallback_when_native_deny_bit_is_clear() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
@@ -3648,7 +3652,7 @@ mod tests {
             .expect_err("missing deny support bit must fail closed");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert_eq!(error.error_message, PSEC_DENIED_PATHS_UNSUPPORTED_MSG);
+        assert!(error.error_message.contains("guarded-WPR fallback"));
         assert_eq!(support.api_calls.load(Ordering::SeqCst), 1);
         assert_eq!(support.deny_calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
