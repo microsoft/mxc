@@ -121,6 +121,21 @@ pub enum OutStream {
 /// container's output to the client as bytes arrive; paths that only need the
 /// final captured blob (one-shot, detached init) leave it unset. It receives
 /// the full callback bytes, independent of the capped buffers' truncation.
+///
+/// **Two distinct live-output architectures — why they don't share plumbing.**
+/// The one-shot runner streams via `OutputMode::Stream` (in `wsl_container_runner`)
+/// plus a synchronous in-process `stream_pair`/`StreamReader` (in `stream_buffer`),
+/// drained in the same process (caller pipes, or an `inherit_pump` thread). The
+/// daemon cannot reuse that: it must relay output across a named pipe to a
+/// *separate* client process through an async (tokio) control server, so it
+/// bridges the synchronous SDK callback thread to the async pipe writer with a
+/// bounded mpsc channel (see `session_manager::enqueue_output`). Their
+/// backpressure invariants also differ deliberately: the one-shot `StreamReader`
+/// is drained synchronously in-process, whereas this callback **must never
+/// block** — the same SDK thread also delivers the process-exit callback, so the
+/// daemon path uses a non-blocking `try_send` that drops on overflow rather than
+/// stalling teardown. Keep the two paths separate for those reasons; share only
+/// the leaf primitives ([`OutStream`], the capped capture buffers).
 pub type OutputSink = Box<dyn Fn(OutStream, &[u8]) + Send + Sync>;
 
 /// Shared buffer for capturing process I/O via SDK callbacks. Fields are

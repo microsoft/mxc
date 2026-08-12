@@ -3,7 +3,7 @@
     "phase": "exec",
     "sandboxId": "{{SANDBOX_ID}}",
     "process": {
-        "commandLine": "sh -c 'echo DRIP-PART1; sleep 2; echo DRIP-PART2'",
+        "commandLine": "sh -c 'echo DRIP-PART1; sleep 3; echo DRIP-PART2'",
         "timeout": 30000
     }
 }

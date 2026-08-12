@@ -419,13 +419,24 @@ try {
     }
 
     # A3b: LIVE DRIP -- prove output is streamed incrementally, not buffered and
-    # dumped at exit. The script prints PART1, sleeps 2s, then prints PART2. With
-    # live streaming the harness observes PART1 well before PART2 (~the sleep);
-    # a buffer-then-dump impl would surface both lines together at process exit
-    # (gap ~0). Asserting the inter-line arrival gap is the airtight liveness
-    # proof a content-only "stdout contains X" check cannot give.
+    # dumped at exit. The script prints PART1, sleeps 3s, then prints PART2. With
+    # live streaming the harness observes PART1 ~3s before PART2; a buffer-then-
+    # dump impl would surface both lines together at process exit (gap ~0).
+    # Asserting the inter-line arrival gap is the airtight liveness proof a
+    # content-only "stdout contains X" check cannot give.
+    #
+    # De-flake / tolerance: the two outcomes are cleanly separated -- buffered
+    # ~0s vs streamed ~$dripSleepSec. We assert the observed gap is at least
+    # $dripMinGapSec, chosen as roughly half the sleep so it stays far above the
+    # buffered-dump floor while absorbing up to ~$($dripSleepSec - $dripMinGapSec)s
+    # of scheduler / pipe-relay jitter (first-byte latency on PART1 shrinks the
+    # measured gap, so a generous margin below the full sleep is what keeps this
+    # from false-failing under CI load). Widen $dripSleepSec, not $dripMinGapSec,
+    # if a slower host is ever observed.
     if ($execedOk) {
         Run-StateAwareTest "A: exec (live drip -- incremental streaming)" {
+            $dripSleepSec = 3.0
+            $dripMinGapSec = 1.5
             $r = Invoke-StateAwareStreaming -ConfigFile 'wslc_state_aware_exec_drip.json' -SandboxId $script:sandboxId
             Assert-True ($r.ExitCode -eq 0) "drip exec exit code = 0"
             $p1 = $r.Lines | Where-Object { $_.Text -match 'DRIP-PART1' } | Select-Object -First 1
@@ -434,8 +445,8 @@ try {
             Assert-True ($null -ne $p2) "PART2 line observed on stdout"
             if ($p1 -and $p2) {
                 $gapSec = ($p2.At - $p1.At).TotalSeconds
-                Assert-True ($gapSec -ge 1.0) `
-                    ("PART1 arrived >=1.0s before PART2 (gap {0:N2}s) -- streamed live, not buffered" -f $gapSec)
+                Assert-True ($gapSec -ge $dripMinGapSec) `
+                    ("PART1 arrived >={0:N1}s before PART2 (gap {1:N2}s, sleep {2:N1}s) -- streamed live, not buffered" -f $dripMinGapSec, $gapSec, $dripSleepSec)
             }
         } | Out-Null
     }

@@ -153,14 +153,20 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
 
         let client = connect_daemon()?;
 
-        // Relay each chunk to our own stdio as it arrives, flushing every chunk
-        // so newline-free progress output reaches the consumer promptly.
+        // Relay each chunk to our own stdio as it arrives. Hold the stdout/stderr
+        // locks for the whole relay so we don't reacquire the handle per chunk,
+        // and coalesce flushes: `std::io::Stdout`/`Stderr` are line-buffered, so
+        // newline-terminated output already reaches the consumer promptly; we only
+        // force a flush for a chunk that does *not* end in a newline (progress
+        // output — prompts, spinners) so it isn't stranded in the line buffer.
+        // This avoids a flush syscall per bulk chunk while preserving low latency.
         // Best-effort: a failed local write must not mask the container's exit code.
-        let mut stdout = std::io::stdout();
-        let mut stderr = std::io::stderr();
-
-        let exit_code = client
-            .exec_streaming(
+        let stdout = std::io::stdout();
+        let stderr = std::io::stderr();
+        let exit_code = {
+            let mut out = stdout.lock();
+            let mut err = stderr.lock();
+            let result = client.exec_streaming(
                 ExecConfig {
                     sandbox_id: sandbox_id.to_string(),
                     script_code: request.script_code.clone(),
@@ -170,19 +176,26 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
                 },
                 |stream, bytes| match stream {
                     OutStream::Stdout => {
-                        let _ = stdout.write_all(bytes);
-                        let _ = stdout.flush();
+                        let _ = out.write_all(bytes);
+                        if bytes.last() != Some(&b'\n') {
+                            let _ = out.flush();
+                        }
                     }
                     OutStream::Stderr => {
-                        let _ = stderr.write_all(bytes);
-                        let _ = stderr.flush();
+                        let _ = err.write_all(bytes);
+                        if bytes.last() != Some(&b'\n') {
+                            let _ = err.flush();
+                        }
                     }
                 },
-            )
-            .map_err(map_daemon_error)?;
-
-        let _ = stdout.flush();
-        let _ = stderr.flush();
+            );
+            let _ = out.flush();
+            let _ = err.flush();
+            // Drop the locks before mapping the error so error conversion never
+            // contends with the writers we just held.
+            drop((out, err));
+            result.map_err(map_daemon_error)?
+        };
 
         Ok(ExecHandle {
             stdout: null_pipe_handle(),
@@ -304,12 +317,12 @@ fn build_provision_config(
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let image_tar_path = config.and_then(|c| c.image_tar_path);
 
-    // Object-identity normalization (D6) + delegation (D3), mirroring the
-    // one-shot runner: tighten rw/ro/denied aliases of the same host object to
-    // the strictest intent, then reject any path the caller cannot access. The
-    // daemon must mount the tightened policy, so a writable alias of a readonly
-    // object never leaks and a persistent daemon never mounts a path the phase
-    // caller could not delegate.
+    // WSLc provision-time filesystem-policy gate (D6 normalization → D3
+    // delegation → denied-path overlap), shared verbatim with the one-shot
+    // runner via `policy_mapping::apply_provision_policy_gate`. The daemon must
+    // mount the tightened policy, so a writable alias of a readonly object never
+    // leaks and a persistent daemon never mounts a path the phase caller could
+    // not delegate.
     let normalized = normalize_and_check_delegation(request)?;
     let normalized_request;
     let request = match normalized {
@@ -323,19 +336,6 @@ fn build_provision_config(
         None => request,
     };
 
-    // Re-run the denied-path overlap check on the *normalized* lists, mirroring
-    // the one-shot runner order (wsl_container_runner.rs). Normalization can
-    // tighten a mounted alias into `deniedPaths`; if that alias is nested under
-    // another mounted parent the raw pre-normalization check in
-    // `validate_provision_policy` cannot see it, and the daemon would mount the
-    // parent leaving the deny reachable through it. Fail closed here.
-    crate::policy_mapping::validate_denied_path_overlap(
-        &request.policy.readwrite_paths,
-        &request.policy.readonly_paths,
-        &request.policy.denied_paths,
-    )
-    .map_err(MxcError::policy_validation)?;
-
     let volumes = build_daemon_volumes(request)?;
     let network = map_network(request);
     Ok(ProvisionConfig {
@@ -346,27 +346,25 @@ fn build_provision_config(
     })
 }
 
-/// Object-identity normalization (D6) then delegation check (D3) for the
-/// provision phase, mirroring the one-shot runner order. Returns the tightened
-/// policy when aliasing required a change, else `None`; either check maps its
-/// `String` error to a `policy_validation` envelope.
+/// State-aware adapter over the shared WSLc provision policy gate
+/// ([`crate::policy_mapping::apply_provision_policy_gate`]): runs the full
+/// three-step gate (D6 normalization → D3 delegation → denied-path overlap),
+/// buffering normalization diagnostics and surfacing them on stderr (stdout
+/// carries the phase envelope), and maps the gate's `String` error to a
+/// `policy_validation` [`MxcError`]. Returns the tightened policy when
+/// normalization changed something, else `None`.
 fn normalize_and_check_delegation(
     request: &ExecutionRequest,
 ) -> Result<Option<ContainerPolicy>, MxcError> {
     let mut logger = Logger::new(Mode::Buffer);
-    let normalized =
-        wxc_common::filesystem_object::normalize_object_conflicts(&request.policy, &mut logger)
-            .map_err(MxcError::policy_validation)?;
+    let result = crate::policy_mapping::apply_provision_policy_gate(request, &mut logger);
     // Surface any normalization notes (policy tightening / unresolved paths) on
-    // stderr rather than dropping the buffer: stdout carries the phase envelope,
-    // so these diagnostics must not go there.
+    // stderr even when the gate then fails, rather than dropping the buffer.
     let notes = logger.get_buffer();
     if !notes.is_empty() {
         eprint!("{notes}");
     }
-    let policy = normalized.as_ref().unwrap_or(&request.policy);
-    wxc_common::filesystem_access::check_delegation(policy).map_err(MxcError::policy_validation)?;
-    Ok(normalized)
+    result.map_err(MxcError::policy_validation)
 }
 
 /// Build daemon volume mounts from the request's filesystem policy. Overlapping

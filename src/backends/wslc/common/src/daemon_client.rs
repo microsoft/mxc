@@ -289,8 +289,15 @@ impl DaemonClient {
     /// code and fully-buffered output.
     ///
     /// A convenience wrapper over [`exec_streaming`](Self::exec_streaming) that
-    /// accumulates every stdout/stderr chunk into an [`ExecResult`]. Prefer
-    /// `exec_streaming` when output should be relayed live rather than buffered.
+    /// accumulates every stdout/stderr chunk into an [`ExecResult`].
+    ///
+    /// **Unbounded capture — trusted/bounded output only.** This buffers the
+    /// entire stream in memory with no cap, so container-controlled output can
+    /// exhaust the caller's process memory. It is intended for tests and callers
+    /// that already know the command's output is small and bounded. Any path that
+    /// relays or handles live/untrusted output must use
+    /// [`exec_streaming`](Self::exec_streaming) (the production state-aware runner
+    /// does), which buffers nothing and lets the caller apply its own policy.
     pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();

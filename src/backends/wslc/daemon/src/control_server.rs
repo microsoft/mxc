@@ -425,7 +425,7 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
 /// live output streaming depends on), so `WslcGetProcessIOHandle(STDIN)` is
 /// unavailable. Piped stdin would require a handle-mode rearchitecture (no
 /// callbacks; `ReadFile` threads for stdout/stderr + `WriteFile` for stdin) and
-/// is deferred to Tier 2 (see the 2c plan).
+/// is deferred; stdin forwarding is tracked in issue #804.
 async fn handle_exec(
     mut pipe: NamedPipeServer,
     session: SessionHandle,

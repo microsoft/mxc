@@ -1279,17 +1279,14 @@ impl WSLContainerRunner {
     ) -> Result<StartedContainer, ScriptResponse> {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw) before mapping to
-        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
-        // `denied` is simply not mounted by WSLC — unmounted = invisible.) Only
-        // clone the request when an aliasing conflict actually needs tightening;
-        // an unresolvable path with deniedPaths present fails closed.
+        // WSLc provision-time filesystem-policy gate (D6 normalization → D3
+        // delegation → denied-path overlap), shared verbatim with the
+        // state-aware provision path via `policy_mapping::apply_provision_policy_gate`
+        // so the two runners cannot drift. Only clone the request when
+        // normalization actually tightened something; any failure is surfaced on
+        // the streaming logger and returned as a `ScriptResponse` error.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
-            &request.policy,
-            logger,
-        ) {
+        let request = match policy_mapping::apply_provision_policy_gate(request, logger) {
             Ok(Some(policy)) => {
                 normalized = ExecutionRequest {
                     policy,
@@ -1298,34 +1295,11 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => {
+                let _ = writeln!(logger, "[WSLC] {}", msg);
+                return Err(ScriptResponse::error(&msg));
+            }
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents. On Windows this covers directory readwrite paths (the common
-        // WSLC case).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
-
-        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
-        // overlay primitive, so a deniedPaths entry nested under a mounted
-        // (readwrite/readonly) parent cannot be masked and would stay accessible
-        // through the parent mount. A lexical tier catches `..`/case/whole-drive
-        // spellings; a canonicalizing tier resolves symlink/junction/8.3/`\\?\`
-        // aliases (including a not-yet-created deny under an aliased parent) and
-        // fails closed on unresolvable paths. Reject such configs rather than
-        // silently leaving the subtree exposed. Runs after object normalization
-        // so it sees the already-tightened intents.
-        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
-            &request.policy.readwrite_paths,
-            &request.policy.readonly_paths,
-            &request.policy.denied_paths,
-        ) {
-            let _ = writeln!(logger, "[WSLC] {}", msg);
-            return Err(ScriptResponse::error(&msg));
-        }
 
         // -- Init: COM + SDK + preflight --
         let sdk = Self::init_and_load_sdk(logger)?;

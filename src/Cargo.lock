@@ -3120,6 +3120,7 @@ name = "wslc_common"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "base64",
  "libloading",
  "serde",
  "serde_json",
