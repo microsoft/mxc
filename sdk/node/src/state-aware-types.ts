@@ -120,8 +120,8 @@ export interface WindowsSandboxProvisionConfig {
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
    * the same absolute host path; `deniedPaths` name HOST paths the contained
    * code must not reach. The SDK forwards this policy as-is; the backend
-   * enforces it at provision and rejects a `deniedPath` equal to or nested
-   * within a mapped share (`.wsb` has no Deny primitive).
+   * enforces it at provision and rejects a `deniedPaths` entry equal to or
+   * nested within a mapped share (`.wsb` has no Deny primitive).
    */
   filesystem?: FilesystemConfig;
 }
@@ -161,8 +161,8 @@ export interface WslcProvisionConfig {
    * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
    * at the same absolute host path. The backend runs the same object-identity
    * normalization + delegation gate as the one-shot runner and rejects a
-   * `deniedPath` equal to or nested within a mounted share (WSLc has no Deny
-   * mount primitive) with `code: 'policy_validation'`.
+   * `deniedPaths` entry equal to or nested within a mounted share (WSLc has no
+   * Deny mount primitive) with `code: 'policy_validation'`.
    */
   filesystem?: FilesystemConfig;
   /**
@@ -203,8 +203,9 @@ export interface WslcExecConfig {
    * (well-behaved HTTP clients honor it; raw-socket clients can bypass it).
    * WSLc accepts only the `{ url }` proxy form — its containers run in their
    * own network namespace, so the `localhost` / `builtinTestServer` loopback
-   * forms are unreachable and rejected. All other network fields are ignored
-   * at exec (network mode is fixed at provision).
+   * forms are unreachable and rejected. Every other network field — host
+   * filters, a `defaultPolicy` change, and `allowLocalNetwork` — is rejected
+   * with `code: 'policy_validation'` (network mode is fixed at provision).
    */
   network?: NetworkConfig;
 }
