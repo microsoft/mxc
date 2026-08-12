@@ -66,42 +66,11 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         request: &ExecutionRequest,
         config: Option<WslcProvisionPhase>,
     ) -> Result<ProvisionResult<()>, MxcError> {
-        let image = config
-            .as_ref()
-            .and_then(|c| c.image.clone())
-            .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
-        let image_tar_path = config.and_then(|c| c.image_tar_path);
-
-        // Object-identity normalization (D6) + delegation (D3), mirroring the
-        // one-shot runner: tighten rw/ro/denied aliases of the same host object
-        // to the strictest intent, then reject any path the caller cannot access.
-        // The daemon must mount the tightened policy, so a writable alias of a
-        // readonly object never leaks and a persistent daemon never mounts a path
-        // the phase caller could not delegate.
-        let normalized = normalize_and_check_delegation(request)?;
-        let normalized_request;
-        let request = match normalized {
-            Some(policy) => {
-                normalized_request = ExecutionRequest {
-                    policy,
-                    ..request.clone()
-                };
-                &normalized_request
-            }
-            None => request,
-        };
-
-        let volumes = build_daemon_volumes(request)?;
-        let network = map_network(request);
+        let provision_config = build_provision_config(request, config)?;
 
         let client = connect_daemon()?;
         let sandbox_id = client
-            .provision(ProvisionConfig {
-                image,
-                image_tar_path,
-                volumes,
-                network,
-            })
+            .provision(provision_config)
             .map_err(map_daemon_error)?;
 
         // The daemon mints a fully `wslc:`-prefixed id; return it verbatim so
@@ -170,19 +139,16 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<()>,
     ) -> Result<ExecHandle, MxcError> {
         // Cooperative proxy: inject HTTP(S)_PROXY (and scrub caller-supplied
-        // proxy vars). The url-form requirement is enforced in `validate_exec`.
-        let env = if request.policy.network_proxy.is_enabled() {
-            let proxy_url = exec_proxy_url(request).ok_or_else(|| {
-                MxcError::policy_validation(
-                    "WSLc: network.proxy requires the 'url' form (a routable proxy URL)",
-                )
-            })?;
-            split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
+        // proxy vars). `exec_proxy_url` yields the routable URL only when the
+        // proxy is enabled *and* in the required `url` form — `validate_exec`
+        // has already rejected the non-`url` form before we get here, so a
+        // `None` here means the proxy is disabled, not malformed.
+        let env = match exec_proxy_url(request) {
+            Some(proxy_url) => split_env(&wxc_common::proxy_env::apply_cooperative_proxy_env(
                 &request.env,
-                &proxy_url,
-            ))
-        } else {
-            split_env(&request.env)
+                proxy_url,
+            )),
+            None => split_env(&request.env),
         };
 
         let client = connect_daemon()?;
@@ -314,6 +280,64 @@ fn validate_sandbox_id(sandbox_id: &str) -> Result<(), MxcError> {
     }
 }
 
+/// Build the daemon `ProvisionConfig` from the request + phase config without
+/// contacting the daemon. Runs the same normalization/delegation + volume/network
+/// mapping as `provision`, so the forwarded config (image, imageTarPath, volumes,
+/// network) can be observed directly by a host-independent test — catching a
+/// serialization/forwarding regression that an E2E run would only surface on a
+/// live WSL host.
+fn build_provision_config(
+    request: &ExecutionRequest,
+    config: Option<WslcProvisionPhase>,
+) -> Result<ProvisionConfig, MxcError> {
+    let image = config
+        .as_ref()
+        .and_then(|c| c.image.clone())
+        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let image_tar_path = config.and_then(|c| c.image_tar_path);
+
+    // Object-identity normalization (D6) + delegation (D3), mirroring the
+    // one-shot runner: tighten rw/ro/denied aliases of the same host object to
+    // the strictest intent, then reject any path the caller cannot access. The
+    // daemon must mount the tightened policy, so a writable alias of a readonly
+    // object never leaks and a persistent daemon never mounts a path the phase
+    // caller could not delegate.
+    let normalized = normalize_and_check_delegation(request)?;
+    let normalized_request;
+    let request = match normalized {
+        Some(policy) => {
+            normalized_request = ExecutionRequest {
+                policy,
+                ..request.clone()
+            };
+            &normalized_request
+        }
+        None => request,
+    };
+
+    // Re-run the denied-path overlap check on the *normalized* lists, mirroring
+    // the one-shot runner order (wsl_container_runner.rs). Normalization can
+    // tighten a mounted alias into `deniedPaths`; if that alias is nested under
+    // another mounted parent the raw pre-normalization check in
+    // `validate_provision_policy` cannot see it, and the daemon would mount the
+    // parent leaving the deny reachable through it. Fail closed here.
+    crate::policy_mapping::validate_denied_path_overlap(
+        &request.policy.readwrite_paths,
+        &request.policy.readonly_paths,
+        &request.policy.denied_paths,
+    )
+    .map_err(MxcError::policy_validation)?;
+
+    let volumes = build_daemon_volumes(request)?;
+    let network = map_network(request);
+    Ok(ProvisionConfig {
+        image,
+        image_tar_path,
+        volumes,
+        network,
+    })
+}
+
 /// Object-identity normalization (D6) then delegation check (D3) for the
 /// provision phase, mirroring the one-shot runner order. Returns the tightened
 /// policy when aliasing required a change, else `None`; either check maps its
@@ -325,6 +349,13 @@ fn normalize_and_check_delegation(
     let normalized =
         wxc_common::filesystem_object::normalize_object_conflicts(&request.policy, &mut logger)
             .map_err(MxcError::policy_validation)?;
+    // Surface any normalization notes (policy tightening / unresolved paths) on
+    // stderr rather than dropping the buffer: stdout carries the phase envelope,
+    // so these diagnostics must not go there.
+    let notes = logger.get_buffer();
+    if !notes.is_empty() {
+        eprint!("{notes}");
+    }
     let policy = normalized.as_ref().unwrap_or(&request.policy);
     wxc_common::filesystem_access::check_delegation(policy).map_err(MxcError::policy_validation)?;
     Ok(normalized)
@@ -452,6 +483,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(map_network(&req), NetworkMode::Bridged);
+    }
+
+    #[test]
+    fn build_provision_config_forwards_image_and_tar_path() {
+        let phase = WslcProvisionPhase {
+            image: Some("custom/image:tag".to_string()),
+            image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+        };
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        assert_eq!(cfg.image, "custom/image:tag");
+        assert_eq!(
+            cfg.image_tar_path.as_deref(),
+            Some("C:\\images\\custom.tar")
+        );
+    }
+
+    #[test]
+    fn build_provision_config_defaults_image_and_omits_tar_when_absent() {
+        let cfg = build_provision_config(&ExecutionRequest::default(), None).unwrap();
+        assert_eq!(cfg.image, DEFAULT_IMAGE);
+        assert!(cfg.image_tar_path.is_none());
+    }
+
+    #[test]
+    fn build_provision_config_rejects_denied_overlap_after_normalization() {
+        // Guard: `build_provision_config` must re-run the denied-path overlap
+        // check on the (post-normalization) lists, mirroring the one-shot
+        // runner. A `deniedPaths` entry nested under a mounted parent has no
+        // masking primitive on WSLc's flat mount surface, so it must be
+        // rejected here even though the surrounding dispatcher also validates.
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                readwrite_paths: vec!["C:\\parent".to_string()],
+                denied_paths: vec!["C:\\parent\\secret".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = build_provision_config(&req, None).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("deniedPaths"), "got: {}", err.message);
     }
 
     #[test]

@@ -55,6 +55,59 @@ const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// spurious failure.
 const SPAWN_LOCK_TIMEOUT: Duration = Duration::from_secs(75);
 
+/// Overall per-request response deadline for a non-streaming daemon call
+/// (`provision` / `start` / `stop` / `deprovision` / `ping`). The daemon services
+/// every lifecycle op on a single apartment-affine worker, so a call that hangs
+/// on the SDK would otherwise block this phase process — and, transitively, every
+/// later lifecycle command including teardown — forever. Bounding the client read
+/// lets a wedged daemon surface an actionable timeout instead of blocking
+/// indefinitely. Generous enough to cover a cold image pull at `provision`.
+const CALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Env override (positive whole seconds) for [`READY_TIMEOUT`]. Lets negative
+/// tests (readiness failure) fail fast instead of waiting a minute.
+const READY_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_READY_TIMEOUT_SECS";
+
+/// Env override (positive whole seconds) for [`SPAWN_LOCK_TIMEOUT`].
+const SPAWN_LOCK_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_SPAWN_LOCK_TIMEOUT_SECS";
+
+/// Env override (positive whole seconds) for [`CALL_TIMEOUT`].
+const CALL_TIMEOUT_ENV: &str = "MXC_WSLC_DAEMON_CALL_TIMEOUT_SECS";
+
+/// Resolve a `Duration` from an environment variable holding a positive whole
+/// number of seconds, falling back to `default` when the variable is unset,
+/// empty, non-numeric, or zero. Mirrors the daemon-side override pattern so the
+/// production defaults stand unless a test/operator deliberately tunes them.
+fn duration_from_env(var: &str, default: Duration) -> Duration {
+    resolve_duration(std::env::var(var).ok().as_deref(), default)
+}
+
+/// Pure core of [`duration_from_env`]: map an optional raw string to a
+/// `Duration`, using `default` unless the string is a positive integer number
+/// of seconds. Split out so the parsing rules are unit-testable without mutating
+/// process-global environment state.
+fn resolve_duration(raw: Option<&str>, default: Duration) -> Duration {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
+/// The daemon-readiness wait, honoring [`READY_TIMEOUT_ENV`].
+fn ready_timeout() -> Duration {
+    duration_from_env(READY_TIMEOUT_ENV, READY_TIMEOUT)
+}
+
+/// The spawn/teardown transition-lock wait, honoring [`SPAWN_LOCK_TIMEOUT_ENV`].
+fn spawn_lock_timeout() -> Duration {
+    duration_from_env(SPAWN_LOCK_TIMEOUT_ENV, SPAWN_LOCK_TIMEOUT)
+}
+
+/// The overall per-request response deadline, honoring [`CALL_TIMEOUT_ENV`].
+fn call_timeout() -> Duration {
+    duration_from_env(CALL_TIMEOUT_ENV, CALL_TIMEOUT)
+}
+
 /// Poll cadence while waiting for the `ready` record.
 const READY_POLL: Duration = Duration::from_millis(100);
 
@@ -148,10 +201,11 @@ impl DaemonClient {
 
         // Slow path: serialise spawn/teardown so two phase processes cannot both
         // spawn a daemon (or race a spawn against a teardown).
-        let _lock = TransitionLock::acquire(SPAWN_LOCK_TIMEOUT)
+        let _lock = TransitionLock::acquire(spawn_lock_timeout())
             .context("acquire daemon spawn transition lock")?;
 
-        let deadline = Instant::now() + READY_TIMEOUT;
+        let ready_timeout = ready_timeout();
+        let deadline = Instant::now() + ready_timeout;
         let mut spawned = false;
         loop {
             match live_daemon()? {
@@ -178,7 +232,7 @@ impl DaemonClient {
 
             if Instant::now() >= deadline {
                 bail!(
-                    "timed out after {READY_TIMEOUT:?} waiting for the wslc daemon to become ready"
+                    "timed out after {ready_timeout:?} waiting for the wslc daemon to become ready"
                 );
             }
             std::thread::sleep(READY_POLL);
@@ -275,10 +329,18 @@ impl DaemonClient {
 
     /// Issue a single non-streaming request on a fresh connection and return the
     /// daemon's reply.
+    ///
+    /// The response read is bounded by [`call_timeout`]: the daemon services
+    /// every lifecycle op on one apartment-affine worker, so a hung SDK call
+    /// would otherwise block this phase process (and thus later teardown)
+    /// forever. On deadline we return an actionable timeout instead of blocking
+    /// indefinitely; the abandoned reader thread unblocks when the pipe finally
+    /// responds or closes (at latest when this short-lived phase process exits).
     fn call(&self, request: &DaemonRequest) -> DaemonResult<DaemonResponse> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, request)?;
-        Ok(read_frame(&mut pipe)?)
+        let timeout = call_timeout();
+        read_frame_with_deadline::<DaemonResponse, _>(move || read_frame(&mut pipe), timeout)
     }
 
     /// Open a fresh synchronous connection to the daemon pipe, retrying past the
@@ -517,6 +579,42 @@ fn read_frame<T: DeserializeOwned>(pipe: &mut File) -> Result<T> {
     serde_json::from_slice(&body).context("deserialise frame body")
 }
 
+/// Run a blocking frame `read` with an overall `timeout`.
+///
+/// A Windows named pipe opened as a synchronous `File` has no per-read timeout,
+/// so the read runs on a spawned thread and we wait on an [`mpsc`] channel with
+/// [`Receiver::recv_timeout`]. On timeout we return an actionable transport
+/// error rather than blocking forever behind a wedged daemon; the reader thread
+/// is abandoned (it unblocks when the pipe responds or closes — at latest when
+/// this short-lived phase process exits).
+///
+/// [`mpsc`]: std::sync::mpsc
+/// [`Receiver::recv_timeout`]: std::sync::mpsc::Receiver::recv_timeout
+fn read_frame_with_deadline<T, F>(read: F, timeout: Duration) -> DaemonResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        // The receiver may already be gone (we timed out); ignore the send error.
+        let _ = tx.send(read());
+    });
+
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result.map_err(DaemonError::Transport),
+        Err(RecvTimeoutError::Timeout) => Err(DaemonError::transport(format!(
+            "timed out after {timeout:?} waiting for the wslc daemon to respond; it may be wedged \
+             on a prior operation (override with {CALL_TIMEOUT_ENV})"
+        ))),
+        Err(RecvTimeoutError::Disconnected) => Err(DaemonError::transport(
+            "wslc daemon reader thread ended without a response",
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -587,5 +685,63 @@ mod tests {
         assert_eq!(client.pipe_name, record.pipe_name);
         assert_eq!(client.server_pid, 4321);
         assert_eq!(client.server_pid_creation_time, 0xABCD);
+    }
+
+    #[test]
+    fn read_frame_with_deadline_returns_value_before_deadline() {
+        let v: DaemonResult<u32> = read_frame_with_deadline(|| Ok(42u32), Duration::from_secs(5));
+        assert_eq!(v.unwrap(), 42);
+    }
+
+    #[test]
+    fn read_frame_with_deadline_times_out_on_wedged_reader() {
+        // A deliberately non-responsive reader (mirrors a wedged daemon that
+        // never answers) must surface an actionable timeout, not block forever.
+        let start = Instant::now();
+        let v: DaemonResult<u32> = read_frame_with_deadline(
+            || {
+                std::thread::sleep(Duration::from_secs(30));
+                Ok(0u32)
+            },
+            Duration::from_millis(100),
+        );
+        let err = v.unwrap_err();
+        assert!(matches!(err, DaemonError::Transport(_)));
+        let text = err.to_string();
+        assert!(text.contains("timed out"), "unexpected message: {text}");
+        assert!(
+            text.contains(CALL_TIMEOUT_ENV),
+            "should name the override env"
+        );
+        // The whole call must return promptly on deadline, not after the read.
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn read_frame_with_deadline_propagates_reader_error() {
+        let v: DaemonResult<u32> = read_frame_with_deadline(
+            || Err(anyhow::anyhow!("framing error")),
+            Duration::from_secs(5),
+        );
+        let err = v.unwrap_err();
+        assert!(matches!(err, DaemonError::Transport(_)));
+        assert!(err.to_string().contains("framing error"));
+    }
+
+    #[test]
+    fn resolve_duration_falls_back_when_absent_or_invalid() {
+        let default = Duration::from_secs(600);
+        assert_eq!(resolve_duration(None, default), default);
+        assert_eq!(resolve_duration(Some(""), default), default);
+        assert_eq!(resolve_duration(Some("nope"), default), default);
+        assert_eq!(resolve_duration(Some("0"), default), default);
+    }
+
+    #[test]
+    fn resolve_duration_honours_positive_override() {
+        assert_eq!(
+            resolve_duration(Some("  3  "), Duration::from_secs(600)),
+            Duration::from_secs(3)
+        );
     }
 }

@@ -89,7 +89,8 @@ pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), Mxc
 
 /// The routable proxy URL to inject at exec, or `None` when the proxy is
 /// disabled or specified in a non-`url` form (localhost / builtinTestServer).
-pub(crate) fn exec_proxy_url(request: &ExecutionRequest) -> Option<String> {
+/// Borrows from the request so presence validation does not allocate.
+pub(crate) fn exec_proxy_url(request: &ExecutionRequest) -> Option<&str> {
     if !request.policy.network_proxy.is_enabled() {
         return None;
     }
@@ -98,7 +99,7 @@ pub(crate) fn exec_proxy_url(request: &ExecutionRequest) -> Option<String> {
         .network_proxy
         .address
         .as_ref()
-        .and_then(|addr| addr.original_url.clone())
+        .and_then(|addr| addr.original_url.as_deref())
 }
 
 fn reject_filesystem_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
@@ -277,10 +278,7 @@ mod tests {
             ..Default::default()
         });
         validate_exec_policy(&req).unwrap();
-        assert_eq!(
-            exec_proxy_url(&req).as_deref(),
-            Some("http://127.0.0.1:8888")
-        );
+        assert_eq!(exec_proxy_url(&req), Some("http://127.0.0.1:8888"));
     }
 
     #[test]
@@ -321,10 +319,7 @@ mod tests {
             ..Default::default()
         });
         validate_exec_policy(&req).unwrap();
-        assert_eq!(
-            exec_proxy_url(&req).as_deref(),
-            Some("http://127.0.0.1:8888")
-        );
+        assert_eq!(exec_proxy_url(&req), Some("http://127.0.0.1:8888"));
     }
 
     #[test]

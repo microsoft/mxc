@@ -638,6 +638,29 @@ Run-StateAwareTest "D: start (filesystem policy rejected)" {
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
+# The cross-cutting wire parser + dispatcher must reject a post-provision proxy
+# just like the policy unit test does — proxy is an exec-only concern, fixed at
+# provision for the network mode. Cover both post-provision validators (start /
+# stop) that funnel through validate_post_provision_policy, exercising the real
+# base64 -> parser -> dispatch path rather than only the in-crate unit test.
+Run-StateAwareTest "D: start (network.proxy rejected post-provision)" {
+    $req = @{ phase = 'start'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
+    $r = Invoke-StateAware -Request $req
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+} | Out-Null
+
+Run-StateAwareTest "D: stop (network.proxy rejected post-provision)" {
+    $req = @{ phase = 'stop'; sandboxId = 'wslc:0123456789abcdef0123456789abcdef'; network = @{ proxy = @{ url = 'http://127.0.0.1:8888' } } }
+    $r = Invoke-StateAware -Request $req
+    Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
+    $envObj = Parse-Envelope -Stdout $r.Stdout
+    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
+} | Out-Null
+
 # ---------------- Lifecycle E: restart cycle (stop -> start again) ----------------
 
 # Exercises stop -> re-start re-activation on the same sandbox. The daemon state

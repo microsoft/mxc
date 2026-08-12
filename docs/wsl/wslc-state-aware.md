@@ -77,11 +77,18 @@ rules do not apply — see the empirical finding in the plan history). Proxy is 
 |-------|-----------|----------------------------|------|
 | `readwritePaths` / `readonlyPaths` | honored → container volumes | rejected | rejected |
 | `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
-| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | rejected | rejected (non-default network) |
+| `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
 | `network` host filtering (`allowedHosts` / `blockedHosts`) | rejected | rejected | rejected |
 | `network.proxy` | rejected | rejected | honored — **`url` form only** (`localhost` / `builtinTestServer` forms → `policy_validation`); injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
 
 Filesystem policy is fixed at `provision` and immutable afterwards.
+
+The network **mode** (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host lists) is
+also fixed at `provision`. Post-provision phases reject the mode by **presence, not value**: any
+explicitly supplied network-mode field is rejected — including an explicit `defaultPolicy: "block"`
+whose value equals the default — because an explicit default is indistinguishable from an omitted
+one by value alone. Only the exec-phase cooperative `proxy` is accepted after provision; a
+proxy-only `network` block (no mode fields) is therefore honored at exec.
 
 ## Error mapping
 
