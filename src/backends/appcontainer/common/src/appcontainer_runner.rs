@@ -1531,7 +1531,6 @@ struct AppContainerSandboxProcess {
     preserve_policy: bool,
     timeout_ms: u32,
     teardown_done: bool,
-    kill_requested: bool,
     /// Sandbox identity join key — the AppContainer profile name MXC created
     /// this sandbox under. Carried so the audit records emitted from `wait()`,
     /// `kill()`, and `run_teardown()` can be joined to the OS-side records
@@ -1596,7 +1595,6 @@ impl AppContainerSandboxProcess {
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
             teardown_done: false,
-            kill_requested: false,
             // The AppContainer profile name is the caller's `containerId`, i.e.
             // a config value — sanitize before it can reach a record.
             identity: sanitize_identity(&identity).to_string(),
@@ -1626,11 +1624,16 @@ impl AppContainerSandboxProcess {
             return;
         }
         self.teardown_done = true;
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+        // Reuse the sink-preserving audit logger for the firewall/BFS
+        // cleanup calls below, not a throwaway buffer-only logger: partial
+        // cleanup warnings from `stop_all`/`remove_configuration` are
+        // real diagnostics and must reach the same file/pipe sinks as the
+        // structured `SandboxTornDown` record emitted at the end of this
+        // function, not be silently dropped with the buffer.
         let network = self
             .prepared
             .network_manager
-            .stop_all(!self.preserve_policy, &mut logger);
+            .stop_all(!self.preserve_policy, &mut self.audit_logger);
         // Whether BFS removal was actually requested this teardown, vs whether
         // it landed. The two used to be conflated: `bfs_removed` was inferred
         // from `filesystem_mode` alone, so a failed `remove_configuration`
@@ -1639,7 +1642,9 @@ impl AppContainerSandboxProcess {
             && self.prepared.bfs_manager.configured()
             && !self.preserve_policy;
         let bfs_removed = if bfs_requested {
-            self.prepared.bfs_manager.remove_configuration(&mut logger)
+            self.prepared
+                .bfs_manager
+                .remove_configuration(&mut self.audit_logger)
         } else {
             false
         };
@@ -1775,13 +1780,13 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
         //
-        self.kill_requested = true;
         if let Err(error) = self.job.terminate(u32::MAX) {
             wxc_common::telemetry::log_process_event(
                 sanitize_identity(&self.identity),
                 self.pid,
                 wxc_common::telemetry::ProcessEvent::KillFailed(
                     KillMethod::TerminateJobObject.as_str(),
+                    error.code().0,
                 ),
             );
             if self.audit_enabled() {
@@ -1813,14 +1818,20 @@ impl SandboxProcess for AppContainerSandboxProcess {
                     Err(std::io::Error::other("GetExitCodeProcess failed"))
                 } else {
                     let exit_code = code as i32;
-                    if !self.kill_requested {
-                        wxc_common::telemetry::log_process_event(
-                            sanitize_identity(&self.identity),
-                            self.pid,
-                            wxc_common::telemetry::ProcessEvent::Exited(exit_code),
-                        );
-                    }
-                    if self.audit_enabled() && !self.kill_requested {
+                    // Always emit exactly one terminal outcome record here,
+                    // even when an external caller cancelled via `kill()`
+                    // before this natural exit was observed: a prior design
+                    // suppressed `ProcessExited` whenever a kill had been
+                    // requested, which left a successful proactive
+                    // cancellation (and a failed kill followed by a natural
+                    // exit) with no process outcome record at all, violating
+                    // the process-outcome contract (M-ETW-1).
+                    wxc_common::telemetry::log_process_event(
+                        sanitize_identity(&self.identity),
+                        self.pid,
+                        wxc_common::telemetry::ProcessEvent::Exited(exit_code),
+                    );
+                    if self.audit_enabled() {
                         let record = self
                             .audit(AuditEventName::ProcessExited)
                             .i64("exit_code", exit_code as i64);
@@ -2314,5 +2325,192 @@ mod tests {
             error.error_message,
             CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
         );
+    }
+
+    /// Runner-level end-to-end tests: a real Win32 process, a real job
+    /// object, and a real file-backed `Logger`, driven through
+    /// `AppContainerSandboxProcess::wait`/`kill`/`Drop` exactly as
+    /// `wxc-exec` does. These exercise the actual runner-to-audit-log wiring
+    /// (unit tests elsewhere only exercise the pure status-computation
+    /// helpers in isolation), so a real regression in that wiring — e.g. the
+    /// `ProcessExited` suppression bug fixed alongside these tests — shows up
+    /// as a missing line in a real log file, not just a wrong argument to a
+    /// mocked call.
+    mod runner_e2e {
+        use super::super::*;
+        use std::io::Read as _;
+        use std::os::windows::io::IntoRawHandle;
+        use std::process::Command;
+        use windows::Win32::Foundation::HANDLE;
+        use wxc_common::process_util::{OwnedHandle, SendOwnedHandle};
+        use wxc_common::sandbox_process::SandboxProcess;
+
+        /// Spawn a real, ordinary (non-AppContainer) child process for the
+        /// test to drive through the runner's real `wait`/`kill`/
+        /// `run_teardown` logic. Returns the process's raw handle — now
+        /// owned by the caller, since `Command`'s `Child` is consumed via
+        /// `IntoRawHandle` so nothing double-closes it — and its OS pid.
+        fn spawn_test_child(args: &[&str]) -> (SendOwnedHandle, u32) {
+            let child = Command::new("cmd.exe")
+                .args(args)
+                .spawn()
+                .expect("spawn cmd.exe for runner e2e test");
+            let pid = child.id();
+            let raw = child.into_raw_handle();
+            let mut owned = OwnedHandle::new(HANDLE(raw));
+            (SendOwnedHandle::take(&mut owned), pid)
+        }
+
+        /// Build a minimal, real `AppContainerSandboxProcess` around
+        /// `process`/`pid`: a real `UiJobObject` assigned to the process, an
+        /// unconfigured (no-op) `NetworkManager`/`FileSystemBfsManager` pair
+        /// (`FilesystemMode::Dacl` skips the BFS path entirely, and the
+        /// default `NetworkManager` has no firewall rules to remove), and
+        /// `logger`'s diagnostic sinks — so audit records land wherever the
+        /// caller attached a file sink on `logger`.
+        fn make_test_process(
+            process: SendOwnedHandle,
+            pid: u32,
+            timeout_ms: u32,
+            logger: &Logger,
+        ) -> AppContainerSandboxProcess {
+            let job = UiJobObject::new().expect("create job object");
+            job.assign_process(process.get())
+                .expect("assign process to job");
+            AppContainerSandboxProcess {
+                process,
+                _thread: SendOwnedHandle::take(&mut OwnedHandle::new(HANDLE::default())),
+                job,
+                pid,
+                stdin: None,
+                stdout: None,
+                stderr: None,
+                stdout_canceller: None,
+                stderr_canceller: None,
+                prepared: Prepared {
+                    network_manager: crate::network_manager::NetworkManager::new(),
+                    bfs_manager: crate::filesystem_bfs::FileSystemBfsManager::new(
+                        "wxc-e2e-test".to_string(),
+                        None,
+                    ),
+                },
+                filesystem_mode: FilesystemMode::Dacl,
+                preserve_policy: false,
+                timeout_ms,
+                teardown_done: false,
+                identity: "wxc-e2e-test".to_string(),
+                tier: "app_container_dacl",
+                audit_logger: logger.clone_diagnostic_sink(),
+            }
+        }
+
+        fn read_audit_file(path: &std::path::Path) -> String {
+            let mut contents = String::new();
+            std::fs::File::open(path)
+                .expect("open audit log file")
+                .read_to_string(&mut contents)
+                .expect("read audit log file");
+            contents
+        }
+
+        /// Unique-per-test log path so parallel test threads never share a
+        /// file sink.
+        fn test_log_path(name: &str) -> std::path::PathBuf {
+            std::env::temp_dir().join(format!(
+                "wxc-e2e-{name}-{}-{:?}.log",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+        }
+
+        #[test]
+        fn natural_exit_emits_process_exited_and_torn_down_records() {
+            let log_path = test_log_path("natural-exit");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            let (process, pid) = spawn_test_child(&["/C", "exit 7"]);
+            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
+
+            let exit_code = sandbox.wait().expect("natural exit should succeed");
+            assert_eq!(exit_code, 7);
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessExited""#),
+                "expected a ProcessExited audit record; got: {audit}"
+            );
+            assert!(
+                audit.contains(r#""exit_code":7"#),
+                "ProcessExited record must carry the real exit code; got: {audit}"
+            );
+            assert!(
+                audit.contains(r#""event":"mxc.SandboxTornDown""#),
+                "expected a SandboxTornDown audit record; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
+
+        #[test]
+        fn proactive_kill_before_natural_exit_still_emits_process_exited() {
+            let log_path = test_log_path("proactive-kill");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            // A process that would otherwise run far longer than this test.
+            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
+            let mut sandbox = make_test_process(process, pid, 30_000, &logger);
+
+            // Simulate an external caller (e.g. an FFI/SDK cancellation)
+            // cancelling before the process would otherwise exit on its own.
+            sandbox.kill().expect("kill should succeed");
+            let exit_code = sandbox
+                .wait()
+                .expect("wait after a successful kill should still resolve");
+            let _ = exit_code;
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessExited""#),
+                "a successful proactive cancellation must still leave exactly \
+                 one terminal process-outcome record instead of none; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
+
+        #[test]
+        fn timeout_emits_process_timed_out_record() {
+            let log_path = test_log_path("timeout");
+            let _ = std::fs::remove_file(&log_path);
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            logger
+                .enable_file_sink(&log_path)
+                .expect("enable file sink");
+
+            let (process, pid) = spawn_test_child(&["/C", "ping -n 60 127.0.0.1 >nul"]);
+            // A timeout far shorter than the child's runtime.
+            let mut sandbox = make_test_process(process, pid, 200, &logger);
+
+            let err = sandbox
+                .wait()
+                .expect_err("the child must still be running past the timeout");
+            assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+            drop(sandbox);
+
+            let audit = read_audit_file(&log_path);
+            assert!(
+                audit.contains(r#""event":"mxc.ProcessTimedOut""#),
+                "expected a ProcessTimedOut audit record; got: {audit}"
+            );
+            let _ = std::fs::remove_file(&log_path);
+        }
     }
 }

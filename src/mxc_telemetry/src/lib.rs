@@ -307,7 +307,12 @@ mod provider {
         );
     }
 
-    pub fn log_process_kill_failed(identity: &str, process_id: u32, error_type: &str) {
+    pub fn log_process_kill_failed(
+        identity: &str,
+        process_id: u32,
+        error_type: &str,
+        error_code: i32,
+    ) {
         let Some(state) = STATE.get() else { return };
         let (version, channel, debugging, app_session) = common_params(state);
         tracelogging::write_event!(
@@ -325,6 +330,7 @@ mod provider {
             str8("mxc.identity", identity),
             u32("mxc.process_id", &process_id),
             str8("mxc.error_type", error_type),
+            i32("mxc.error_code", &error_code),
         );
     }
 
@@ -431,6 +437,7 @@ mod provider {
         backend: &str,
         reason: &str,
         offending_field: &str,
+        phase: &str,
     ) {
         let Some(state) = STATE.get() else { return };
         let (version, channel, debugging, app_session) = common_params(state);
@@ -450,6 +457,7 @@ mod provider {
             str8("mxc.backend", backend),
             str8("mxc.reason", reason),
             str8("mxc.offending_field", offending_field),
+            str8("mxc.phase", phase),
         );
     }
 }
@@ -492,7 +500,13 @@ mod provider {
 
     pub fn log_process_exited(_identity: &str, _process_id: u32, _exit_code: i32) {}
     pub fn log_process_timed_out(_identity: &str, _process_id: u32, _timeout_ms: u64) {}
-    pub fn log_process_kill_failed(_identity: &str, _process_id: u32, _error_type: &str) {}
+    pub fn log_process_kill_failed(
+        _identity: &str,
+        _process_id: u32,
+        _error_type: &str,
+        _error_code: i32,
+    ) {
+    }
     pub fn log_enforcement_degraded(
         _identity: &str,
         _tier: &str,
@@ -515,6 +529,7 @@ mod provider {
         _backend: &str,
         _reason: &str,
         _offending_field: &str,
+        _phase: &str,
     ) {
     }
 }

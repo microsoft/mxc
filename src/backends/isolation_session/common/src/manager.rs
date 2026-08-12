@@ -651,7 +651,7 @@ fn wait_with_graceful_shutdown(
         wxc_common::telemetry::log_process_event(
             &wxc_common::policy_identity::redact_identity(identity),
             pid,
-            wxc_common::telemetry::ProcessEvent::KillFailed("terminate_process"),
+            wxc_common::telemetry::ProcessEvent::KillFailed("terminate_process", error.code().0),
         );
         if let Some(logger) = logger.as_mut() {
             let record = AuditEvent::new(AuditEventName::ProcessKillFailed)

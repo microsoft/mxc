@@ -34,6 +34,32 @@ const SECRET_PATH_MARKERS: &[&str] = &[
 /// never leaks one.
 const SECRET_PATH_SEGMENTS: &[&str] = &["user"];
 
+/// Whether a single (not-yet-lower-cased) JSON object key is secret-bearing,
+/// per [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
+/// (substring match) — an ASCII-case-insensitive equivalent of
+/// [`is_secret_path_field`] for callers that only need the yes/no decision and
+/// would otherwise allocate a lower-cased copy of `field` just to ask it.
+pub(crate) fn is_secret_path_field_ci(field: &str) -> bool {
+    SECRET_PATH_SEGMENTS
+        .iter()
+        .any(|segment| field.eq_ignore_ascii_case(segment))
+        || SECRET_PATH_MARKERS
+            .iter()
+            .any(|marker| contains_ignore_ascii_case(field, marker))
+}
+
+/// ASCII-case-insensitive `str::contains`, without allocating a lower-cased
+/// copy of `haystack`. `needle` is always one of the ASCII lower-case
+/// constants above.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    needle.is_empty()
+        || (needle.len() <= haystack.len()
+            && haystack
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle)))
+}
+
 /// Whether a single lower-cased JSON object key is secret-bearing, per
 /// [`SECRET_PATH_SEGMENTS`] (whole-field match) and [`SECRET_PATH_MARKERS`]
 /// (substring match). Shared by error-path redaction (this module) and raw

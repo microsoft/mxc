@@ -130,23 +130,10 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
 pub enum ProcessEvent<'a> {
     Exited(i32),
     TimedOut(u64),
-    KillFailed(&'a str),
-}
-
-/// Backwards compatibility: deprecated wrappers around ProcessEvent variants.
-/// Used by existing callers; new code should use ProcessEvent directly.
-#[deprecated(since = "0.8.0", note = "use ProcessEvent enum variants directly")]
-pub enum ProcessEventKind {
-    Exited,
-    TimedOut,
-    KillFailed,
-}
-
-#[deprecated(since = "0.8.0", note = "use ProcessEvent enum variants directly")]
-pub enum ProcessEventData<'a> {
-    ExitCode(i32),
-    TimeoutMs(u64),
-    KillFailure(&'a str),
+    /// Kill method attempted, plus the numeric OS error code returned by the
+    /// failed termination call (e.g. `error.code().0` on Windows), so ETW
+    /// consumers can see *why* the kill failed, not just what was attempted.
+    KillFailed(&'a str, i32),
 }
 
 pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_>) {
@@ -157,8 +144,8 @@ pub fn log_process_event(identity: &str, process_id: u32, event: ProcessEvent<'_
         ProcessEvent::TimedOut(timeout_ms) => {
             mxc_telemetry::log_process_timed_out(identity, process_id, timeout_ms);
         }
-        ProcessEvent::KillFailed(error_type) => {
-            mxc_telemetry::log_process_kill_failed(identity, process_id, error_type);
+        ProcessEvent::KillFailed(error_type, error_code) => {
+            mxc_telemetry::log_process_kill_failed(identity, process_id, error_type, error_code);
         }
     }
 
@@ -263,8 +250,9 @@ pub fn log_config_rejected(
     backend: &str,
     reason: &str,
     offending_field: &str,
+    phase: &str,
 ) {
-    mxc_telemetry::log_config_rejected(correlation_id, backend, reason, offending_field);
+    mxc_telemetry::log_config_rejected(correlation_id, backend, reason, offending_field, phase);
     #[cfg(test)]
     test_sink::record_requirement(
         "MXC.ConfigRejected",
@@ -273,6 +261,7 @@ pub fn log_config_rejected(
             ("backend".to_owned(), backend.to_owned()),
             ("reason".to_owned(), reason.to_owned()),
             ("offending_field".to_owned(), offending_field.to_owned()),
+            ("phase".to_owned(), phase.to_owned()),
         ],
     );
 }
@@ -287,6 +276,15 @@ pub(super) mod test_sink {
     use super::{ExecutionEvent, FailureReason, ProcessEvent, TelemetryContext};
     use std::cell::Cell;
     use std::sync::Mutex;
+
+    /// Serializes any test that installs/clears this capture sink or drives
+    /// the emit glue in `telemetry::tests`, since `EXECUTIONS`/`ERRORS`/
+    /// `REQUIREMENTS` below (and the process-global emit-slot state in the
+    /// parent module) are shared regardless of which thread `cargo test`
+    /// happens to run a given test on. Every test that touches this module,
+    /// directly or via the parent module's emit helpers, must hold this lock
+    /// for its capture window.
+    pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Owned copy of an `MXC.Execution` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,12 +389,13 @@ pub(super) mod test_sink {
                     ("TimeoutMs".to_owned(), timeout_ms.to_string()),
                 ],
             ),
-            ProcessEvent::KillFailed(error_type) => (
+            ProcessEvent::KillFailed(error_type, error_code) => (
                 "MXC.ProcessKillFailed",
                 vec![
                     ("identity".to_owned(), identity.to_owned()),
                     ("process_id".to_owned(), process_id.to_string()),
                     ("mxc.error_type".to_owned(), error_type.to_owned()),
+                    ("mxc.error_code".to_owned(), error_code.to_string()),
                 ],
             ),
         };
@@ -469,10 +468,13 @@ mod tests {
 
     #[test]
     fn requirement_events_use_bounded_event_names() {
+        let _lock = test_sink::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         test_sink::install();
         log_process_event("opaque", 42, ProcessEvent::Exited(0));
         log_process_event("opaque", 42, ProcessEvent::TimedOut(1000));
-        log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate"));
+        log_process_event("opaque", 42, ProcessEvent::KillFailed("terminate", 5));
         log_enforcement_degraded("opaque", "base_container", true, "reason", "dacl_augmented");
         log_policy_hash("opaque", "sha256:abc", "0.8.0-alpha");
         log_network_policy_applied("opaque", "proxy", "deny", 8080);
@@ -482,6 +484,7 @@ mod tests {
             "process_container",
             "invalid",
             "process.commandLine",
+            "validate",
         );
         let events = test_sink::take_requirements();
         test_sink::clear();
@@ -548,6 +551,13 @@ mod tests {
                 .iter()
                 .any(|(n, v)| n == "mxc.error_type" && v == "terminate"),
             "ProcessKillFailed must include mxc.error_type field"
+        );
+        assert!(
+            process_killfailed
+                .fields
+                .iter()
+                .any(|(n, v)| n == "mxc.error_code" && v == "5"),
+            "ProcessKillFailed must include mxc.error_code field"
         );
 
         // Validate EnforcementDegraded payload
@@ -658,5 +668,8 @@ mod tests {
             "offending_field".to_owned(),
             "process.commandLine".to_owned()
         )));
+        assert!(rejected
+            .fields
+            .contains(&("phase".to_owned(), "validate".to_owned())));
     }
 }

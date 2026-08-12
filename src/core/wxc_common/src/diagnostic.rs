@@ -44,12 +44,39 @@ fn is_valid_pipe_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-        && token
-            .bytes()
-            .filter(|byte| *byte != b'-')
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            >= 4
+        && has_sufficient_entropy(token)
+}
+
+/// Approximate Shannon entropy (bits per hex character) over the token's
+/// non-separator bytes, rejecting low-entropy patterns that a simple
+/// "at least 4 distinct bytes" check would let through — e.g. `"abcd"`
+/// repeated eight times has exactly 4 distinct bytes (enough to pass a bare
+/// distinct-count check) but only 2 bits of entropy per character, far short
+/// of what a real random token carries.
+fn has_sufficient_entropy(token: &str) -> bool {
+    let mut counts = [0u32; 256];
+    let mut total = 0u32;
+    for byte in token.bytes().filter(|byte| *byte != b'-') {
+        counts[byte as usize] += 1;
+        total += 1;
+    }
+    if total == 0 {
+        return false;
+    }
+    let entropy: f64 = counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = f64::from(count) / f64::from(total);
+            -p * p.log2()
+        })
+        .sum();
+    // A uniformly random hex token carries up to 4 bits/char (log2(16)).
+    // Require at least 3 bits/char: comfortably above what any low-period
+    // repeating pattern can produce (a period-4 repeat tops out at 2
+    // bits/char) while still accepting real random tokens.
+    const MIN_BITS_PER_CHAR: f64 = 3.0;
+    entropy >= MIN_BITS_PER_CHAR
 }
 
 /// Retrieve the SID string for the current process token's user.
@@ -213,10 +240,11 @@ pub fn redact_raw_config_json(raw: &str) -> String {
 /// safe: e.g. blanking the whole `user` object (rather than only `upn`/
 /// `wamToken` within it) never leaks a credential.
 fn redact_secret_fields(value: &mut serde_json::Value) {
-    redact_secret_fields_at_path(value, &[]);
+    let mut path = Vec::new();
+    redact_secret_fields_at_path(value, &mut path);
 }
 
-fn redact_secret_fields_at_path(value: &mut serde_json::Value, path: &[String]) {
+fn redact_secret_fields_at_path(value: &mut serde_json::Value, path: &mut Vec<String>) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, entry) in map.iter_mut() {
@@ -230,9 +258,14 @@ fn redact_secret_fields_at_path(value: &mut serde_json::Value, path: &[String]) 
                         *url = crate::proxy_env::redact_proxy_url(url);
                     }
                 } else {
-                    let mut child_path = path.to_vec();
-                    child_path.push(key_lower);
-                    redact_secret_fields_at_path(entry, &child_path);
+                    // Reuse one mutable path stack across the whole
+                    // recursion instead of cloning it at every key: push the
+                    // current key before descending, pop it on the way back
+                    // out, so allocation cost no longer grows with both JSON
+                    // size and nesting depth.
+                    path.push(key_lower);
+                    redact_secret_fields_at_path(entry, path);
+                    path.pop();
                 }
             }
         }
@@ -257,7 +290,7 @@ fn redact_environment_values(value: &mut serde_json::Value) {
                 }
             }
         }
-        other => redact_secret_fields_at_path(other, &[]),
+        other => redact_secret_fields_at_path(other, &mut Vec::new()),
     }
 }
 
@@ -481,5 +514,14 @@ mod tests {
         assert!(!is_valid_pipe_token("0123456789abcdef"));
         assert!(!is_valid_pipe_token("0123456789abcdef0123456789abcde!"));
         assert!(!is_valid_pipe_token("--------------------------------"));
+    }
+
+    #[test]
+    fn pipe_tokens_reject_low_entropy_repeated_patterns() {
+        // Exactly 4 distinct bytes (would have passed the old distinct-byte
+        // check) but only 2 bits/char of real entropy: a short pattern
+        // repeated to reach the length floor, not a genuinely random token.
+        assert!(!is_valid_pipe_token("abcdabcdabcdabcdabcdabcdabcdabcd"));
+        assert!(!is_valid_pipe_token("00000000000000000000000000000001"));
     }
 }

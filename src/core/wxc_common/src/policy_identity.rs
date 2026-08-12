@@ -262,9 +262,10 @@ fn strip_keys(value: &mut Value, keys: &[&str]) {
     match value {
         Value::Object(map) => {
             map.retain(|key, _| {
-                let normalized = key.to_ascii_lowercase();
-                !crate::config_deserialize::is_secret_path_field(&normalized)
-                    && !keys.iter().any(|explicit| normalized == *explicit)
+                !crate::config_deserialize::is_secret_path_field_ci(key)
+                    && !keys
+                        .iter()
+                        .any(|explicit| key.eq_ignore_ascii_case(explicit))
             });
             for child in map.values_mut() {
                 strip_keys(child, keys);
@@ -313,52 +314,64 @@ fn proxy_projection(request: &ExecutionRequest) -> Value {
 /// by an unrelated crate in the dependency graph must not silently change every
 /// hash MXC has ever emitted. Scalars are handed straight to `serde_json`, so
 /// string escaping and number formatting are not reimplemented here.
+///
+/// Writes into a single growing `Vec<u8>` buffer and converts to `String`
+/// exactly once at the end, rather than allocating (and immediately
+/// discarding) a separate `String` per object key and per scalar value —
+/// which this hash computation used to do at every level of every request's
+/// policy tree.
 fn canonical_json(value: &Value) -> String {
-    let mut out = String::new();
+    let mut out = Vec::new();
     write_canonical(value, &mut out);
-    out
+    // `write_canonical` only ever appends JSON structural bytes (all ASCII)
+    // and `serde_json`'s own string/number encoding, both of which are
+    // guaranteed valid UTF-8.
+    String::from_utf8(out).expect("canonical JSON writer only ever emits valid UTF-8")
 }
 
-fn write_canonical(value: &Value, out: &mut String) {
+fn write_canonical(value: &Value, out: &mut Vec<u8>) {
     match value {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
             keys.sort_unstable();
-            out.push('{');
+            out.push(b'{');
             for (i, key) in keys.iter().enumerate() {
                 if i > 0 {
-                    out.push(',');
+                    out.push(b',');
                 }
-                out.push_str(&scalar_json(&Value::String((*key).clone())));
-                out.push(':');
+                write_scalar(key.as_str(), out);
+                out.push(b':');
                 // A key present in `keys` is by construction present in `map`.
                 if let Some(child) = map.get(*key) {
                     write_canonical(child, out);
                 }
             }
-            out.push('}');
+            out.push(b'}');
         }
         Value::Array(items) => {
-            out.push('[');
+            out.push(b'[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
-                    out.push(',');
+                    out.push(b',');
                 }
                 write_canonical(item, out);
             }
-            out.push(']');
+            out.push(b']');
         }
         // Null / Bool / Number / String have no ordering concern, so there is
         // nothing to hand-roll: `serde_json` already renders them canonically.
-        scalar => out.push_str(&scalar_json(scalar)),
+        scalar => write_scalar(scalar, out),
     }
 }
 
-/// Render a non-container `Value`. Serializing a scalar `Value` to a `String`
-/// is infallible (the only failure mode of the `String` serializer is an I/O
-/// error, which cannot occur for an in-memory buffer).
-fn scalar_json(value: &Value) -> String {
-    serde_json::to_string(value).expect("serializing a scalar Value to JSON is infallible")
+/// Serialize any `serde_json::Serialize` scalar (a `&str` object key or a
+/// non-container `Value`) directly into `out`. Serializing a `&str` renders
+/// identically to serializing the equivalent `Value::String`, so object keys
+/// need no intermediate `Value` wrapper. Writing to a `Vec<u8>` is infallible
+/// (the only failure mode of `serde_json`'s writer is an I/O error, which
+/// cannot occur for an in-memory buffer).
+fn write_scalar<T: serde::Serialize + ?Sized>(value: &T, out: &mut Vec<u8>) {
+    serde_json::to_writer(out, value).expect("serializing a scalar value to JSON is infallible");
 }
 
 /// Render a sandbox identity so it is safe to write to a diagnostic log file.

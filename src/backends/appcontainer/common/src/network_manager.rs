@@ -204,23 +204,26 @@ impl NetworkManager {
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         );
 
-        if firewall_mode_selected {
-            let default_policy = if policy.default_network_policy == NetworkPolicy::Block {
+        let default_policy =
+            if firewall_mode_selected && policy.default_network_policy == NetworkPolicy::Block {
                 DefaultPolicy::Block
             } else {
                 DefaultPolicy::Allow
             };
-            return NetworkPolicyPlan {
-                default_policy,
-                firewall_mode_selected,
-                rules_will_be_installed: true,
-            };
-        }
 
         NetworkPolicyPlan {
-            default_policy: DefaultPolicy::Allow,
+            default_policy,
             firewall_mode_selected,
-            rules_will_be_installed: false,
+            // `apply_firewall_rules_inner` always falls through to install a
+            // default Allow/BlockAll rule whenever firewall mode is
+            // selected, even with no explicit host list and an allow
+            // default — see
+            // `firewall_mode_default_allow_installs_default_rule_without_log_line`.
+            // So this is unconditional on `firewall_mode_selected`, not on
+            // the narrower "has hosts, or blocks by default" condition
+            // `initialize_policy` uses below, which governs only the legacy
+            // startup log line.
+            rules_will_be_installed: firewall_mode_selected,
         }
     }
 
@@ -228,26 +231,20 @@ impl NetworkManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> (DefaultPolicy, bool) {
-        let use_firewall_rules = matches!(
-            policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
-
-        if use_firewall_rules
+        let plan = Self::describe_policy(policy);
+        // The legacy log line is reserved for the case where the caller gave
+        // firewall enforcement something explicit to do (a host list) or
+        // asked to block by default; the coincidental default-rule
+        // fallthrough for the plain-allow, no-hosts case stays silent, as
+        // documented on `NetworkPolicyPlan::rules_will_be_installed` above.
+        if plan.firewall_mode_selected
             && (!policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty()
                 || policy.default_network_policy == NetworkPolicy::Block)
         {
             logger.log_line("Applying network firewall rules...");
-            let default_policy = if policy.default_network_policy == NetworkPolicy::Block {
-                DefaultPolicy::Block
-            } else {
-                DefaultPolicy::Allow
-            };
-            return (default_policy, true);
         }
-
-        (DefaultPolicy::Allow, use_firewall_rules)
+        (plan.default_policy, plan.firewall_mode_selected)
     }
 
     /// Number of firewall rules currently created by this manager.

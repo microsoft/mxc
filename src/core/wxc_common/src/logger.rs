@@ -49,6 +49,20 @@ thread_local! {
     static THREAD_DIAG_SINK: RefCell<Option<Logger>> = const { RefCell::new(None) };
 }
 
+/// RAII guard returned by [`Logger::install_thread_diagnostic_sink`]. Clears
+/// the thread-local slot on drop — including when a panic unwinds through
+/// the installing scope — so an installed sink can never outlive the scope
+/// that published it, regardless of how that scope is exited.
+pub struct ThreadDiagnosticSinkGuard {
+    _private: (),
+}
+
+impl Drop for ThreadDiagnosticSinkGuard {
+    fn drop(&mut self) {
+        Logger::clear_thread_diagnostic_sink();
+    }
+}
+
 impl fmt::Debug for Logger {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Logger")
@@ -112,16 +126,38 @@ impl Logger {
             OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
         };
 
+        // `READ_CONTROL` (a generic access right, distinct from the SQOS
+        // flags below despite sharing a numeric value) lets us read the
+        // pipe's security descriptor if ever needed for diagnostics; it is
+        // not defined as a `FILE_ACCESS_RIGHTS` constant in the `windows`
+        // crate's `FileSystem` module, so it is named here explicitly rather
+        // than left as an unexplained magic number in `access_mode`.
+        const READ_CONTROL: u32 = 0x0002_0000;
+        // Security Quality of Service flags for `CreateFile`, passed via
+        // `custom_flags` (`dwFlagsAndAttributes`). Without
+        // `SECURITY_SQOS_PRESENT`, Windows defaults an outbound pipe
+        // connection to `SECURITY_IMPERSONATION`, letting the pipe server
+        // impersonate this process's security context. Since the server is
+        // only identity-checked *after* connecting (see
+        // `verify_server_integrity` below), request the minimum
+        // `SECURITY_IDENTIFICATION` level up front so a connection to an
+        // unexpected or compromised server can never use our token to act as
+        // us, even for the brief window before that check runs.
+        const SECURITY_SQOS_PRESENT: u32 = 0x0010_0000;
+        const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
+
         let pipe_path = crate::diagnostic::diagnostic_pipe_name();
 
         match std::fs::OpenOptions::new()
             .write(true)
             .access_mode(
                 windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE.0
-                    | 0x0002_0000
+                    | READ_CONTROL
                     | windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES.0,
             )
-            .custom_flags(FILE_FLAG_WRITE_THROUGH.0)
+            .custom_flags(
+                FILE_FLAG_WRITE_THROUGH.0 | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION,
+            )
             .open(&pipe_path)
         {
             Ok(file) => {
@@ -446,18 +482,32 @@ impl Logger {
     /// message that cannot interleave). Publication is per-thread, so
     /// concurrent runs on different threads never share sinks by accident.
     ///
-    /// The installed sink is reclaimed with
-    /// [`Logger::clear_thread_diagnostic_sink`]; leaving one installed at
-    /// process exit is harmless (the sinks close with the process).
-    pub fn install_thread_diagnostic_sink(&self) {
+    /// Returns a [`ThreadDiagnosticSinkGuard`] that clears the installed sink
+    /// on drop, including when a panic unwinds through the caller's scope or
+    /// an early return skips an explicit clear — a bare
+    /// `install`/`clear_thread_diagnostic_sink` pair left it up to the caller
+    /// to remember to call the latter on every exit path, which a panic or a
+    /// future early return could silently skip, leaving stale ambient state
+    /// installed for whatever runs next on this thread. Dropping the guard at
+    /// process exit without ever running is equally harmless (the sinks close
+    /// with the process).
+    #[must_use = "the diagnostic sink is cleared when this guard drops; \
+                  binding it to `_` clears it immediately"]
+    pub fn install_thread_diagnostic_sink(&self) -> ThreadDiagnosticSinkGuard {
         let clone = self.clone_diagnostic_sink();
         THREAD_DIAG_SINK.with(|slot| {
             *slot.borrow_mut() = Some(clone);
         });
+        ThreadDiagnosticSinkGuard { _private: () }
     }
 
     /// Clear any diagnostic sink installed on the current thread by
     /// [`Logger::install_thread_diagnostic_sink`].
+    ///
+    /// Normally unnecessary to call directly: the [`ThreadDiagnosticSinkGuard`]
+    /// returned by `install_thread_diagnostic_sink` does this on drop. Kept
+    /// available for a caller that needs to clear ahead of the guard's scope
+    /// ending.
     pub fn clear_thread_diagnostic_sink() {
         THREAD_DIAG_SINK.with(|slot| {
             slot.borrow_mut().take();

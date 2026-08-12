@@ -2486,7 +2486,7 @@ impl BaseContainerSandboxProcess {
             wxc_common::telemetry::log_process_event(
                 sanitize_identity(&self.identity),
                 self.pid,
-                wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str()),
+                wxc_common::telemetry::ProcessEvent::KillFailed(method.as_str(), error.code().0),
             );
             if self.audit_enabled() {
                 let record = self

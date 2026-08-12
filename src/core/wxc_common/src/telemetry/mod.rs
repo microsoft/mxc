@@ -666,8 +666,12 @@ mod tests {
     /// Serializes tests that touch the process-global emit slot / context
     /// (`HAS_EMITTED`, `PROCESS_BACKEND`, `PROCESS_PHASE`, `PROCESS_CORRELATION_VECTOR`)
     /// or drive the emit paths, so their global state can't leak across tests.
-    /// Mirrors the `TEST_LOCK` pattern in `mxc_telemetry`.
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+    /// Shared with `events::test_sink`, since both this module's tests and
+    /// the requirement-payload test in `events.rs` touch the same
+    /// process-global capture state; a lock private to this module alone
+    /// would not serialize against that test. Mirrors the `TEST_LOCK`
+    /// pattern in `mxc_telemetry`.
+    use super::events::test_sink::TEST_LOCK;
 
     #[test]
     fn is_enabled_explicit_true() {

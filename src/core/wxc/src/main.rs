@@ -367,6 +367,7 @@ fn log_config_rejected(
         backend,
         reason.as_str(),
         offending_field,
+        phase,
     );
     let record = AuditEvent::new(AuditEventName::ConfigRejected)
         // No sandbox exists yet — the config was refused — so M-ETW-7's
@@ -432,9 +433,23 @@ fn rejection_reason_for(error: &MxcError) -> RejectionReason {
     config_rejection_reason_for(error).unwrap_or(RejectionReason::RunnerUnavailable)
 }
 
+/// Marker logged for the `MXC.PolicyHash` identity field when the caller
+/// supplied a `sandboxId` for this phase. This call happens before the
+/// dispatcher validates the id against real backend state (see the
+/// `install_thread_diagnostic_sink` comment below), so a caller-chosen string
+/// that merely *looks* like an MXC-minted `iso:`/`wsb:` id would otherwise
+/// pass `redact_identity`'s shape check unverified. Since MXC has not
+/// confirmed the id yet, the field records only that a caller-provided id was
+/// present, not its value; the later, post-dispatch `SandboxIdentity` audit
+/// record (see `sandbox_id_for_identity_record` below) is unaffected and
+/// still discloses the real, backend-verified identity on success.
+const UNVERIFIED_SANDBOX_ID_MARKER: &str = "unverified";
+
 fn state_aware_policy_identity(sandbox_id: Option<&str>) -> String {
-    let identity = sandbox_id.filter(|id| !id.is_empty()).unwrap_or("CLI");
-    wxc_common::policy_identity::redact_identity(identity)
+    match sandbox_id.filter(|id| !id.is_empty()) {
+        None => wxc_common::policy_identity::redact_identity("CLI"),
+        Some(_) => UNVERIFIED_SANDBOX_ID_MARKER.to_string(),
+    }
 }
 
 fn emit_state_aware_early_rejection(
@@ -584,11 +599,13 @@ fn run_state_aware_main(
     // `StatefulSandboxBackend::exec` signature has no `Logger` parameter
     // can inherit them via `Logger::inherit_thread_diagnostic_sink` instead
     // of building a throwaway `Logger::new(Mode::Buffer)` and silently
-    // dropping every record. Cleared before this function returns so we
-    // never leak duplicated handles across independent invocations.
-    logger.install_thread_diagnostic_sink();
+    // dropping every record. The returned guard clears the sink when it
+    // drops at the end of this scope -- including if `run_state_aware`
+    // panics -- so we never leak duplicated handles across independent
+    // invocations even on an unwind.
+    let _diag_sink_guard = logger.install_thread_diagnostic_sink();
     let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
-    Logger::clear_thread_diagnostic_sink();
+    drop(_diag_sink_guard);
     let elapsed = started.elapsed();
 
     // Record the sandbox identity join key. For `isolation_session` the
@@ -1483,25 +1500,32 @@ fn main() {
             }
         }
 
-        // Log the raw input JSON config before any transformation.
-        let raw_json = if is_base64 {
-            wxc_common::encoding::base64_decode(&config_data)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        } else {
-            fs::read_to_string(&config_data).ok()
-        };
-        if let Some(json) = raw_json {
-            // Redact secret-bearing fields (e.g. `experimental.isolationSession.user.{upn,wamToken}`)
-            // before writing: a one-shot IsolationSession request's credential
-            // bundle is only rejected by the runner after this point, so the
-            // raw config as received from the caller may still contain it.
-            let _ = writeln!(logger, "SECTION: JSON Config (redacted)");
-            let _ = writeln!(
-                logger,
-                "{}",
-                wxc_common::diagnostic::redact_raw_config_json(json.trim())
-            );
+        // Log the raw input JSON config before any transformation. Skipped
+        // entirely when no diagnostic sink is attached: this re-reads the
+        // config and redacts/renders it just to have `log_diagnostic_line`
+        // discard the result, so gate the work itself rather than only its
+        // output (mirrors `Logger::has_diagnostic_sink`'s existing contract
+        // for `log_audit_event`).
+        if logger.has_diagnostic_sink() {
+            let raw_json = if is_base64 {
+                wxc_common::encoding::base64_decode(&config_data)
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+            } else {
+                fs::read_to_string(&config_data).ok()
+            };
+            if let Some(json) = raw_json {
+                // Redact secret-bearing fields (e.g. `experimental.isolationSession.user.{upn,wamToken}`)
+                // before writing: a one-shot IsolationSession request's credential
+                // bundle is only rejected by the runner after this point, so the
+                // raw config as received from the caller may still contain it.
+                let _ = writeln!(logger, "SECTION: JSON Config (redacted)");
+                let _ = writeln!(
+                    logger,
+                    "{}",
+                    wxc_common::diagnostic::redact_raw_config_json(json.trim())
+                );
+            }
         }
     }
 
@@ -1510,16 +1534,21 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        // Emit the full (redacted) request policy for diagnostics.
-        let _ = writeln!(
-            logger,
-            "SECTION: Full `ExecutionRequest` configuration (redacted)"
-        );
-        let _ = writeln!(
-            logger,
-            "{}",
-            wxc_common::diagnostic::redacted_request_json(&request)
-        );
+        // Emit the full (redacted) request policy for diagnostics. Gated on
+        // an attached sink for the same reason as the raw-config block above:
+        // rendering the whole request is comparatively expensive and would
+        // otherwise run unconditionally only to be discarded.
+        if logger.has_diagnostic_sink() {
+            let _ = writeln!(
+                logger,
+                "SECTION: Full `ExecutionRequest` configuration (redacted)"
+            );
+            let _ = writeln!(
+                logger,
+                "{}",
+                wxc_common::diagnostic::redacted_request_json(&request)
+            );
+        }
     }
 
     // Run script in the selected containment backend. Backend selection and
@@ -2059,13 +2088,16 @@ mod tests {
     #[test]
     fn state_aware_policy_identity_uses_sandbox_join_key() {
         assert_eq!(state_aware_policy_identity(None), "CLI");
+        // A caller-supplied sandbox id is not yet backend-verified at this
+        // logging call site, so it must not be echoed back even when it
+        // happens to match the shape of an MXC-minted id.
         assert_eq!(
             state_aware_policy_identity(Some("wsb:0123abcd")),
-            "wsb:0123abcd"
+            "unverified"
         );
-        assert_ne!(
-            state_aware_policy_identity(Some("wsb:0123abcd")),
-            "windows_sandbox"
+        assert_eq!(
+            state_aware_policy_identity(Some("some-caller-chosen-string")),
+            "unverified"
         );
     }
 
