@@ -10,7 +10,7 @@ thiserror = { workspace = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 wxc_common = { workspace = true }
 learning_mode_core = { workspace = true }
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Globalization"] }
 windows-core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]

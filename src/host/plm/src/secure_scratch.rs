@@ -40,7 +40,9 @@ use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_F
 const DIRECTORY_PREFIX: &str = "mxc-plm-elevated-";
 const PROFILE_FILE: &str = "embedded.wprp";
 const TRACE_FILE: &str = "trace.etl";
-const RECOVERY_MARKER_FILE: &str = "mxc-plm-active.marker";
+const RECOVERY_STATE_PARENT: &str = "Microsoft";
+const RECOVERY_STATE_COMPONENTS: [&str; 2] = ["MXC", "PLM"];
+const RECOVERY_MARKER_FILE: &str = "active.marker";
 const PROTECTED_SDDL: &str = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)S:(ML;OICI;NW;;;HI)";
 const MARKER_SDDL: &str = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)S:(ML;;NW;;;HI)";
 const PIN_SHARE: FILE_SHARE_MODE = FILE_SHARE_MODE(FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0);
@@ -306,8 +308,9 @@ impl RecoveryMarker {
         let program_data = program_data_path()?;
         let root = validate_program_data_path(&program_data)?;
         validate_volume(&root)?;
-        let ancestor_handles = pin_program_data_components(&program_data, &root)?;
-        let path = program_data.join(RECOVERY_MARKER_FILE);
+        let (state_directory, ancestor_handles) =
+            open_protected_recovery_directory(&program_data, &root)?;
+        let path = state_directory.join(RECOVERY_MARKER_FILE);
         let wide = wide_path(&path);
         let security = OwnedSecurityDescriptor::from_sddl(MARKER_SDDL)?;
         let attributes = security.attributes();
@@ -386,6 +389,79 @@ impl Drop for RecoveryMarker {
             }
         }
     }
+}
+
+fn open_protected_recovery_directory(
+    program_data: &Path,
+    root: &Path,
+) -> Result<(PathBuf, Vec<OwnedHandle>)> {
+    let mut handles = pin_program_data_components(program_data, root)?;
+    let parent = program_data.join(RECOVERY_STATE_PARENT);
+    let parent_handle = open_pinned_directory(&parent)
+        .with_context(|| format!("failed to pin PLM recovery parent {}", parent.display()))?;
+    if !has_trusted_owner(parent_handle.0)? {
+        bail!("PLM recovery parent has an untrusted owner");
+    }
+    handles.push(parent_handle);
+
+    let security = OwnedSecurityDescriptor::from_sddl(PROTECTED_SDDL)?;
+    let mut current = parent;
+    for component in RECOVERY_STATE_COMPONENTS {
+        current.push(component);
+        create_or_open_protected_directory(&current, &security, &mut handles)?;
+    }
+    Ok((current, handles))
+}
+
+fn create_or_open_protected_directory(
+    path: &Path,
+    security: &OwnedSecurityDescriptor,
+    handles: &mut Vec<OwnedHandle>,
+) -> Result<()> {
+    let wide = wide_path(path);
+    let attributes = security.attributes();
+    match unsafe { CreateDirectoryW(PCWSTR(wide.as_ptr()), Some(&attributes)) } {
+        Ok(()) => {}
+        Err(error)
+            if error.code() == HRESULT::from_win32(ERROR_ALREADY_EXISTS.0)
+                || error.code() == HRESULT::from_win32(ERROR_FILE_EXISTS.0) => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("failed to create PLM recovery directory {}", path.display())
+            });
+        }
+    }
+
+    let access = FILE_READ_ATTRIBUTES.0 | READ_CONTROL.0 | WRITE_DAC.0 | WRITE_OWNER.0;
+    let handle = open_handle(
+        path,
+        access,
+        PIN_SHARE,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+    .with_context(|| format!("failed to pin PLM recovery directory {}", path.display()))?;
+    verify_file_kind(handle.0, true)?;
+    if !has_trusted_owner(handle.0)? {
+        bail!(
+            "PLM recovery directory {} has an untrusted owner",
+            path.display()
+        );
+    }
+    unsafe {
+        SetKernelObjectSecurity(
+            handle.0,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            security.as_ptr(),
+        )
+    }
+    .with_context(|| {
+        format!(
+            "failed to protect PLM recovery directory {}",
+            path.display()
+        )
+    })?;
+    handles.push(handle);
+    Ok(())
 }
 
 impl Drop for SecureScratch {
@@ -774,6 +850,9 @@ mod tests {
         assert!(MARKER_SDDL.contains(";;;SY"));
         assert!(MARKER_SDDL.contains(";;;BA"));
         assert!(MARKER_SDDL.ends_with("S:(ML;;NW;;;HI)"));
+        assert_eq!(RECOVERY_STATE_PARENT, "Microsoft");
+        assert_eq!(RECOVERY_STATE_COMPONENTS, ["MXC", "PLM"]);
+        assert_eq!(RECOVERY_MARKER_FILE, "active.marker");
 
         let mut marker = RecoveryMarker {
             path: PathBuf::new(),

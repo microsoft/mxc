@@ -1215,6 +1215,7 @@ fn main() {
                     "error: plm start failed; refusing to run --audit without an \
                      active trace. See logs for details."
                 );
+                drop(take_parked_dacl());
                 std::process::exit(1);
             }
         }
