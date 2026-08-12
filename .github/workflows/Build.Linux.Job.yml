@@ -78,7 +78,7 @@ jobs:
             --no-default-features "${features[@]}"
 
       ####################
-      # E2E Tests are being moved to the Test.Matrix.Job.yml workflow, which runs cross-platform validation
+      # E2E Tests are being moved to the Validation.Tests.Matrix.Job.yml workflow, which runs cross-platform validation
       ###############
 
       # Bubblewrap is required to run the executor characterization tests in

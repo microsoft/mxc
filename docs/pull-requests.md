@@ -9,6 +9,8 @@ it fans out to the reusable `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
 x64/arm64, Linux x64/arm64, and macOS arm64 hosts, then runs the lint,
 versioning, and SDK jobs.
 
+A change that touches only `docs/**` does not trigger `Build.yml`.
+
 ## Azure Pipelines (optional on PRs, required on `main`)
 
 The ADO pipeline (`MXC-PR-Build`) is the Azure version of the PR pipeline. The official
