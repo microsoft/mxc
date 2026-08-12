@@ -76,10 +76,22 @@ When that complete set is available, MXC uses PSEC with native V2 capture.
 Otherwise it retains the highest legacy containment tier that can fully honor
 the request (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it with
 the guarded WPR capture provider. The elevated guardian filters the host-wide
-trace to OS-observed process lifetime windows and returns only bounded
-canonical denial data; raw ETL does not cross into the SDK result. If no
-containment tier can honor the policy, or the guarded PLM helper is unavailable,
-the request fails as `backend_unavailable`.
+trace to OS-observed process lifetime windows: before the suspended sandbox
+child resumes, the authenticated owner sends its job and still-owned root
+process HANDLE values. The guardian duplicates both from that authenticated
+process, verifies the duplicated process belongs to the duplicated job, and
+retains the stable process handle. The root generation uses exact kernel
+creation/exit FILETIMEs read from that handle (with the exit time read only
+after WPR stops). For every descendant new-process notification, the guardian
+opens and retains a process handle, verifies membership in the duplicated job,
+and reads exact creation/exit FILETIMEs; the sealed ETL must contain the same
+exact generation. At finish, job accounting
+`TotalProcesses` must equal the retained unique root-plus-descendant
+generations, so missing or inconsistent membership notifications fail closed.
+The owner never supplies PID/time scopes. Only bounded canonical denial data
+returns; raw ETL does not cross into the SDK result. If no containment tier can
+honor the policy, or the guarded PLM helper is unavailable, the request fails
+as `backend_unavailable`.
 
 Internal validation confirmed the earlier contract on build `26657.1002` uses
 legacy containment rather than native capture, while the full V2 contract on

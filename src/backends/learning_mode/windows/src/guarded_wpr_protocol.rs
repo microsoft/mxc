@@ -5,19 +5,15 @@
 
 use std::io::{self, Read, Write};
 
-use learning_mode_core::ProcessLifetime;
-
 const MAGIC: &[u8; 8] = b"MXCPLM01";
 const VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 20;
-const SCOPE_MAGIC: &[u8; 8] = b"MXCSCP01";
-const SCOPE_HEADER_LEN: usize = 16;
-const PROCESS_LIFETIME_LEN: usize = 20;
+const ATTACH_HANDLES_MAGIC: &[u8; 8] = b"MXCATT01";
+const ATTACH_HANDLES_LEN: usize = 24;
 
 pub const MAX_ERROR_BYTES: u64 = 64 * 1024;
 pub const MAX_TRACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub const MAX_ANALYSIS_BYTES: u64 = 64 * 1024 * 1024;
-pub const MAX_PROCESS_LIFETIMES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -109,83 +105,60 @@ fn validate_payload(kind: ResponseKind, payload_len: u64) -> io::Result<()> {
     }
 }
 
-pub fn write_process_lifetimes(
+pub fn write_attach_handles(
     writer: &mut impl Write,
-    lifetimes: &[ProcessLifetime],
+    job_handle: usize,
+    root_process_handle: usize,
 ) -> io::Result<()> {
-    validate_process_lifetimes(lifetimes)?;
-    let count = u32::try_from(lifetimes.len())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "too many process lifetimes"))?;
-    let mut header = [0u8; SCOPE_HEADER_LEN];
-    header[..8].copy_from_slice(SCOPE_MAGIC);
-    header[8..12].copy_from_slice(&count.to_le_bytes());
-    writer.write_all(&header)?;
-    for lifetime in lifetimes {
-        writer.write_all(&lifetime.pid.to_le_bytes())?;
-        writer.write_all(&lifetime.start_filetime.to_le_bytes())?;
-        writer.write_all(&lifetime.end_filetime.to_le_bytes())?;
-    }
-    Ok(())
+    validate_handle(job_handle, "job", io::ErrorKind::InvalidInput)?;
+    validate_handle(
+        root_process_handle,
+        "root process",
+        io::ErrorKind::InvalidInput,
+    )?;
+    let mut payload = [0u8; ATTACH_HANDLES_LEN];
+    payload[..8].copy_from_slice(ATTACH_HANDLES_MAGIC);
+    payload[8..16].copy_from_slice(&(job_handle as u64).to_le_bytes());
+    payload[16..24].copy_from_slice(&(root_process_handle as u64).to_le_bytes());
+    writer.write_all(&payload)
 }
 
-pub fn read_process_lifetimes(reader: &mut impl Read) -> io::Result<Vec<ProcessLifetime>> {
-    let mut header = [0u8; SCOPE_HEADER_LEN];
-    reader.read_exact(&mut header)?;
-    if &header[..8] != SCOPE_MAGIC || header[12..16] != [0; 4] {
+pub fn read_attach_handles(reader: &mut impl Read) -> io::Result<(usize, usize)> {
+    let mut payload = [0u8; ATTACH_HANDLES_LEN];
+    reader.read_exact(&mut payload)?;
+    if &payload[..8] != ATTACH_HANDLES_MAGIC {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "invalid guarded WPR process-lifetime header",
+            "invalid guarded WPR attach-handles header",
         ));
     }
-    let count = u32::from_le_bytes(
-        header[8..12]
-            .try_into()
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid lifetime count"))?,
-    ) as usize;
-    if count == 0 || count > MAX_PROCESS_LIFETIMES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("invalid guarded WPR process-lifetime count {count}"),
-        ));
-    }
-    let mut lifetimes = Vec::with_capacity(count);
-    let mut record = [0u8; PROCESS_LIFETIME_LEN];
-    for _ in 0..count {
-        reader.read_exact(&mut record)?;
-        lifetimes.push(ProcessLifetime {
-            pid: u32::from_le_bytes(record[..4].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid process identifier")
-            })?),
-            start_filetime: u64::from_le_bytes(record[4..12].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid process start time")
-            })?),
-            end_filetime: u64::from_le_bytes(record[12..20].try_into().map_err(|_| {
-                io::Error::new(io::ErrorKind::InvalidData, "invalid process end time")
-            })?),
-        });
-    }
-    validate_process_lifetimes(&lifetimes)?;
-    Ok(lifetimes)
+    let job_handle = decode_handle(&payload[8..16], "job")?;
+    let root_process_handle = decode_handle(&payload[16..24], "root process")?;
+    Ok((job_handle, root_process_handle))
 }
 
-fn validate_process_lifetimes(lifetimes: &[ProcessLifetime]) -> io::Result<()> {
-    if lifetimes.is_empty() || lifetimes.len() > MAX_PROCESS_LIFETIMES {
+fn decode_handle(bytes: &[u8], name: &str) -> io::Result<usize> {
+    let raw = u64::from_le_bytes(bytes.try_into().map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid guarded WPR {name} handle"),
+        )
+    })?);
+    let handle = usize::try_from(raw).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("guarded WPR {name} handle does not fit the current architecture"),
+        )
+    })?;
+    validate_handle(handle, name, io::ErrorKind::InvalidData)?;
+    Ok(handle)
+}
+
+fn validate_handle(handle: usize, name: &str, kind: io::ErrorKind) -> io::Result<()> {
+    if handle == 0 || handle == usize::MAX {
         return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("guarded WPR requires between 1 and {MAX_PROCESS_LIFETIMES} process lifetimes"),
-        ));
-    }
-    if let Some(lifetime) = lifetimes.iter().find(|lifetime| {
-        lifetime.pid == 0
-            || lifetime.start_filetime == 0
-            || lifetime.end_filetime < lifetime.start_filetime
-    }) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "invalid guarded WPR process lifetime for PID {}",
-                lifetime.pid
-            ),
+            kind,
+            format!("invalid guarded WPR {name} handle"),
         ));
     }
     Ok(())
@@ -254,50 +227,24 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_bounded_process_lifetimes() {
-        let expected = vec![
-            ProcessLifetime {
-                pid: 42,
-                start_filetime: 100,
-                end_filetime: 200,
-            },
-            ProcessLifetime {
-                pid: 42,
-                start_filetime: 300,
-                end_filetime: 400,
-            },
-        ];
+    fn round_trips_attach_handles() {
         let mut bytes = Vec::new();
-        write_process_lifetimes(&mut bytes, &expected).unwrap();
+        write_attach_handles(&mut bytes, 0x1234, 0x5678).unwrap();
         assert_eq!(
-            read_process_lifetimes(&mut bytes.as_slice()).unwrap(),
-            expected
+            read_attach_handles(&mut bytes.as_slice()).unwrap(),
+            (0x1234, 0x5678)
         );
     }
 
     #[test]
-    fn rejects_empty_invalid_and_unbounded_process_lifetimes() {
-        assert!(write_process_lifetimes(&mut Vec::new(), &[]).is_err());
-        assert!(write_process_lifetimes(
-            &mut Vec::new(),
-            &[ProcessLifetime {
-                pid: 0,
-                start_filetime: 1,
-                end_filetime: 2,
-            }]
-        )
-        .is_err());
-        assert!(write_process_lifetimes(
-            &mut Vec::new(),
-            &vec![
-                ProcessLifetime {
-                    pid: 1,
-                    start_filetime: 1,
-                    end_filetime: 2,
-                };
-                MAX_PROCESS_LIFETIMES + 1
-            ]
-        )
-        .is_err());
+    fn rejects_invalid_attach_handles_and_magic() {
+        assert!(write_attach_handles(&mut Vec::new(), 0, 1).is_err());
+        assert!(write_attach_handles(&mut Vec::new(), 1, 0).is_err());
+        assert!(write_attach_handles(&mut Vec::new(), usize::MAX, 1).is_err());
+        assert!(write_attach_handles(&mut Vec::new(), 1, usize::MAX).is_err());
+        let mut bytes = Vec::new();
+        write_attach_handles(&mut bytes, 42, 43).unwrap();
+        bytes[0] ^= 0xff;
+        assert!(read_attach_handles(&mut bytes.as_slice()).is_err());
     }
 }

@@ -11,35 +11,21 @@
 //! sandbox cannot outlive the process that owns its enforcement state.
 
 use core::ffi::c_void;
-use std::collections::HashMap;
 use std::mem::size_of;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::ptr;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::sync::OnceLock;
 
-use learning_mode_core::ProcessLifetime;
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, INVALID_HANDLE_VALUE};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
-    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, SetInformationJobObject,
-    TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_UI_RESTRICTIONS,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT,
-    JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
     JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
-use windows::Win32::System::SystemServices::{
-    JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS, JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO,
-    JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_NEW_PROCESS, JOB_OBJECT_UILIMIT_IME,
-};
-use windows::Win32::System::Threading::{
-    GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-};
-use windows::Win32::System::IO::{
-    CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus, OVERLAPPED,
-};
+use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
+use windows::Win32::System::Threading::WaitForSingleObject;
 use windows_core::PCWSTR;
 
 use wxc_common::error::WxcError;
@@ -100,8 +86,6 @@ mod version_detect {
 /// does not emit this constant; if a future release adds it, the local
 /// definition can be removed and the import above extended.
 const JOB_OBJECT_UILIMIT_INJECTION: u32 = 0x0000_0200;
-const TRACKER_STOP_MESSAGE: u32 = u32::MAX;
-const MAX_TRACKED_PROCESSES: usize = 4096;
 
 /// Every `JOB_OBJECT_UILIMIT_*` bit this module's encoder
 /// ([`to_job_object_uilimit_mask`]) can emit. Acts as the universe for the
@@ -241,25 +225,11 @@ pub fn to_job_object_uilimit_mask(r: &EffectiveUiRestrictions) -> u32 {
 /// restrictions. The job HANDLE is closed when this value is dropped.
 pub struct UiJobObject {
     handle: HANDLE,
-    tracker: Option<JobProcessTracker>,
 }
 
 impl UiJobObject {
     /// Creates an unnamed Job Object owned by the current process.
     pub fn new() -> Result<Self, WxcError> {
-        Self::new_inner(false)
-    }
-
-    /// Creates a Job Object that records exact process lifetimes.
-    ///
-    /// The WPR fallback uses these kernel job notifications to scope a
-    /// host-wide ETL trace to the sandbox process tree without trusting a
-    /// caller-supplied PID list.
-    pub fn new_tracked() -> Result<Self, WxcError> {
-        Self::new_inner(true)
-    }
-
-    fn new_inner(track_processes: bool) -> Result<Self, WxcError> {
         // SAFETY: CreateJobObjectW with NULL security attributes and NULL name
         // is documented to either return a valid HANDLE or an error.
         let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
@@ -281,20 +251,7 @@ impl UiJobObject {
                 "SetInformationJobObject(KILL_ON_JOB_CLOSE): {error}"
             )));
         }
-        let tracker = if track_processes {
-            match JobProcessTracker::new(handle) {
-                Ok(tracker) => Some(tracker),
-                Err(error) => {
-                    unsafe {
-                        let _ = CloseHandle(handle);
-                    }
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        Ok(Self { handle, tracker })
+        Ok(Self { handle })
     }
 
     /// Applies the given UI restrictions via `JobObjectBasicUIRestrictions`.
@@ -335,33 +292,41 @@ impl UiJobObject {
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
     }
 
-    /// Terminate every process currently assigned to this job (the sandboxed
-    /// child and all of its descendants) with the given exit code. Used to
-    /// tree-kill a running sandbox. Best-effort: errors are ignored since the
-    /// processes may already have exited.
-    pub fn terminate(&self, exit_code: u32) {
+    /// Returns this process's numeric HANDLE value for authenticated
+    /// cross-process duplication by the elevated guarded-WPR guardian.
+    pub fn handle_value(&self) -> usize {
+        self.handle.0 as usize
+    }
+
+    /// Terminates every process currently assigned to this job (the sandboxed
+    /// child and all of its descendants) with the given exit code.
+    pub fn terminate(&self, exit_code: u32) -> Result<(), WxcError> {
         // SAFETY: `self.handle` is a valid job handle owned by this struct.
-        unsafe {
-            let _ = TerminateJobObject(self.handle, exit_code);
+        unsafe { TerminateJobObject(self.handle, exit_code) }
+            .map_err(|error| WxcError::Process(format!("TerminateJobObject: {error}")))
+    }
+
+    /// Waits until no processes remain assigned to the job.
+    pub fn wait_for_empty(&self) -> Result<(), WxcError> {
+        // SAFETY: `self.handle` is a valid waitable job handle owned by this
+        // struct. A job becomes signaled when its active process count is zero.
+        match unsafe { WaitForSingleObject(self.handle, u32::MAX) } {
+            WAIT_OBJECT_0 => Ok(()),
+            status => Err(WxcError::Process(format!(
+                "WaitForSingleObject(job) returned {status:?}"
+            ))),
         }
     }
 
-    /// Stops process tracking and returns all completed process lifetimes.
-    ///
-    /// Call this only after the job has been terminated and the root process
-    /// reaped, so all queued exit notifications precede the tracker stop
-    /// marker.
-    pub fn finish_process_tracking(&mut self) -> Result<Vec<ProcessLifetime>, WxcError> {
-        self.tracker
-            .take()
-            .ok_or_else(|| WxcError::Process("job process tracking is not enabled".to_string()))?
-            .finish()
+    /// Terminates the complete process tree and confirms that the job is empty.
+    pub fn terminate_and_wait(&self, exit_code: u32) -> Result<(), WxcError> {
+        self.terminate(exit_code)?;
+        self.wait_for_empty()
     }
 }
 
 impl Drop for UiJobObject {
     fn drop(&mut self) {
-        self.tracker.take();
         if !self.handle.is_invalid() {
             // SAFETY: `self.handle` was produced by CreateJobObjectW and has
             // not been closed elsewhere — `UiJobObject` owns it.
@@ -370,306 +335,6 @@ impl Drop for UiJobObject {
             }
         }
     }
-}
-
-struct TrackedProcess {
-    handle: OwnedHandle,
-    start_filetime: u64,
-}
-
-struct ProcessTrackerState {
-    active: HashMap<u32, TrackedProcess>,
-    completed: Vec<ProcessLifetime>,
-    active_process_zero: bool,
-    error: Option<String>,
-}
-
-impl ProcessTrackerState {
-    fn new() -> Self {
-        Self {
-            active: HashMap::new(),
-            completed: Vec::new(),
-            active_process_zero: false,
-            error: None,
-        }
-    }
-
-    fn fail(&mut self, message: impl Into<String>) {
-        if self.error.is_none() {
-            self.error = Some(message.into());
-        }
-    }
-
-    fn process_started(&mut self, pid: u32) {
-        self.active_process_zero = false;
-        if self.active.len() + self.completed.len() >= MAX_TRACKED_PROCESSES {
-            self.fail(format!(
-                "sandbox job exceeded the {MAX_TRACKED_PROCESSES}-process tracking limit"
-            ));
-            return;
-        }
-        if self.active.contains_key(&pid) {
-            self.fail(format!(
-                "sandbox job reported duplicate process start for PID {pid}"
-            ));
-            return;
-        }
-        let handle = match unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
-                false,
-                pid,
-            )
-        } {
-            Ok(handle) => handle,
-            Err(error) => {
-                self.fail(format!(
-                    "failed to open job process {pid} for lifetime tracking: {error}"
-                ));
-                return;
-            }
-        };
-        match process_times(handle) {
-            Ok((start_filetime, _)) => {
-                let handle = unsafe { OwnedHandle::from_raw_handle(handle.0) };
-                self.active.insert(
-                    pid,
-                    TrackedProcess {
-                        handle,
-                        start_filetime,
-                    },
-                );
-            }
-            Err(error) => {
-                unsafe {
-                    let _ = CloseHandle(handle);
-                }
-                self.fail(format!(
-                    "failed to read creation time for job process {pid}: {error}"
-                ));
-            }
-        }
-    }
-
-    fn process_exited(&mut self, pid: u32) {
-        let Some(process) = self.active.remove(&pid) else {
-            if self.completed.iter().any(|lifetime| lifetime.pid == pid) {
-                return;
-            }
-            self.fail(format!(
-                "sandbox job reported process exit without a tracked start for PID {pid}"
-            ));
-            return;
-        };
-        let times = process_times(HANDLE(process.handle.as_raw_handle()));
-        match times {
-            Ok((_, end_filetime)) if end_filetime >= process.start_filetime => {
-                self.completed.push(ProcessLifetime {
-                    pid,
-                    start_filetime: process.start_filetime,
-                    end_filetime,
-                });
-            }
-            Ok((_, end_filetime)) => self.fail(format!(
-                "job process {pid} exited before its recorded creation time \
-                         (start {}, end {end_filetime})",
-                process.start_filetime
-            )),
-            Err(error) => self.fail(format!(
-                "failed to read exit time for job process {pid}: {error}"
-            )),
-        }
-    }
-
-    fn all_processes_exited(&mut self) {
-        self.active_process_zero = true;
-        let pids = self.active.keys().copied().collect::<Vec<_>>();
-        for pid in pids {
-            self.process_exited(pid);
-        }
-    }
-}
-
-#[cfg(test)]
-mod process_tracker_tests {
-    use super::*;
-
-    #[test]
-    fn completed_processes_count_toward_tracking_limit() {
-        let mut state = ProcessTrackerState::new();
-        state.completed = vec![
-            ProcessLifetime {
-                pid: 1,
-                start_filetime: 1,
-                end_filetime: 2,
-            };
-            MAX_TRACKED_PROCESSES
-        ];
-
-        state.process_started(2);
-
-        assert!(state.active.is_empty());
-        assert!(state.error.as_deref().is_some_and(|error| {
-            error.contains("exceeded") && error.contains(&MAX_TRACKED_PROCESSES.to_string())
-        }));
-    }
-}
-
-struct JobProcessTracker {
-    completion_port: HANDLE,
-    state: Arc<Mutex<ProcessTrackerState>>,
-    worker: Option<JoinHandle<()>>,
-}
-
-impl JobProcessTracker {
-    fn new(job: HANDLE) -> Result<Self, WxcError> {
-        let completion_port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1) }
-            .map_err(|error| {
-            WxcError::Process(format!("CreateIoCompletionPort(job tracker): {error}"))
-        })?;
-        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
-            CompletionKey: ptr::null_mut(),
-            CompletionPort: completion_port,
-        };
-        if let Err(error) = unsafe {
-            SetInformationJobObject(
-                job,
-                JobObjectAssociateCompletionPortInformation,
-                &association as *const _ as *const c_void,
-                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
-            )
-        } {
-            unsafe {
-                let _ = CloseHandle(completion_port);
-            }
-            return Err(WxcError::Process(format!(
-                "SetInformationJobObject(completion port): {error}"
-            )));
-        }
-
-        let state = Arc::new(Mutex::new(ProcessTrackerState::new()));
-        let worker_state = Arc::clone(&state);
-        let raw_port = completion_port.0 as usize;
-        let worker = std::thread::spawn(move || {
-            process_job_notifications(HANDLE(raw_port as *mut c_void), &worker_state);
-        });
-        Ok(Self {
-            completion_port,
-            state,
-            worker: Some(worker),
-        })
-    }
-
-    fn finish(mut self) -> Result<Vec<ProcessLifetime>, WxcError> {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let state = self
-                .state
-                .lock()
-                .map_err(|_| WxcError::Process("job tracker state was poisoned".to_string()))?;
-            if (state.active_process_zero && state.active.is_empty()) || state.error.is_some() {
-                break;
-            }
-            drop(state);
-            if Instant::now() >= deadline {
-                return Err(WxcError::Process(
-                    "timed out waiting for the sandbox job to report zero active processes"
-                        .to_string(),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        self.stop_worker();
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| WxcError::Process("job tracker state was poisoned".to_string()))?;
-        if !state.active.is_empty() {
-            return Err(WxcError::Process(format!(
-                "job tracker stopped with {} process(es) still active",
-                state.active.len()
-            )));
-        }
-        if let Some(error) = state.error.take() {
-            return Err(WxcError::Process(error));
-        }
-        Ok(std::mem::take(&mut state.completed))
-    }
-
-    fn stop_worker(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = unsafe {
-                PostQueuedCompletionStatus(self.completion_port, TRACKER_STOP_MESSAGE, 0, None)
-            };
-            if worker.join().is_err() {
-                if let Ok(mut state) = self.state.lock() {
-                    state.fail("job process tracker thread panicked");
-                }
-            }
-        }
-    }
-}
-
-impl Drop for JobProcessTracker {
-    fn drop(&mut self) {
-        self.stop_worker();
-        if !self.completion_port.is_invalid() {
-            unsafe {
-                let _ = CloseHandle(self.completion_port);
-            }
-        }
-    }
-}
-
-fn process_job_notifications(port: HANDLE, state: &Arc<Mutex<ProcessTrackerState>>) {
-    loop {
-        let mut message = 0u32;
-        let mut completion_key = 0usize;
-        let mut overlapped: *mut OVERLAPPED = ptr::null_mut();
-        let result = unsafe {
-            GetQueuedCompletionStatus(
-                port,
-                &mut message,
-                &mut completion_key,
-                &mut overlapped,
-                u32::MAX,
-            )
-        };
-        if let Err(error) = result {
-            if let Ok(mut state) = state.lock() {
-                state.fail(format!("job process tracker wait failed: {error}"));
-            }
-            return;
-        }
-        if message == TRACKER_STOP_MESSAGE {
-            return;
-        }
-        let pid = overlapped as usize as u32;
-        let Ok(mut state) = state.lock() else {
-            return;
-        };
-        match message {
-            JOB_OBJECT_MSG_NEW_PROCESS => state.process_started(pid),
-            JOB_OBJECT_MSG_EXIT_PROCESS | JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
-                state.process_exited(pid);
-            }
-            JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => state.all_processes_exited(),
-            _ => {}
-        }
-    }
-}
-
-fn process_times(process: HANDLE) -> Result<(u64, u64), windows_core::Error> {
-    let mut creation = FILETIME::default();
-    let mut exit = FILETIME::default();
-    let mut kernel = FILETIME::default();
-    let mut user = FILETIME::default();
-    unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }?;
-    Ok((filetime_to_u64(creation), filetime_to_u64(exit)))
-}
-
-fn filetime_to_u64(value: FILETIME) -> u64 {
-    (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
 }
 
 #[cfg(test)]
@@ -692,28 +357,6 @@ mod tests {
         })
         .expect("set global-namespace block");
         drop(job);
-    }
-
-    #[test]
-    fn tracked_job_records_process_lifetime() {
-        let mut job = UiJobObject::new_tracked().expect("create tracked job");
-        let mut child = Command::new("cmd.exe")
-            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
-            .spawn()
-            .expect("spawn child");
-        job.assign_process(HANDLE(child.as_raw_handle()))
-            .expect("assign child");
-
-        job.terminate(1);
-        child.wait().expect("wait for terminated child");
-        let lifetimes = job
-            .finish_process_tracking()
-            .expect("finish process tracking");
-
-        assert_eq!(lifetimes.len(), 1);
-        assert_eq!(lifetimes[0].pid, child.id());
-        assert!(lifetimes[0].start_filetime > 0);
-        assert!(lifetimes[0].end_filetime >= lifetimes[0].start_filetime);
     }
 
     #[test]

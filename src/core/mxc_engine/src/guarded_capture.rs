@@ -12,7 +12,7 @@
 //! (`request.policy.capture_denials.is_some()` on a non-native tier).
 
 use appcontainer_common::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
-use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use learning_mode_core::AnalysisResult;
 use std::os::windows::ffi::OsStringExt;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::HMODULE;
@@ -70,15 +70,25 @@ struct PlmGuardedCaptureSession {
 }
 
 impl GuardedCaptureSession for PlmGuardedCaptureSession {
+    fn attach_process_tree(
+        &mut self,
+        job_handle: usize,
+        root_process_handle: usize,
+    ) -> Result<(), String> {
+        self.session
+            .attach_process_tree(job_handle, root_process_handle)
+            .map_err(|e| format!("guarded WPR process-tree attach failed: {e:#}"))
+    }
+
     fn discard(&mut self) -> Result<(), String> {
         self.session
             .discard()
             .map_err(|e| format!("guarded WPR discard failed: {e:#}"))
     }
 
-    fn stop_analyzed(&mut self, lifetimes: &[ProcessLifetime]) -> Result<AnalysisResult, String> {
+    fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
         self.session
-            .stop_analyzed(lifetimes)
+            .stop_analyzed()
             .map_err(|e| format!("guarded WPR stop/analyze failed: {e:#}"))
     }
 }

@@ -23,7 +23,7 @@
 //! `dispatcher::spawn_with_fallback_and_capture`) — a runner never picks up
 //! guarded capture silently.
 
-use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use learning_mode_core::AnalysisResult;
 
 /// A live guarded WPR capture session scoped to one sandboxed process tree.
 ///
@@ -35,22 +35,29 @@ use learning_mode_core::{AnalysisResult, ProcessLifetime};
 ///
 /// [`stop_analyzed`]: GuardedCaptureSession::stop_analyzed
 pub trait GuardedCaptureSession: Send {
+    /// Duplicates and attaches the caller's sandbox job and still-owned
+    /// suspended root process in the elevated guardian. Both values must be
+    /// HANDLEs owned by the authenticated unelevated process.
+    fn attach_process_tree(
+        &mut self,
+        job_handle: usize,
+        root_process_handle: usize,
+    ) -> Result<(), String>;
+
     /// Stops the owned WPR trace and securely discards its raw ETL without
-    /// analysis. Used when process-lifetime tracking failed and no safe scope
-    /// can be supplied to [`Self::stop_analyzed`].
+    /// analysis. Used when job attachment or sandbox launch fails.
     fn discard(&mut self) -> Result<(), String>;
 
-    /// Stops the guarded capture and analyzes it, scoping every accepted
-    /// denial event to one of `lifetimes` (an inclusive PID + timestamp
-    /// window observed by the sandbox's tracked job object). Returns the
-    /// bounded, de-duplicated result.
+    /// Stops the guarded capture and analyzes it against exact process
+    /// generations: the guardian-attested root handle lifetime plus descendants
+    /// reconciled from job membership and sealed-ETL lifecycle events.
     ///
     /// # Errors
     ///
     /// Returns a human-readable message if the guardian connection is gone,
     /// the stop/analyze round trip fails, or the guardian reports a decode
     /// error.
-    fn stop_analyzed(&mut self, lifetimes: &[ProcessLifetime]) -> Result<AnalysisResult, String>;
+    fn stop_analyzed(&mut self) -> Result<AnalysisResult, String>;
 }
 
 /// Starts a [`GuardedCaptureSession`] for the calling (unelevated) process.
@@ -62,8 +69,9 @@ pub trait GuardedCaptureFactory: Send + Sync {
     ///
     /// `owner_pid` is the calling (unelevated) process's own OS process id —
     /// used by the elevated guardian to authenticate the connection — **not**
-    /// the sandboxed child's pid, which is not yet known when the guarded
-    /// session must start (before the job is assigned a running process).
+    /// the sandboxed child's pid. The child identity and lifetime are attested
+    /// later from its duplicated process handle; no caller-supplied child PID
+    /// or timestamp is trusted.
     ///
     /// # Errors
     ///
@@ -88,17 +96,22 @@ mod tests {
     }
 
     impl GuardedCaptureSession for FakeSession {
+        fn attach_process_tree(
+            &mut self,
+            job_handle: usize,
+            root_process_handle: usize,
+        ) -> Result<(), String> {
+            if job_handle == 0 || root_process_handle == 0 {
+                return Err("handles must be non-zero".to_string());
+            }
+            Ok(())
+        }
+
         fn discard(&mut self) -> Result<(), String> {
             Ok(())
         }
 
-        fn stop_analyzed(
-            &mut self,
-            lifetimes: &[ProcessLifetime],
-        ) -> Result<AnalysisResult, String> {
-            if lifetimes.is_empty() {
-                return Err("no tracked process lifetimes".to_string());
-            }
+        fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
             Ok(self.analysis.clone())
         }
     }
@@ -126,13 +139,11 @@ mod tests {
     fn factory_and_session_are_object_safe() {
         let factory: Box<dyn GuardedCaptureFactory> = Box::new(FakeFactory);
         let mut session = factory.start(1234).expect("start should succeed");
-        let lifetimes = [ProcessLifetime {
-            pid: 1234,
-            start_filetime: 0,
-            end_filetime: 10,
-        }];
+        session
+            .attach_process_tree(42, 43)
+            .expect("attach_process_tree should succeed");
         let analysis = session
-            .stop_analyzed(&lifetimes)
+            .stop_analyzed()
             .expect("stop_analyzed should succeed");
         assert_eq!(analysis.denials.len(), 1);
     }

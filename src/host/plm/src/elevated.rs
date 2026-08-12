@@ -12,21 +12,29 @@
 
 use anyhow::{Context, Result};
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ffi::c_void;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use std::ptr;
 use std::sync::atomic::AtomicIsize;
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use learning_mode_core::{AnalysisResult, ProcessLifetime};
-use learning_mode_windows::EtlDenialAnalyzer;
-use windows::core::PCWSTR;
+use learning_mode_windows::{
+    EtlDenialAnalyzer, JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
+};
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_BROKEN_PIPE, ERROR_CANCELLED, ERROR_NO_DATA, ERROR_PIPE_CONNECTED,
-    ERROR_PIPE_LISTENING, ERROR_PIPE_NOT_CONNECTED, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED,
-    WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE, ERROR_CANCELLED,
+    ERROR_NO_DATA, ERROR_PIPE_CONNECTED, ERROR_PIPE_LISTENING, ERROR_PIPE_NOT_CONNECTED, FILETIME,
+    HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::{
     GetLengthSid, GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
@@ -34,20 +42,33 @@ use windows::Win32::Security::{
 use windows::Win32::Storage::FileSystem::{
     FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_FIRST_PIPE_INSTANCE,
 };
+use windows::Win32::System::JobObjects::{
+    IsProcessInJob, JobObjectAssociateCompletionPortInformation,
+    JobObjectBasicAccountingInformation, QueryInformationJobObject, SetInformationJobObject,
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+};
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
     PeekNamedPipe, PIPE_NOWAIT, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
 };
+use windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
+use windows::Win32::System::SystemServices::{
+    JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS, JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO,
+    JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_NEW_PROCESS,
+};
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
-    OpenProcessToken, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SYNCHRONIZE,
+    GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, GetProcessTimes,
+    OpenProcess, OpenProcessToken, TerminateProcess, WaitForSingleObject, PROCESS_DUP_HANDLE,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+};
+use windows::Win32::System::IO::{
+    CreateIoCompletionPort, GetQueuedCompletionStatus, PostQueuedCompletionStatus, OVERLAPPED,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
 
 use crate::elevated_protocol::{
-    read_header, read_process_lifetimes, write_header, write_process_lifetimes, ResponseKind,
-    HEADER_LEN, MAX_ANALYSIS_BYTES, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
+    read_attach_handles, read_header, write_attach_handles, write_header, ResponseKind, HEADER_LEN,
+    MAX_ANALYSIS_BYTES, MAX_ERROR_BYTES, MAX_TRACE_BYTES,
 };
 use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 
@@ -60,6 +81,8 @@ const HANDSHAKE_READY: u8 = 0xa5;
 const CONTROL_STOP: u8 = 1;
 const CONTROL_STOP_AND_ANALYZE: u8 = 2;
 const CONTROL_STOP_AND_DISCARD: u8 = 3;
+const CONTROL_ATTACH_JOB: u8 = 4;
+const TRACKER_STOP_MESSAGE: u32 = u32::MAX;
 static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,6 +90,34 @@ enum GuardControl {
     Stop,
     StopAndAnalyze,
     StopAndDiscard,
+    AttachJob,
+}
+
+fn attest_job_process(job: HANDLE, pid: u32) -> Result<(OwnedHandle, u64)> {
+    let process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+            false,
+            pid,
+        )
+    }
+    .with_context(|| format!("failed to open job process PID {pid}"))?;
+    let process = OwnedHandle(process);
+    if unsafe { GetProcessId(process.0) } != pid {
+        anyhow::bail!("opened process identity changed while attesting PID {pid}");
+    }
+    let mut in_job = BOOL::default();
+    unsafe { IsProcessInJob(process.0, Some(job), &mut in_job) }
+        .with_context(|| format!("failed to verify job membership for PID {pid}"))?;
+    if !in_job.as_bool() {
+        anyhow::bail!("PID {pid} was not a member of the guarded sandbox job");
+    }
+    let (creation_filetime, _) = process_times(process.0)
+        .with_context(|| format!("failed to query creation time for PID {pid}"))?;
+    if creation_filetime == 0 {
+        anyhow::bail!("PID {pid} has an invalid creation time");
+    }
+    Ok((process, creation_filetime))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +132,7 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
         CONTROL_STOP => Ok(GuardControl::Stop),
         CONTROL_STOP_AND_ANALYZE => Ok(GuardControl::StopAndAnalyze),
         CONTROL_STOP_AND_DISCARD => Ok(GuardControl::StopAndDiscard),
+        CONTROL_ATTACH_JOB => Ok(GuardControl::AttachJob),
         _ => anyhow::bail!("invalid guarded PLM control message {value}"),
     }
 }
@@ -88,6 +140,7 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Operation {
     Start,
+    Attach,
     Stop,
     Discard,
 }
@@ -203,6 +256,7 @@ impl GuardLifecycle {
 
 struct GuardedOwner {
     owner: OwnedHandle,
+    job_tracker: Option<JobProcessTracker>,
     recovery_marker: RecoveryMarker,
     _singleton: SingletonGuard,
     lifecycle: GuardLifecycle,
@@ -214,6 +268,7 @@ impl GuardedOwner {
         let recovery_marker = RecoveryMarker::acquire()?;
         let mut guarded = Self {
             owner,
+            job_tracker: None,
             recovery_marker,
             _singleton: singleton,
             lifecycle: GuardLifecycle::new(),
@@ -290,22 +345,35 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self, None, false);
+                        return run_guarded_stop(pipe, self, StopDisposition::Trace);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
-                        let lifetimes = match read_process_lifetimes(pipe) {
-                            Ok(lifetimes) => lifetimes,
+                        return run_guarded_stop(pipe, self, StopDisposition::Analyze);
+                    }
+                    Ok(GuardControl::StopAndDiscard) => {
+                        return run_guarded_stop(pipe, self, StopDisposition::Discard);
+                    }
+                    Ok(GuardControl::AttachJob) => {
+                        let (job_handle, root_process_handle) = match read_attach_handles(pipe) {
+                            Ok(handles) => handles,
                             Err(error) => {
                                 self.preserve_after_pipe_break();
                                 return Err(error).context(
-                                    "failed to receive guarded WPR process-lifetime scope",
+                                    "failed to receive guarded WPR sandbox attach handles",
                                 );
                             }
                         };
-                        return run_guarded_stop(pipe, self, Some(&lifetimes), false);
-                    }
-                    Ok(GuardControl::StopAndDiscard) => {
-                        return run_guarded_stop(pipe, self, None, true);
+                        let response_result =
+                            match self.attach_process_tree(job_handle, root_process_handle) {
+                                Ok(()) => write_header(pipe, ResponseKind::Success, 0)
+                                    .and_then(|_| pipe.flush())
+                                    .context("failed to acknowledge guarded WPR job attachment"),
+                                Err(error) => write_error_response(pipe, &error),
+                            };
+                        if let Err(error) = response_result {
+                            self.preserve_after_pipe_break();
+                            return Err(error);
+                        }
                     }
                     Err(error) => {
                         self.preserve_after_pipe_break();
@@ -328,6 +396,29 @@ impl GuardedOwner {
         if self.lifecycle.on_pipe_break() == GuardAction::Preserve {
             self.preserve_uncertain_trace();
         }
+    }
+
+    fn attach_process_tree(
+        &mut self,
+        source_job_handle: usize,
+        source_root_process_handle: usize,
+    ) -> Result<()> {
+        if self.job_tracker.is_some() {
+            anyhow::bail!("guarded WPR sandbox process tree is already attached");
+        }
+        self.job_tracker = Some(JobProcessTracker::duplicate_and_attach(
+            self.owner.0,
+            source_job_handle,
+            source_root_process_handle,
+        )?);
+        Ok(())
+    }
+
+    fn finish_job_tracking(&mut self) -> Result<JobMembershipSnapshot> {
+        self.job_tracker
+            .take()
+            .context("guarded WPR stop/analyze requires an attached sandbox process tree")?
+            .finish()
     }
 
     fn preserve_after_start_error(&mut self) {
@@ -365,6 +456,7 @@ impl Operation {
     fn as_arg(self) -> &'static str {
         match self {
             Self::Start => "start",
+            Self::Attach => "attach",
             Self::Stop => "stop",
             Self::Discard => "discard",
         }
@@ -372,6 +464,10 @@ impl Operation {
 }
 
 struct OwnedHandle(HANDLE);
+
+// SAFETY: Windows kernel handles are process-global. Ownership remains unique,
+// and all access is synchronized by the tracker mutex when moved to its worker.
+unsafe impl Send for OwnedHandle {}
 
 impl Drop for OwnedHandle {
     fn drop(&mut self) {
@@ -381,6 +477,458 @@ impl Drop for OwnedHandle {
             }
         }
     }
+}
+
+struct TrackedMembership {
+    pid: u32,
+    process: OwnedHandle,
+    creation_filetime: u64,
+    start_sequence: usize,
+    start_observed_filetime: u64,
+    end_sequence: Option<usize>,
+    end_observed_filetime: Option<u64>,
+}
+
+struct ProcessTrackerState {
+    attached_filetime: u64,
+    root_pid: u32,
+    root_active: bool,
+    root_start_notification_seen: bool,
+    root_exit_notification_seen: bool,
+    active: HashMap<u32, usize>,
+    processes: Vec<TrackedMembership>,
+    notification_sequence: usize,
+    active_process_zero_filetime: Option<u64>,
+    error: Option<String>,
+}
+
+impl ProcessTrackerState {
+    fn new(attached_filetime: u64, root_pid: u32) -> Self {
+        Self {
+            attached_filetime,
+            root_pid,
+            root_active: true,
+            root_start_notification_seen: false,
+            root_exit_notification_seen: false,
+            active: HashMap::new(),
+            processes: Vec::new(),
+            notification_sequence: 0,
+            active_process_zero_filetime: None,
+            error: None,
+        }
+    }
+
+    fn fail(&mut self, message: impl Into<String>) {
+        if self.error.is_none() {
+            self.error = Some(message.into());
+        }
+    }
+
+    fn process_started(
+        &mut self,
+        pid: u32,
+        observed_filetime: u64,
+        attestation: Result<(OwnedHandle, u64)>,
+    ) {
+        self.active_process_zero_filetime = None;
+        if pid == self.root_pid && self.root_active && !self.root_start_notification_seen {
+            self.root_start_notification_seen = true;
+            return;
+        }
+        let (process, creation_filetime) = match attestation {
+            Ok(attestation) => attestation,
+            Err(error) => {
+                self.fail(format!(
+                    "failed to attest job process generation for PID {pid}: {error:#}"
+                ));
+                return;
+            }
+        };
+        if self.processes.len() >= MAX_JOB_PROCESS_LIFETIMES - 1 {
+            self.fail(format!(
+                "sandbox job exceeded the {MAX_JOB_PROCESS_LIFETIMES}-process tracking limit"
+            ));
+            return;
+        }
+        if self.active.contains_key(&pid) {
+            self.fail(format!(
+                "sandbox job reported duplicate process start for PID {pid}"
+            ));
+            return;
+        }
+        let index = self.processes.len();
+        let start_sequence = self.take_notification_sequence();
+        self.processes.push(TrackedMembership {
+            pid,
+            process,
+            creation_filetime,
+            start_sequence,
+            start_observed_filetime: observed_filetime,
+            end_sequence: None,
+            end_observed_filetime: None,
+        });
+        self.active.insert(pid, index);
+    }
+
+    fn process_exited(&mut self, pid: u32, observed_filetime: u64) {
+        if pid == self.root_pid && self.root_active && !self.root_exit_notification_seen {
+            self.root_active = false;
+            self.root_exit_notification_seen = true;
+            return;
+        }
+        if pid == self.root_pid
+            && self.root_exit_notification_seen
+            && !self.active.contains_key(&pid)
+        {
+            return;
+        }
+        let index = if let Some(index) = self.active.remove(&pid) {
+            index
+        } else if let Some(index) = self
+            .processes
+            .iter()
+            .rposition(|process| process.pid == pid && process.end_sequence.is_none())
+        {
+            index
+        } else {
+            if self
+                .processes
+                .iter()
+                .any(|process| process.pid == pid && process.end_observed_filetime.is_some())
+            {
+                return;
+            }
+            self.fail(format!(
+                "sandbox job reported process exit without a tracked start for PID {pid}"
+            ));
+            return;
+        };
+        let end_sequence = self.take_notification_sequence();
+        let process = &mut self.processes[index];
+        process.end_sequence = Some(end_sequence);
+        process.end_observed_filetime = Some(
+            process
+                .end_observed_filetime
+                .map_or(observed_filetime, |active_zero| {
+                    active_zero.min(observed_filetime)
+                }),
+        );
+    }
+
+    fn all_processes_exited(&mut self, observed_filetime: u64) {
+        self.root_active = false;
+        for (_, index) in self.active.drain() {
+            self.processes[index].end_observed_filetime = Some(observed_filetime);
+        }
+        self.active_process_zero_filetime = Some(observed_filetime);
+    }
+
+    fn take_notification_sequence(&mut self) -> usize {
+        let sequence = self.notification_sequence;
+        self.notification_sequence += 1;
+        sequence
+    }
+}
+
+struct JobProcessTracker {
+    job: OwnedHandle,
+    root_process: OwnedHandle,
+    root_pid: u32,
+    root_creation_filetime: u64,
+    completion_port: OwnedHandle,
+    state: Arc<Mutex<ProcessTrackerState>>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl JobProcessTracker {
+    fn duplicate_and_attach(
+        owner: HANDLE,
+        source_job_handle: usize,
+        source_root_process_handle: usize,
+    ) -> Result<Self> {
+        let job = duplicate_owner_handle(owner, source_job_handle)
+            .context("failed to duplicate sandbox job from the authenticated owner")?;
+        let root_process = duplicate_owner_handle(owner, source_root_process_handle)
+            .context("failed to duplicate sandbox root process from the authenticated owner")?;
+        let root_pid = unsafe { GetProcessId(root_process.0) };
+        if root_pid == 0 {
+            anyhow::bail!(
+                "failed to identify the sandbox root process duplicated from the authenticated owner"
+            );
+        }
+        let mut in_job = BOOL::default();
+        unsafe { IsProcessInJob(root_process.0, Some(job.0), &mut in_job) }
+            .context("failed to verify sandbox root process job membership")?;
+        if !in_job.as_bool() {
+            anyhow::bail!(
+                "authenticated owner's sandbox root process handle is not in the supplied job"
+            );
+        }
+        let (root_creation_filetime, root_exit_filetime) = process_times(root_process.0)
+            .context("failed to attest sandbox root process creation time")?;
+        if root_creation_filetime == 0 || root_exit_filetime != 0 {
+            anyhow::bail!("sandbox root process was not a live process when guarded WPR attached");
+        }
+        let completion_port = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1) }
+            .context("failed to create guarded WPR job completion port")?;
+        let completion_port = OwnedHandle(completion_port);
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: ptr::null_mut(),
+            CompletionPort: completion_port.0,
+        };
+        let attached_filetime = current_filetime();
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectAssociateCompletionPortInformation,
+                &association as *const _ as *const c_void,
+                size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+            )
+        }
+        .context("failed to associate the elevated guardian with the sandbox job")?;
+
+        let state = Arc::new(Mutex::new(ProcessTrackerState::new(
+            attached_filetime,
+            root_pid,
+        )));
+        let worker_state = Arc::clone(&state);
+        let raw_port = completion_port.0 .0 as usize;
+        let raw_job = job.0 .0 as usize;
+        let worker = std::thread::Builder::new()
+            .name("plm-job-tracker".to_string())
+            .spawn(move || {
+                process_job_notifications(
+                    HANDLE(raw_port as *mut c_void),
+                    HANDLE(raw_job as *mut c_void),
+                    &worker_state,
+                );
+            })
+            .context("failed to start guarded WPR job tracker")?;
+        Ok(Self {
+            job,
+            root_process,
+            root_pid,
+            root_creation_filetime,
+            completion_port,
+            state,
+            worker: Some(worker),
+        })
+    }
+
+    fn finish(mut self) -> Result<JobMembershipSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("guarded WPR job tracker state was poisoned"))?;
+            if (state.active_process_zero_filetime.is_some() && state.active.is_empty())
+                || state.error.is_some()
+            {
+                break;
+            }
+            drop(state);
+            if Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for the sandbox job to report zero active processes"
+                );
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        self.stop_worker();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("guarded WPR job tracker state was poisoned"))?;
+        if !state.active.is_empty() {
+            anyhow::bail!(
+                "guarded WPR job tracker stopped with {} process(es) still active",
+                state.active.len()
+            );
+        }
+        if let Some(error) = state.error.take() {
+            anyhow::bail!("{error}");
+        }
+        let completed_filetime = state
+            .active_process_zero_filetime
+            .context("guarded WPR sandbox job never reported zero active processes")?;
+        let (_, root_exit_filetime) = process_times(self.root_process.0)
+            .context("failed to attest sandbox root process exit time after WPR stop")?;
+        if root_exit_filetime == 0 {
+            anyhow::bail!("sandbox root process has no kernel-attested exit time after WPR stop");
+        }
+        if root_exit_filetime < self.root_creation_filetime
+            || root_exit_filetime > completed_filetime
+        {
+            anyhow::bail!("sandbox root process has an invalid kernel-attested lifetime");
+        }
+        let processes = std::mem::take(&mut state.processes)
+            .into_iter()
+            .map(|process| {
+                let (_, exit_filetime) = process_times(process.process.0).with_context(|| {
+                    format!("failed to attest exit time for job process {}", process.pid)
+                })?;
+                if exit_filetime == 0
+                    || exit_filetime < process.creation_filetime
+                    || exit_filetime > completed_filetime
+                {
+                    anyhow::bail!(
+                        "job process {} has an invalid kernel-attested lifetime",
+                        process.pid
+                    );
+                }
+                Ok(JobProcessMembership {
+                    pid: process.pid,
+                    creation_filetime: process.creation_filetime,
+                    exit_filetime,
+                    start_sequence: process.start_sequence,
+                    start_observed_filetime: process.start_observed_filetime,
+                    end_sequence: process.end_sequence,
+                    end_observed_filetime: process.end_observed_filetime.context(format!(
+                        "job process {} has no exit observation time",
+                        process.pid
+                    ))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let total_processes = query_total_processes(self.job.0)?;
+        let retained_processes = u32::try_from(processes.len() + 1)
+            .context("retained sandbox process count does not fit job accounting")?;
+        if total_processes != retained_processes {
+            anyhow::bail!(
+                "sandbox job accounting reported {total_processes} process generation(s), but \
+                 guarded tracking retained {retained_processes}; completion-port notifications \
+                 were lost or inconsistent"
+            );
+        }
+        Ok(JobMembershipSnapshot {
+            root_process: ProcessLifetime {
+                pid: self.root_pid,
+                start_filetime: self.root_creation_filetime,
+                end_filetime: root_exit_filetime,
+            },
+            attached_filetime: state.attached_filetime,
+            completed_filetime,
+            total_processes,
+            notification_count: state.notification_sequence,
+            processes,
+        })
+    }
+
+    fn stop_worker(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            let _ = unsafe {
+                PostQueuedCompletionStatus(self.completion_port.0, TRACKER_STOP_MESSAGE, 0, None)
+            };
+            if worker.join().is_err() {
+                if let Ok(mut state) = self.state.lock() {
+                    state.fail("guarded WPR job tracker thread panicked");
+                }
+            }
+        }
+    }
+}
+
+impl Drop for JobProcessTracker {
+    fn drop(&mut self) {
+        self.stop_worker();
+    }
+}
+
+fn duplicate_owner_handle(owner: HANDLE, source_handle: usize) -> Result<OwnedHandle> {
+    let mut duplicated = HANDLE::default();
+    unsafe {
+        DuplicateHandle(
+            owner,
+            HANDLE(source_handle as *mut c_void),
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }?;
+    Ok(OwnedHandle(duplicated))
+}
+
+fn process_times(process: HANDLE) -> Result<(u64, u64)> {
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) }?;
+    Ok((filetime_value(creation), filetime_value(exit)))
+}
+
+fn query_total_processes(job: HANDLE) -> Result<u32> {
+    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+    unsafe {
+        QueryInformationJobObject(
+            Some(job),
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as *mut c_void,
+            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+            None,
+        )
+    }
+    .context("failed to query sandbox job process accounting")?;
+    Ok(accounting.TotalProcesses)
+}
+
+fn filetime_value(value: FILETIME) -> u64 {
+    (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
+}
+
+fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<ProcessTrackerState>>) {
+    loop {
+        let mut message = 0u32;
+        let mut completion_key = 0usize;
+        let mut overlapped: *mut OVERLAPPED = ptr::null_mut();
+        let result = unsafe {
+            GetQueuedCompletionStatus(
+                port,
+                &mut message,
+                &mut completion_key,
+                &mut overlapped,
+                u32::MAX,
+            )
+        };
+        if let Err(error) = result {
+            if let Ok(mut state) = state.lock() {
+                state.fail(format!("guarded WPR job tracker wait failed: {error}"));
+            }
+            return;
+        }
+        if message == TRACKER_STOP_MESSAGE {
+            return;
+        }
+        let pid = overlapped as usize as u32;
+        let observed_filetime = current_filetime();
+        let attestation = if message == JOB_OBJECT_MSG_NEW_PROCESS {
+            attest_job_process(job, pid)
+        } else {
+            Err(anyhow::anyhow!("not a process-start notification"))
+        };
+        let Ok(mut state) = state.lock() else {
+            return;
+        };
+        match message {
+            JOB_OBJECT_MSG_NEW_PROCESS => {
+                state.process_started(pid, observed_filetime, attestation);
+            }
+            JOB_OBJECT_MSG_EXIT_PROCESS | JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
+                state.process_exited(pid, observed_filetime);
+            }
+            JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {
+                state.all_processes_exited(observed_filetime);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn current_filetime() -> u64 {
+    filetime_value(unsafe { GetSystemTimePreciseAsFileTime() })
 }
 
 /// Live authenticated connection to the elevated START child.
@@ -414,6 +962,40 @@ impl std::fmt::Debug for GuardedSession {
 }
 
 impl GuardedSession {
+    pub fn attach_process_tree(
+        &mut self,
+        job_handle: usize,
+        root_process_handle: usize,
+    ) -> Result<()> {
+        if self.disarmed {
+            anyhow::bail!("guarded PLM session is already stopped");
+        }
+        let mut encoded_handles = Vec::new();
+        write_attach_handles(&mut encoded_handles, job_handle, root_process_handle)
+            .context("failed to encode guarded WPR sandbox attach handles")?;
+        let mut pipe = self
+            .pipe
+            .take()
+            .context("guarded PLM control connection is already closed")?;
+        let result = pipe
+            .write_all(&[CONTROL_ATTACH_JOB])
+            .and_then(|_| pipe.write_all(&encoded_handles))
+            .and_then(|_| pipe.flush())
+            .context("failed to send guarded WPR sandbox attach handles")
+            .and_then(|_| {
+                read_response(
+                    &mut pipe,
+                    self.process.0,
+                    Operation::Attach,
+                    None,
+                    Instant::now() + WAIT_TIMEOUT_DURATION,
+                    || Ok(()),
+                )
+            });
+        self.pipe = Some(pipe);
+        result
+    }
+
     pub fn cancel(&mut self) -> Result<()> {
         if self.disarmed {
             return Ok(());
@@ -511,24 +1093,16 @@ impl GuardedSession {
         }
     }
 
-    pub fn stop_analyzed(
-        &mut self,
-        process_lifetimes: &[ProcessLifetime],
-    ) -> Result<AnalysisResult> {
+    pub fn stop_analyzed(&mut self) -> Result<AnalysisResult> {
         if self.disarmed {
             anyhow::bail!("guarded PLM session is already stopped");
         }
-        let mut encoded_lifetimes = Vec::new();
-        write_process_lifetimes(&mut encoded_lifetimes, process_lifetimes)
-            .context("failed to encode guarded WPR process-lifetime scope")?;
         let mut pipe = self
             .pipe
             .take()
             .context("guarded PLM control connection is already closed")?;
         pipe.write_all(&[CONTROL_STOP_AND_ANALYZE])
             .context("failed to send guarded PLM analyzed STOP")?;
-        pipe.write_all(&encoded_lifetimes)
-            .context("failed to send guarded WPR process-lifetime scope")?;
         pipe.flush()
             .context("failed to flush guarded PLM analyzed STOP")?;
 
@@ -807,13 +1381,19 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopDisposition {
+    Trace,
+    Analyze,
+    Discard,
+}
+
 fn run_guarded_stop(
     pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
-    process_lifetimes: Option<&[ProcessLifetime]>,
-    discard: bool,
+    disposition: StopDisposition,
 ) -> Result<()> {
-    let result = run_guarded_stop_with_stopped(pipe, owner, process_lifetimes, discard);
+    let result = run_guarded_stop_with_stopped(pipe, owner, disposition);
     if let Err(error) = result {
         owner.preserve_after_start_error();
         write_error_response(pipe, &error)?;
@@ -825,8 +1405,7 @@ fn run_guarded_stop(
 fn run_guarded_stop_with_stopped(
     pipe: &mut std::fs::File,
     owner: &mut GuardedOwner,
-    process_lifetimes: Option<&[ProcessLifetime]>,
-    discard: bool,
+    disposition: StopDisposition,
 ) -> Result<()> {
     crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
     let scratch = SecureScratch::new()?;
@@ -835,14 +1414,15 @@ fn run_guarded_stop_with_stopped(
     write_header(pipe, ResponseKind::Stopped, 0)
         .and_then(|_| pipe.flush())
         .context("failed to return elevated PLM WPR-stopped milestone")?;
-    if discard {
-        write_header(pipe, ResponseKind::Success, 0)
+    match disposition {
+        StopDisposition::Discard => write_header(pipe, ResponseKind::Success, 0)
             .and_then(|_| pipe.flush())
-            .context("failed to return elevated PLM discard success")
-    } else if let Some(lifetimes) = process_lifetimes {
-        write_analysis_response(pipe, &scratch, lifetimes)
-    } else {
-        write_trace_response(pipe, &scratch)
+            .context("failed to return elevated PLM discard success"),
+        StopDisposition::Analyze => {
+            let membership = owner.finish_job_tracking()?;
+            write_analysis_response(pipe, &scratch, &membership)
+        }
+        StopDisposition::Trace => write_trace_response(pipe, &scratch),
     }
 }
 
@@ -921,10 +1501,10 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
 fn write_analysis_response(
     pipe: &mut std::fs::File,
     scratch: &SecureScratch,
-    process_lifetimes: &[ProcessLifetime],
+    membership: &JobMembershipSnapshot,
 ) -> Result<()> {
     let analysis = EtlDenialAnalyzer
-        .analyze_for_process_lifetimes(scratch.trace_path(), process_lifetimes)
+        .analyze_for_job_membership(scratch.trace_path(), membership)
         .context("failed to decode guarded WPR trace for the sandbox process tree")?;
     let payload =
         serde_json::to_vec(&analysis).context("failed to serialize guarded WPR analysis")?;
@@ -962,7 +1542,7 @@ fn authenticate_server(pipe: &std::fs::File, expected_pid: u32) -> Result<OwnedH
 
     let owner = unsafe {
         OpenProcess(
-            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+            PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_DUP_HANDLE,
             false,
             actual_pid,
         )
@@ -1690,9 +2270,109 @@ mod tests {
             parse_guard_control(CONTROL_STOP_AND_DISCARD).unwrap(),
             GuardControl::StopAndDiscard
         );
-        for invalid in [0, 4, u8::MAX] {
+        assert_eq!(
+            parse_guard_control(CONTROL_ATTACH_JOB).unwrap(),
+            GuardControl::AttachJob
+        );
+        for invalid in [0, 5, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
         }
+    }
+
+    #[test]
+    fn completed_processes_count_toward_guardian_tracking_limit() {
+        fn fake_attestation(pid: u32) -> Result<(OwnedHandle, u64)> {
+            Ok((OwnedHandle(HANDLE::default()), u64::from(pid) + 1))
+        }
+
+        let mut state = ProcessTrackerState::new(1, 0);
+        for pid in 1..MAX_JOB_PROCESS_LIFETIMES as u32 {
+            state.process_started(pid, 2, fake_attestation(pid));
+            state.process_exited(pid, 3);
+        }
+
+        state.process_started(u32::MAX, 4, fake_attestation(u32::MAX));
+
+        assert!(state.active.is_empty());
+        assert_eq!(state.processes.len(), MAX_JOB_PROCESS_LIFETIMES - 1);
+        assert!(state.error.as_deref().is_some_and(|error| {
+            error.contains("exceeded") && error.contains(&MAX_JOB_PROCESS_LIFETIMES.to_string())
+        }));
+    }
+
+    #[test]
+    fn root_notifications_are_optional_and_not_double_counted() {
+        for include_start in [false, true] {
+            let mut state = ProcessTrackerState::new(1, 42);
+            if include_start {
+                state.process_started(42, 2, Ok((OwnedHandle(HANDLE::default()), 1)));
+            }
+            state.process_exited(42, 3);
+            state.all_processes_exited(4);
+
+            assert!(state.processes.is_empty());
+            assert_eq!(state.notification_sequence, 0);
+            assert!(state.active.is_empty());
+            assert_eq!(state.active_process_zero_filetime, Some(4));
+        }
+    }
+
+    #[test]
+    fn guardian_attests_root_handle_and_reconciles_optional_root_notifications() {
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+        };
+
+        let job = OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap());
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        unsafe { AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())) }.unwrap();
+
+        let tracker = JobProcessTracker::duplicate_and_attach(
+            unsafe { GetCurrentProcess() },
+            job.0 .0 as usize,
+            child.as_raw_handle() as usize,
+        )
+        .unwrap();
+        unsafe { TerminateJobObject(job.0, 1) }.unwrap();
+        child.wait().unwrap();
+
+        let membership = tracker.finish().unwrap();
+        assert_eq!(membership.root_process.pid, child.id());
+        assert!(membership.processes.is_empty());
+        assert_eq!(membership.total_processes, 1);
+        assert!(membership.root_process.end_filetime >= membership.root_process.start_filetime);
+        assert!(membership.completed_filetime >= membership.attached_filetime);
+    }
+
+    #[test]
+    fn guardian_rejects_root_handle_from_a_different_job() {
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, TerminateJobObject,
+        };
+
+        let actual_job = OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap());
+        let unrelated_job = OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap());
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        unsafe { AssignProcessToJobObject(actual_job.0, HANDLE(child.as_raw_handle())) }.unwrap();
+
+        let error = match JobProcessTracker::duplicate_and_attach(
+            unsafe { GetCurrentProcess() },
+            unrelated_job.0 .0 as usize,
+            child.as_raw_handle() as usize,
+        ) {
+            Ok(_) => panic!("a root process from another job must be rejected"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("not in the supplied job"));
+        unsafe { TerminateJobObject(actual_job.0, 1) }.unwrap();
+        child.wait().unwrap();
     }
 
     #[test]

@@ -24,7 +24,7 @@
 //! direction; shared generic TDH primitives can be extracted later if another
 //! runtime consumer needs them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
@@ -38,12 +38,24 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 
 use crate::extractors::{extract_denial, is_learning_mode_event, DecodedEventParts, RawDenial};
+use crate::process_lifetime::{
+    reconcile_job_membership, JobMembershipSnapshot, KernelProcessLifetime,
+    MAX_JOB_PROCESS_LIFETIMES,
+};
 use crate::{path_norm, tdh_decode};
 
 /// `OpenTraceW` returns this sentinel (`(TRACEHANDLE)-1`) on failure.
 const INVALID_PROCESSTRACE_HANDLE: u64 = u64::MAX;
 const MAX_UNIQUE_DENIALS: usize = 10_000;
 const MAX_PROCESSED_EVENTS: usize = 1_000_000;
+const PROCESS_PROVIDER: windows::core::GUID = windows::core::GUID {
+    data1: 0x3d6f_a8d0,
+    data2: 0xfe05,
+    data3: 0x11d0,
+    data4: [0x9d, 0xda, 0x00, 0xc0, 0x4f, 0xd7, 0xba, 0x7c],
+};
+const EVENT_TRACE_TYPE_START: u8 = 1;
+const EVENT_TRACE_TYPE_END: u8 = 2;
 
 /// One decoded ETW event, retaining the header context the extractors need.
 #[cfg(test)]
@@ -57,6 +69,7 @@ struct CollectedEvent {
 enum CollectionMode {
     Analyze,
     Raw,
+    KernelProcessLifetimes,
 }
 
 type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
@@ -77,6 +90,10 @@ struct Accumulator<'visitor> {
     decode_error: Option<String>,
     panic_payload: Option<Box<dyn std::any::Any + Send>>,
     schema_cache: tdh_decode::EventSchemaCache,
+    process_pids: HashSet<u32>,
+    active_processes: HashMap<u32, (u64, usize)>,
+    kernel_process_lifetimes: Vec<KernelProcessLifetime>,
+    kernel_process_event_order: usize,
 }
 
 impl<'visitor> Accumulator<'visitor> {
@@ -95,6 +112,10 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+            process_pids: HashSet::new(),
+            active_processes: HashMap::new(),
+            kernel_process_lifetimes: Vec::new(),
+            kernel_process_event_order: 0,
         }
     }
 
@@ -120,6 +141,18 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+            process_pids: HashSet::new(),
+            active_processes: HashMap::new(),
+            kernel_process_lifetimes: Vec::new(),
+            kernel_process_event_order: 0,
+        }
+    }
+
+    fn kernel_process_lifetimes(process_pids: HashSet<u32>) -> Self {
+        Self {
+            mode: CollectionMode::KernelProcessLifetimes,
+            process_pids,
+            ..Self::analyze()
         }
     }
 
@@ -200,7 +233,10 @@ impl<'visitor> Accumulator<'visitor> {
         event_id: u16,
         error: tdh_decode::DecodeError,
     ) {
-        if (matches!(self.mode, CollectionMode::Raw) || error.is_schema_error())
+        if (matches!(
+            self.mode,
+            CollectionMode::Raw | CollectionMode::KernelProcessLifetimes
+        ) || error.is_schema_error())
             && self.decode_error.is_none()
         {
             self.decode_error = Some(format!("provider {:?} event {event_id}: {error}", provider));
@@ -215,6 +251,70 @@ impl<'visitor> Accumulator<'visitor> {
             denials: self.denials,
             denied_resources_truncated: self.truncated,
         })
+    }
+
+    fn into_kernel_process_lifetimes(self) -> Result<Vec<KernelProcessLifetime>, AnalyzeError> {
+        if let Some(error) = self.decode_error {
+            return Err(AnalyzeError::Decode(error));
+        }
+        if self.processing_limit_reached {
+            return Err(AnalyzeError::Decode(format!(
+                "trace exceeded the {MAX_PROCESSED_EVENTS}-event processing limit"
+            )));
+        }
+        Ok(self.kernel_process_lifetimes)
+    }
+
+    fn add_kernel_process_event(&mut self, pid: u32, filetime: u64, opcode: u8) {
+        if !self.process_pids.contains(&pid) {
+            return;
+        }
+        let order = self.kernel_process_event_order;
+        self.kernel_process_event_order += 1;
+        match opcode {
+            EVENT_TRACE_TYPE_START => {
+                if self.active_processes.contains_key(&pid) {
+                    self.decode_error = Some(format!(
+                        "kernel trace reported overlapping process generations for PID {pid}"
+                    ));
+                    return;
+                }
+                if self.active_processes.len() + self.kernel_process_lifetimes.len()
+                    >= MAX_JOB_PROCESS_LIFETIMES
+                {
+                    self.decode_error = Some(format!(
+                        "kernel trace exceeded the {MAX_JOB_PROCESS_LIFETIMES}-generation \
+                         reconciliation limit"
+                    ));
+                    return;
+                }
+                self.active_processes.insert(pid, (filetime, order));
+            }
+            EVENT_TRACE_TYPE_END => {
+                let Some((start_filetime, start_order)) = self.active_processes.remove(&pid) else {
+                    // The trace can contain the end of a generation that began
+                    // before WPR started. It cannot match a job process created
+                    // after capture started, so it is safely ignored.
+                    return;
+                };
+                if filetime < start_filetime {
+                    self.decode_error = Some(format!(
+                        "kernel trace reported PID {pid} ending before its start"
+                    ));
+                    return;
+                }
+                self.kernel_process_lifetimes.push(KernelProcessLifetime {
+                    lifetime: ProcessLifetime {
+                        pid,
+                        start_filetime,
+                        end_filetime: filetime,
+                    },
+                    start_order,
+                    end_order: order,
+                });
+            }
+            _ => {}
+        }
     }
 }
 
@@ -240,6 +340,35 @@ impl EtlDenialAnalyzer {
         let mut accumulator = Accumulator::analyze_for_process_lifetimes(process_lifetimes);
         process_trace_file(source_path, &mut accumulator)?;
         accumulator.into_analysis()
+    }
+
+    /// Combines the handle-attested root generation with descendants whose
+    /// retained handles are reconciled against kernel lifecycle events, then
+    /// analyzes denials only for those exact PID generations.
+    ///
+    /// The sealed ETL is read twice: once to derive exact process lifetimes and
+    /// once to filter denials. This avoids retaining unscoped host denials and
+    /// prevents PID reuse from admitting an unrelated generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalyzeError`] when lifecycle events are missing, ambiguous,
+    /// out of order, exceed bounds, or when either trace pass fails.
+    pub fn analyze_for_job_membership(
+        &self,
+        source_path: &Path,
+        membership: &JobMembershipSnapshot,
+    ) -> Result<AnalysisResult, AnalyzeError> {
+        let process_pids = membership
+            .processes
+            .iter()
+            .map(|process| process.pid)
+            .collect::<HashSet<_>>();
+        let mut accumulator = Accumulator::kernel_process_lifetimes(process_pids);
+        process_trace_file(source_path, &mut accumulator)?;
+        let kernel_lifetimes = accumulator.into_kernel_process_lifetimes()?;
+        let process_lifetimes = reconcile_job_membership(membership, &kernel_lifetimes)?;
+        self.analyze_for_process_lifetimes(source_path, &process_lifetimes)
     }
 }
 
@@ -467,28 +596,79 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
+    let opcode = header.EventDescriptor.Opcode;
     if matches!(acc.mode, CollectionMode::Analyze) && !is_learning_mode_event(provider, event_id) {
+        return;
+    }
+    if matches!(acc.mode, CollectionMode::KernelProcessLifetimes)
+        && !(provider == PROCESS_PROVIDER
+            && matches!(opcode, EVENT_TRACE_TYPE_START | EVENT_TRACE_TYPE_END))
+    {
         return;
     }
 
     match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
         Ok(parts) => match acc.mode {
             CollectionMode::Analyze => {
-                if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
-                {
+                let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+                    return;
+                };
+                if let Some(raw) = extract_denial(&parts, header.ProcessId, filetime) {
                     acc.add_raw_denial(raw);
                 }
-                for raw in crate::capability_dacl::extract_denials(
-                    &parts,
-                    header.ProcessId,
-                    header.TimeStamp as u64,
-                ) {
+                for raw in
+                    crate::capability_dacl::extract_denials(&parts, header.ProcessId, filetime)
+                {
                     acc.add_raw_denial(raw);
                 }
             }
             CollectionMode::Raw => acc.visit_raw_event(&parts),
+            CollectionMode::KernelProcessLifetimes => {
+                let Some(pid) = decoded_u32_property(&parts, "ProcessId") else {
+                    acc.decode_error = Some(format!(
+                        "kernel process lifecycle event opcode {opcode} omitted ProcessId"
+                    ));
+                    return;
+                };
+                let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+                    return;
+                };
+                acc.add_kernel_process_event(pid, filetime, opcode);
+            }
         },
         Err(error) => acc.record_event_decode_error(provider, event_id, error),
+    }
+}
+
+fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64> {
+    // PROCESS_TRACE_MODE_RAW_TIMESTAMP is deliberately not set, so ProcessTrace
+    // has already converted the record timestamp to 100-nanosecond FILETIME.
+    match u64::try_from(timestamp) {
+        Ok(filetime) => Some(filetime),
+        Err(_) => {
+            acc.decode_error = Some(format!(
+                "ETW returned a negative normalized FILETIME timestamp ({timestamp})"
+            ));
+            None
+        }
+    }
+}
+
+fn decoded_u32_property(parts: &DecodedEventParts, name: &str) -> Option<u32> {
+    let raw = parts
+        .props
+        .iter()
+        .find(|(property, _)| property.eq_ignore_ascii_case(name))?
+        .1
+        .trim()
+        .trim_matches('"')
+        .trim();
+    if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        raw.parse::<u32>()
+            .ok()
+            .or_else(|| u32::from_str_radix(raw, 16).ok())
     }
 }
 

@@ -1963,12 +1963,7 @@ impl BaseContainerRunner {
         // is already running; it is a shell that has not yet run the user
         // command, so the pre-assignment window is empty in practice and the
         // later resume is a harmless no-op.
-        let job = match (if use_guarded_capture {
-            UiJobObject::new_tracked()
-        } else {
-            UiJobObject::new()
-        })
-        .and_then(|job| {
+        let job = match UiJobObject::new().and_then(|job| {
             // Pass the raw handle — `assign_process` borrows it and does not
             // take ownership. Wrapping it in a temporary `OwnedHandle` here
             // would close `pi.hProcess` when the temporary dropped, leaving the
@@ -2047,11 +2042,74 @@ impl BaseContainerRunner {
                     )
                 })?;
             match factory.start(std::process::id()) {
-                Ok(session) => Some(session),
+                Ok(mut session) => {
+                    if let Err(attach_error) =
+                        session.attach_process_tree(job.handle_value(), pi.hProcess.0 as usize)
+                    {
+                        if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
+                            unsafe {
+                                let _ = CloseHandle(pi.hProcess);
+                                let _ = CloseHandle(pi.hThread);
+                            }
+                            return Err(ScriptResponse {
+                                failure_phase: FailurePhase::LaunchFailed,
+                                ..ScriptResponse::error(&format!(
+                                    "captureDenials failed to attach the sandbox process tree to \
+                                     guarded WPR before resuming the sandbox: {attach_error}; \
+                                     additionally failed to terminate the suspended sandbox: \
+                                     {terminate_error}"
+                                ))
+                            });
+                        }
+                        let discard_error = session.discard().err();
+                        unsafe {
+                            let _ = CloseHandle(pi.hProcess);
+                            let _ = CloseHandle(pi.hThread);
+                        }
+                        if legacy_destroy_on_exit {
+                            run_sandbox_cleanup(
+                                &identity,
+                                &sid_string,
+                                request.policy.network_proxy.is_enabled(),
+                                logger,
+                            );
+                            sandbox_tracking::unregister_ctrl_c_cleanup();
+                        }
+                        self.proxy_coordinator.stop(logger);
+                        let mut message = format!(
+                            "captureDenials failed to attach the sandbox process tree to guarded WPR \
+                             before resuming the sandbox: {attach_error}"
+                        );
+                        if let Some(discard_error) = discard_error {
+                            let _ = write!(
+                                message,
+                                "; additionally failed to stop and discard guarded WPR: \
+                                 {discard_error}"
+                            );
+                        }
+                        return Err(ScriptResponse {
+                            failure_phase: FailurePhase::LaunchFailed,
+                            ..ScriptResponse::error(&message)
+                        });
+                    }
+                    Some(session)
+                }
                 Err(error) => {
-                    job.terminate(u32::MAX);
+                    if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
+                        unsafe {
+                            let _ = CloseHandle(pi.hProcess);
+                            let _ = CloseHandle(pi.hThread);
+                        }
+                        return Err(ScriptResponse {
+                            failure_phase: FailurePhase::LaunchFailed,
+                            ..ScriptResponse::error(&format!(
+                                "captureDenials failed to start guarded WPR before resuming the \
+                                 sandbox: {error}; additionally failed to terminate the suspended \
+                                 sandbox: {terminate_error}"
+                            ))
+                        });
+                    }
                     unsafe {
-                        let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
                         let _ = CloseHandle(pi.hProcess);
                         let _ = CloseHandle(pi.hThread);
                     }
@@ -2086,9 +2144,18 @@ impl BaseContainerRunner {
         // handle; `ResumeThread` only adjusts its suspend count.
         if unsafe { ResumeThread(pi.hThread) } == u32::MAX {
             let error = unsafe { GetLastError() };
-            job.terminate(u32::MAX);
-            unsafe {
-                let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
+            if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
+                unsafe {
+                    let _ = CloseHandle(pi.hProcess);
+                    let _ = CloseHandle(pi.hThread);
+                }
+                return Err(ScriptResponse {
+                    failure_phase: FailurePhase::LaunchFailed,
+                    ..ScriptResponse::error(&format!(
+                        "ResumeThread failed: {error:?}; additionally failed to terminate the \
+                         suspended sandbox: {terminate_error}"
+                    ))
+                });
             }
             if let Some(mut session) = guarded_capture_session.take() {
                 let _ = session.discard();
@@ -2142,10 +2209,10 @@ impl BaseContainerRunner {
     }
 }
 
-/// A BaseContainer child launched by [`BaseContainerRunner::spawn_base`]. The
-/// child runs immediately (no suspend); this owns the process handle, the
-/// parent-side pipe ends, and the per-run proxy/sandbox state it tears down
-/// once the child exits.
+/// A BaseContainer child launched by [`BaseContainerRunner::spawn_base`].
+/// `spawn_base` resumes it only after job assignment and any guarded-capture
+/// attachment. This owns the process handle, parent-side pipe ends, and the
+/// per-run proxy/sandbox state it tears down once the child exits.
 struct BaseChild {
     process: OwnedHandle,
     thread: OwnedHandle,
@@ -2451,40 +2518,21 @@ impl BaseContainerSandboxProcess {
         };
         let guarded_capture_result = if let Some(mut session) = self.guarded_capture_session.take()
         {
-            let lifetimes = self
-                .job
-                .as_mut()
-                .ok_or_else(|| {
-                    std::io::Error::other("captureDenials tracked job was not initialized")
-                })
-                .and_then(|job| {
-                    job.finish_process_tracking()
-                        .map_err(|error| std::io::Error::other(error.to_string()))
-                });
             let output_path = self.capture_output_path.take();
             let exit_code = self.last_exit_code.unwrap_or(-1);
-            let result = match lifetimes {
-                Ok(lifetimes) => session
-                    .stop_analyzed(&lifetimes)
-                    .map_err(|error| {
-                        std::io::Error::other(format!(
-                            "captureDenials failed to stop and analyze guarded WPR: {error}"
-                        ))
-                    })
-                    .and_then(|analysis| {
-                        let output_path = output_path.ok_or_else(|| {
-                            std::io::Error::other("captureDenials output path was not initialized")
-                        })?;
-                        write_denials_document(analysis, exit_code, &output_path)
-                    }),
-                Err(error) => match session.discard() {
-                    Ok(()) => Err(error),
-                    Err(discard_error) => Err(std::io::Error::other(format!(
-                        "{error}; additionally failed to stop and discard guarded WPR: \
-                         {discard_error}"
-                    ))),
-                },
-            };
+            let result = session
+                .stop_analyzed()
+                .map_err(|error| {
+                    std::io::Error::other(format!(
+                        "captureDenials failed to stop and analyze guarded WPR: {error}"
+                    ))
+                })
+                .and_then(|analysis| {
+                    let output_path = output_path.ok_or_else(|| {
+                        std::io::Error::other("captureDenials output path was not initialized")
+                    })?;
+                    write_denials_document(analysis, exit_code, &output_path)
+                });
             if let Ok(metadata) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {
                     capture_denials: Some(metadata.clone()),
@@ -2516,19 +2564,24 @@ impl BaseContainerSandboxProcess {
 
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
         if let Some(job) = &self.job {
-            job.terminate(u32::MAX);
+            job.terminate_and_wait(u32::MAX)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
         } else {
-            unsafe {
-                let _ = TerminateProcess(self.process.get(), u32::MAX);
-            }
+            unsafe { TerminateProcess(self.process.get(), u32::MAX) }
+                .map_err(|error| std::io::Error::other(format!("TerminateProcess: {error}")))?;
         }
         Ok(())
     }
 
-    fn terminate_and_reap(&mut self) {
-        let _ = self.kill_process_tree();
+    fn terminate_and_reap(&mut self) -> std::io::Result<()> {
+        self.kill_process_tree()?;
         unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            match WaitForSingleObject(self.process.get(), u32::MAX) {
+                WAIT_OBJECT_0 => Ok(()),
+                status => Err(std::io::Error::other(format!(
+                    "WaitForSingleObject(process) returned {status:?}"
+                ))),
+            }
         }
     }
 
@@ -2646,9 +2699,10 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // failure this also terminates it. Then reap the root before releasing
         // the pipe drains — and killing the tree closes the descendant's pipe
         // write-ends, so the drains can finish.
-        self.terminate_and_reap();
+        let termination_result = self.terminate_and_reap();
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        termination_result?;
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
@@ -2662,7 +2716,12 @@ impl Drop for BaseContainerSandboxProcess {
         // Kill and reap before tearing down proxy / sandbox state, so an
         // abandoned-but-running sandbox cannot outlive its enforcement (or
         // leak as an orphan).
-        self.terminate_and_reap();
+        if let Err(error) = self.terminate_and_reap() {
+            write_stderr_line_best_effort(format_args!(
+                "failed to terminate sandbox process tree during drop: {error}"
+            ));
+            return;
+        }
         if let Err(error) = self.run_teardown() {
             write_stderr_line_best_effort(format_args!(
                 "captureDenials teardown failed during drop: {error}"

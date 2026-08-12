@@ -16,6 +16,7 @@
 //! error type; callers map the plain `String` errors into their own error
 //! type at the call site.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
@@ -71,7 +72,7 @@ pub fn write_denials_output_file(
 
     let write_result = {
         let mut writer = std::io::BufWriter::new(file);
-        write(&mut writer)
+        write(&mut writer).and_then(|()| writer.flush())
     };
     if let Err(error) = write_result {
         let write_error = std::io::Error::other(format!(

@@ -48,6 +48,8 @@ mod extractors;
 #[cfg(target_os = "windows")]
 mod path_norm;
 #[cfg(target_os = "windows")]
+mod process_lifetime;
+#[cfg(target_os = "windows")]
 mod tdh_decode;
 #[cfg(target_os = "windows")]
 mod ui;
@@ -60,6 +62,10 @@ pub use extractors::DecodedEventParts;
 pub use ffi::{is_learning_mode_api_available, LearningModeApi, LearningModeTraceHandle};
 #[cfg(target_os = "windows")]
 pub use lifecycle::CaptureSession;
+#[cfg(target_os = "windows")]
+pub use process_lifetime::{
+    JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
+};
 #[cfg(target_os = "windows")]
 pub use secenv::{
     is_security_environment_api_available, probe_security_environment_exports,

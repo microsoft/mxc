@@ -1085,16 +1085,8 @@ impl AppContainerScriptRunner {
         // CRITICAL: child was created with CREATE_SUSPENDED. We must either
         // successfully attach the Job Object, OR TerminateProcess. Anything
         // that returns an error in this block must terminate first.
-        let capture_denials_requested = request.policy.capture_denials.is_some();
         let job = match (|| -> Result<UiJobObject, WxcError> {
-            let job = if capture_denials_requested {
-                // The guarded-WPR fallback scopes its host-wide trace to
-                // exactly this process tree via the job's own kernel
-                // notifications, never a caller-supplied PID list.
-                UiJobObject::new_tracked()?
-            } else {
-                UiJobObject::new()?
-            };
+            let job = UiJobObject::new()?;
             let restrictions = ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
                 &request.policy.base_process_ui,
@@ -1137,14 +1129,46 @@ impl AppContainerScriptRunner {
                 ) {
                     Ok(path) => path,
                     Err(e) => {
-                        job.terminate(u32::MAX);
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                "captureDenials failed to resolve the denials output path: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                            ))
+                            })?;
                         return Err(WxcError::Process(format!(
                             "captureDenials failed to resolve the denials output path: {e}"
                         )));
                     }
                 };
                 match factory.start(std::process::id()) {
-                    Ok(session) => {
+                    Ok(mut session) => {
+                        if let Err(attach_error) = session.attach_process_tree(
+                            job.handle_value(),
+                            process_handle.get().0 as usize,
+                        ) {
+                            job.terminate_and_wait(u32::MAX)
+                                .map_err(|terminate_error| {
+                                    WxcError::Process(format!(
+                                        "captureDenials guarded WPR session failed to attach the \
+                                     sandbox process tree: {attach_error}; additionally failed to \
+                                     terminate the suspended sandbox: {terminate_error}"
+                                    ))
+                                })?;
+                            let discard_error = session.discard().err();
+                            let mut message = format!(
+                                "captureDenials guarded WPR session failed to attach the sandbox \
+                                 process tree: {attach_error}"
+                            );
+                            if let Some(discard_error) = discard_error {
+                                message.push_str(&format!(
+                                    "; additionally failed to stop and discard guarded WPR: \
+                                     {discard_error}"
+                                ));
+                            }
+                            return Err(WxcError::Process(message));
+                        }
                         logger.log_line(&format!(
                             "guarded WPR captureDenials session started (output: {})",
                             output_path.display()
@@ -1155,7 +1179,14 @@ impl AppContainerScriptRunner {
                         // No active trace exists yet -- terminate the
                         // still-suspended child now, before it is ever
                         // resumed, so nothing runs unobserved.
-                        job.terminate(u32::MAX);
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                    "captureDenials guarded WPR session failed to start: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                                ))
+                            })?;
                         return Err(WxcError::Process(format!(
                             "captureDenials guarded WPR session failed to start: {e}"
                         )));
@@ -1268,8 +1299,7 @@ impl SpawnedChild {
     /// session was already started.
     ///
     /// The child never ran successfully, so there is no analysis result to
-    /// preserve. Stop the trace through the authenticated discard protocol
-    /// without depending on process-lifetime tracking.
+    /// preserve. Stop the trace through the authenticated discard protocol.
     fn discard_capture_session_after_launch_failure(&mut self) {
         let Some(mut session) = self.capture_session.take() else {
             return;
@@ -1542,7 +1572,7 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
-    teardown_done: bool,
+    teardown_result: Option<Result<(), String>>,
     /// Live guarded WPR capture session, moved from the `SpawnedChild`.
     /// Stopped and analyzed in `run_teardown` once the child has exited and
     /// been reaped.
@@ -1603,7 +1633,7 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
-            teardown_done: false,
+            teardown_result: None,
             capture_session: child.capture_session.take(),
             capture_output_path: child.capture_output_path.take(),
             last_exit_code: None,
@@ -1612,10 +1642,9 @@ impl AppContainerSandboxProcess {
     }
 
     fn run_teardown(&mut self) -> std::io::Result<()> {
-        if self.teardown_done {
-            return Ok(());
+        if let Some(result) = &self.teardown_result {
+            return result.clone().map_err(std::io::Error::other);
         }
-        self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         self.prepared
             .network_manager
@@ -1634,17 +1663,10 @@ impl AppContainerSandboxProcess {
         // crosses back into this process. Write it through the same shared
         // `capture_output` plumbing the native BaseContainer path uses, so
         // the two paths emit byte-identical JSON.
-        let Some(mut session) = self.capture_session.take() else {
-            return Ok(());
-        };
-        let lifetimes = self
-            .job
-            .finish_process_tracking()
-            .map_err(|error| std::io::Error::other(error.to_string()));
-        let output_path = self.capture_output_path.take();
-        let exit_code = self.last_exit_code.unwrap_or(-1);
-        let result = match lifetimes {
-            Ok(lifetimes) => match session.stop_analyzed(&lifetimes) {
+        let result: std::io::Result<()> = if let Some(mut session) = self.capture_session.take() {
+            let output_path = self.capture_output_path.take();
+            let exit_code = self.last_exit_code.unwrap_or(-1);
+            let capture_result = match session.stop_analyzed() {
                 Ok(analysis) => match output_path {
                     Some(output_path) => {
                         capture_output::write_denials_document(analysis, exit_code, &output_path)
@@ -1656,23 +1678,22 @@ impl AppContainerSandboxProcess {
                 Err(error) => Err(std::io::Error::other(format!(
                     "captureDenials failed to stop and analyze the guarded WPR session: {error}"
                 ))),
-            },
-            Err(error) => match session.discard() {
-                Ok(()) => Err(error),
-                Err(discard_error) => Err(std::io::Error::other(format!(
-                    "{error}; additionally failed to stop and discard guarded WPR: {discard_error}"
-                ))),
-            },
-        };
-        match result {
-            Ok(metadata) => {
-                self.output_metadata = Some(SandboxOutputMetadata {
-                    capture_denials: Some(metadata),
-                });
-                Ok(())
+            };
+            match capture_result {
+                Ok(metadata) => {
+                    self.output_metadata = Some(SandboxOutputMetadata {
+                        capture_denials: Some(metadata),
+                    });
+                    Ok(())
+                }
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        }
+        } else {
+            Ok(())
+        };
+        let result = result.map_err(|error| error.to_string());
+        self.teardown_result = Some(result.clone());
+        result.map_err(std::io::Error::other)
     }
 }
 
@@ -1722,8 +1743,9 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        self.job.terminate(u32::MAX);
-        Ok(())
+        self.job
+            .terminate_and_wait(u32::MAX)
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1761,12 +1783,15 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // (immediate once it has exited) before releasing the pipe drains — and
         // killing the tree closes the descendant's pipe write-ends, so the drains
         // can finish.
-        let _ = self.kill();
-        unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        let termination_result = self.kill();
+        if termination_result.is_ok() {
+            unsafe {
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            }
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
+        termination_result?;
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
@@ -1780,7 +1805,12 @@ impl Drop for AppContainerSandboxProcess {
         // Kill the tree and reap before tearing down firewall/filesystem
         // policy, so an abandoned-but-running sandbox cannot outlive its
         // enforcement (or leak as an orphan). `kill()` terminates the job.
-        let _ = self.kill();
+        if let Err(error) = self.kill() {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to terminate sandbox job during drop: {error}"
+            ));
+            return;
+        }
         unsafe {
             let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
@@ -2062,7 +2092,7 @@ mod tests {
         CAPTURE_DENIALS_SCHEMA_TOO_OLD_MSG,
     };
     use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
-    use learning_mode_core::{AnalysisResult, ProcessLifetime};
+    use learning_mode_core::AnalysisResult;
     use std::sync::Arc;
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
@@ -2075,14 +2105,19 @@ mod tests {
         fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
             struct FakeSession;
             impl GuardedCaptureSession for FakeSession {
+                fn attach_process_tree(
+                    &mut self,
+                    _job_handle: usize,
+                    _root_process_handle: usize,
+                ) -> Result<(), String> {
+                    Ok(())
+                }
+
                 fn discard(&mut self) -> Result<(), String> {
                     Ok(())
                 }
 
-                fn stop_analyzed(
-                    &mut self,
-                    _lifetimes: &[ProcessLifetime],
-                ) -> Result<AnalysisResult, String> {
+                fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
                     Ok(AnalysisResult::complete(Vec::new()))
                 }
             }
