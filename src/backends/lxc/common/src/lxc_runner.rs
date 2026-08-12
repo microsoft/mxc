@@ -291,11 +291,12 @@ impl LxcScriptRunner {
             let pin_outcome = container.attach_run(&command, "/", &[], true, None);
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
-                Ok((code, _, stderr)) => Some(format!(
-                    "writing /etc/hosts exited with {}: {}",
-                    code,
-                    stderr.trim()
-                )),
+                // The exit code is the whole report. `attach_run` streams the
+                // child's output straight to the caller's terminal and hands
+                // back empty strings, so appending its stderr here would end
+                // every one of these messages with a colon and nothing after
+                // it -- a promise of a reason that cannot be kept.
+                Ok((code, _, _)) => Some(Self::hosts_command_failure("writing", code)),
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = pin_error {
@@ -319,11 +320,9 @@ impl LxcScriptRunner {
             let unpin = Self::build_hosts_unpin_command();
             let unpin_error = match container.attach_run(&unpin, "/", &[], true, None) {
                 Ok((0, _, _)) => None,
-                Ok((code, _, stderr)) => Some(format!(
-                    "clearing /etc/hosts exited with {}: {}",
-                    code,
-                    stderr.trim()
-                )),
+                // Reports the exit code alone, for the reason given on the
+                // pinning path above.
+                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = unpin_error {
@@ -510,6 +509,22 @@ impl LxcScriptRunner {
             Self::hosts_read_prologue()
         )
     }
+
+    /// Why a `/etc/hosts` command that ran to completion is being treated as a
+    /// failure, given the verb for what it was doing and the code it exited
+    /// with.
+    ///
+    /// The exit code is the entire report, and that is a property of how these
+    /// commands are run rather than a choice about brevity. `attach_run`
+    /// streams the child's output to the caller as it arrives and hands back
+    /// empty strings for both streams, so a reason that appended the returned
+    /// stderr would read `exited with 1: ` every single time -- a colon
+    /// offering an explanation, followed by nothing. Taking only the code
+    /// leaves the message true, and leaves the actual diagnostics where the
+    /// child already wrote them.
+    fn hosts_command_failure(verb: &str, exit_code: i32) -> String {
+        format!("{} /etc/hosts exited with {}", verb, exit_code)
+    }
 }
 
 impl ScriptRunner for LxcScriptRunner {
@@ -592,6 +607,46 @@ mod tests {
         assert!(
             command.matches(HOSTS_PIN_MARKER).count() >= 2,
             "the written line must carry the marker that the strip looks for; got: {command}"
+        );
+    }
+
+    #[test]
+    fn a_failed_hosts_command_reports_a_reason_it_can_actually_supply() {
+        // `attach_run` streams the child's output live and returns empty
+        // strings for both streams, so the earlier form of this message
+        // appended an empty stderr and always read "exited with 1: " -- a
+        // colon offering an explanation, with nothing after it. Both verbs are
+        // checked because the pin and unpin paths build this independently.
+        for verb in ["writing", "clearing"] {
+            let reason = LxcScriptRunner::hosts_command_failure(verb, 1);
+
+            assert!(
+                reason.contains('1'),
+                "the reason must name the exit code; got: {reason}"
+            );
+            assert!(
+                !reason.trim_end().ends_with(':'),
+                "the reason must not trail a separator promising more; got: {reason:?}"
+            );
+            assert_eq!(
+                reason.trim_end(),
+                reason,
+                "the reason must not trail whitespace where a stderr used to go; got: {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_hosts_command_distinguishes_the_step_that_failed() {
+        // Pinning and unpinning fail for different reasons and are fixed
+        // differently, so a message that named neither would send whoever
+        // reads it to the wrong half of the path.
+        let pinning = LxcScriptRunner::hosts_command_failure("writing", 2);
+        let clearing = LxcScriptRunner::hosts_command_failure("clearing", 2);
+
+        assert_ne!(
+            pinning, clearing,
+            "the two steps must not produce the same reason; got: {pinning:?}"
         );
     }
 

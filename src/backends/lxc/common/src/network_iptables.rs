@@ -1860,27 +1860,58 @@ impl NetworkIptablesManager {
                 ));
             }
 
-            created.v4_hook = true;
-            Self::publish_created(created);
-            Self::run_iptables_rule_args(
-                &[Self::build_forward_hook_iface_rule_args(
-                    "-I",
-                    iface,
-                    &chain_name,
-                )],
+            Self::install_claimed_hook(
+                created,
+                |created, claimed| created.v4_hook = claimed,
+                |logger| {
+                    Self::run_iptables_rule_args(
+                        &[Self::build_forward_hook_iface_rule_args(
+                            "-I",
+                            iface,
+                            &chain_name,
+                        )],
+                        logger,
+                    )
+                },
+                |logger| {
+                    let _ = Self::run_iptables_rule_args(
+                        &[Self::build_forward_hook_iface_rule_args(
+                            "-D",
+                            iface,
+                            &chain_name,
+                        )],
+                        logger,
+                    );
+                },
                 logger,
             )?;
 
-            created.v4_physdev_hook = true;
-            Self::publish_created(created);
-            created.v4_physdev_hook = Self::install_physdev_hook(
-                Self::run_iptables_rule_args,
-                iface,
-                &chain_name,
-                bridged,
-                "iptables",
+            let physdev_installed = Self::install_claimed_hook(
+                created,
+                |created, claimed| created.v4_physdev_hook = claimed,
+                |logger| {
+                    Self::install_physdev_hook(
+                        Self::run_iptables_rule_args,
+                        iface,
+                        &chain_name,
+                        bridged,
+                        "iptables",
+                        logger,
+                    )
+                },
+                |logger| {
+                    let _ = Self::run_iptables_rule_args(
+                        &[Self::build_forward_hook_physdev_rule_args(
+                            "-D",
+                            iface,
+                            &chain_name,
+                        )],
+                        logger,
+                    );
+                },
                 logger,
             )?;
+            created.v4_physdev_hook = physdev_installed;
             Self::publish_created(created);
 
             // Claimed before insertion for the same reason the hooks are: a
@@ -1921,27 +1952,58 @@ impl NetworkIptablesManager {
                     ));
                 }
 
-                created.v6_hook = true;
-                Self::publish_created(created);
-                Self::run_ip6tables_rule_args(
-                    &[Self::build_forward_hook_iface_rule_args(
-                        "-I",
-                        iface,
-                        &chain_name,
-                    )],
+                Self::install_claimed_hook(
+                    created,
+                    |created, claimed| created.v6_hook = claimed,
+                    |logger| {
+                        Self::run_ip6tables_rule_args(
+                            &[Self::build_forward_hook_iface_rule_args(
+                                "-I",
+                                iface,
+                                &chain_name,
+                            )],
+                            logger,
+                        )
+                    },
+                    |logger| {
+                        let _ = Self::run_ip6tables_rule_args(
+                            &[Self::build_forward_hook_iface_rule_args(
+                                "-D",
+                                iface,
+                                &chain_name,
+                            )],
+                            logger,
+                        );
+                    },
                     logger,
                 )?;
 
-                created.v6_physdev_hook = true;
-                Self::publish_created(created);
-                created.v6_physdev_hook = Self::install_physdev_hook(
-                    Self::run_ip6tables_rule_args,
-                    iface,
-                    &chain_name,
-                    bridged,
-                    "ip6tables",
+                let physdev_installed = Self::install_claimed_hook(
+                    created,
+                    |created, claimed| created.v6_physdev_hook = claimed,
+                    |logger| {
+                        Self::install_physdev_hook(
+                            Self::run_ip6tables_rule_args,
+                            iface,
+                            &chain_name,
+                            bridged,
+                            "ip6tables",
+                            logger,
+                        )
+                    },
+                    |logger| {
+                        let _ = Self::run_ip6tables_rule_args(
+                            &[Self::build_forward_hook_physdev_rule_args(
+                                "-D",
+                                iface,
+                                &chain_name,
+                            )],
+                            logger,
+                        );
+                    },
                     logger,
                 )?;
+                created.v6_physdev_hook = physdev_installed;
                 Self::publish_created(created);
 
                 created.v6_return = true;
@@ -2020,13 +2082,13 @@ impl NetworkIptablesManager {
     ///
     /// FORWARD hooks are claimed *before* their `-I` runs, and chains are
     /// deliberately not claimed before their `-N`. The asymmetry is in the two
-    /// iptables commands. `-I` always inserts, so claiming early can only
-    /// over-claim, and an over-claimed hook is harmless: removal is by full
-    /// rule specification, which names this attempt's own chain, so a `-D` that
-    /// matches nothing is a no-op. `-N` fails when the name is already taken,
-    /// and the chain holding that name belongs to someone else, so claiming
-    /// early would let the rollback of a failed create delete a live chain --
-    /// trading a leak for the removal of another container's enforcement.
+    /// iptables commands. A hook that was never inserted can be disowned again
+    /// the moment its `-I` reports failure, so claiming early costs nothing
+    /// that [`Self::install_claimed_hook`] cannot give back. `-N` fails when
+    /// the name is already taken, and the chain holding that name belongs to
+    /// someone else, so claiming early would let the rollback of a failed
+    /// create delete a live chain -- trading a leak for the removal of another
+    /// container's enforcement.
     ///
     /// The window an early claim closes is between the command returning and
     /// the record being written: a signal landing there leaves an installed
@@ -2034,6 +2096,47 @@ impl NetworkIptablesManager {
     /// holds a reference that keeps the chain undeletable.
     fn publish_created(created: &CreatedResources) {
         crate::signal_cleanup::set_active_created(*created);
+    }
+
+    /// Claim a FORWARD hook, install it, and hand the claim back if the install
+    /// reports that it never landed.
+    ///
+    /// The claim has to be made first, because the window it closes is the one
+    /// between the command returning and the record being written -- see
+    /// [`Self::publish_created`]. Holding it after a *failed* install is a
+    /// different matter: `-D` removes by full rule specification and reports a
+    /// specification that matches nothing as an error, so the rollback of a
+    /// hook that was never inserted cannot clear its own claim. A hook still
+    /// recorded as present is what [`teardown_chain`] reads as a live
+    /// reference, and it leaves the chain unflushed and undeleted rather than
+    /// orphan a jump target. The chain then outlives the apply that failed, and
+    /// the next run for the same container dies at `-N` because the name is
+    /// taken -- one failed setup, and that container name never starts again
+    /// without a human clearing it.
+    ///
+    /// `undo` still runs before the claim is released, and runs even though the
+    /// install just said it failed. The exit status of `-I` is only *nearly*
+    /// conclusive: a command killed after the kernel accepted its rule also
+    /// reports failure, and releasing a claim on a rule that is really there
+    /// would strand it where nothing knows to remove it. Attempting the removal
+    /// costs one no-op command on a path that has already failed, and it makes
+    /// the release safe whichever way the ambiguity fell.
+    fn install_claimed_hook<T>(
+        created: &mut CreatedResources,
+        claim: fn(&mut CreatedResources, bool),
+        install: impl FnOnce(&mut Logger) -> Result<T, String>,
+        undo: impl FnOnce(&mut Logger),
+        logger: &mut Logger,
+    ) -> Result<T, String> {
+        claim(created, true);
+        Self::publish_created(created);
+        let outcome = install(logger);
+        if outcome.is_err() {
+            undo(logger);
+            claim(created, false);
+            Self::publish_created(created);
+        }
+        outcome
     }
 
     /// Best-effort removal of the FORWARD hooks and per-container chains that
@@ -4630,5 +4733,100 @@ mod tests {
                 "a rule whose install failed must not be deleted by {tool}; issued: {issued:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_chain_is_still_deleted_when_its_forward_hook_never_installed() {
+        // The hook is claimed before its `-I` runs, so a signal landing between
+        // the command returning and the record being written still finds it.
+        // Keeping that claim after a *failed* insert is what used to strand the
+        // chain: rollback deletes by full specification, iptables reports a
+        // specification matching nothing as an error, and a hook still on the
+        // books is read as a live reference to the chain -- so the chain was
+        // neither flushed nor deleted. It outlived the apply that failed, and
+        // the next run for the same container died at `-N` with the name
+        // already taken, which meant one failed setup retired that container
+        // name until a human cleared it by hand.
+        //
+        // The observable here is the chain delete rather than the ownership
+        // flag, because the flag is only the mechanism -- a chain nobody can
+        // remove is the harm.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching(
+            "mxcv-strand",
+            "iptables: No chain/target/match by that name",
+        );
+
+        let mut manager = NetworkIptablesManager::new("stranded");
+        manager.set_veth_interface("mxcv-strand");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let outcome = manager.apply_firewall_rules(&policy, &mut logger);
+        assert!(
+            outcome.is_err(),
+            "an apply whose FORWARD hook could not be installed must fail"
+        );
+
+        let chain = chain_name_for("stranded");
+        let issued = fake.issued();
+        assert!(
+            issued
+                .iter()
+                .any(|cmd| cmd[0] == "iptables" && cmd[1] == "-X" && cmd[2] == chain),
+            "the rollback must delete the chain whose hook never installed; issued: {issued:?}"
+        );
+    }
+
+    #[test]
+    fn a_chain_whose_hook_did_install_is_not_deleted_while_the_hook_survives() {
+        // The negative control for the test above. Releasing the claim on a
+        // failed insert must not decay into releasing it whenever removal is
+        // hard: a hook that really is in FORWARD still points at this chain,
+        // and flushing a chain that is still hooked drops it back into FORWARD
+        // with nothing to stop the packet -- the fail-open outcome this module
+        // exists to prevent. Here every install succeeds and only the deletes
+        // fail, which is the shape of a busy or half-broken host.
+        let fake = test_firewall::install();
+
+        let mut manager = NetworkIptablesManager::new("still-hooked");
+        manager.set_veth_interface("mxcv-hooked");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut apply_logger = Logger::new(Mode::Buffer);
+        manager
+            .apply_firewall_rules(&policy, &mut apply_logger)
+            .expect("the apply must succeed against the fake");
+
+        fake.forget_issued();
+        fake.fail_commands_matching("-D", "iptables: Resource temporarily unavailable");
+        let mut remove_logger = Logger::new(Mode::Buffer);
+        let _ = manager.remove_firewall_rules(&mut remove_logger);
+
+        let chain = chain_name_for("still-hooked");
+        let issued = fake.issued();
+        for operation in ["-F", "-X"] {
+            assert!(
+                !issued
+                    .iter()
+                    .any(|cmd| cmd[1] == operation && cmd[2] == chain),
+                "a chain whose hook is still installed must not be {operation}'d; \
+                 issued: {issued:?}"
+            );
+        }
+
+        // The claim must also survive the install that succeeded, or the
+        // teardown would have nothing recorded to remove and would walk past
+        // the hook it put in FORWARD. Asserting the attempt rather than the
+        // result is the point: these deletes are the ones being failed, and a
+        // release on success shows up as the command never being issued.
+        let removal =
+            NetworkIptablesManager::build_forward_hook_iface_rule_args("-D", "mxcv-hooked", &chain);
+        assert!(
+            issued
+                .iter()
+                .any(|cmd| cmd[0] == "iptables" && cmd[1..] == removal[..]),
+            "a hook that installed must still be owned, and so still be removed; \
+             issued: {issued:?}"
+        );
     }
 }
