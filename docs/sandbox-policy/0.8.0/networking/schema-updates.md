@@ -21,12 +21,14 @@ the shared policy.
 
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
-On directional backends, `egress` governs all outbound traffic and `ingress` governs traffic entering the sandbox.
-ProcessContainer maps `egress` to internet-bound traffic and maps `ingress.default` to Windows'
-`privateNetworkClientServer` capability, which enables private-network communication in both directions.
+On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
+`ingress` governs traffic entering the sandbox. ProcessContainer maps `egress` to internet-bound traffic and maps
+`ingress.default` to Windows' `privateNetworkClientServer` capability, which enables private-network communication in
+both directions.
 
 `allowLocalNetwork` still maps only to `ingress.default`. This preserves existing ProcessContainer private-network
-behavior while allowing directional backends to enforce independent outbound and inbound policy.
+behavior while allowing backends with clean private-network separation to enforce independent outbound and inbound
+policy.
 
 ## Direct egress
 
@@ -91,7 +93,8 @@ Schema 0.8 moves the endpoint to runtime metadata:
 }
 ```
 
-The omitted 0.8 `network` block uses deny defaults.
+The omitted 0.8 `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, direct egress rules
+do not apply because egressible HTTP(S) traffic is forwarded to the proxy.
 
 For example, this legacy policy:
 
@@ -118,9 +121,9 @@ migrates to deny-default egress with allowed private/LAN inbound:
 }
 ```
 
-On directional backends, this does not grant outbound private-network or internet access. On ProcessContainer,
-`ingress.default: "allow"` preserves the legacy `allowLocalNetwork` behavior by granting bidirectional private-network
-communication, while internet-bound egress remains denied.
+On backends that cleanly separate private-network ingress from egress, this does not grant outbound private-network or
+internet access. On ProcessContainer, `ingress.default: "allow"` preserves the legacy `allowLocalNetwork` behavior by
+granting bidirectional private-network communication, while internet-bound egress remains denied.
 
 ## Backend-specific schema 0.8 configuration
 

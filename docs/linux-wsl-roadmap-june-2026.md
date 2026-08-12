@@ -343,7 +343,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 > **Example (N4).** GA spec D4: when a connection matches both an `egress.allow` and an `egress.deny` rule, **the
 > deny wins** (fail-closed). The canonical case is "allow everything except a few malicious IPs." These rules apply
-> only to model 1 and are rejected when `runtimeConfig.networkProxy` selects the proxy-only runtime path.
+> only to model 1 and do not apply when `runtimeConfig.networkProxy` selects the proxy-only runtime path.
 >
 > ```json
 > {
@@ -372,7 +372,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > **Example (N5).** The proxy is the **recommended GA path** (model 2, "deny-all-except-proxy"). MXC does **not**
 > run the proxy: the consumer supplies and starts it, while MXC restricts egress to it and sets the proxy environment
 > variables. The variables are an advisory routing hint; the VM-level network policy is the containment boundary.
-> Direct `egress.allow`/`deny` rules are rejected when `runtimeConfig.networkProxy` is present.
+> Direct `egress.allow`/`deny` rules do not apply when `runtimeConfig.networkProxy` is present.
 >
 > ```json
 > {
