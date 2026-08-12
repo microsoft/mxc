@@ -390,7 +390,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > ```
 >
 > The presence of `runtimeConfig.networkProxy` selects the proxy-only runtime path; there is no caller-selected mode.
-> `ingress.hostLoopback` remains denied because the sandbox-to-proxy connection is outbound. WSLC must translate the
+> `ingress.hostLoopback` remains denied because the container-to-proxy connection is outbound. WSLC must translate the
 > caller's local endpoint to a VM-reachable address and authorize only that outbound endpoint.
 >
 > **❌ Not implemented today (but #19/#25 are unblocked).** WSLC has no proxy code at all. The env path exists — `request.env` is piped in via `WslcSetProcessSettingsEnvVariables` (`wsl_container_runner.rs:929-942`) — but nothing injects `HTTP_PROXY`/`HTTPS_PROXY` from the proxy config (#19), and the GA-mandated clearing of all inherited proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY` + lowercase) isn't done (#25). Both are doable now through the existing env path — no SDK dependency — they're just unwritten.
@@ -475,7 +475,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 28 | **Port-mapping support** | ✅ Addressed | TCP host→container port forwarding shipped in [PR #530](https://github.com/microsoft/mxc/pull/530) (merged 2026-06-23). Provides explicit per-port inbound exposure (the `hostLoopback: "allow"` primitive for mapped ports); policy-driven `ingress.hostLoopback` default posture still needs the VM-level API (see Network #16 / SDK dep #1). | — |
-| 29 | **State-aware lifecycle** | 🟡 Actionable | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost — session reuse is the highest-value win. | L |
+| 29 | **State-aware lifecycle** | ✅ Addressed | Daemon-backed warm session/container reuse across separate phase processes (`wxc-wslc-daemon.exe`) implements `StatefulSandboxBackend` for WSLC — the highest-value WSLC win (slowest cold start). See `docs/wsl/wslc-state-aware.md`. | — |
 | 30 | **Structured denied-resource diagnostics** | 🟡 Actionable | Parity with Process Container's structured denial reporting. | M |
 | 31 | **Un-gate WSLC tests in CI** | ⛔ Blocked | Needs `wslcsdk.dll` public NuGet (see SDK dep #2 above). | M |
 
@@ -502,7 +502,7 @@ These show up on multiple backends and are worth coordinating to avoid divergent
 
 1. **Filesystem policy alignment** — D4 (path-tree resolver), D3 (delegation check), D6 (object validation), same-path conflict (most-restrictive-wins), paths-should-exist warning all belong in `wxc_common` and serve all three backends.
 2. **Network policy alignment** — N1 (default-deny), N2 (inbound), N3 (CIDR-only schema), N5 (proxy enforcement), N7 (schema migration). Shared `NetworkIptablesManager` in `wxc_common` serves LXC and Bwrap; WSLC depends on SDK VM-level API.
-3. **State-aware lifecycle** — LXC #27, Bwrap #30, WSLC #29. None of the three implement `StatefulSandboxBackend` today. WSLC has the largest payoff (slowest cold start).
+3. **State-aware lifecycle** — LXC #27, Bwrap #30, WSLC #29. WSLC now implements `StatefulSandboxBackend` (daemon-backed warm reuse — the largest payoff, slowest cold start); LXC and Bwrap do not yet.
 4. **Resource limits (cgroups v2)** — LXC #28, Bwrap #28. Same kernel API; build a shared `cgroup_controller` crate.
 5. **Structured denied-resource diagnostics** — LXC #29, Bwrap #33, WSLC #30. Replicate Process Container's structured denial reporting on Linux.
 6. **CI gating** — LXC #31, Bwrap #34, WSLC #31.

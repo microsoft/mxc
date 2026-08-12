@@ -10,13 +10,13 @@ This doc covers only how the Windows ProcessContainer backend enforces them.
 
 ## 1. What this backend targets at GA
 
-On ProcessContainer paths with OS-scoped enforcement, each sandbox gets two enforcement primitives scoped to its
+On ProcessContainer paths with OS-scoped enforcement, each container gets two enforcement primitives scoped to its
 container SID and applied with no UAC prompt per launch. The AppContainer compatibility behavior is documented in
 section 2 and is not equivalent to these guarantees.
 
 - **WFP internet filters:** block internet-bound traffic by default, then allow or block specific public destinations
   by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over an allow. The
-  rules apply only to this sandbox.
+  rules apply only to this container.
 - **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g., the WinHTTP/Chromium stack) at a
   caller-provided loopback proxy container. MXC also sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants to
   the loopback endpoint for runtimes that use proxy environment variables rather than WinHTTP. `NO_PROXY` is a bypass

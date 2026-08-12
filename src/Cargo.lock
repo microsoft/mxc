@@ -92,7 +92,6 @@ dependencies = [
  "learning_mode_windows",
  "process_security_environment_spec",
  "sandbox_spec",
- "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1490,6 +1489,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_config_contract"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mxc_darwin"
 version = "0.7.0"
 dependencies = [
@@ -1739,9 +1747,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "embed-manifest",
+ "getrandom 0.2.17",
+ "learning_mode_core",
+ "learning_mode_windows",
  "mxc_build_common",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
  "windows",

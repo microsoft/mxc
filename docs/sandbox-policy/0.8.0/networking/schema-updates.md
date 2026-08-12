@@ -22,7 +22,7 @@ the shared policy.
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
 On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
-`ingress` governs traffic entering the sandbox. ProcessContainer maps `egress` to internet-bound traffic and maps
+`ingress` governs traffic entering the container. ProcessContainer maps `egress` to internet-bound traffic and maps
 `ingress.default` to Windows' `privateNetworkClientServer` capability, which enables private-network communication in
 both directions.
 
