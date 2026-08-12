@@ -1695,6 +1695,17 @@ impl AppContainerSandboxProcess {
         self.teardown_result = Some(result.clone());
         result.map_err(std::io::Error::other)
     }
+
+    fn discard_guarded_capture_after_termination_failure(&mut self) {
+        let Some(mut session) = self.capture_session.take() else {
+            return;
+        };
+        if let Err(error) = session.discard() {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to discard guarded WPR capture after sandbox termination failure: {error}"
+            ));
+        }
+    }
 }
 
 impl SandboxProcess for AppContainerSandboxProcess {
@@ -1809,6 +1820,7 @@ impl Drop for AppContainerSandboxProcess {
             capture_output::write_stderr_line_best_effort(format_args!(
                 "failed to terminate sandbox job during drop: {error}"
             ));
+            self.discard_guarded_capture_after_termination_failure();
             return;
         }
         unsafe {

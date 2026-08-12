@@ -50,7 +50,7 @@ pub trait GuardedCaptureSession: Send {
 
     /// Stops the guarded capture and analyzes it against exact process
     /// generations: the guardian-attested root handle lifetime plus descendants
-    /// reconciled from job membership and sealed-ETL lifecycle events.
+    /// reconciled from retained handles and job membership accounting.
     ///
     /// # Errors
     ///

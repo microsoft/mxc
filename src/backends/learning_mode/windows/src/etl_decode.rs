@@ -24,7 +24,7 @@
 //! direction; shared generic TDH primitives can be extracted later if another
 //! runtime consumer needs them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
@@ -62,11 +62,63 @@ enum CollectionMode {
 
 type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LifetimeRange {
+    start_filetime: u64,
+    end_filetime: u64,
+}
+
+#[derive(Debug, Default)]
+struct ProcessLifetimeIndex {
+    ranges_by_pid: HashMap<u32, Vec<LifetimeRange>>,
+}
+
+impl ProcessLifetimeIndex {
+    fn new(process_lifetimes: &[ProcessLifetime]) -> Self {
+        let mut ranges_by_pid =
+            HashMap::<u32, Vec<LifetimeRange>>::with_capacity(process_lifetimes.len());
+        for lifetime in process_lifetimes {
+            ranges_by_pid
+                .entry(lifetime.pid)
+                .or_default()
+                .push(LifetimeRange {
+                    start_filetime: lifetime.start_filetime,
+                    end_filetime: lifetime.end_filetime,
+                });
+        }
+
+        for ranges in ranges_by_pid.values_mut() {
+            ranges.sort_unstable_by_key(|range| range.start_filetime);
+            let mut merged = Vec::<LifetimeRange>::with_capacity(ranges.len());
+            for range in ranges.drain(..) {
+                if let Some(previous) = merged.last_mut() {
+                    if range.start_filetime <= previous.end_filetime {
+                        previous.end_filetime = previous.end_filetime.max(range.end_filetime);
+                        continue;
+                    }
+                }
+                merged.push(range);
+            }
+            *ranges = merged;
+        }
+
+        Self { ranges_by_pid }
+    }
+
+    fn contains(&self, pid: u32, filetime: u64) -> bool {
+        let Some(ranges) = self.ranges_by_pid.get(&pid) else {
+            return false;
+        };
+        let candidate = ranges.partition_point(|range| range.start_filetime <= filetime);
+        candidate > 0 && filetime <= ranges[candidate - 1].end_filetime
+    }
+}
+
 /// Accumulates bounded analysis results or streams raw diagnostic events
 /// during a `ProcessTrace` pass.
 struct Accumulator<'visitor> {
     mode: CollectionMode,
-    process_lifetimes: Option<&'visitor [ProcessLifetime]>,
+    process_lifetimes: Option<ProcessLifetimeIndex>,
     denials: Vec<DeniedResource>,
     seen: HashSet<(String, learning_mode_core::AccessType)>,
     truncated: bool,
@@ -99,9 +151,9 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
-    fn analyze_for_process_lifetimes(process_lifetimes: &'visitor [ProcessLifetime]) -> Self {
+    fn analyze_for_process_lifetimes(process_lifetimes: &[ProcessLifetime]) -> Self {
         Self {
-            process_lifetimes: Some(process_lifetimes),
+            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
             ..Self::analyze()
         }
     }
@@ -125,11 +177,11 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     fn add_raw_denial(&mut self, raw: RawDenial) {
-        if self.process_lifetimes.is_some_and(|lifetimes| {
-            !lifetimes
-                .iter()
-                .any(|lifetime| lifetime.contains(raw.pid, raw.filetime))
-        }) {
+        if self
+            .process_lifetimes
+            .as_ref()
+            .is_some_and(|lifetimes| !lifetimes.contains(raw.pid, raw.filetime))
+        {
             return;
         }
         let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
@@ -527,6 +579,47 @@ fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64>
 mod tests {
     use super::*;
     use learning_mode_core::{AccessType, ResourceType};
+
+    #[test]
+    fn process_lifetime_index_matches_pid_and_merged_time_ranges() {
+        let index = ProcessLifetimeIndex::new(&[
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 20,
+                end_filetime: 30,
+            },
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 10,
+                end_filetime: 25,
+            },
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 40,
+                end_filetime: 50,
+            },
+            ProcessLifetime {
+                pid: 8,
+                start_filetime: 15,
+                end_filetime: 45,
+            },
+        ]);
+
+        assert!(index.contains(7, 10));
+        assert!(index.contains(7, 30));
+        assert!(!index.contains(7, 35));
+        assert!(index.contains(7, 40));
+        assert!(!index.contains(7, 51));
+        assert!(index.contains(8, 35));
+        assert!(!index.contains(9, 20));
+    }
+
+    #[test]
+    fn empty_process_lifetime_index_fails_closed() {
+        let index = ProcessLifetimeIndex::new(&[]);
+
+        assert!(!index.contains(7, 10));
+    }
 
     #[test]
     fn raw_visitor_panic_is_captured_inside_callback_state() {

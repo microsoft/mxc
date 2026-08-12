@@ -2562,6 +2562,17 @@ impl BaseContainerSandboxProcess {
         result.map_err(std::io::Error::other)
     }
 
+    fn discard_guarded_capture_after_termination_failure(&mut self) {
+        let Some(mut session) = self.guarded_capture_session.take() else {
+            return;
+        };
+        if let Err(error) = session.discard() {
+            write_stderr_line_best_effort(format_args!(
+                "failed to discard guarded WPR capture after sandbox termination failure: {error}"
+            ));
+        }
+    }
+
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
         if let Some(job) = &self.job {
             job.terminate_and_wait(u32::MAX)
@@ -2720,6 +2731,7 @@ impl Drop for BaseContainerSandboxProcess {
             write_stderr_line_best_effort(format_args!(
                 "failed to terminate sandbox process tree during drop: {error}"
             ));
+            self.discard_guarded_capture_after_termination_failure();
             return;
         }
         if let Err(error) = self.run_teardown() {
