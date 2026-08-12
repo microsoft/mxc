@@ -18,17 +18,25 @@ This document specifies the shared MXC networking schema and GA behavior for bac
 
 #### Connectivity models
 
-MXC defines three outbound connectivity models, listed in increasing order of network restriction. All three apply the configured L3/L4 filtering (IP/CIDR/port/protocol allow/block rules). They differ in whether a loopback HTTP(S) proxy is present and whether the sandbox can reach the internet directly:
+MXC defines three outbound connectivity models, listed in increasing order of
+network restriction. Model 1 applies the configured L3/L4 filtering
+(IP/CIDR/port/protocol allow/block rules). Models 2 and 3 have no direct egress
+path and therefore do not accept direct egress allow or deny rules.
 
 - **Direct internet + L3/L4 filtering, no proxy (least restrictive).** The sandbox reaches the internet directly over HTTP(S) (and other protocols), subject only to IP/CIDR/port/protocol allow/block rules. No proxy is configured, so there is no application-layer (domain/URL/content) inspection.
 - **No direct internet + loopback HTTP(S) proxy (more restrictive).** The sandbox has no direct internet path; the only reachable egress is the loopback proxy port, and all other outbound is dropped. Cooperating clients route their HTTP(S) to the proxy (via the proxy environment variables / platform proxy configuration), where it is fully inspectable/filterable by the consumer. A client that ignores the proxy and tries to reach the internet directly is dropped, since no other egress path exists.
-- **No direct internet + no inbound (most restrictive):** This is the most restrictive we can get. In this model all network traffic is dropped.
+- **No direct internet + no inbound (most restrictive):** This is the most
+  restrictive model. External network traffic is dropped; backend-local
+  intra-sandbox IPC is described separately below.
 
 There was a fourth model that was looked at Direct internet + L3/L4 filtering + loopback HTTP(S) proxy. However, unlike model 2 which only allows traffic through a specific loopback port, direct internet access greatly decreases the ways to control egress and increases the opportunities for agent bypass. It is not a model we will have for GA.
 
 **GA goal:** model 2 (recommended to mxc consumers) on every backend. The shape of model 2 is the same everywhere: restrict the sandbox's outbound so the only reachable destination is the loopback proxy port, and configure the proxy information so cooperating clients route there.
 
-This loopback-only-plus-proxy-routing pattern is a well-established way to confine sandboxed agent egress on macOS and Linux. MXC enforces a strict localhost-only egress restriction for GA. See GA Scope by Backend for per-backend details.
+This loopback-only-plus-proxy-routing pattern is a well-established way to
+confine sandboxed agent egress on macOS and Linux. The GA target enforces a
+strict localhost-only egress restriction. See GA Scope by Backend for
+per-backend details and compatibility limitations.
 
 Throughout this document, the deny-all-except-proxy posture (the GA goal) refers to model 2.
 
@@ -41,8 +49,8 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
 - **Protocol:** HTTP and HTTPS only
 - **Destination:** Localhost proxy only (e.g., 127.0.0.1, ::1)
 - **Ports:** Any port within the 1 – 65535 range.
-- **Routing mechanism:** This applies to HTTP(S) only, never to other protocols. The sandbox's outbound is restricted so the only reachable destination is the loopback proxy port. Cooperating clients are pointed at the proxy: via the `HTTP_PROXY`/`HTTPS_PROXY` variables on the Linux and macOS backends, and via the per-appContainer WinHTTP proxy configuration on Windows. A client that ignores it cannot reach the internet directly because the egress restriction drops everything except the localhost proxy port, so it is dropped rather than bypassing the proxy. In model 1 (where direct egress is permitted) such a client may instead egress directly, subject to the IP/CIDR/port/protocol rules.
-- **What is NOT routed:** Non-HTTP traffic (raw TCP/UDP sockets, SSH, custom protocols, QUIC, WebRTC, etc.) is never redirected to the proxy. In model 2 on Windows, without the internetClient capability such connections cannot be made at all (the capability, not allow rules, gates direct egress); in model 1 they are subject to the IP/CIDR/port/protocol rules. Transparently routing this traffic through the proxy is a gap that requires further design and is out of scope for GA.
+- **Routing mechanism:** This applies to HTTP(S) only, never to other protocols. The sandbox's outbound is restricted so the only reachable destination is the loopback proxy port. Cooperating clients are pointed at the proxy through `HTTP_PROXY`/`HTTPS_PROXY` on Linux and macOS. Windows uses both per-AppContainer WinHTTP configuration and proxy environment variables for non-WinHTTP clients. A client that ignores the proxy cannot reach the internet directly on an enforcing model-2 path because the egress restriction drops everything except the localhost proxy port. In model 1, such a client may instead egress directly, subject to the IP/CIDR/port/protocol rules.
+- **What is NOT routed:** Non-HTTP traffic (raw TCP/UDP sockets, SSH, custom protocols, QUIC, WebRTC, etc.) is never redirected to the proxy. On an enforcing Windows model-2 path, omitting `internetClient` blocks public internet access and scoped enforcement blocks other direct egress, including private-network paths exposed by `privateNetworkClientServer`. In model 1, non-HTTP traffic is subject to the IP/CIDR/port/protocol rules. Transparently routing this traffic through the proxy is a gap that requires further design and is out of scope for GA.
 
 **Direct outbound path (model 1 only):**
 
@@ -65,7 +73,9 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
 **Default stance:** Host-loopback and LAN/private-network inbound traffic are
 blocked by default on backends that enforce the GA network policy.
 
-This does not affect intra-container loopback. Processes inside the same sandbox may communicate with each other over localhost / 127.0.0.1 / ::1.
+On backends with private loopback, this does not affect intra-container
+loopback. Processes inside the same sandbox may communicate over localhost /
+127.0.0.1 / ::1. Seatbelt has the exception described below.
 
 Ingress has two allow/deny controls and no rule arrays:
 
@@ -80,7 +90,8 @@ host-loopback connectivity while denying other inbound traffic.
 
 **Scope:**
 
-- Intra-container loopback: always allowed
+- Intra-container loopback: allowed on backends with private loopback;
+  Seatbelt cannot separate it from host loopback
 - Host-loopback connectivity in either direction: controlled by
   `ingress.hostLoopback`
 - LAN/private-network inbound: controlled by `ingress.default`, where supported
@@ -105,9 +116,15 @@ Enforcement and the Seatbelt bind caveat are covered in D2.
 
 #### Intra-Container Networking Policy
 
-Loopback traffic within the same sandbox is always allowed. This enables multi-process applications, local IPC over localhost sockets, and sandbox-local helper processes. For example, on macOS Seatbelt, processes launched via posix_spawn or NSTask inherit the effective sandbox constraints of the parent process. Parent and child can communicate over allowed loopback or IPC paths.
+Backends with private loopback allow loopback traffic within the same sandbox.
+This enables multi-process applications, local IPC over localhost sockets, and
+sandbox-local helper processes. Seatbelt shares the host network stack, so
+`ingress.hostLoopback: deny` also prevents intra-sandbox TCP loopback; use
+another permitted IPC mechanism when that posture is required.
 
-Loopback traffic between processes in the same sandbox is not governed by outbound IP/CIDR rules or host-to-container inbound policy.
+On backends with private loopback, traffic between processes in the same
+sandbox is not governed by outbound IP/CIDR rules or host-to-container inbound
+policy.
 
 ## Proposed Schema
 
@@ -149,7 +166,7 @@ No direct internet, loopback proxy only (more restrictive). Proxy
   "processContainer": { // process-container backend data (not shared policy)
     "network": {
       // Packaged app family name or unpackaged AppContainer profile name.
-      "allowedProxyPeer": "agent-proxy"
+      "allowedProxyPeer": "<package-family-or-profile-name>"
     }
   }
 }
@@ -185,7 +202,15 @@ Ingress has no CIDR peers or port rules. `ingress.default` and
 
 **Why:** This ensures the configuration explicitly describes the sandbox's network permissions (auditable on enforcing backends). Forgotten rules fail closed (safer). The same configuration means the same thing on different hosts and container types (portable intent, though enforcement fidelity varies by platform).
 
-**Limitation:** Enforcement requires an egress restriction at the OS level: WFP on Windows process containers, a network namespace plus iptables on the Linux backends, and a Seatbelt profile confining network-outbound to the loopback proxy port on macOS. Rich IP/CIDR/port allow-lists are expressible on Windows and the Linux backends but not on macOS, where Seatbelt restricts egress to the proxy port rather than filtering arbitrary destinations. A configuration a backend cannot enforce is rejected rather than run advisory, so "fully describes the workload's network view" always holds for an accepted configuration.
+**Limitation:** Enforcement requires an egress restriction at the OS level:
+WFP on Windows process containers, a network namespace plus iptables on the
+Linux backends, and a Seatbelt profile confining network-outbound to the
+loopback proxy port on macOS. Rich IP/CIDR/port allow-lists are expressible on
+Windows and the Linux backends but not on macOS, where Seatbelt restricts
+egress to the proxy port rather than filtering arbitrary destinations.
+Backend-specific docs identify temporary compatibility behaviors whose
+enforcement is intentionally coarser. Outside those documented exceptions, a
+backend rejects configurations it cannot enforce.
 
 ### D2: Inbound and host-loopback are blocked by default
 
@@ -193,7 +218,8 @@ Ingress has no CIDR peers or port rules. `ingress.default` and
 `ingress.default: deny` blocks LAN/private-network inbound traffic, and
 `ingress.hostLoopback: deny` separately blocks host-loopback connectivity in
 either direction. The host-loopback value overrides `default` for that path.
-Intra-container loopback is always allowed.
+Intra-container loopback is allowed on backends with private loopback.
+Seatbelt has the caveat described below.
 
 **Why inbound is blocked by default:**
 
@@ -233,15 +259,28 @@ Intra-container loopback is always allowed.
 
 | Platform | Enforcement Mechanism |
 |---|---|
-| Windows (Process Containers) | Per-AppContainer WinHTTP proxy configuration + no internetClient capability. |
-| Linux (WSLc, LXC, Bubblewrap) | iptables in the sandbox network namespace: default-DROP all outbound except the configured proxy endpoint plus the explicit allow-list. This DROP is the enforcement. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; an app that ignores them does not gain direct internet access. iptables rule drops the connection and it simply fails. |
+| Windows (Process Containers) | Enforcing BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. AppContainer fallback: cooperative routing only. |
+| Linux (WSLc, LXC, Bubblewrap) | iptables in the sandbox network namespace: default-DROP all outbound except the configured proxy endpoint. This DROP is the enforcement. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; an app that ignores them does not gain direct internet access. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
 
 **Why localhost only:** Remote proxies introduce trust boundary issues (proxy on different machine = different security context). Localhost proxy simplifies GA implementation and ensures proxy is under the same administrative control as the sandbox.
 
-**Proxy environment-variable hygiene (all backends):** The sandbox starts with all HTTP(S)-related proxy environment variables cleared to empty (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY`, and their lowercase variants). The sandbox never inherits host or stale proxy settings. MXC sets these variables explicitly, and only to the configured loopback proxy, when a proxy is in use (model 2); in model 1 they remain empty.
+**Proxy environment-variable hygiene (all backends):** The sandbox starts
+with all HTTP(S)-related proxy environment variables cleared to empty
+(`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY`, and their
+lowercase variants). The sandbox never inherits host or stale proxy settings.
+In model 2, MXC sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants
+to the configured loopback proxy. Bypass variables such as `NO_PROXY` do not
+carry the proxy endpoint. In model 1 the variables remain empty.
 
-**Consumer-provided proxy (all backends):** MXC does not provide, launch, or manage the proxy, and knows nothing about it beyond the host:port in the configuration. The consumer must start their proxy listening before launching the workload. MXC restricts the sandbox's egress to that endpoint and points the proxy variables at it. Making the proxy reachable from inside the sandbox is MXC's responsibility and is backend-specific.
+**Consumer-provided proxy (all backends):** MXC does not provide, launch, or
+manage the proxy, and knows nothing about it beyond the host:port in the
+configuration. The consumer must start the proxy listening before launching
+the workload. On enforcing paths, MXC restricts the sandbox's egress to that
+endpoint and points the proxy variables at it. Backend-specific compatibility
+paths may provide cooperative routing only and are documented separately.
+Making the proxy reachable from inside the sandbox is MXC's responsibility and
+is backend-specific.
 
 What is and is not routed through the proxy is described under Outbound Traffic Routing.
 
@@ -259,7 +298,12 @@ What is and is not routed through the proxy is described under Outbound Traffic 
 
 **Why:** Portable intent across platforms. Customers write one configuration that expresses their security policy; MXC maps it to backend-specific enforcement.
 
-**Reality:** Enforcement fidelity varies. A capability available on one backend (e.g., per-AppContainer WFP filters) may not have an equivalent on another. Cooperation-dependent routing (e.g., honoring proxy env vars) is allowed only as an optimization above an enforcing layer that already blocks non-cooperative traffic; it is never the enforcement mechanism itself.
+**Reality:** Enforcement fidelity varies. A capability available on one
+backend (e.g., per-AppContainer WFP filters) may not have an equivalent on
+another. For a model-2 implementation, cooperation-dependent routing is only
+an optimization above an enforcing layer that blocks non-cooperative traffic;
+it is not the enforcement mechanism. Explicitly documented compatibility
+fallbacks that provide cooperative routing only do not satisfy model 2.
 
 ### D8: Delegation from the invoking user
 
@@ -269,17 +313,26 @@ What is and is not routed through the proxy is described under Outbound Traffic 
 
 ## GA Scope by Backend
 
-GA includes all backends for their respective isolation capabilities. Network configuration enforcement varies by backend. This section describes the deny-all-except-recommended-path model for each backend.
+GA includes all backends for their respective isolation capabilities. Network
+configuration enforcement varies by backend. This section describes the GA
+target for each backend; it does not claim that unfinished roadmap work is
+already implemented.
 
-### Process containers (Windows): GA enforcement
+### Process containers (Windows): GA target and compatibility behavior
+
+The model-2 guarantees below apply to ProcessContainer paths with OS-scoped
+proxy enforcement. The AppContainer compatibility fallback is cooperative and
+does not satisfy model 2; see the implementation doc for its limitations.
 
 **Connectivity models:**
 
-- **Model 2 (recommended):** Grants no `internetClient`, so the AppContainer reaches only the configured loopback proxy
-  and the system drops all other outbound traffic. `allowedProxyPeer` scopes access to a packaged app or unpackaged
-  AppContainer proxy. An unpackaged non-AppContainer proxy requires the explicit `hostLoopback: allow` opt-in.
+- **Model 2 (recommended):** On an enforcing path, grants no `internetClient`,
+  so the AppContainer reaches only the configured loopback proxy and the
+  system drops all other outbound traffic. `allowedProxyPeer` scopes access to
+  a packaged app or unpackaged AppContainer proxy. An unpackaged
+  non-AppContainer proxy requires the explicit `hostLoopback: allow` opt-in.
 - **Model 1:** Grants `internetClient`, allowing direct egress under WFP IP/CIDR/port/protocol rules.
-- **Model 3:** Grants no `internetClient` and no loopback exemptions for the AppContainer SID.
+- **Model 3:** Grants no `internetClient` and no host or peer loopback exemptions for the AppContainer SID.
 
 **Enforcement:**
 
@@ -287,7 +340,7 @@ GA includes all backends for their respective isolation capabilities. Network co
 |---|---|---|
 | IP/CIDR allow/block | WFP dynamic filters for IPv4/IPv6, scoped to AppContainer SID | |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
-| Protocol filtering | Protocol filtering via WFP | tcp, udp, icmpv4, icmpv6, any. |
+| Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
 | Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
 | Proxy (HTTP/S only) | Per-AppContainer WinHTTP proxy configuration. Applications using WinHTTP stack (e.g., Chromium) are transparently routed. **Loopback access to the configured localhost proxy endpoint is explicitly permitted while blocking direct internet egress.** | Non-WinHTTP stacks (raw sockets, SSH, custom TCP/UDP) and HTTP clients configured to ignore OS/env proxy settings are not proxied and traffic is dropped. |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
@@ -303,7 +356,8 @@ GA includes all backends for their respective isolation capabilities. Network co
 
 **Connectivity model:** Model 2 achievable, iptables kernel-enforces deny-all-except-loopback-proxy within the container network namespace. Model 1 by relaxing the allow-list (permit direct egress) and using iptables for filtering. Model 3 is enforced with the container network namespace and iptables/nftables blocking all in and out traffic.
 
-**Recommended path:** Localhost proxy (HTTP/S via env vars) + explicit IP/CIDR allow-list.
+**Recommended path:** Localhost proxy (HTTP/S via env vars) with no direct
+egress allow-list.
 
 **Enforcement:**
 
@@ -321,7 +375,9 @@ GA includes all backends for their respective isolation capabilities. Network co
 
 ### LXC and Bubblewrap: GA enforcement
 
-Same model and enforcement as WSLc (model 2 achievable; iptables/nftables on the veth interface; default-deny outbound, loopback proxy + allow-list and `ingress.hostLoopback` via INPUT).
+Same model and enforcement as WSLc (model 2 achievable; iptables/nftables on
+the veth interface; default-deny outbound, loopback proxy only, and
+`ingress.hostLoopback` via INPUT).
 
 ### macOS (Seatbelt): GA enforcement
 
@@ -356,4 +412,4 @@ Same model and enforcement as WSLc (model 2 achievable; iptables/nftables on the
 - **DNS domain filtering:** The IP/CIDR schema cannot distinguish hostnames that resolve to the same IP. Domain allow/deny requires either deeper platform support or the proxy inspecting the CONNECT/request host plus blocking direct DNS egress (see D3).
 - **Inter-container networking:** Containers cannot communicate with each other (except Windows process containers).
 - **macOS direct-egress models:** Seatbelt cannot filter arbitrary remote destinations, so model 1 (direct egress under IP/CIDR/port/protocol rules) is not available on macOS; macOS supports model 2 (proxy-only).
-- **Proxy arbitrary network traffic:** GA MXC configures proxies for HTTP/S traffic only. On Windows, only clients that use the WinHTTP stack or correctly query the platform proxy configuration are proxied. Many libraries on all 3 platforms (Windows/Linux/macOS) use proxy environment variables as their configuration mechanism. On Linux and macOS these are the standard way to apply proxy configurations; however, it is advisory only and not a full RFC standard. As far as MXC is concerned, libraries/apps that honor them will use the proxy, while libraries/apps that ignore them will not have their traffic directed to the proxy and but instead have their egress blocked.
+- **Proxy arbitrary network traffic:** GA MXC configures proxies for HTTP/S traffic only. On Windows, only clients that use the WinHTTP stack or correctly query the platform proxy configuration are proxied. Many libraries on all 3 platforms (Windows/Linux/macOS) use proxy environment variables as their configuration mechanism. On Linux and macOS these are the standard way to apply proxy configurations; however, it is advisory only and not a full RFC standard. As far as MXC is concerned, libraries/apps that honor them will use the proxy, while libraries/apps that ignore them will not have their traffic directed to the proxy and instead have their egress blocked.

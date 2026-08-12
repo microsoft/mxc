@@ -113,6 +113,10 @@ Notes:
 
 ## Network policy
 
+This matrix describes the current schema 0.7 implementation. A checkmark for
+the AppContainer compatibility proxy means cooperative routing is available;
+it does not imply the planned schema 0.8 model-2 proxy-only guarantee.
+
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
