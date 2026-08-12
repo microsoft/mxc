@@ -1967,69 +1967,28 @@ impl BaseContainerRunner {
             }
         };
 
-        // `--wait-for-debugger`: block (no timeout) until an external
-        // debugger attaches to the real sandboxed PID, then clear only
-        // wxc-exec's own CREATE_SUSPENDED hold — see `debugger_wait` module
-        // docs for why this leaves the debugger's own attach-time freeze in
-        // place (so a plain `g` is enough, no `~0 m` needed). Unreachable in
-        // practice: `validate()` rejects `--wait-for-debugger` for this
-        // backend before `spawn_base` runs (BaseContainer cannot guarantee
-        // CREATE_SUSPENDED is honored on every OS build). Handled here
-        // anyway so a direct/test caller that bypasses `validate()` still
-        // fails closed instead of silently violating the suspend guarantee.
-        if request.wait_for_debugger {
-            if let Err(e) = crate::debugger_wait::wait_for_debugger_then_resume(
-                pi.hProcess,
-                pi.hThread,
-                pi.dwProcessId,
-                logger,
-            ) {
-                let _ = writeln!(
-                    logger,
-                    "Error: --wait-for-debugger failed ({e}); the sandboxed child has \
-                     been terminated."
-                );
-                // `wait_for_debugger_then_resume` already terminated the
-                // child on failure; reap it and tear down the same
-                // sandbox/proxy state the job-setup-failure path above does.
-                unsafe {
-                    let _ = WaitForSingleObject(pi.hProcess, u32::MAX);
-                    let _ = CloseHandle(pi.hProcess);
-                    let _ = CloseHandle(pi.hThread);
-                }
-                if request.lifecycle.destroy_on_exit {
-                    run_sandbox_cleanup(
-                        &identity,
-                        &sid_string,
-                        request.policy.network_proxy.is_enabled(),
-                        logger,
-                    );
-                    sandbox_tracking::unregister_ctrl_c_cleanup();
-                }
-                self.proxy_coordinator.stop(logger);
+        // `--wait-for-debugger` never reaches this point: `spawn()` (the only
+        // caller of `spawn_base`) runs `self.validate(request)?` first, and
+        // `validate()` unconditionally rejects the flag for this backend
+        // (BaseContainer cannot guarantee CREATE_SUSPENDED is honored on
+        // every OS build -- see `debugger_wait` module docs for what that
+        // guarantee protects). Asserted rather than handled with a second,
+        // untested parallel error path: if a future refactor of `spawn()`
+        // ever drops the `validate()` call, this fires instead of silently
+        // resuming a child the operator expected to stay suspended.
+        debug_assert!(
+            !request.wait_for_debugger,
+            "wait_for_debugger must be rejected by validate() before reaching spawn_base"
+        );
 
-                const WAIT_FOR_DEBUGGER_FAILED_MSG: &str =
-                    "--wait-for-debugger failed while waiting for a debugger to attach; \
-                     the sandboxed child was terminated.";
-                return Err(ScriptResponse {
-                    exit_code: -1,
-                    error_message: WAIT_FOR_DEBUGGER_FAILED_MSG.to_string(),
-                    standard_err: WAIT_FOR_DEBUGGER_FAILED_MSG.to_string(),
-                    extended_error: format!("wait_for_debugger_then_resume failed: {e}"),
-                    failure_phase: FailurePhase::LaunchFailed,
-                    ..Default::default()
-                });
-            }
-        } else {
-            // The child was created suspended; now that it is in the job object (so
-            // every descendant it spawns is captured), resume its main thread. If the
-            // create API ignored CREATE_SUSPENDED the thread is already running and
-            // this is a harmless no-op.
-            // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
-            // handle; `ResumeThread` only adjusts its suspend count.
-            unsafe {
-                ResumeThread(pi.hThread);
-            }
+        // The child was created suspended; now that it is in the job object (so
+        // every descendant it spawns is captured), resume its main thread. If the
+        // create API ignored CREATE_SUSPENDED the thread is already running and
+        // this is a harmless no-op.
+        // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
+        // handle; `ResumeThread` only adjusts its suspend count.
+        unsafe {
+            ResumeThread(pi.hThread);
         }
 
         // Hand ownership to the caller via `BaseChild`, which performs

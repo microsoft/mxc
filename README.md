@@ -235,7 +235,7 @@ wxc-exec.exe --audit policy.json
 wxc-exec.exe --wait-for-debugger config.json
 ```
 
-Attach a debugger to the printed PID and set breakpoints (necessarily deferred/pending ones, since no dependent DLL past the main image has loaded yet). The instant `wxc-exec` detects the attach it automatically clears its own suspend hold, so a plain `g` is all you need afterward — no `~0 m` ("Resume Thread") required. Windows-only; only the AppContainer tier of the `processcontainer` backend implements the suspend point (BaseContainer is skipped automatically, since it cannot guarantee `CREATE_SUSPENDED` is honored on every OS build).
+Attach a debugger to the printed PID and set breakpoints (necessarily deferred/pending ones, since no dependent DLL past the main image has loaded yet). The instant `wxc-exec` detects the attach it automatically clears its own suspend hold, so a plain `g` is all you need afterward — no `~0 m` ("Resume Thread") required. Windows-only; only the AppContainer tier of the `processcontainer` backend implements the suspend point (BaseContainer is skipped automatically, since it cannot guarantee `CREATE_SUSPENDED` is honored on every OS build). Combining `--wait-for-debugger` with any other `containment` backend (Windows Sandbox, WSLC, IsolationSession, Hyperlight, MicroVM, LXC, Bubblewrap, Seatbelt) is rejected up front, since none of them expose a pre-execution suspend point.
 
 ## Telemetry (Experimental)
 

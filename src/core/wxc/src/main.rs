@@ -156,7 +156,8 @@ struct Cli {
     /// only the AppContainer tier of the `processcontainer` backend
     /// implements the suspend point (BaseContainer is skipped
     /// automatically, since it cannot guarantee CREATE_SUSPENDED is honored
-    /// on every OS build).
+    /// on every OS build). Rejected up front for every other containment
+    /// backend, none of which expose a pre-execution suspend point.
     #[cfg(target_os = "windows")]
     #[arg(long = "wait-for-debugger")]
     wait_for_debugger: bool,
@@ -1568,6 +1569,18 @@ mod tests {
         assert!(cli.experimental);
         assert!(cli.debug);
         assert!(cli.command.is_empty());
+    }
+
+    #[test]
+    fn cli_wait_for_debugger_flag_present_maps_to_true() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--wait-for-debugger"]);
+        assert!(cli.wait_for_debugger);
+    }
+
+    #[test]
+    fn cli_wait_for_debugger_flag_absent_maps_to_false() {
+        let cli = parse_cli(&["wxc-exec", "policy.json"]);
+        assert!(!cli.wait_for_debugger);
     }
 
     #[test]

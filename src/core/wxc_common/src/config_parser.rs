@@ -5011,6 +5011,16 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_debugger_defaults_to_false() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.wait_for_debugger);
+    }
+
+    #[test]
     fn unknown_experimental_fields_ignored() {
         let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {"futureFeature": {"x": 1}, "test": {"message": "hi"}}}"#;
         let encoded = base64_encode(json.as_bytes());

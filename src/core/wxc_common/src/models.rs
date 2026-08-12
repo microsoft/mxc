@@ -744,6 +744,9 @@ pub struct ExecutionRequest {
     /// Consumed by the AppContainer runner; the dispatcher never routes a
     /// `wait_for_debugger` request to the BaseContainer runner, which
     /// cannot guarantee `CREATE_SUSPENDED` is honored on every OS build.
+    /// `wxc_common::validator::validate_common` rejects a request with this
+    /// set unless `containment == ContainmentBackend::ProcessContainer`, so
+    /// non-Windows and non-ProcessContainer backends never see it set.
     pub wait_for_debugger: bool,
 }
 
