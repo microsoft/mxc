@@ -91,15 +91,14 @@ pub fn is_managed_proxy_key(key: &str) -> bool {
 
 /// Redact any `user:pass@` userinfo from a proxy URL so it is safe to log.
 ///
-/// Handles the malformed input a diagnostic actually sees: a proxy URL is
-/// redacted on the failure path, where it may not be a well-formed absolute
-/// URL. `scheme:opaque` is redacted too, since `url::Url::parse` accepts it and
-/// the resulting error message would otherwise carry the password.
+/// The input need not be a well-formed absolute URL: redaction runs on the
+/// failure path, where the value is often the reason the failure happened.
+/// `url::Url::parse` accepts the opaque `scheme:rest` form, so a password
+/// written that way still reaches an error message and still has to be hidden.
 ///
-/// When the value carries a credential the *normalized* form is returned, not
-/// the original, so the whitespace a URL parser ignores cannot be used to smuggle
-/// the secret through the redaction. When it carries none the input is returned
-/// untouched.
+/// A credential-bearing value comes back normalized rather than verbatim,
+/// because the whitespace a URL parser ignores would otherwise be a way to
+/// carry the secret out through the redaction itself.
 pub fn redact_proxy_url(url: &str) -> String {
     let normalized = normalize_as_the_url_parser_does(url);
     let parts = split_proxy_authority(&normalized);
@@ -116,13 +115,12 @@ pub fn redact_proxy_url(url: &str) -> String {
 /// same URL the rest of the system acts on.
 ///
 /// WHATWG strips leading and trailing C0 controls and spaces, and removes tab,
-/// newline, and carriage return from anywhere in the input. `ProxyAddress::from_url`
-/// stores the string it was given and `to_url` returns it verbatim, so without
-/// this the guard read one URL while `lxc-attach` received another:
-/// `" http://alice:hunter2@host"` has no recognizable scheme once the leading
-/// space is counted, so the authority stopped at the first `/` of `//` and the
-/// `@` after it was never seen. The guard reported no credentials and redaction
-/// returned the password verbatim.
+/// newline, and carriage return from anywhere in the input. The string a proxy
+/// URL is configured with is the string handed to `lxc-attach`, so any
+/// difference between what a parser sees and what this module sees is a way to
+/// carry a credential past the guard: whitespace a parser discards would
+/// otherwise hide the scheme, and with no scheme recognized the `@` would
+/// fall outside the authority and no credential would be found.
 fn normalize_as_the_url_parser_does(url: &str) -> Cow<'_, str> {
     let is_trimmed = |c: char| c <= ' ';
     if url.contains(['\t', '\n', '\r']) {
@@ -153,35 +151,30 @@ struct ProxyAuthority<'a> {
 
 /// Split `url` into scheme, separator, authority, and tail.
 ///
-/// Every form is recognized deliberately, because [`ProxyAddress::from_url`]
-/// stores whatever string it is given and [`ProxyAddress::to_url`] returns it
-/// verbatim, so anything that parses somewhere downstream reaches the same
-/// places a well-formed URL does.
+/// The forms recognized are wider than any single URL syntax, because a
+/// configured proxy URL reaches `lxc-attach` as written: whatever some parser
+/// downstream accepts is a live proxy URL, whether or not this module would
+/// call it well-formed.
 ///
-/// * `scheme://authority` -- the ordinary form.
-/// * `scheme:authority` -- `url::Url::parse` accepts the opaque form, and
-///   `alice:hunter2@example.com` parses with scheme `alice`.
-/// * `scheme:/authority` -- for a *special* scheme (`http`, `https`, and the
-///   rest of the WHATWG set) one slash introduces an authority exactly as two
-///   do, so `http:/alice:hunter2@example.com` is the credentialed URL
-///   `http://alice:hunter2@example.com/`. Any run of leading slashes is
-///   therefore part of the separator rather than the start of a path.
-/// * no scheme at all -- the whole value is treated as an authority. Nothing
-///   downstream should accept it as a proxy URL, but the point here is not to
-///   decide that; it is that a bearer token used as sole userinfo,
-///   `token@proxy.example.com`, carries no colon and would otherwise be both
-///   unflagged and unredacted.
+/// `url::Url::parse` takes the opaque `scheme:rest` form, in which a
+/// credential-bearing value parses with the username as its scheme. For a
+/// WHATWG *special* scheme (`http`, `https`, and the rest of that set) a single
+/// slash introduces an authority exactly as two do, so any run of leading
+/// slashes belongs to the separator rather than to a path. A value with no
+/// scheme at all is one long authority, which is what keeps a single-component
+/// userinfo -- a bearer token, carrying no colon -- from passing as an ordinary
+/// host.
 ///
-/// A colon alone does not make a scheme: the prefix has to satisfy
+/// A colon alone does not make a scheme. The prefix has to satisfy
 /// [`is_uri_scheme`], or the colon is a port separator and the whole value is
-/// the authority. `alice@proxy.example.com:3128` is that case.
+/// the authority.
 ///
-/// This is the single parse shared by [`redact_proxy_url`] and
-/// [`proxy_url_has_credentials`]: a parse each is a way for them to disagree
-/// about one URL, and redaction that hides a credential the guard does not
+/// This is the one parse shared by [`redact_proxy_url`] and
+/// [`proxy_url_has_credentials`]. A parse each is a way for them to disagree
+/// about a single URL, and redaction that hides a credential the guard does not
 /// flag is a silent bypass. It is total rather than fallible for the same
-/// reason -- an input only one of them could parse is an input they can
-/// differ on.
+/// reason: an input only one of them could parse is an input they can differ
+/// on.
 fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
     let (scheme, after_scheme) = match url.find(':') {
         Some(colon) if is_uri_scheme(&url[..colon]) => url.split_at(colon),
@@ -195,7 +188,6 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
     // into argv and into the very error text meant to hide it; claiming
     // userinfo a strict parse would not is a rejected config. The guard is
     // therefore allowed to be more suspicious than the parser and never less.
-    // `http:\/alice:hunter2@host` was a live bypass on exactly this point.
     let introduces_authority = |c: char| c == '/' || c == '\\';
     let ends_authority = |c: char| matches!(c, '/' | '?' | '#' | '\\');
 
@@ -217,19 +209,17 @@ fn split_proxy_authority(url: &str) -> ProxyAuthority<'_> {
 /// Whether `candidate` satisfies the RFC 3986 scheme grammar,
 /// `ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )`.
 ///
-/// A colon is not proof of a scheme -- it can separate a *port* instead.
-/// Taking everything before the first colon as the scheme would read
-/// `alice@proxy.example.com:3128` as scheme `alice@proxy.example.com` and
-/// authority `3128`, and an authority of `3128` carries no `@`: the guard
-/// would find no credentials and redaction would return the string
-/// untouched, while the username still reaches `lxc-attach` argv.
+/// A colon is not proof of a scheme -- it can separate a *port* instead. A rule
+/// that took everything before the first colon would read
+/// `user@proxy.example.com:3128` as a scheme with `3128` for its authority, and
+/// an authority of `3128` carries no `@`, so nothing would be flagged and
+/// nothing redacted while the credential still reached `lxc-attach` argv.
 ///
-/// `@` is not in the grammar and a prefix carrying userinfo always contains
-/// one, so refusing non-schemes is what sends the whole value through as an
-/// authority -- where the `@` is found. A hostname alone still satisfies the
-/// grammar (`proxy.example.com` is ALPHA and `.`), and that is harmless: it
-/// leaves the authority as the bare port, which carries no credential either
-/// way.
+/// `@` is outside the grammar and a prefix carrying userinfo always contains
+/// one, so refusing non-schemes is exactly what pushes the whole value through
+/// as an authority, where the `@` is visible. A bare hostname does satisfy the
+/// grammar, and that costs nothing: the authority it leaves behind is the port,
+/// which carries no credential either way.
 fn is_uri_scheme(candidate: &str) -> bool {
     let mut chars = candidate.chars();
     if !chars
@@ -244,22 +234,19 @@ fn is_uri_scheme(candidate: &str) -> bool {
 /// The userinfo an authority carries, split from its host, or `None` when it
 /// carries none worth hiding.
 ///
-/// Empty userinfo is not a credential: `http://@proxy.example.com` and
-/// `http://:@proxy.example.com` name neither a user nor a password, and
-/// refusing them would reject a configuration that leaks nothing. A single
-/// component *is* one, though -- `http://token@proxy.example.com` is how a
-/// bearer token is passed, and `http://:secret@proxy.example.com` is a
-/// password with the username omitted.
+/// Empty userinfo names neither a user nor a password, so `@host` and `:@host`
+/// leak nothing and treating them as credentials would refuse a configuration
+/// that is safe. One component is still a credential, though: that is how a
+/// bearer token is passed, and how a password with the username omitted is
+/// written.
 ///
-/// Emptiness stops at `""` and `":"`. A previous version treated any run of
-/// colons as empty, which is wrong because only the *first* colon separates
-/// the two components: in `::` the second colon is the password's own value.
-/// Measured against the parser, `http://::@host` reports
-/// `password = Some("%3A")` while `http://:@host` reports `None`, so that is
-/// exactly where the boundary belongs.
+/// Emptiness therefore stops at `""` and `":"`. Only the first colon separates
+/// the two components, so in `::` the second colon is the password's own value
+/// -- `url::Url::parse` reports `password = Some("%3A")` for that authority and
+/// `None` for `:`, which is where the boundary belongs.
 ///
-/// Sharing this between the two public functions is what makes them unable to
-/// disagree about a given string.
+/// Both public functions in this module reach userinfo through here, so they
+/// cannot disagree about a given string.
 fn credential_userinfo(authority: &str) -> Option<(&str, &str)> {
     let (userinfo, host) = authority.rsplit_once('@')?;
     if userinfo.is_empty() || userinfo == ":" {
@@ -271,13 +258,13 @@ fn credential_userinfo(authority: &str) -> Option<(&str, &str)> {
 /// Whether a proxy URL carries `user:pass@` userinfo.
 ///
 /// This is the single definition of "carries credentials", so a backend that
-/// must refuse such a URL and the config parser that rejects it up front
-/// cannot drift apart.
+/// must refuse such a URL and the config parser that rejects it up front cannot
+/// drift apart.
 ///
-/// It deliberately does not ask whether [`redact_proxy_url`] changes the
-/// string. That answers a different question — how to render a URL safely —
-/// and returns the input unchanged when the userinfo is already the literal
-/// redaction marker, which would report a credential-bearing URL as clean.
+/// Asking instead whether [`redact_proxy_url`] changed the string would answer
+/// a different question -- how to render a URL safely -- and would report an
+/// already-redacted URL as clean, since redacting the marker `***@` yields the
+/// same string back.
 pub fn proxy_url_has_credentials(url: &str) -> bool {
     let normalized = normalize_as_the_url_parser_does(url);
     credential_userinfo(split_proxy_authority(&normalized).authority).is_some()
@@ -319,19 +306,17 @@ pub fn apply_cooperative_proxy_env(caller_env: &[String], proxy_url: &str) -> Ve
 /// Scrub proxy env vars from `env` in place, then point them at `proxy` when it
 /// carries an address.
 ///
-/// This is the LXC entry point. It delegates to [`apply_cooperative_proxy_env`]
-/// so LXC scrubs and sets exactly the same key set as Bubblewrap and WSLc,
-/// rather than maintaining a parallel list that can drift.
+/// `env` is the `ExecutionRequest::env` representation, `KEY=VALUE` strings; an
+/// entry with no `=` is a bare key, so a valueless `HTTP_PROXY` is scrubbed too.
 ///
-/// `env` uses the `ExecutionRequest::env` representation: `KEY=VALUE` strings.
-/// An entry with no `=` is treated as a bare key, so a valueless `HTTP_PROXY`
-/// is still scrubbed.
+/// LXC shares one key set with Bubblewrap and WSLc rather than keeping a
+/// parallel list, so the backends cannot drift into scrubbing different
+/// variables.
 ///
-/// Returns whether the caller must force a clean environment. This is always
-/// `true`, including when `env` ends up empty: the return value tells the
-/// caller to emit `--clear-env`, and an empty vector must still stop
-/// `lxc-attach` inheriting the MXC host process environment, which carries
-/// both proxy vars and credentials.
+/// The returned flag tells the caller to pass `--clear-env`. It is required
+/// even for an empty environment: without it `lxc-attach` inherits the MXC host
+/// process environment, which carries proxy variables and credentials of its
+/// own.
 pub fn apply_proxy_env(env: &mut Vec<String>, proxy: &ProxyConfig) -> bool {
     if let Some(address) = &proxy.address {
         *env = apply_cooperative_proxy_env(env, &address.to_url());

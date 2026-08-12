@@ -54,8 +54,8 @@ const CHAIN_ASSERTING_SCRIPTS: &[&str] = &[
 
 /// Read every `run_lxc_network_*.sh` as (file name, contents).
 ///
-/// Fails rather than returning an empty vector when the directory is missing or
-/// holds no network scripts, so a broken path cannot look like a clean run.
+/// A missing directory or an empty match is a hard failure: a drift guard that
+/// finds nothing to check is indistinguishable from one that passes.
 fn network_scripts() -> Vec<(String, String)> {
     let dir = scripts_dir();
     let entries =
@@ -92,10 +92,9 @@ const MXC_CHAIN_SED_PROGRAM: &str = r"s/^-N \(MXC-.*\)$/\1/p";
 /// Every `MXC-<something>` on a line that is not one of the two legitimate
 /// idioms: the pinned shape check and the chain-enumerating `sed` program.
 ///
-/// Scans whole lines rather than just assignments, because a literal is just as
-/// vacuous passed straight to an assertion --
-/// `assert_no_forward_reference "MXC-CLI-LXC-Net-Deny"` names a chain that
-/// cannot exist exactly as an assignment would.
+/// A hard-coded chain name is vacuous wherever it appears, not only in an
+/// assignment: `assert_no_forward_reference "MXC-CLI-LXC-Net-Deny"` names a
+/// chain that can never exist, and so asserts nothing about the real one.
 fn illegal_mxc_literals(line: &str) -> Vec<String> {
     if line.trim_start().starts_with('#') {
         return Vec::new();
@@ -188,12 +187,11 @@ fn matches_documented_shape(chain: &str) -> bool {
 /// Every `grep -Eq '<pattern>'` shape check found in the network scripts, as
 /// (script name, line number, pattern).
 ///
-/// A comment is not a check, and neither is a pattern that is not applied to
-/// the derived name, so both are excluded: a disabled check that still mentions
-/// the pattern would otherwise satisfy the guard below while validating
-/// nothing. That makes this deliberately coupled to the scripts' exact idiom --
-/// if the idiom changes, this stops finding checks and the guard fails loudly
-/// rather than going quietly green.
+/// A commented-out check that still mentions the pattern would satisfy the
+/// guard below while validating nothing, so only a pattern actually applied to
+/// the derived name counts. The cost is deliberate coupling to the scripts'
+/// exact idiom: if the idiom changes this finds no checks at all, and the guard
+/// fails loudly rather than going quietly green.
 fn shape_patterns() -> Vec<(String, usize, String)> {
     let mut found = Vec::new();
     for (name, body) in network_scripts() {

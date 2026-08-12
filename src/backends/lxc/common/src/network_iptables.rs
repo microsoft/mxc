@@ -360,19 +360,15 @@ impl NetworkIptablesManager {
     /// The hosts-file pin a proxied container must be given before it runs, or
     /// `None` when the policy needs no pin.
     ///
-    /// Populated by [`Self::apply_firewall_rules`] and only meaningful after
-    /// it succeeds: the pin names the address that apply authorized, and
-    /// resolving the proxy host a second time to build it could return a
-    /// different address under round-robin or split-horizon DNS -- one the
-    /// chain does not allow.
+    /// The pin is a record of a lookup rather than something recomputed on
+    /// demand, because round-robin and split-horizon DNS can answer one name
+    /// with a different address each time. A pin built from a second lookup
+    /// could name an address the chain never allowed.
     pub fn proxy_host_pin(&self) -> Option<&ProxyHostPin> {
         self.proxy_pin.as_ref()
     }
 
     /// Whether this manager has been told a missing veth is expected.
-    ///
-    /// Lets a backend that structurally has no veth assert it made the
-    /// declaration without standing up a real firewall.
     pub fn veth_scoping_is_optional(&self) -> bool {
         self.veth_scoping_optional
     }
@@ -430,20 +426,20 @@ impl NetworkIptablesManager {
     /// and neither yields a host-side interface to match on. Failing there would
     /// refuse to start every Bubblewrap sandbox that asks for firewall mode.
     ///
-    /// Callers that set this get the pre-existing behavior: the chain is built,
-    /// the FORWARD hook is skipped, and the skip is logged. The policy is
-    /// therefore **not** enforced, which is why this is opt-in and loud rather
-    /// than the default.
+    /// The policy is **not** enforced for a caller that sets this: there is no
+    /// host-side interface to hook FORWARD on, so the chain exists and nothing
+    /// reaches it. That is why the declaration is opt-in and logged -- an
+    /// unenforced chain is indistinguishable from an enforced one otherwise.
     pub fn allow_missing_veth_interface(&mut self) {
         self.veth_scoping_optional = true;
     }
 
     /// Build one FORWARD hook rule matching the veth as the input interface.
     ///
-    /// `op` is `-I` to install or `-D` to remove. Both come from this one
-    /// builder so a delete can never drift from the insert it has to match:
-    /// iptables deletes by full rule specification, and a spec that differs by
-    /// even one match leaves the hook in place.
+    /// `op` is `-I` or `-D`. One builder serves both because iptables deletes
+    /// by full rule specification: a delete whose spec differs from the insert
+    /// by even one match removes nothing, reports nothing, and leaves the hook
+    /// in place.
     fn build_forward_hook_iface_rule_args(op: &str, iface: &str, chain_name: &str) -> Vec<String> {
         vec![
             op.to_string(),
@@ -458,14 +454,11 @@ impl NetworkIptablesManager {
     /// Build one FORWARD hook rule matching the veth as the *bridge port* the
     /// packet entered on.
     ///
-    /// This is the rule that does the work whenever the container is attached
-    /// to a bridge, which is the default LXC topology (`lxc.net.0.link` set to
-    /// `lxcbr0`). A packet leaving such a container is bridged onto `lxcbr0`
-    /// and then routed off it, so by the time FORWARD sees the packet its
-    /// input interface is the bridge and not the veth -- an `-i <veth>` rule
-    /// matches nothing at all. Measured on a live container: with both rules
-    /// present in FORWARD and the same traffic flowing, the `--physdev-in`
-    /// rule counted 11 packets while the `-i` rule counted zero.
+    /// On the default LXC topology the veth is enslaved to a bridge
+    /// (`lxc.net.0.link` set to `lxcbr0`). A packet leaving such a container is
+    /// bridged onto `lxcbr0` and then routed off it, so by the time FORWARD
+    /// sees the packet its input interface is the bridge and not the veth --
+    /// an `-i <veth>` rule matches nothing at all.
     ///
     /// `--physdev-in` still names one specific bridge port, so the chain stays
     /// scoped to a single container. Matching the bridge itself would apply
@@ -490,11 +483,9 @@ impl NetworkIptablesManager {
     /// Determine whether `iface` is enslaved to a bridge, looked up under an
     /// injectable sysfs root so this is testable without a live interface.
     ///
-    /// `master` is a symlink, so the probe uses `symlink_metadata` rather than
-    /// `exists`, which follows the link and would report a dangling `master` as
-    /// absent. A `NotFound` on `master` only means "directly routed" when the
-    /// interface directory itself is readable; otherwise nothing was
-    /// established and the answer is [`VethTopology::Unknown`].
+    /// `master` is a symlink, and `Path::exists` follows links, so it would
+    /// report a dangling `master` as absent -- a bridged interface read as
+    /// directly routed. Only `symlink_metadata` sees the link itself.
     fn veth_topology_in(sysfs_net_root: &Path, iface: &str) -> VethTopology {
         let iface_dir = sysfs_net_root.join(iface);
         match std::fs::symlink_metadata(iface_dir.join("master")) {
@@ -554,14 +545,12 @@ impl NetworkIptablesManager {
 
     /// Install the `--physdev-in` FORWARD hook for one family.
     ///
-    /// Whether a failure here is fatal depends entirely on the topology, so
-    /// the decision lives in one place rather than being duplicated per
-    /// family. On a bridged veth this rule is the only one that can ever
-    /// match, so failing to install it means the policy is not enforced and
-    /// the caller must not be told otherwise. On a directly routed veth the
-    /// `-i` rule already carries the traffic and this one is redundant, so a
-    /// host whose kernel lacks the `physdev` match is still correctly
-    /// filtered and only warrants a warning.
+    /// Whether a failure is fatal turns on the topology and not on the family,
+    /// which is why `bridged` is the only thing that decides it. The `physdev`
+    /// match is a separate kernel module a host may simply not have: where the
+    /// `-i` hook already carries the traffic its absence costs nothing, and
+    /// where it does not the chain is unreachable from FORWARD and the policy
+    /// is unenforced.
     fn install_physdev_hook(
         run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
         iface: &str,
@@ -596,42 +585,31 @@ impl NetworkIptablesManager {
     ///
     /// The chain hooks traffic *leaving* the container (`-i` / `--physdev-in`),
     /// so a reply -- which arrives with the container's port as the output
-    /// interface -- matches no MXC rule and falls through to the FORWARD
-    /// policy. Where that policy is DROP, which is what Docker sets and Docker
-    /// is installed nearly everywhere, an explicitly allowed destination is
-    /// unreachable: the request goes out and the answer never comes back.
+    /// interface -- matches no MXC rule and falls through to the host's FORWARD
+    /// policy. Where that policy is DROP, which is what installing Docker sets
+    /// it to, an explicitly allowed destination is unreachable: the request
+    /// goes out and the answer never comes back.
     ///
-    /// This rule cannot widen the policy, and the reason is that conntrack
-    /// state is not created by a packet the chain drops. Conntrack attaches an
-    /// *unconfirmed* entry at PREROUTING, but only `nf_conntrack_confirm`
-    /// inserts it into the table, and that runs after the FORWARD verdict --
-    /// so a dropped packet is freed and takes its unconfirmed entry with it.
-    /// The reverse packet then finds no state, is classified `NEW` rather than
-    /// `ESTABLISHED`, matches nothing here, and falls to the host policy.
+    /// Accepting on connection state cannot widen the policy, because a packet
+    /// the chain drops never creates state. Conntrack attaches an *unconfirmed*
+    /// entry at PREROUTING, but only `nf_conntrack_confirm` inserts it into the
+    /// table, and that runs after the FORWARD verdict -- so a dropped packet is
+    /// freed and takes its unconfirmed entry with it. The reverse packet then
+    /// finds no state, is classified `NEW` rather than `ESTABLISHED`, matches
+    /// nothing here, and falls to the host policy.
     ///
-    /// Measured rather than assumed, on the directly routed topology, with a
-    /// positive control to prove the detector works. Outbound allowed: two
-    /// conntrack entries, this rule matched three times, three packets reached
-    /// the container. Outbound dropped by the chain, then a cooperating peer
-    /// sending the reverse packets: zero conntrack entries, this rule matched
-    /// **zero** times, zero packets reached the container.
+    /// The flows it does carry include ones the *host* authorized inbound, not
+    /// only ones this chain authorized outbound: any connection whose first
+    /// packet already passed the host's own policy has state. Inbound `NEW`
+    /// connections match nothing here.
     ///
-    /// What this rule does accept is the continuation of a flow whose state
-    /// already exists -- which includes a flow the *host* authorized inbound,
-    /// not only one this chain accepted outbound. That is what stateful
-    /// filtering means and it is not a widening: the connection's first packet
-    /// still had to pass the host's own policy. Inbound *new* connections
-    /// match nothing here and are left to that policy exactly as before.
-    ///
-    /// It deliberately accepts rather than jumping to the chain, even though
-    /// the chain carries an `ESTABLISHED,RELATED` rule of its own that would
-    /// match. The chain's other rules are written against `-d <destination>`
-    /// for egress, so an inbound packet that is not established would be
-    /// tested against egress-shaped rules and, under an `allow` default, hit
-    /// the chain's closing ACCEPT. That would quietly turn this into an
-    /// inbound enforcement surface with the wrong semantics -- a separate
-    /// control, tracked separately, and not something to acquire as a side
-    /// effect of fixing the reply path.
+    /// It accepts rather than jumping to the chain, even though the chain
+    /// carries an `ESTABLISHED,RELATED` rule of its own that would match. The
+    /// chain's other rules are written against `-d <destination>` for egress,
+    /// so an inbound packet that is not established would be tested against
+    /// egress-shaped rules and, under an `allow` default, hit the chain's
+    /// closing ACCEPT -- making this an inbound enforcement surface carrying
+    /// egress semantics.
     fn build_forward_return_iface_rule_args(op: &str, iface: &str) -> Vec<String> {
         vec![
             op.to_string(),
@@ -701,12 +679,11 @@ impl NetworkIptablesManager {
 
     /// Whether a programmed destination accepts every address in its family.
     ///
-    /// Only a prefix length of zero qualifies. That is the one case where an
-    /// allow rule can be shown, without knowing the address, to cover a
-    /// blocked host that failed to resolve -- which is what makes it a hard
-    /// error rather than a warning in [`Self::build_policy_rules_logged`]. A
-    /// bare literal or any longer prefix names a bounded set, so it carries no
-    /// such proof.
+    /// The question is provable coverage, not likely coverage. A prefix length
+    /// of zero covers an unknown address without anyone having to know what
+    /// that address is; a literal or any longer prefix names a bounded set that
+    /// an unresolved host may or may not fall inside, and nothing available
+    /// here can decide which. Only the first is treated as coverage.
     fn covers_every_address(destination: &str) -> bool {
         destination
             .split_once('/')
@@ -925,16 +902,12 @@ impl NetworkIptablesManager {
 
     /// Build the ACCEPT rules that open the proxy endpoints, and nothing else.
     ///
-    /// These are the only allow rules a proxied chain carries. They are emitted
-    /// straight before the closing DROP from
-    /// [`Self::build_default_policy_rule_arg`], so the chain reads "the proxy,
-    /// then nothing".
+    /// These are the only allow rules a proxied chain carries; every other
+    /// destination is left to the chain's closing DROP.
     ///
-    /// IPv4 only, so the caller must not run these through `ip6tables`: the
-    /// endpoints come from [`Self::resolve_proxy_endpoints`], which refuses an
-    /// IPv6 proxy rather than programming a rule for it. A proxied IPv6 chain
-    /// therefore holds its closing DROP alone, which is the fail-closed
-    /// outcome -- IPv6 egress is denied rather than left open.
+    /// The rules are IPv4 only, so they must not be run through `ip6tables`. A
+    /// proxied IPv6 chain therefore holds its closing DROP alone, which is the
+    /// fail-closed outcome -- IPv6 egress is denied rather than left open.
     fn build_proxy_chain_rule_args(
         chain_name: &str,
         endpoints: &[ProxyEndpoint],
@@ -960,10 +933,11 @@ impl NetworkIptablesManager {
 
     /// Whether `host` is an IPv6 literal (bracketed `[..]` or bare).
     ///
-    /// The proxy firewall rule is emitted with IPv4 `iptables` only, so an IPv6
-    /// proxy endpoint cannot be enforced. It must be rejected explicitly rather
-    /// than passed through IPv4-only endpoint selection, which would drop it and
-    /// leave a deny-all container whose proxy was silently discarded.
+    /// An IPv6 proxy endpoint cannot be enforced, since the proxy rules are
+    /// emitted with IPv4 `iptables` only. It needs naming as its own case
+    /// because the failure would otherwise be silent: an IPv6 literal yields
+    /// no IPv4 endpoint, and a proxied chain with no endpoints is a deny-all
+    /// container whose proxy was discarded.
     fn host_is_ipv6_literal(host: &str) -> bool {
         let candidate = host
             .strip_prefix('[')
@@ -986,20 +960,17 @@ impl NetworkIptablesManager {
     /// Resolve the policy's proxy into the destinations the chain will allow,
     /// and the hosts-file pin the container needs to agree with them.
     ///
-    /// Returns an empty vector when the policy carries no proxy, which is what
-    /// puts the chain back on the ordinary allow/block path.
+    /// Both come out of a single lookup. Two lookups of one name can disagree
+    /// -- DNS round-robin returns a different order, or a TTL expires between
+    /// the calls -- and a container pinned to an address this chain did not
+    /// authorize cannot reach its proxy at all. A pin of `None` means the
+    /// configured address is already an IP literal, which needs no pinning.
     ///
-    /// The pin is produced from this same resolution rather than from a second
-    /// lookup. Two lookups of one name can disagree -- DNS round-robin returns
-    /// a different order, or a TTL expires between the calls -- and a container
-    /// pinned to an address this chain did not authorize cannot reach its
-    /// proxy at all. `None` means no pin is needed because the address is
-    /// already an IP literal.
-    ///
-    /// Every resolved IPv4 address is opened, not just the pinned one. They are
-    /// all addresses of the configured proxy host, so the posture is unchanged,
-    /// and a client that resolves the name through something other than
-    /// `/etc/hosts` still reaches the proxy instead of being dropped.
+    /// The chain opens every resolved IPv4 address rather than the pinned one
+    /// alone. They are all addresses of the same configured host, so the
+    /// posture is unchanged, and a client that resolves the name through
+    /// something other than the pin still reaches the proxy instead of being
+    /// dropped.
     fn resolve_proxy_endpoints(
         policy: &ContainerPolicy,
         logger: &mut Logger,
@@ -1062,10 +1033,9 @@ impl NetworkIptablesManager {
     /// Build the hosts-file pin that makes the container resolve the proxy
     /// hostname to `ip`.
     ///
-    /// Under "deny all except the proxy" the chain opens no port 53, so the
-    /// container has no resolver to reach: the pin is what lets it find the
-    /// proxy at all, and it also stops the container selecting an address the
-    /// chain never allowed.
+    /// A proxied chain opens no port 53, so the container has no resolver to
+    /// reach: the pin is what lets it find the proxy at all, and it also stops
+    /// the container selecting an address the chain never allowed.
     fn build_proxy_host_pin(
         address: &ProxyAddress,
         ip: &str,
@@ -1154,9 +1124,7 @@ impl NetworkIptablesManager {
     /// warning pass.
     ///
     /// This shim panics on the unresolvable-block-entry error so that the many
-    /// rulegen assertions over well-formed policies keep a plain return type. A
-    /// test that exercises the error path must call
-    /// [`Self::build_policy_rules_logged`] directly and inspect the `Result`.
+    /// rulegen assertions over well-formed policies keep a plain return type.
     #[cfg(test)]
     fn build_policy_rule_args(chain_name: &str, policy: &ContainerPolicy) -> FirewallRuleArgs {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
@@ -1176,43 +1144,21 @@ impl NetworkIptablesManager {
     /// expires between the calls — so the rule installed would not match the
     /// rule that was validated and logged.
     ///
-    /// Deny-precedence (AB#62830341): block-list rules are emitted before
-    /// allow-list rules, and iptables/ip6tables apply first-match-wins within
-    /// the chain, so a destination present in both lists is DROPped. Emission
-    /// order is the entire precedence mechanism — there is no separate
-    /// resolution pass — so swapping these two iterators silently reverses the
-    /// security semantics of every policy whose lists overlap.
+    /// Deny-precedence (AB#62830341) is emission order and nothing else:
+    /// block-list rules are emitted before allow-list rules, and
+    /// iptables/ip6tables apply first-match-wins within the chain, so a
+    /// destination present in both lists is DROPped. There is no separate
+    /// reconciliation pass, so exchanging these two iterators reverses the
+    /// security semantics of every policy whose lists overlap and produces no
+    /// other symptom.
     ///
-    /// A block entry that resolves to nothing programs no rule. That is a
-    /// containment failure only when something else would then permit the
-    /// destination, so the response depends on the default policy. Under
-    /// [`NetworkPolicy::Allow`] the chain ends in ACCEPT and the unwritten deny
-    /// rule was the only thing that would have stopped the traffic, so the
-    /// apply fails closed with an error rather than reporting success over a
-    /// policy it did not enforce. Under [`NetworkPolicy::Block`] the closing
-    /// DROP already denies every destination the allow list did not name, so an
-    /// unresolvable block entry is redundant rather than missing — the ordinary
-    /// case being a blocklist naming a host that does not exist at all — and a
-    /// warning is the proportionate response.
-    ///
-    /// That reasoning holds only while the closing DROP is what the traffic
-    /// actually reaches. An allow rule is evaluated first, and since
-    /// `resolve_host` passes CIDRs through unchanged, one entry can legally
-    /// cover the whole address space. A `/0` allow therefore accepts whatever
-    /// the unresolvable deny would have named, whatever that turns out to be,
-    /// so under [`NetworkPolicy::Block`] that combination fails closed too.
-    ///
-    /// Allows narrower than `/0` stay a warning. They name a bounded set the
-    /// operator vouched for, the closing DROP still denies everything outside
-    /// it, and nothing available here shows the missing deny falls inside it.
-    /// Failing those as well would reject the ordinary policy described above
-    /// — an allowlist beside a blocked host that no longer exists — and the
-    /// cheapest way to satisfy such an error is to delete the blocklist entry,
-    /// which leaves the deployment less protected than the warning did.
-    ///
-    /// An unresolvable allow entry is always a warning: it withholds traffic
-    /// that was meant to be permitted, which costs availability and cannot
-    /// widen what the container can reach.
+    /// An entry that resolves to nothing programs no rule, and the two
+    /// directions are not symmetric. An unwritten deny leaves reachable a
+    /// destination the operator named as unreachable, so it is a hard error
+    /// wherever something else in the chain would accept that destination.
+    /// An unwritten allow only withholds traffic that was meant to be
+    /// permitted, which costs availability and can never widen what the
+    /// container reaches, so it is always a warning.
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
@@ -1588,10 +1534,11 @@ impl NetworkIptablesManager {
     /// `MXC-<name>` chain ("chain already exists") and a partial failure never
     /// tears down a chain this attempt did not create.
     ///
-    /// A policy carrying a proxy is resolved here, once, before any rule is
-    /// installed. The resulting endpoints are what the chain opens and the
-    /// recorded [`Self::proxy_host_pin`] is what the container must be given,
-    /// so both sides name the address a single lookup returned.
+    /// A proxied policy whose proxy is named rather than an IP literal also
+    /// produces [`Self::proxy_host_pin`], which the caller must give the
+    /// container before it runs. A proxied chain opens no port 53, so a
+    /// container started without that pin cannot resolve the proxy name and
+    /// reaches nothing at all.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
@@ -2067,22 +2014,20 @@ impl NetworkIptablesManager {
     /// a signal arriving mid-apply sees an empty set, removes nothing, and
     /// leaks the partially created chain.
     ///
-    /// FORWARD hooks go further and are claimed *before* the `-I` runs, because
-    /// "after the command returns" still leaves a window: the kernel has the
-    /// rule, this process has not yet recorded it, and a signal landing there
-    /// leaves an installed hook absent from the snapshot. Cleanup then skips
-    /// it, and the surviving hook holds a reference that keeps the chain
-    /// undeletable. Claiming first inverts the failure into an over-claim, and
-    /// an over-claimed hook is harmless: removal is by full rule specification,
-    /// which names this attempt's own chain, so a `-D` that matches nothing is
-    /// a no-op and cannot disturb another container.
+    /// FORWARD hooks are claimed *before* their `-I` runs, and chains are
+    /// deliberately not claimed before their `-N`. The asymmetry is in the two
+    /// iptables commands. `-I` always inserts, so claiming early can only
+    /// over-claim, and an over-claimed hook is harmless: removal is by full
+    /// rule specification, which names this attempt's own chain, so a `-D` that
+    /// matches nothing is a no-op. `-N` fails when the name is already taken,
+    /// and the chain holding that name belongs to someone else, so claiming
+    /// early would let the rollback of a failed create delete a live chain --
+    /// trading a leak for the removal of another container's enforcement.
     ///
-    /// Chains are deliberately *not* claimed ahead of their `-N`. Unlike `-I`,
-    /// which always inserts, `-N` fails when the name is already taken -- and
-    /// the pre-existing chain in that case belongs to someone else. Claiming
-    /// first would let the rollback of a failed create delete a live chain this
-    /// attempt did not install, trading a leak for the removal of another
-    /// container's enforcement.
+    /// The window an early claim closes is between the command returning and
+    /// the record being written: a signal landing there leaves an installed
+    /// hook absent from the snapshot, cleanup skips it, and the surviving hook
+    /// holds a reference that keeps the chain undeletable.
     fn publish_created(created: &CreatedResources) {
         crate::signal_cleanup::set_active_created(*created);
     }

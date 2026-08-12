@@ -448,12 +448,15 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
 
 // ---------- Conversion from wire model to domain model ----------
 
-/// Whether `host` is a loopback endpoint that a container cannot reach through
-/// its own network namespace: 127.0.0.0/8, ::1, or the name "localhost".
+/// Whether `host` names a loopback endpoint: 127.0.0.0/8, ::1, or the name
+/// "localhost".
 ///
-/// Accepts bracketed IPv6 literals (e.g. `[::1]`) as stored by the proxy URL
-/// parser. Used to reject loopback proxy hosts under the LXC deny-all model,
-/// where the container's loopback is not the host's.
+/// Inside a container's network namespace a loopback address names the
+/// container's own loopback rather than the host's, so an endpoint reachable
+/// that way on the host is not reachable from the container.
+///
+/// Brackets are stripped first: a URL host component keeps them around an IPv6
+/// literal, and that is the form a parsed proxy URL stores.
 fn host_is_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;

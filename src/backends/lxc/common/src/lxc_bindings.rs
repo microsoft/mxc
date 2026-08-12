@@ -68,11 +68,10 @@ pub fn resolve_default_lxcpath() -> String {
     resolve_lxcpath_with_env(|k| std::env::var(k).ok(), current_euid)
 }
 
-/// Test-only convenience wrapper over [`build_attach_args_with_env_control`]
-/// that hardcodes `force_clear_env = false` (the legacy behavior). Kept
-/// `#[cfg(test)]`-only because production code always calls the
-/// `_with_env_control` variant directly, so compiling this wrapper outside
-/// tests would trip the dead-code lint.
+/// The keep-env argv shape, for tests that do not exercise env control.
+///
+/// No production caller wants it, so outside `cfg(test)` this is dead code,
+/// and the workspace clippy lane runs with `-D warnings`.
 #[cfg(test)]
 fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> Vec<String> {
     build_attach_args_with_env_control(env, working_directory, command, false)
@@ -85,9 +84,10 @@ fn build_attach_args(env: &[String], working_directory: &str, command: &str) -> 
 /// actually spawning `lxc-attach`. See [`LxcContainer::attach_run`] for
 /// the full contract.
 ///
-/// `force_clear_env` forces `--clear-env` even when `env` is empty, so a
-/// fully-scrubbed proxy env can't silently fall back to inheriting the
-/// host's variables.
+/// An empty `env` is ambiguous: it is both "the caller expressed no opinion"
+/// and "a scrub removed every entry there was". `force_clear_env` is how a
+/// caller says which one it means, because only the second still has to shut
+/// the host environment out.
 ///
 /// Gated to Linux + test builds because `attach_run` is a Windows stub
 /// that never calls this helper, and the workspace clippy lane on
@@ -314,10 +314,11 @@ impl LxcContainer {
     ///
     /// When `env` is empty, the legacy keep-env behavior is preserved so
     /// existing call sites without explicit env are undisturbed unless
-    /// `force_clear_env` is true. The LXC runner uses `force_clear_env`
-    /// after proxy-env scrubbing removes every caller-supplied proxy entry;
-    /// that still must clear inherited proxy variables instead of falling
-    /// back to keep-env mode.
+    /// `force_clear_env` is true. An empty `env` is ambiguous -- it is both
+    /// "no caller opinion" and "a scrub removed every entry there was" -- and
+    /// keep-env is only the right reading of the first, because it is the
+    /// mode under which this process's own environment, proxy variables and
+    /// host credentials included, reaches the container.
     ///
     /// We pass `unblock_signals = [SIGHUP, SIGTERM, SIGINT]` because
     /// [`crate::signal_cleanup::install`] blocks them in this process so

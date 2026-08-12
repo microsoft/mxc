@@ -497,15 +497,13 @@ fn needs_iptables_rules(request: &ExecutionRequest) -> bool {
 
 /// Build the iptables manager for a Bubblewrap sandbox.
 ///
-/// Unprivileged bwrap has no veth to scope a chain to: the sandbox either
-/// shares the host network namespace or gets a private one, and neither yields
-/// a host-side interface to match on (see `local_network_diagnostic` in
-/// `bwrap_command`). A missing veth is therefore structural here, not a failed
-/// lookup, so the manager is told not to fail closed on it. Without that, every
-/// Bubblewrap sandbox requesting firewall enforcement would refuse to start.
-///
-/// This lives in its own function so the declaration is covered by a test;
-/// inlined at the call site, deleting it broke nothing that any test could see.
+/// Unprivileged bwrap has no veth: the sandbox either shares the host network
+/// namespace or gets a private one, and neither leaves a host-side interface
+/// for a chain to match on (see `local_network_diagnostic` in
+/// `bwrap_command`). The absence is structural, not a lookup that failed, and
+/// that distinction is the whole of what makes it safe to accept here: there
+/// is no case in this backend where a veth was expected and went missing, so
+/// accepting one cannot mask a discovery that broke.
 fn build_firewall_manager(container_name: &str) -> NetworkIptablesManager {
     let mut mgr = NetworkIptablesManager::new(container_name);
     mgr.allow_missing_veth_interface();

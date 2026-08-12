@@ -393,35 +393,36 @@ impl LxcScriptRunner {
     /// Build the shell command that installs `hosts_line` into the
     /// container's `/etc/hosts`.
     ///
-    /// Idempotent: a container reused across runs (`destroy_on_exit = false`)
-    /// would otherwise accumulate entries, and the *first* match wins in a
-    /// hosts file, so a stale line would shadow the current pin. Every
-    /// previously written entry is stripped by its marker before the new one
-    /// is appended.
+    /// The first match wins in a hosts file, so an entry left by an earlier
+    /// run on a container reused across runs (`destroy_on_exit = false`) would
+    /// shadow the pin this run authorized. Marking each written line is what
+    /// lets a later run recognize its own without disturbing the ones the
+    /// distribution shipped.
     ///
-    /// The file is rewritten in place rather than with `mv`, because LXC may
-    /// bind-mount `/etc/hosts`; replacing the inode would leave the container
-    /// still reading the old file. Only `grep` and `printf` are used, so this
-    /// runs under BusyBox as well as coreutils.
+    /// LXC may bind-mount `/etc/hosts`, so the file is rewritten in place:
+    /// replacing the inode would leave the container reading the old one. The
+    /// toolset is held to `grep` and `printf` because the image may be BusyBox
+    /// rather than coreutils.
     ///
-    /// The kept lines are staged in a shell variable rather than a scratch
-    /// file. An earlier form wrote them to `/tmp/.mxc-hosts` first, but `/tmp`
-    /// belongs to the container: on a container reused across runs, a previous
-    /// workload can leave that predictable name as a symlink, and `>` follows
-    /// symlinks. This command runs privileged through `lxc-attach`, so the
-    /// redirect would truncate and overwrite whatever the link pointed at --
-    /// another container file, or a host path exposed through a writable bind
-    /// mount. A variable has no name in the filesystem to hijack.
+    /// The kept lines are staged in a shell variable because a scratch file
+    /// has a name in the container's own filesystem and this command runs
+    /// privileged through `lxc-attach`. A previous workload on a reused
+    /// container can pre-create any predictable name as a symlink, and `>`
+    /// follows symlinks, so staging in a file aims a privileged truncating
+    /// write at whatever the link names -- another container file, or a host
+    /// path exposed through a writable bind mount. A variable has no name to
+    /// hijack.
     ///
-    /// Staging in a variable also removes a failure window rather than adding
-    /// one. The substitution completes before the redirect opens `/etc/hosts`,
-    /// so the only commands running against the truncated file are `printf`
-    /// builtins operating on text already in memory.
+    /// Staging must also finish before the redirect opens `/etc/hosts`,
+    /// because `>` truncates on open. Past that point nothing reads the
+    /// filesystem again: what remains works from text already in memory, so
+    /// no read failure can strand a file that has already been emptied.
     ///
-    /// The line is single-quoted, which is safe by construction:
-    /// `ProxyHostPin` can only be built from a validated hostname and a parsed
-    /// [`std::net::IpAddr`], so it cannot contain a quote, a space, or a
-    /// newline.
+    /// Single-quoting `hosts_line` is safe by construction: `ProxyHostPin`
+    /// builds it from a parsed [`std::net::IpAddr`] and a validated
+    /// hostname, neither of which can carry a quote or a newline. The one
+    /// space it does contain is the hosts-file separator, and single quotes
+    /// render that inert.
     fn build_hosts_pin_command(hosts_line: &str) -> String {
         // `$(...)` strips trailing newlines, so the kept text is re-emitted
         // with an explicit one and the guard keeps an empty result from
@@ -441,41 +442,40 @@ impl LxcScriptRunner {
     /// opens the file for writing.
     ///
     /// `> /etc/hosts` truncates the moment it is opened, so every reason the
-    /// read could fail has to be settled first. Discarding grep's status
-    /// leaves `$kept` empty whenever `grep` is absent, `/etc/hosts` is
-    /// unreadable, or the binary is killed -- the redirect then truncates the
-    /// file and the closing `printf` exits 0, recording a successful pin over
-    /// a hosts file emptied of every entry the image shipped.
+    /// read could fail has to be settled before that point. Were the status
+    /// left unexamined, the failure would run in the worst possible
+    /// direction: `$kept` would be empty whether `grep` is absent,
+    /// `/etc/hosts` is unreadable, or the binary is killed, and the closing
+    /// `printf` would still exit 0 -- a successful pin reported over a hosts
+    /// file emptied of every entry the image shipped.
     ///
-    /// Only status 0 (lines kept) and status 1 (nothing kept) are outcomes.
-    /// Status 1 is legitimate and common: an empty file, or a re-pin where
-    /// every existing line carries the marker. Anything above 1 is a failed
-    /// read, and `127` additionally covers a missing `grep`. A missing file is
-    /// separated out first, because grep cannot distinguish "absent" from
-    /// "unreadable" -- both are status 2 -- and an image that ships no
+    /// Only 0 (lines kept) and 1 (nothing kept) are outcomes rather than
+    /// failures. Status 1 is legitimate and common: an empty file, or a re-pin
+    /// where every existing line carries the marker. Anything above 1 is a
+    /// failed read, which also catches the `127` a missing `grep` produces. A
+    /// missing file is separated out ahead of the read because `grep` reports
+    /// both "absent" and "unreadable" as status 2, and an image that ships no
     /// `/etc/hosts` has no content to protect.
     ///
     /// Two gaps survive this guard, and neither is closable while the command
     /// is restricted to `grep` and `printf` for BusyBox:
     ///
     /// * A successful read still loses NUL bytes, because a shell variable
-    ///   cannot hold them. A hosts file containing one would be rewritten
-    ///   truncated at that byte with status 0, and no assertion here would
-    ///   notice. A NUL in `/etc/hosts` is malformed to begin with, and every
-    ///   alternative -- a scratch file, `sed`, `awk` -- reintroduces either the
-    ///   symlink target this design removed or a dependency BusyBox may lack.
+    ///   cannot hold them. A hosts file containing one is rewritten truncated
+    ///   at that byte with status 0, and no check here observes it. A NUL in
+    ///   `/etc/hosts` is malformed to begin with, and the alternatives -- a
+    ///   scratch file, `sed`, `awk` -- each cost either a filesystem name an
+    ///   attacker can hijack or a tool BusyBox may not ship.
     ///
-    /// * A symlink *swapped in* between the `-h` test and the redirect is
-    ///   still followed. That is a genuine race, and closing it needs an
-    ///   open-once-and-rewrite primitive -- `openat` with `O_NOFOLLOW` inside
-    ///   the container's mount namespace -- which is a Rust-side change rather
-    ///   than a shell one. What the `-h` test does close is the case that
-    ///   needs no race at all: a workload reused across runs can *leave*
-    ///   `/etc/hosts` as a symlink. A dangling one is the worst shape,
-    ///   because it fails `-e` -- a read guarded on `-e` alone is skipped and
-    ///   the redirect then creates the link's target, a write to an
-    ///   attacker-named path, which on a writable host bind mount lands
-    ///   outside the container.
+    /// * A symlink swapped in between the `-h` test and the redirect is still
+    ///   followed. Closing that race needs an open-once-and-rewrite primitive
+    ///   -- `openat` with `O_NOFOLLOW` inside the container's mount namespace
+    ///   -- which is a Rust-side change rather than a shell one. The `-h` test
+    ///   covers the unraced shape: a workload reused across runs can simply
+    ///   leave `/etc/hosts` as a symlink. A dangling one is the worst of
+    ///   those, because it fails `-e` as well, and a redirect onto a dangling
+    ///   link creates the link's target -- a write to an attacker-named path,
+    ///   which on a writable host bind mount lands outside the container.
     fn hosts_read_prologue() -> String {
         format!(
             "if [ -h /etc/hosts ]; then \
@@ -498,17 +498,12 @@ impl LxcScriptRunner {
 
     /// Strip every pin this runner has ever written from `/etc/hosts`.
     ///
-    /// Re-pinning is self-cleaning because it filters the marker out before
-    /// appending, but a run that pins *nothing* never reaches that path. On a
-    /// container kept alive across runs the previous pin would then survive
-    /// into a policy that never authorized it, and a hostname the new policy
-    /// resolves fresh -- to build a DROP rule, say -- would still be reached at
-    /// the stale address. The deny would be written against one address and
-    /// evaded at another.
-    ///
-    /// Uses the same rewrite-in-place form as the pin, for the same
-    /// bind-mount reason, and the same variable staging for the same
-    /// symlink reason.
+    /// Only a run that pins something removes the previous pin on its way
+    /// past, so a run that pins nothing needs its own removal. Left in place
+    /// on a container kept alive across runs, a stale pin outlives the policy
+    /// that authorized it: the new policy resolves the hostname fresh to build
+    /// its rules, so a deny would be written against one address while the
+    /// container still reaches the other.
     fn build_hosts_unpin_command() -> String {
         format!(
             "{}{{ if [ -n \"$kept\" ]; then printf '%s\\n' \"$kept\"; fi; }} > /etc/hosts",
@@ -892,10 +887,9 @@ mod hosts_command_execution {
             std::fs::read_to_string(self.hosts()).expect("the fixture should be readable")
         }
 
-        /// A `PATH` carrying a `grep` that fails with `status`, so the read can
-        /// be broken without breaking the shell around it. `printf` and `[` are
-        /// builtins and survive the override; everything else still resolves
-        /// through the inherited `PATH` behind the shim.
+        /// A `PATH` carrying a `grep` that fails with `status`, so the read
+        /// can be broken without breaking the shell around it: `printf` and
+        /// `[` are builtins and survive the override.
         fn path_with_failing_grep(&self, status: i32) -> String {
             use std::os::unix::fs::PermissionsExt;
 
@@ -930,10 +924,10 @@ mod hosts_command_execution {
         }
     }
 
-    /// Point a generated command at a scratch file. Only the path moves: the
-    /// existence check, the read, the status guard, and the redirect are the
-    /// generated text unmodified. That the real target is `/etc/hosts` is
-    /// pinned separately, by the string tests above.
+    /// Point a generated command at a scratch file, so what runs is the
+    /// generated text with only the path substituted. That the real target is
+    /// `/etc/hosts` is not left unpinned by the substitution; the string tests
+    /// above pin it.
     fn retarget(command: &str, hosts: &Path) -> String {
         command.replace(
             "/etc/hosts",

@@ -113,9 +113,10 @@ fn assert_deny_precedence(
     }
 }
 
-/// Unwrap `result`, panicking with the `Err` payload if it is an `Err`.
-/// Never formats the `Ok` payload, since `FirewallRuleArgs` is not
-/// documented to implement `Debug`.
+/// Unwrap `result`, panicking with the `Err` payload.
+///
+/// `.unwrap()` would require `Debug` on the `Ok` type, which
+/// `FirewallRuleArgs` is not documented to implement.
 fn expect_ok(result: Result<FirewallRuleArgs, String>, context: &str) -> FirewallRuleArgs {
     match result {
         Ok(args) => args,

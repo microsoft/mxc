@@ -359,10 +359,8 @@ impl ProxyHostPin {
     /// Render this pin as a `/etc/hosts` line.
     ///
     /// The address is written bare. A hosts file takes an unbracketed IPv6
-    /// literal, unlike a URL host component, and [`IpAddr`]'s `Display` is
-    /// already that bare form -- so the difference from
-    /// [`ProxyAddress::to_url`], which brackets, is structural rather than a
-    /// convention a caller could forget.
+    /// literal where a URL host component requires brackets, so this rendering
+    /// and [`ProxyAddress::to_url`] differ on the same address by design.
     pub fn hosts_line(&self) -> String {
         format!("{} {}", self.ip, self.hostname)
     }
@@ -405,10 +403,10 @@ impl ProxyAddress {
     /// Returns the proxy URL. Uses the original URL if one was provided,
     /// otherwise constructs one from this address and port.
     ///
-    /// The constructed form names [`Self::address`] rather than assuming
-    /// loopback. A proxy bound to a non-loopback address is reachable through
-    /// [`ProxyAddress::new`], and reporting `127.0.0.1` for it would hand the
-    /// sandbox a different endpoint from the one the firewall authorized.
+    /// The address is never assumed to be loopback. The URL the sandbox is
+    /// given and the endpoint the firewall authorized have to name the same
+    /// proxy, so a fixed `127.0.0.1` would be wrong for a proxy not bound
+    /// there.
     pub fn to_url(&self) -> String {
         if let Some(url) = &self.original_url {
             return url.clone();
@@ -423,24 +421,21 @@ impl ProxyAddress {
     /// Returns the pin required for a sandbox to resolve this proxy's hostname
     /// to `ip`.
     ///
-    /// `Ok(None)` means no pin is needed: the address is already an IP
-    /// literal, so there is nothing to resolve and nothing a sandbox could
+    /// `Ok(None)` means no pin is needed, because the address is already an IP
+    /// literal: there is nothing to resolve, and so nothing a sandbox could
     /// resolve differently.
     ///
-    /// `Err` means a pin is needed but cannot be produced, because the address
-    /// is empty or contains characters that are not valid in a hostname. This
-    /// is deliberately an error rather than `None`. Returning `None` would tell
-    /// the caller "no hosts entry required", so a malformed address would
-    /// silently skip the pin and let the sandbox re-resolve the name freely --
-    /// failing open, which is the defect review objected to elsewhere in this
-    /// work. A proxy whose endpoint cannot be pinned must not run.
+    /// `Err` means a pin is needed and cannot be produced -- the address is
+    /// empty, or holds characters a hostname cannot. That is an error rather
+    /// than `None` because `None` reads as "no hosts entry required", which
+    /// would let a malformed address silently skip the pin and leave the
+    /// sandbox free to re-resolve the name. A proxy whose endpoint cannot be
+    /// pinned must not run.
     ///
-    /// Taking an [`IpAddr`] rather than a string means the caller has already
-    /// resolved the name, and makes an unparseable address unrepresentable
-    /// here.
+    /// The [`IpAddr`] parameter puts resolution on the caller and leaves an
+    /// unparseable address unrepresentable here.
     ///
-    /// The URL is deliberately left untouched. See [`ProxyHostPin`] for why
-    /// rewriting the host to `ip` instead would break TLS.
+    /// The URL keeps its hostname; [`ProxyHostPin`] carries the reason.
     pub fn host_pin(&self, ip: IpAddr) -> Result<Option<ProxyHostPin>, WxcError> {
         let hostname = Self::unbracket(&self.address);
 
@@ -468,10 +463,9 @@ impl ProxyAddress {
     /// Whether `host` is safe to write as the name column of a hosts file
     /// entry.
     ///
-    /// Rejects the empty string and anything outside the letter, digit, `-`,
-    /// and `.` set. That set excludes whitespace and newlines, which is the
-    /// property that matters: either would end the record and inject a second,
-    /// unauthorized mapping.
+    /// What matters about the allowed set is what it leaves out: a space or a
+    /// newline would end the record, so a hostname carrying one would write
+    /// further mappings for names the policy never authorized.
     fn is_pinnable_hostname(host: &str) -> bool {
         !host.is_empty()
             && host
@@ -482,9 +476,9 @@ impl ProxyAddress {
     /// Wraps `host` in `[` `]` when it is a bare IPv6 literal, so it is valid
     /// as a URL host component.
     ///
-    /// An already-bracketed literal needs no special case. `IpAddr::from_str`
-    /// does not accept brackets, so a bracketed host fails to parse and falls
-    /// through unchanged rather than being bracketed twice.
+    /// Double bracketing needs no guard: `IpAddr::from_str` rejects brackets,
+    /// so an already-bracketed literal fails to parse and passes through
+    /// unchanged.
     fn bracket_if_ipv6(host: &str) -> std::borrow::Cow<'_, str> {
         match host.parse::<IpAddr>() {
             Ok(IpAddr::V6(_)) => std::borrow::Cow::Owned(format!("[{host}]")),
