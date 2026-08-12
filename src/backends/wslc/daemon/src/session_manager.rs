@@ -25,8 +25,11 @@
 //! output flows over the sink. (Client `Stdin` forwarding is a later fill-in.)
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
 use wslc_common::container_steps::{self, OutStream, OutputSink, ProcessSettings};
@@ -149,8 +152,11 @@ pub type OutputChunk = (OutStream, Vec<u8>);
 /// unbounded) so a container emitting output faster than a slow client drains it
 /// cannot grow the queue without limit and OOM the persistent daemon, taking
 /// down every sandbox it owns — the same hazard the capture-buffer cap guards
-/// against. When the queue is full the sink applies backpressure (see
-/// [`SessionHandle::exec`]) rather than dropping bytes.
+/// against. When the queue is full the sink does **not** block (see
+/// [`enqueue_output`]): it latches a truncation flag and drops further bytes so
+/// the SDK callback thread — which also delivers the process-exit callback — is
+/// never parked. Stalling that thread could otherwise block exit delivery and
+/// wedge teardown for every sandbox sharing the daemon.
 const LIVE_OUTPUT_CHANNEL_CAPACITY: usize = 256;
 
 /// Max bytes per enqueued live-output chunk. A single SDK callback can deliver
@@ -163,22 +169,50 @@ const LIVE_OUTPUT_MAX_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Enqueue an SDK output callback, splitting it into `LIVE_OUTPUT_MAX_CHUNK_BYTES`
 /// pieces so each queue entry and its resulting frame stay bounded regardless of
-/// the callback's buffer size. Stops early once the receiver is gone (client
-/// left / leak-path `close()`), so a leaked callback never parks forever.
-fn enqueue_output(tx: &mpsc::Sender<OutputChunk>, kind: OutStream, bytes: &[u8]) {
+/// the callback's buffer size.
+///
+/// This runs **synchronously on the SDK's I/O callback thread**, which also
+/// delivers the process-exit callback. It must therefore never block: a
+/// [`try_send`](mpsc::Sender::try_send) that finds the bounded queue full does
+/// **not** apply backpressure (that would park this thread and could deadlock
+/// exit delivery and teardown for every sandbox on the daemon). Instead it
+/// latches `overflowed` and stops enqueuing; the pipe handler turns a latched
+/// overflow into a terminal `Error` frame so the client sees an explicit
+/// truncation rather than a silently short stream. Once latched, subsequent
+/// callbacks return immediately so the client receives a clean truncated prefix
+/// rather than a gapped stream. A closed receiver (client left / leak-path
+/// `close()`) likewise stops enqueuing.
+fn enqueue_output(
+    tx: &mpsc::Sender<OutputChunk>,
+    overflowed: &AtomicBool,
+    kind: OutStream,
+    bytes: &[u8],
+) {
+    if overflowed.load(Ordering::Relaxed) {
+        return;
+    }
     for chunk in bytes.chunks(LIVE_OUTPUT_MAX_CHUNK_BYTES) {
-        if tx.blocking_send((kind, chunk.to_vec())).is_err() {
-            break;
+        match tx.try_send((kind, chunk.to_vec())) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                overflowed.store(true, Ordering::Relaxed);
+                return;
+            }
+            Err(TrySendError::Closed(_)) => return,
         }
     }
 }
 
-/// An admitted exec: the completion receiver (the run's exit code) plus the
-/// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames.
+/// An admitted exec: the completion receiver (the run's exit code), the
+/// live-output receiver the pipe handler drains into `Stdout`/`Stderr` frames,
+/// and the `overflowed` latch the sink sets when it had to drop output because a
+/// slow client let the bounded queue fill. The pipe handler reports a set latch
+/// as a terminal `Error` frame.
 #[derive(Debug)]
 pub struct ExecStream {
     pub done: oneshot::Receiver<Result<i32, WorkerError>>,
     pub output: mpsc::Receiver<OutputChunk>,
+    pub overflowed: Arc<AtomicBool>,
 }
 
 /// A cheap, clonable handle async tasks use to drive the worker thread.
@@ -215,15 +249,18 @@ impl SessionHandle {
         let (done, done_rx) = oneshot::channel();
         let (stream_tx, output) = mpsc::channel::<OutputChunk>(LIVE_OUTPUT_CHANNEL_CAPACITY);
         // The sink is invoked from the SDK's I/O callback threads (native OS
-        // threads, never the async runtime). `blocking_send` on the bounded
-        // channel parks that thread when the queue is full, propagating
-        // backpressure to the container's stdout/stderr pipe — the container
-        // blocks producing until the pipe handler drains, so memory stays
-        // bounded and no output bytes are dropped. A closed receiver (client
-        // gone, or the leak-path `close()` in the pipe handler) makes the send
-        // return `Err`, so a leaked callback never parks forever.
+        // threads, never the async runtime). Those same threads deliver the
+        // process-exit callback, so the sink must never block: [`enqueue_output`]
+        // uses a non-blocking `try_send` and, on a full queue, latches
+        // `overflowed` and drops further bytes instead of parking the thread.
+        // Memory stays bounded by the channel capacity; a slow/non-reading
+        // client can no longer wedge exit delivery or teardown for every sandbox
+        // on the daemon. The pipe handler reports a set latch as a terminal
+        // `Error` frame so truncation is explicit rather than silent.
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let sink_overflowed = Arc::clone(&overflowed);
         let sink: OutputSink = Box::new(move |kind, bytes| {
-            enqueue_output(&stream_tx, kind, bytes);
+            enqueue_output(&stream_tx, &sink_overflowed, kind, bytes);
         });
         self.send(WorkerCommand::Exec {
             config,
@@ -235,6 +272,7 @@ impl SessionHandle {
         Ok(ExecStream {
             done: done_rx,
             output,
+            overflowed,
         })
     }
 
@@ -797,7 +835,10 @@ mod tests {
         let payload = vec![b'x'; LIVE_OUTPUT_MAX_CHUNK_BYTES * 3 + 7];
         let producer = tokio::task::spawn_blocking({
             let payload = payload.clone();
-            move || enqueue_output(&tx, OutStream::Stdout, &payload)
+            move || {
+                let overflowed = AtomicBool::new(false);
+                enqueue_output(&tx, &overflowed, OutStream::Stdout, &payload)
+            }
         });
 
         let mut reassembled = Vec::new();
