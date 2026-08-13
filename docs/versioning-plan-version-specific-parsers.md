@@ -367,11 +367,16 @@ dev/
 Add mutable development adapters outside the contract crate:
 
 ```text
-src/core/wxc_common/src/config_contract_adapters/v0_8/
+src/core/wxc_common/src/config_contract_adapters/dev/
   mod.rs
   one_shot.rs
   state_aware.rs
 ```
+
+The development adapter follows the mutable `dev` contract rather than an
+immutable version name. Publication creates a separate frozen versioned adapter
+for the promoted stable contract while `dev` advances to the next development
+version.
 
 The one-shot development request contains the stable candidate surface plus a
 recursively closed one-shot experimental structure.
