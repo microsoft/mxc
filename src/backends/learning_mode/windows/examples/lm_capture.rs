@@ -1,0 +1,223 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! End-to-end validation for the Learning Mode capture lifecycle, independent of the
+//! MXC runner and the `captureDenials` config.
+//!
+//! It drives the full 2-phase sequence against a real child process:
+//!
+//! 1. build a minimal FlatBuffer sandbox spec with the `permissiveLearningMode`
+//!    capability (the token the OS learning-mode path recognises),
+//! 2. [`CaptureSession::begin`] — create the security environment + start the trace,
+//! 3. attach the environment handle through
+//!    `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT` and launch `cmd.exe` with
+//!    `CreateProcessW`,
+//! 4. wait for it to exit,
+//! 5. [`CaptureSession::finish`] — stop and deliver the ETL, close the trace, then close
+//!    the environment,
+//! 6. assert the ETL file was produced (non-empty).
+//!
+//! Run on a feature-enabled Windows build (elevated):
+//!
+//! ```text
+//! cargo run -p learning_mode_windows --example lm_capture
+//! ```
+//!
+//! Exit codes: `0` = ETL produced; `2` = API unavailable / off-feature build; `1` = a
+//! step failed.
+
+#[cfg(not(target_os = "windows"))]
+fn main() {
+    eprintln!("lm_capture is Windows-only");
+    std::process::exit(2);
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    std::process::exit(windows_impl::run());
+}
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use std::path::PathBuf;
+
+    use learning_mode_windows::{
+        CaptureSession, LearningModeApi, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
+        PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+    };
+    use process_security_environment_spec::process_security_environment_layout::{
+        finish_process_security_environment_buffer, ProcessSecurityEnvironment,
+        ProcessSecurityEnvironmentArgs, SchemaVersion,
+    };
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        CreateProcessW, GetExitCodeProcess, WaitForSingleObject, EXTENDED_STARTUPINFO_PRESENT,
+        INFINITE, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+    use windows_core::{PCWSTR, PWSTR};
+
+    /// Build a minimal PSEC 1.0 FlatBuffer carrying the learning-mode capability.
+    fn build_sandbox_spec() -> Vec<u8> {
+        let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(256);
+        let version = SchemaVersion::new(1, 0);
+        // `permissiveLearningMode` is the capability the SandboxEngine functest uses to
+        // exercise the learning-mode trace; it reliably drives recorded events.
+        let capabilities = builder.create_string("permissiveLearningMode");
+        let spec = ProcessSecurityEnvironment::create(
+            &mut builder,
+            &ProcessSecurityEnvironmentArgs {
+                version: Some(&version),
+                capabilities: Some(capabilities),
+                ..Default::default()
+            },
+        );
+        finish_process_security_environment_buffer(&mut builder, spec);
+        builder.finished_data().to_vec()
+    }
+
+    /// Null-terminated, mutable UTF-16 command line for the child.
+    fn wide_command_line() -> Vec<u16> {
+        let cmd = r#"cmd.exe /c echo Hello from the learning-mode sandbox & whoami"#;
+        cmd.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    fn etl_output_path() -> PathBuf {
+        std::env::temp_dir().join(format!("lm_capture_{}.etl", std::process::id()))
+    }
+
+    pub fn run() -> i32 {
+        let secenv_api = match SecurityEnvironmentApi::load() {
+            Ok(api) => api,
+            Err(e) => {
+                eprintln!("SecurityEnvironmentApi::load failed (off-feature build?): {e}");
+                return 2;
+            }
+        };
+        let learning_mode_api = match LearningModeApi::load() {
+            Ok(api) => api,
+            Err(e) => {
+                eprintln!("LearningModeApi::load failed (off-feature build?): {e}");
+                return 2;
+            }
+        };
+
+        let spec = build_sandbox_spec();
+        println!("built sandbox spec: {} bytes", spec.len());
+
+        let session = match CaptureSession::begin(
+            secenv_api,
+            learning_mode_api,
+            &spec,
+            PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
+        ) {
+            Ok(session) => session,
+            Err(e) => {
+                eprintln!("CaptureSession::begin failed: {e}");
+                return 1;
+            }
+        };
+        println!("CaptureSession::begin OK — environment + trace live");
+
+        let exit_code = match launch_and_wait(session.environment()) {
+            Ok(code) => {
+                println!("child exited with code {code}");
+                code
+            }
+            Err(e) => {
+                eprintln!("launch failed: {e}");
+                // `session` drops here → trace closed/discarded + environment closed.
+                return 1;
+            }
+        };
+        let _ = exit_code;
+
+        let etl_path = etl_output_path();
+        if let Err(e) = session.finish(Some(&etl_path)) {
+            eprintln!("CaptureSession::finish failed: {e}");
+            return 1;
+        }
+        println!("CaptureSession::finish OK — trace delivered and closed, environment closed");
+
+        match std::fs::metadata(&etl_path) {
+            Ok(meta) => {
+                println!(
+                    "ETL produced: {} ({} bytes)",
+                    etl_path.display(),
+                    meta.len()
+                );
+                if meta.len() == 0 {
+                    eprintln!("ETL validation failed: file is empty");
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(e) => {
+                eprintln!("expected ETL at {} but none found: {e}", etl_path.display());
+                1
+            }
+        }
+    }
+
+    /// Launch the child inside `environment` and wait for it to exit, returning its exit
+    /// code.
+    fn launch_and_wait(environment: HANDLE) -> Result<u32, String> {
+        let mut cmd = wide_command_line();
+
+        // SAFETY: a zeroed STARTUPINFOW with only `cb` set is valid; the child inherits
+        // the caller's console for stdio (no STARTF_USESTDHANDLES).
+        let mut startup_info: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup_info.cb = u32::try_from(std::mem::size_of::<STARTUPINFOW>())
+            .map_err(|_| "STARTUPINFOW size overflow".to_string())?;
+        let extended_startup = SecurityEnvironmentStartupInfo::new(startup_info, environment, &[])
+            .map_err(|error| error.to_string())?;
+        let mut process_information: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+
+        // SAFETY: `cmd` is mutable and null-terminated; `extended_startup`
+        // owns a valid attribute list containing the live environment handle;
+        // `process_information` is a valid output buffer.
+        unsafe {
+            CreateProcessW(
+                PCWSTR::null(),
+                Some(PWSTR(cmd.as_mut_ptr())),
+                None,
+                None,
+                false,
+                EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                PCWSTR::null(),
+                &extended_startup.startup_info().StartupInfo,
+                &mut process_information,
+            )
+        }
+        .map_err(|error| format!("CreateProcessW failed: {error}"))?;
+
+        // SAFETY: `hProcess` is a valid process handle returned by the launch.
+        let wait = unsafe { WaitForSingleObject(process_information.hProcess, INFINITE) };
+        let result = if wait == WAIT_OBJECT_0 {
+            let mut exit_code: u32 = 0;
+            // SAFETY: `hProcess` is valid and the process has signalled exit.
+            unsafe { GetExitCodeProcess(process_information.hProcess, &mut exit_code) }
+                .map(|()| exit_code)
+                .map_err(|e| format!("GetExitCodeProcess failed: {e}"))
+        } else if wait == WAIT_FAILED {
+            // SAFETY: reads the last-error value set by WaitForSingleObject.
+            let err = unsafe { windows::Win32::Foundation::GetLastError() };
+            Err(format!(
+                "WaitForSingleObject failed (GetLastError = {})",
+                err.0
+            ))
+        } else {
+            Err(format!(
+                "WaitForSingleObject returned unexpected status: {wait:?}"
+            ))
+        };
+
+        // SAFETY: both handles were returned by the launch and are not used again.
+        unsafe {
+            let _ = CloseHandle(process_information.hThread);
+            let _ = CloseHandle(process_information.hProcess);
+        }
+        result
+    }
+}

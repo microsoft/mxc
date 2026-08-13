@@ -1,21 +1,23 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::fmt::Write;
-use std::fs;
+use std::{borrow::Cow, fs};
 
+use crate::config_deserialize;
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    ContainerPolicy, ContainmentBackend, ExecutionRequest, ExperimentalConfig,
-    IsolationSessionConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode, NetworkPolicy,
-    PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig,
-    UiPolicy, WindowsSandboxConfig, WslcConfig,
+    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
+    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
+    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
+    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
+use serde::{Deserialize, Deserializer};
+use serde_json::value::RawValue;
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -31,6 +33,44 @@ pub enum ParseError {
     /// Discriminated as state-aware; conversion to `ParsedStateAwareRequest`
     /// failed. Carries an `MxcError` so the driver can emit a typed envelope.
     StateAware(MxcError),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ErrorOutput {
+    Primary,
+    DiagnosticOnly,
+}
+
+impl ParseError {
+    fn output(&self) -> ErrorOutput {
+        match self {
+            Self::Decode(_) | Self::OneShot(_) => ErrorOutput::Primary,
+            Self::StateAware(_) => ErrorOutput::DiagnosticOnly,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::Decode(error) | Self::OneShot(error) => error.to_string(),
+            Self::StateAware(error) => error.to_string(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(expecting = "a configuration object")]
+struct RequestDiscriminator<'a> {
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    phase: Option<&'a RawValue>,
+    #[serde(borrow, default, deserialize_with = "deserialize_present_raw")]
+    experimental: Option<&'a RawValue>,
+}
+
+fn deserialize_present_raw<'de, D>(deserializer: D) -> Result<Option<&'de RawValue>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    <&RawValue>::deserialize(deserializer).map(Some)
 }
 
 // ---------- Public API ----------
@@ -79,14 +119,16 @@ pub fn load_request_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<ExecutionRequest, WxcError> {
-    let json_str = decode_request_input(input, logger, opts.is_base64)?;
+    let result = (|| {
+        let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
 
-    let cfg: wire::MxcConfig = serde_json::from_str(&json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-    convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+    })();
+    log_one_shot_error(logger, &result);
+    result
 }
 
 /// Build a request from an already-parsed wire-format config [`Value`], running
@@ -101,12 +143,14 @@ pub fn load_request_from_value(
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    let cfg: wire::MxcConfig = serde_json::from_value(config).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+    let result = (|| {
+        let cfg: wire::MxcConfig = config_deserialize::from_value(config)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-    convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command)
+    })();
+    log_one_shot_error(logger, &result);
+    result
 }
 /// driver can pick the right output convention per path (envelope on stdout
 /// for state-aware, diagnostic on stderr for one-shot and pre-discrimination
@@ -135,9 +179,16 @@ pub fn load_mxc_request_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
-    let json_str =
-        decode_request_input(input, logger, opts.is_base64).map_err(ParseError::Decode)?;
-    parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+    let result = (|| {
+        let json_str = decode_request_input_without_logging(input, opts.is_base64)
+            .map_err(ParseError::Decode)?;
+        parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+    })();
+
+    if let Err(error) = &result {
+        log_error(logger, &error.message(), error.output());
+    }
+    result
 }
 
 /// Parse an MXC request from a **raw JSON string** (already decoded — not a file
@@ -148,73 +199,81 @@ pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
 ) -> Result<MxcRequest, ParseError> {
-    parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false)
+    let result = parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false);
+    if let Err(error) = &result {
+        log_error(logger, &error.message(), error.output());
+    }
+    result
 }
 
 /// Shared parse core over an already-decoded JSON string.
+///
+/// Borrows only the discriminator and the raw state-aware backend block, then
+/// deserialises the typed model directly from source text so policy errors
+/// retain line and column information (`serde_json::Value` would discard it).
 fn parse_mxc_request_json(
     json_str: &str,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<MxcRequest, ParseError> {
-    // Parse once into a generic JSON value so we can (a) discriminate one-shot
-    // vs state-aware by presence of the `phase` key and (b) capture the raw
-    // `experimental` block for the state-aware path, where it is typed
-    // per-backend at dispatch time rather than at parse time.
-    let parsed_json: serde_json::Value = serde_json::from_str(json_str).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        ParseError::Decode(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
-    })?;
+    let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
+        .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
 
-    if parsed_json.get("phase").is_some() {
-        convert_wire_state_aware(parsed_json, logger, allow_missing_command)
-            .map(MxcRequest::StateAware)
-            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+    if discriminator.phase.is_some() {
+        convert_wire_state_aware(
+            json_str,
+            discriminator.experimental,
+            logger,
+            allow_missing_command,
+        )
+        .map(MxcRequest::StateAware)
+        .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
-        // Re-deserialize from the source text (not the already-parsed
-        // `parsed_json`) so serde's line/column context is preserved in error
-        // messages on this trust boundary; `from_value` discards it, turning a
-        // typo or out-of-range field into an unlocalised "expected u16"-style dump.
-        let cfg: wire::MxcConfig = serde_json::from_str(json_str).map_err(|e| {
-            logger.log_line("Error parsing JSON");
-            ParseError::OneShot(WxcError::ConfigParse(format!("JSON parse error: {}", e)))
-        })?;
+        let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
+            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
 }
 
-/// Reads a request from disk or decodes it from base64. Public so the driver
-/// can decode once and reuse the JSON across multiple parse attempts; the
-/// internal `load_request` and `load_mxc_request` use it too.
-pub fn decode_request_input(
-    input: &str,
-    logger: &mut Logger,
-    is_base64: bool,
-) -> Result<String, WxcError> {
+fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
+    if let Err(error) = result {
+        log_error(logger, &error.to_string(), ErrorOutput::Primary);
+    }
+}
+
+fn log_error(logger: &mut Logger, message: &str, output: ErrorOutput) {
+    match output {
+        ErrorOutput::Primary => logger.log_line(message),
+        ErrorOutput::DiagnosticOnly => logger.log_diagnostic_line(message),
+    }
+}
+
+/// Reads a request from disk or decodes it from base64.
+fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<String, WxcError> {
     if is_base64 {
         let bytes = base64_decode(input).map_err(|_| {
-            let msg = "Failed to decode base64 configuration";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
+            WxcError::ConfigParse("Failed to decode base64 configuration".to_string())
         })?;
         String::from_utf8(bytes).map_err(|_| {
-            let msg = "Base64 decoded content is not valid UTF-8";
-            logger.log_line(msg);
-            WxcError::ConfigParse(msg.to_string())
+            WxcError::ConfigParse("Base64 decoded content is not valid UTF-8".to_string())
         })
     } else {
+        // The file path is untrusted input; on Linux/macOS it may contain
+        // newlines or terminal control characters. Escape it before embedding
+        // in diagnostics so a missing/unreadable file cannot inject forged
+        // multi-line log output.
+        let safe_input = config_deserialize::escape_diagnostic_text(input);
         if !std::path::Path::new(input).exists() {
-            let _ = write!(logger, "Configuration file not found: {}", input);
             return Err(WxcError::ConfigParse(format!(
-                "Configuration file not found: {}",
-                input
+                "Configuration file not found: {safe_input}"
             )));
         }
         fs::read_to_string(input).map_err(|e| {
-            let _ = write!(logger, "Failed to open configuration file: {}", input);
-            WxcError::ConfigParse(format!("Failed to read configuration file: {}", e))
+            WxcError::ConfigParse(format!(
+                "Failed to read configuration file '{safe_input}': {e}"
+            ))
         })
     }
 }
@@ -237,7 +296,7 @@ const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isola
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
-fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), WxcError> {
+fn validate_schema_version(version: &str) -> Result<(), WxcError> {
     if version.is_empty() {
         return Ok(());
     }
@@ -245,12 +304,10 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     // Parse the version, stripping pre-release suffix for comparison
     // (e.g., "0.4.0-alpha" is treated as "0.4.0")
     let parsed = semver::Version::parse(version).map_err(|_| {
-        let msg = format!(
+        WxcError::ConfigParse(format!(
             "Invalid schema version '{}': must be semver (e.g., 'X.Y.Z' or 'X.Y.Z-alpha')",
-            version
-        );
-        logger.log_line(&msg);
-        WxcError::ConfigParse(msg)
+            config_deserialize::escape_diagnostic_text(version)
+        ))
     })?;
 
     let req = semver::VersionReq::parse(SUPPORTED_VERSION).unwrap();
@@ -260,38 +317,53 @@ fn validate_schema_version(version: &str, logger: &mut Logger) -> Result<(), Wxc
     let comparable = semver::Version::new(parsed.major, parsed.minor, parsed.patch);
     if !req.matches(&comparable) {
         let min = semver::VersionReq::parse(">=0.6").unwrap();
+        let safe_version = config_deserialize::escape_diagnostic_text(version);
         let msg = if !min.matches(&comparable) {
             format!(
                 "Config schema version '{}' is older than supported (supported: {}). Update your config.",
-                version, SUPPORTED_VERSION
+                safe_version, SUPPORTED_VERSION
             )
         } else {
             format!(
                 "Config schema version '{}' is newer than supported (supported: {}). Upgrade wxc-exec.",
-                version, SUPPORTED_VERSION
+                safe_version, SUPPORTED_VERSION
             )
         };
-        logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
     Ok(())
 }
 
-fn validate_filesystem_paths(
-    policy: &ContainerPolicy,
-    logger: &mut Logger,
-) -> Result<(), WxcError> {
-    validate_paths(&policy.readonly_paths, logger)?;
-    validate_paths(&policy.readwrite_paths, logger)?;
-    validate_paths(&policy.denied_paths, logger)?;
+fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
+    validate_paths(&policy.readonly_paths)?;
+    validate_paths(&policy.readwrite_paths)?;
+    validate_paths(&policy.denied_paths)?;
     Ok(())
 }
 
-fn validate_paths(paths: &[String], logger: &mut Logger) -> Result<(), WxcError> {
+fn validate_paths(paths: &[String]) -> Result<(), WxcError> {
     for path in paths {
+        // A blank entry names nothing: backends would either grant nothing or,
+        // worse, treat it as "unset" (e.g. a NULL working directory).
+        if path.trim().is_empty() {
+            return Err(WxcError::ConfigParse(
+                "Filesystem path is empty".to_string(),
+            ));
+        }
+        // An interior NUL silently truncates the path once it is converted to a
+        // C/UTF-16 string, so the enforced grant would not be the one requested.
+        if path.contains('\0') {
+            let msg = format!(
+                "Filesystem path '{}' contains an embedded NUL character",
+                config_deserialize::escape_diagnostic_text(path)
+            );
+            return Err(WxcError::ConfigParse(msg));
+        }
         if path.contains('"') {
-            let msg = format!("Filesystem path '{}' contains invalid character '\"'", path);
-            logger.log_line(&msg);
+            let msg = format!(
+                "Filesystem path '{}' contains invalid character '\"'",
+                config_deserialize::escape_diagnostic_text(path)
+            );
             return Err(WxcError::ConfigParse(msg));
         }
     }
@@ -328,14 +400,14 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else if readonly.contains(p) {
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readwritePaths' and 'readonlyPaths'; \
                  applying most-restrictive intent (readonly)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -347,7 +419,7 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
             logger.log_line(&format!(
                 "Filesystem path '{}' appears in 'readonlyPaths' and 'deniedPaths'; \
                  applying most-restrictive intent (denied)",
-                p
+                config_deserialize::escape_diagnostic_text(p)
             ));
             false
         } else {
@@ -366,7 +438,8 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
                 logger.log_line(&format!(
                     "WARNING: filesystem path '{}' (in '{}') does not exist on the host; \
                      the backend may fail at mount time",
-                    path, list_name
+                    config_deserialize::escape_diagnostic_text(path),
+                    list_name
                 ));
             }
         }
@@ -419,6 +492,20 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     if let Some(url_str) = url {
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+
+        // Only http/https are meaningful for the HTTP(S)_PROXY env vars we
+        // inject. A non-HTTP scheme (ftp://, socks5://, …) is silently ignored
+        // by many clients, which fails open under WSLc's defaultPolicy=allow.
+        let scheme = parsed.scheme();
+        if scheme != "http" && scheme != "https" {
+            // Redact any embedded userinfo (`user:password@`) before it reaches
+            // the diagnostic/log stream — a proxy URL commonly carries basic-auth
+            // credentials, and the scheme alone diagnoses the failure.
+            let redacted = crate::proxy_env::redact_proxy_url(&url_str);
+            return Err(WxcError::ConfigParse(format!(
+                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+            )));
+        }
 
         let host = parsed
             .host_str()
@@ -478,7 +565,6 @@ fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
 fn validate_single_backend_section(
     containment: ContainmentBackend,
     present_sections: &[&'static str],
-    logger: &mut Logger,
 ) -> Result<(), WxcError> {
     let allowed_section = containment.section_path();
     let extras: Vec<&'static str> = present_sections
@@ -507,7 +593,6 @@ fn validate_single_backend_section(
             extras.join(", "),
         ),
     };
-    logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
 }
 
@@ -518,7 +603,6 @@ fn validate_single_backend_section(
 fn validate_experimental_backend_keys(
     containment: Option<&ContainmentBackend>,
     experimental_raw: Option<&serde_json::Value>,
-    logger: &mut Logger,
 ) -> Result<(), WxcError> {
     let Some(serde_json::Value::Object(map)) = experimental_raw else {
         return Ok(());
@@ -554,7 +638,6 @@ fn validate_experimental_backend_keys(
          remove the unused section(s).",
         qualified.join(", "),
     );
-    logger.log_line(&msg);
     Err(WxcError::ConfigParse(msg))
 }
 
@@ -592,6 +675,60 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     }
 }
 
+/// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
+/// must be an absolute path whose parent directory already exists (the runner
+/// writes the JSON denials output file there after the workload exits). The
+/// path itself must not be an existing directory. A relative path, directory
+/// path, or missing parent yields an actionable error.
+fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Result<(), WxcError> {
+    let candidate = std::path::Path::new(path);
+    if !candidate.is_absolute() {
+        let msg = format!(
+            "processContainer.captureDenials.outputPath must be an absolute path: '{path}'"
+        );
+        logger.log_line(&msg);
+        return Err(WxcError::ConfigParse(msg));
+    }
+    match candidate.parent() {
+        // A filesystem root ("/", "C:\\") has either no parent (`None`) or an
+        // empty parent, and cannot name a trace file.
+        None => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not a \
+                 directory root: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(parent) if parent.as_os_str().is_empty() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not a \
+                 directory root: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(parent) if !parent.is_dir() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath parent directory does not \
+                 exist: '{}'",
+                parent.display()
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        Some(_) if candidate.is_dir() => {
+            let msg = format!(
+                "processContainer.captureDenials.outputPath must name a file, not an \
+                 existing directory: '{path}'"
+            );
+            logger.log_line(&msg);
+            Err(WxcError::ConfigParse(msg))
+        }
+        _ => Ok(()),
+    }
+}
+
 // `allow_missing_command` relaxes the `require_process == true` arms so that a
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
@@ -607,14 +744,14 @@ fn convert_wire_config(
     // input is a state-aware-shaped payload sent to a one-shot entry point;
     // reject it loudly rather than silently executing it as a one-shot.
     if cfg.phase.is_some() {
-        let msg = "'phase' is only valid on state-aware lifecycle requests".to_string();
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
+        return Err(WxcError::ConfigParse(
+            "'phase' is only valid on state-aware lifecycle requests".to_string(),
+        ));
     }
     if cfg.sandbox_id.is_some() {
-        let msg = "'sandboxId' is only valid on state-aware lifecycle requests".to_string();
-        logger.log_line(&msg);
-        return Err(WxcError::ConfigParse(msg));
+        return Err(WxcError::ConfigParse(
+            "'sandboxId' is only valid on state-aware lifecycle requests".to_string(),
+        ));
     }
     if cfg.correlation_vector.is_some() {
         let msg = "'correlationVector' is only valid on state-aware lifecycle requests".to_string();
@@ -628,7 +765,7 @@ fn convert_wire_config(
     let schema_version = cfg.version.unwrap_or_default();
 
     // Validate the schema version up front so an unsupported version fails fast.
-    validate_schema_version(&schema_version, logger)?;
+    validate_schema_version(&schema_version)?;
 
     let container_id = cfg.container_id.unwrap_or_default();
 
@@ -641,13 +778,11 @@ fn convert_wire_config(
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
                 Some(_) if command_required => {
-                    logger.log_line("process.commandLine cannot be empty");
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
                 None if command_required => {
-                    logger.log_line("Missing required field: process.commandLine");
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
                     ));
@@ -682,7 +817,7 @@ fn convert_wire_config(
     // intents and the omitted case resolve to the OS-native backend here.
     let containment = map_wire_containment(cfg.containment.as_ref());
 
-    validate_single_backend_section(containment.clone(), &present_backend_sections, logger)?;
+    validate_single_backend_section(containment.clone(), &present_backend_sections)?;
 
     // LXC configuration
     let lxc_config = match cfg.lxc {
@@ -704,44 +839,92 @@ fn convert_wire_config(
             policy.least_privilege_mode = lp;
         }
 
-        // learningMode handling differs between debug and release.
+        // The learningMode boolean maps to the deny-and-record learning-mode
+        // capability (`learningModeLogging`). AppContainer restrictions remain
+        // enforced; access denials are recorded for diagnostics. This is
+        // available in every build.
         if ac.learning_mode.unwrap_or(false) {
-            #[cfg(debug_assertions)]
-            {
-                policy
-                    .capabilities
-                    .push("permissiveLearningMode".to_string());
-                logger.log("WARNING: 'learningMode' enabled - AppContainer restrictions will NOT be enforced (DEBUG BUILD ONLY)\n");
-                logger.log(
-                    "[mxc] permissiveLearningMode injected via 'learningMode: true' - AppContainer restrictions are NOT enforced\n",
-                );
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                logger.log("SECURITY: 'learningMode' is disabled in release builds. This capability has been removed.\n");
-            }
+            policy.capabilities.push("learningModeLogging".to_string());
         }
 
+        // Learning-mode capability names are reserved for the dedicated entry
+        // points (`learningMode`, `--audit`, and future captureDenials wiring).
+        // Reject direct capability-array use case-insensitively because Windows
+        // derives capability SIDs case-insensitively.
         if let Some(caps) = ac.capabilities {
-            #[cfg(debug_assertions)]
-            if caps.iter().any(|c| c == "permissiveLearningMode") {
-                logger.log(
-                    "[mxc] permissiveLearningMode present in policy capabilities - AppContainer restrictions are NOT enforced\n",
+            if let Some(invalid) = caps.iter().find(|capability| capability.contains(',')) {
+                let msg = format!(
+                    "processContainer.capabilities entry '{invalid}' must not contain a comma; \
+                     provide multiple capabilities as separate JSON array entries"
                 );
+                logger.log_line(&msg);
+                return Err(WxcError::ConfigParse(msg));
+            }
+            if let Some(reserved) = caps.iter().find(|capability| {
+                capability.eq_ignore_ascii_case("learningModeLogging")
+                    || capability.eq_ignore_ascii_case("permissiveLearningMode")
+            }) {
+                let msg = format!(
+                    "processContainer.capabilities must not include reserved learning-mode \
+                     capability '{reserved}'; use processContainer.learningMode for \
+                     deny-and-record mode or --audit for permissive mode"
+                );
+                logger.log_line(&msg);
+                return Err(WxcError::ConfigParse(msg));
             }
             policy.capabilities.extend(caps);
         }
 
-        // SECURITY: Strip permissiveLearningMode in release builds.
-        #[cfg(not(debug_assertions))]
-        {
-            policy.capabilities.retain(|cap| {
-                if cap == "permissiveLearningMode" {
-                    logger.log("SECURITY: Removed 'permissiveLearningMode' capability (not allowed in release builds)\n");
-                    false
-                } else {
-                    true
+        // captureDenials (Windows denial capture). Presence enables capture: the
+        // runner records the process's ungranted access attempts to a
+        // learning-mode ETL trace. `mode` decides whether each recorded access is
+        // blocked (`block`, the default) or allowed (`allow`).
+        // The optional outputPath names where the trace is sealed; validate it
+        // eagerly so a bad path fails at parse time rather than deep in the runner.
+        if let Some(cd) = ac.capture_denials {
+            if let Some(path) = cd.output_path.as_deref() {
+                validate_capture_denials_output_path(path, logger)?;
+            }
+            let mode = match cd.mode {
+                Some(wire::CaptureDenialsMode::Allow) => CaptureDenialsMode::Allow,
+                Some(wire::CaptureDenialsMode::Block) | None => CaptureDenialsMode::Block,
+            };
+
+            // captureDenials drives the learning-mode ETL capture in the runner,
+            // which requires the corresponding learning-mode capability on the
+            // child token so the OS emits the access-check records the capture
+            // path collects. Inject it additively (preserving the workload's real
+            // capabilities). `block` keeps deny-by-default via
+            // `learningModeLogging`; `allow` replaces deny-and-record with
+            // `permissiveLearningMode` (the runner surfaces the security warning).
+            let capture_capability = match mode {
+                CaptureDenialsMode::Block => {
+                    // Capability entries are exact names. Comma-packed entries
+                    // were rejected above, so substring matching here would
+                    // incorrectly remove unrelated custom capabilities.
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("permissiveLearningMode")
+                    });
+                    "learningModeLogging"
                 }
+                CaptureDenialsMode::Allow => {
+                    policy.capabilities.retain(|capability| {
+                        !capability.eq_ignore_ascii_case("learningModeLogging")
+                    });
+                    "permissiveLearningMode"
+                }
+            };
+            if !policy
+                .capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case(capture_capability))
+            {
+                policy.capabilities.push(capture_capability.to_string());
+            }
+
+            policy.capture_denials = Some(CaptureDenialsConfig {
+                mode,
+                output_path: cd.output_path,
             });
         }
 
@@ -773,7 +956,7 @@ fn convert_wire_config(
             policy.readonly_paths = v;
         }
     }
-    validate_filesystem_paths(&policy, logger)?;
+    validate_filesystem_paths(&policy)?;
     normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
@@ -783,20 +966,54 @@ fn convert_wire_config(
         }
     }
 
-    // Network section
+    // Network section. Capture presence before the typed mapping consumes
+    // `cfg.network` so backends can distinguish an absent policy from an
+    // explicit default-valued one (the domain `default_network_policy` defaults
+    // to `Block` either way).
+    policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
+        // Presence of any network *mode* field (everything except `proxy`), so
+        // post-provision phases can reject an immutable-posture change by
+        // presence while still accepting a proxy-only network block.
+        policy.network_mode_specified = net.default_policy.is_some()
+            || net.enforcement_mode.is_some()
+            || net.allow_local_network.is_some()
+            || net.allowed_hosts.is_some()
+            || net.blocked_hosts.is_some();
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
                 && containment != ContainmentBackend::Seatbelt
+                && containment != ContainmentBackend::Wslc
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', or 'seatbelt' containment backends";
+                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
+
+            // WSLc containers run in their own network namespace, so an
+            // MXC-run host-loopback proxy is unreachable. Accept only the
+            // caller-supplied `url` form (which carries `original_url`); reject
+            // the `localhost` / `builtinTestServer` forms.
+            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+                let is_url_form = proxy_config
+                    .address
+                    .as_ref()
+                    .is_some_and(|addr| addr.original_url.is_some());
+                if !is_url_form {
+                    let msg = "WSLc: network.proxy must use the 'url' form pointing at a \
+                               routable proxy (e.g. \"url\": \"http://proxy.example:8080\"). \
+                               The 'localhost' and 'builtinTestServer' forms are not supported \
+                               because a WSLc container runs in its own network namespace and \
+                               cannot reach a host-loopback proxy.";
+                    logger.log_line(msg);
+                    return Err(WxcError::ConfigParse(msg.to_string()));
+                }
+            }
+
             policy.network_proxy = proxy_config;
         }
 
@@ -819,6 +1036,58 @@ fn convert_wire_config(
             policy.blocked_hosts = v;
         }
 
+        // WSLc routes egress through the cooperative proxy but does not forward
+        // host lists to it, and a 'block' default (the WSLc default) yields no
+        // outbound networking / a drop-floor that can't even reach the proxy.
+        // Require an 'allow' default with no host lists so the proxy is reachable.
+        if containment == ContainmentBackend::Wslc
+            && policy.network_proxy.is_enabled()
+            && (policy.default_network_policy == NetworkPolicy::Block
+                || !policy.allowed_hosts.is_empty()
+                || !policy.blocked_hosts.is_empty())
+        {
+            let msg = "WSLc: network.proxy requires network.defaultPolicy='allow' and no \
+                       allowedHosts/blockedHosts. A WSLc container reaches the proxy only \
+                       with outbound networking enabled, and host lists are enforced by the \
+                       proxy, not forwarded to it.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // WSLc cannot enforce per-host egress filtering: containers lack
+        // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
+        // cannot expose VM-level enforcement without breaking other security
+        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
+        // enforces the same for requests that bypass this parser. Bare defaults
+        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
+        if containment == ContainmentBackend::Wslc {
+            if policy.needs_host_filtering() {
+                let msg = "WSLc: per-host egress filtering (allowedHosts with \
+                           defaultPolicy='block', or blockedHosts with \
+                           defaultPolicy='allow') is not supported. A WSLc container has \
+                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
+                           enforcement is not available without breaking other security \
+                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
+                           for cooperative host filtering, or remove the host lists.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // WSLc cannot honor a blanket inbound-listen grant. The runner only
+            // wires explicit host->container port forwards (experimental.wslc
+            // portMappings) into the WSL2 VM's NAT; it never consults
+            // allowLocalNetwork. Reject `true` and point at portMappings.
+            // (`false` is the default and a no-op.)
+            if policy.allow_local_network {
+                let msg = "WSLc: network.allowLocalNetwork=true is not supported. A WSLc \
+                           container runs in the NAT'd WSL2 VM and MXC does not honor a \
+                           blanket inbound-listen grant; expose specific ports with \
+                           experimental.wslc.portMappings instead.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+        }
+
         // Bubblewrap is unprivileged by design; iptables-based enforcement
         // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
         // privilege story. Reject the combination explicitly.
@@ -833,7 +1102,6 @@ fn convert_wire_config(
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer; iptables-based \
                        enforcement requires privilege and is mutually exclusive.";
-            logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -901,7 +1169,6 @@ fn convert_wire_config(
                        MXC does not forward host lists to it. Use \
                        'network.proxy.builtinTestServer: true' (testing only) for \
                        MXC-enforced host filtering, or remove the host policy.";
-            logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -972,14 +1239,12 @@ fn convert_wire_config(
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                     if m.container_port == 0 {
                         let msg = format!(
                             "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                     // Only TCP is representable in the wire model
@@ -1007,7 +1272,6 @@ fn convert_wire_config(
                              for protocol '{}'",
                             pm.windows_port, pm.protocol
                         );
-                        logger.log_line(&msg);
                         return Err(WxcError::ConfigParse(msg));
                     }
                 }
@@ -1017,19 +1281,10 @@ fn convert_wire_config(
         } else {
             None
         };
-        let isolation_session = raw_exp.isolation_session.map(|as_cfg| {
-            let mut config = IsolationSessionConfig::default();
-            if let Some(id) = as_cfg.configuration_id {
-                config.configuration_id = id.into();
-            }
-            config.user = as_cfg.user.map(Into::into);
-            config
-        });
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
                 .to_string();
-            logger.log_line(&msg);
             return Err(WxcError::ConfigParse(msg));
         }
         let telemetry = raw_exp.telemetry.map(|raw_t| TelemetryConfig {
@@ -1039,7 +1294,6 @@ fn convert_wire_config(
             test,
             windows_sandbox,
             wslc,
-            isolation_session,
             telemetry,
         }
     } else {
@@ -1050,7 +1304,12 @@ fn convert_wire_config(
     // rejected above.
     let seatbelt = cfg.seatbelt.map(make_seatbelt_config);
 
-    // UI section
+    // UI section. Capture presence before the typed mapping consumes `ui`:
+    // `UiPolicy::default()` is full lockdown, so an explicit lockdown `ui` is
+    // otherwise indistinguishable from an absent one, and a backend that cannot
+    // honor UI restrictions has no way to tell "caller asked for lockdown" from
+    // "caller said nothing". Twin of `network_specified`.
+    policy.ui_specified = cfg.ui.is_some();
     if let Some(raw_ui) = cfg.ui {
         let clipboard = raw_ui.clipboard.map(Into::into).unwrap_or_default();
         policy.ui = UiPolicy {
@@ -1076,20 +1335,21 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
-        audit: false,
     })
 }
 
 fn convert_wire_state_aware(
-    mut value: serde_json::Value,
+    json: &str,
+    experimental: Option<&RawValue>,
     logger: &mut Logger,
     allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
-    // Capture the raw `experimental` block before typed deserialize; it is typed
-    // per-backend at dispatch time, not here.
-    let experimental_raw = value
-        .as_object_mut()
-        .and_then(|map| map.remove("experimental"));
+    let experimental_raw = experimental
+        .map(|raw| {
+            config_deserialize::from_str::<serde_json::Value>(raw.get())
+                .map_err(|error| WxcError::ConfigParse(error.to_string()))
+        })
+        .transpose()?;
 
     // Peeling `experimental` off above also removes it from the typed
     // deserialize, so a non-object value (e.g. `"experimental": 42`) would slip
@@ -1100,16 +1360,15 @@ fn convert_wire_state_aware(
     // on both paths and is accepted.)
     if let Some(exp) = experimental_raw.as_ref() {
         if !exp.is_null() && !exp.is_object() {
-            let msg = "invalid `experimental`: expected an object".to_string();
-            logger.log_line(&msg);
-            return Err(WxcError::ConfigParse(msg));
+            return Err(WxcError::ConfigParse(
+                "Invalid configuration at `experimental`: expected an object".to_string(),
+            ));
         }
     }
 
-    let mut cfg: wire::MxcConfig = serde_json::from_value(value).map_err(|e| {
-        logger.log_line("Error parsing JSON");
-        WxcError::ConfigParse(format!("JSON parse error: {}", e))
-    })?;
+    let base_json = mask_state_aware_experimental(json, experimental)?;
+    let mut cfg: wire::MxcConfig = config_deserialize::from_str(&base_json)
+        .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
     // `phase` is the state-aware discriminator and is constrained by the wire
     // enum; absence here would be a logic error in the caller's discrimination.
@@ -1128,11 +1387,26 @@ fn convert_wire_state_aware(
         .as_ref()
         .map(|c| map_wire_containment(Some(c)));
 
+    // `containment` is a provision-only field: the backend is selected once at
+    // provision, and every later phase routes by `sandboxId`. A stray
+    // `containment` on a non-provision phase would otherwise leak into the
+    // shared converter's per-backend network guards and produce contradictory
+    // policy behavior (e.g. an exec `containment:"wslc"` + proxy is rejected
+    // either as "proxy requires allow" or as an immutable post-provision mode
+    // change). Reject it once, clearly, as a malformed envelope.
+    if phase != Phase::Provision && cfg.containment.is_some() {
+        return Err(WxcError::ConfigParse(format!(
+            "State-aware '{phase}' requests must not carry 'containment'; the backend is fixed \
+             at provision and later phases route by 'sandboxId'."
+        )));
+    }
+
     // Mirror the one-shot rejection of moved-to-stable experimental sections.
     // The one-shot path errors on `experimental.seatbelt` in `convert_wire_config`,
     // but the state-aware path peels `experimental` into `experimental_raw`
     // before that runs, so without this check the block would be silently
-    // discarded (the same silent-policy-drop class as the F1 stable sections).
+    // discarded (the same silent-policy-drop class as the moved-to-stable
+    // sections).
     if let Some(serde_json::Value::Object(exp)) = experimental_raw.as_ref() {
         for key in ["seatbelt", "macos_sandbox"] {
             if exp.contains_key(key) {
@@ -1140,13 +1414,12 @@ fn convert_wire_state_aware(
                     "'experimental.{key}' has moved to the stable section; \
                      use top-level 'seatbelt' instead."
                 );
-                logger.log_line(&msg);
                 return Err(WxcError::ConfigParse(msg));
             }
         }
     }
 
-    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref(), logger)?;
+    validate_experimental_backend_keys(containment.as_ref(), experimental_raw.as_ref())?;
 
     let sandbox_id = cfg.sandbox_id.clone();
     let correlation_vector = cfg.correlation_vector.clone();
@@ -1175,7 +1448,6 @@ fn convert_wire_state_aware(
              Remove them; per-backend policy and lifecycle are fixed at provision time.",
             stray.join(", ")
         );
-        logger.log_line(&msg);
         return Err(WxcError::ConfigParse(msg));
     }
 
@@ -1207,9 +1479,13 @@ fn convert_wire_state_aware(
     {
         let telemetry: TelemetryConfig =
             serde_json::from_value(telemetry_val.clone()).map_err(|e| {
-                let msg = format!("invalid experimental.telemetry: {e}");
-                logger.log_line(&msg);
-                WxcError::ConfigParse(msg)
+                // Do not log here: state-aware parse errors are routed centrally
+                // and exactly once by the outer `load_mxc_request*` wrapper via
+                // `log_error(..., ErrorOutput::DiagnosticOnly)`. Logging here as
+                // well would produce a duplicate auxiliary diagnostic.
+                // Returning the error keeps stdout clean (envelope-owned) and
+                // yields a single auxiliary-sink line.
+                WxcError::ConfigParse(format!("invalid experimental.telemetry: {e}"))
             })?;
         request.experimental.telemetry = Some(telemetry);
     }
@@ -1221,7 +1497,76 @@ fn convert_wire_state_aware(
         sandbox_id,
         correlation_vector,
         experimental_raw,
+        // Retain the decoded request text so the dispatcher can deserialize each
+        // `experimental.<backend>.<phase>` sub-slice positionally and report
+        // typed errors with whole-file line/column (parity with base config).
+        source_text: Some(json.to_owned().into_boxed_str()),
     })
+}
+
+/// Byte range `[start, end)` of the borrowed `experimental` value within the
+/// original request text.
+///
+/// `raw` is `serde_json`'s borrowed `RawValue` for the `experimental` field,
+/// which — for `&str` input — is a sub-slice of `json`; its pointer therefore
+/// lies within `json`'s allocation and its length stays within bounds. The
+/// checks below make that invariant explicit and fail closed if a future caller
+/// ever passes a `raw` not borrowed from `json` (unreachable on the normal
+/// parser path).
+fn experimental_source_span(json: &str, raw: &str) -> Result<(usize, usize), WxcError> {
+    let locate_err = || {
+        WxcError::ConfigParse("Unable to locate the experimental configuration block".to_string())
+    };
+    let start = (raw.as_ptr() as usize)
+        .checked_sub(json.as_ptr() as usize)
+        .filter(|start| *start <= json.len())
+        .ok_or_else(locate_err)?;
+    let end = start
+        .checked_add(raw.len())
+        .filter(|end| *end <= json.len())
+        .ok_or_else(locate_err)?;
+    Ok((start, end))
+}
+
+fn mask_state_aware_experimental<'a>(
+    json: &'a str,
+    experimental: Option<&RawValue>,
+) -> Result<Cow<'a, str>, WxcError> {
+    let Some(experimental) = experimental else {
+        return Ok(Cow::Borrowed(json));
+    };
+
+    let raw = experimental.get();
+    let (start, end) = experimental_source_span(json, raw)?;
+    let (prefix, suffix) = match (json.get(..start), json.get(end..)) {
+        (Some(prefix), Some(suffix)) => (prefix, suffix),
+        _ => {
+            return Err(WxcError::ConfigParse(
+                "Unable to locate the experimental configuration block".to_string(),
+            ))
+        }
+    };
+
+    // State-aware backend config is retained separately and typed at dispatch.
+    // Replace it with an empty object of identical byte/line length so the base
+    // wire model validates cross-cutting fields without shifting source
+    // coordinates. ASCII spaces preserve byte offsets; retained CR/LF preserve
+    // lines. The caller already verified that `raw` is an object.
+    let mut masked = String::with_capacity(json.len());
+    masked.push_str(prefix);
+    let mut braces = ['{', '}'].into_iter();
+    for byte in raw.bytes() {
+        match byte {
+            b'\r' => masked.push('\r'),
+            b'\n' => masked.push('\n'),
+            _ => masked.push(braces.next().unwrap_or(' ')),
+        }
+    }
+    debug_assert!(braces.next().is_none());
+    masked.push_str(suffix);
+    debug_assert_eq!(masked.len(), json.len());
+
+    Ok(Cow::Owned(masked))
 }
 
 #[cfg(test)]
@@ -1354,7 +1699,7 @@ mod tests {
             "phase": "start",
             "sandboxId": "iso:abcd1234",
             "experimental": {
-                "isolation_session": {"start": {"configurationId": "small"}}
+                "isolation_session": {"start": {"opaqueFutureField": true}}
             }
         }"#;
         match load_mxc(json).unwrap() {
@@ -1368,7 +1713,7 @@ mod tests {
                 assert_eq!(
                     exp,
                     serde_json::json!({
-                        "isolation_session": {"start": {"configurationId": "small"}}
+                        "isolation_session": {"start": {"opaqueFutureField": true}}
                     })
                 );
             }
@@ -1407,7 +1752,7 @@ mod tests {
         let json = r#"{
             "phase": "start",
             "sandboxId": "iso:abcd1234",
-            "experimental": {"isolation_session": {"start": {"configurationId": "small"}}}
+            "experimental": {"isolation_session": {"start": {"opaqueFutureField": true}}}
         }"#;
         match load_mxc(json).unwrap() {
             MxcRequest::StateAware(p) => assert!(p.request.experimental.telemetry.is_none()),
@@ -1426,6 +1771,120 @@ mod tests {
         }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_rejects_containment_on_non_provision_phase() {
+        // `containment` is provision-only; later phases route by `sandboxId`.
+        // A stray `containment` on start/exec/stop/deprovision is a malformed
+        // envelope, rejected once rather than leaking into per-backend guards.
+        for phase in ["start", "exec", "stop", "deprovision"] {
+            let json = format!(
+                r#"{{
+                    "phase": "{phase}",
+                    "sandboxId": "iso:abcd1234",
+                    "containment": "wslc"
+                }}"#
+            );
+            let opts = LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            };
+            let r = load_mxc_with_opts(&json, opts);
+            assert!(
+                matches!(r, Err(ParseError::StateAware(_))),
+                "phase {phase}: expected state-aware rejection, got {:?}",
+                r
+            );
+        }
+    }
+
+    /// Parse a provision request and return the resolved cross-cutting policy.
+    fn provision_policy(network_json: &str) -> ContainerPolicy {
+        let json = format!(
+            r#"{{
+                "phase": "provision",
+                "containment": "processcontainer",
+                "network": {network_json}
+            }}"#
+        );
+        match load_mxc(&json).unwrap() {
+            MxcRequest::StateAware(p) => p.request.policy,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_network_mode_specified_true_for_each_mode_field() {
+        // Every network *mode* field (everything except `proxy`) must flip the
+        // presence bit so post-provision phases can reject an immutable-posture
+        // change by presence.
+        for net in [
+            r#"{"defaultPolicy": "allow"}"#,
+            r#"{"enforcementMode": "firewall"}"#,
+            r#"{"allowLocalNetwork": true}"#,
+            r#"{"allowedHosts": ["example.com"]}"#,
+            r#"{"blockedHosts": ["example.com"]}"#,
+        ] {
+            let policy = provision_policy(net);
+            assert!(
+                policy.network_mode_specified,
+                "network {net} should set network_mode_specified"
+            );
+            assert!(policy.network_specified);
+        }
+    }
+
+    #[test]
+    fn state_aware_proxy_only_block_leaves_network_mode_unspecified() {
+        // A proxy-only block sets `network_specified` (the block is present) but
+        // NOT `network_mode_specified`, so the cooperative proxy stays honourable
+        // at exec while no immutable mode change is falsely detected.
+        let policy = provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
+        assert!(policy.network_specified);
+        assert!(
+            !policy.network_mode_specified,
+            "proxy-only block must not set network_mode_specified"
+        );
+        assert!(policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn state_aware_malformed_telemetry_logs_once_and_keeps_primary_clean() {
+        // The malformed-telemetry error must reach the auxiliary
+        // diagnostic sink exactly once (routed centrally by the outer
+        // `load_mxc_request` wrapper), never duplicated, and must never touch the
+        // primary buffer/stdout that the state-aware JSON envelope owns.
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "experimental": {"telemetry": 42}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("diag.log");
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.enable_file_sink(&log_path).unwrap();
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(
+            matches!(result, Err(ParseError::StateAware(_))),
+            "got {result:?}"
+        );
+        assert!(
+            logger.get_buffer().is_empty(),
+            "state-aware error must not touch the primary buffer: {:?}",
+            logger.get_buffer()
+        );
+        drop(logger);
+
+        let logged = std::fs::read_to_string(&log_path).unwrap();
+        assert_eq!(
+            logged.matches("invalid experimental.telemetry").count(),
+            1,
+            "expected exactly one auxiliary diagnostic, got: {logged:?}"
+        );
     }
 
     #[test]
@@ -1486,15 +1945,163 @@ mod tests {
     #[test]
     fn state_aware_unknown_phase_is_rejected() {
         let json = r#"{"phase": "teleport"}"#;
-        let r = load_mxc(json);
-        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+        assert!(error.message.contains("Invalid configuration at `phase`"));
+        assert!(error.message.contains("unknown variant `teleport`"));
+    }
+
+    #[test]
+    fn present_null_phase_is_still_discriminated_as_state_aware() {
+        let error = match load_mxc(r#"{"phase": null}"#) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+
+        assert!(error.message.contains("Missing required field: phase"));
     }
 
     #[test]
     fn state_aware_unknown_containment_is_rejected() {
-        let json = r#"{"phase": "provision", "containment": "totally_made_up"}"#;
-        let r = load_mxc(json);
-        assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+        let json = r#"{
+            "phase": "provision",
+            "containment": "totally_made_up"
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+        assert!(
+            error
+                .message
+                .contains("Invalid configuration at `containment`"),
+            "got: {}",
+            error.message
+        );
+        assert!(error.message.contains("unknown variant `totally_made_up`"));
+        assert!(error.message.contains("line 3"));
+    }
+
+    #[test]
+    fn state_aware_mask_preserves_locations_after_multiline_experimental() {
+        let json = r#"{
+            "phase": "provision",
+            "experimental": {
+                "future_backend": {
+                    "nested": true
+                }
+            },
+            "process": {"timeout": "soon"}
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::StateAware(error)) => error,
+            other => panic!("expected state-aware error, got {other:?}"),
+        };
+
+        assert!(
+            error
+                .message
+                .contains("Invalid configuration at `process.timeout`"),
+            "got: {}",
+            error.message
+        );
+        assert!(error.message.contains("line 8"), "got: {}", error.message);
+    }
+
+    #[test]
+    fn state_aware_mask_handles_empty_object_at_root_boundaries() {
+        for json in [
+            r#"{"experimental":{},"phase":"provision"}"#,
+            r#"{"phase":"provision","experimental":{}}"#,
+        ] {
+            let discriminator: RequestDiscriminator<'_> =
+                config_deserialize::from_str(json).unwrap();
+            let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+            assert_eq!(masked.len(), json.len());
+            let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
+            assert!(matches!(config.phase, Some(wire::Phase::Provision)));
+        }
+    }
+
+    #[test]
+    fn state_aware_mask_handles_whitespace_only_multiline_object() {
+        let json = "{\n  \"phase\": \"provision\",\n  \"experimental\": {\r\n    \r\n  }\n}";
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+        assert_eq!(masked.len(), json.len());
+        assert_eq!(
+            masked.bytes().filter(|byte| *byte == b'\n').count(),
+            json.bytes().filter(|byte| *byte == b'\n').count()
+        );
+        let config: wire::MxcConfig = config_deserialize::from_str(&masked).unwrap();
+        assert!(matches!(config.phase, Some(wire::Phase::Provision)));
+    }
+
+    #[test]
+    fn experimental_source_span_locates_the_borrowed_block() {
+        let json = r#"{"phase":"provision","experimental":{"a":{"b":1}}}"#;
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let raw = discriminator.experimental.unwrap().get();
+
+        let (start, end) = experimental_source_span(json, raw).unwrap();
+        assert_eq!(&json[start..end], raw);
+        assert_eq!(&json[start..start + 1], "{");
+        assert_eq!(&json[end - 1..end], "}");
+    }
+
+    #[test]
+    fn experimental_source_span_rejects_a_foreign_slice() {
+        // A `raw` not borrowed from `json` must fail closed rather than compute
+        // an out-of-range offset — the invariant guard the masking relies on.
+        let json = r#"{"experimental":{}}"#;
+        let foreign = String::from("{}");
+        let error = experimental_source_span(json, foreign.as_str()).unwrap_err();
+        assert!(matches!(error, WxcError::ConfigParse(_)));
+    }
+
+    #[test]
+    fn state_aware_mask_span_contains_only_braces_spaces_and_newlines() {
+        let json = "{\n  \"experimental\": {\n    \"wslc\": { \"image\": \"py\" }\n  },\n  \"phase\": \"provision\"\n}";
+        let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json).unwrap();
+        let raw = discriminator.experimental.unwrap().get();
+        let (start, end) = experimental_source_span(json, raw).unwrap();
+        let masked = mask_state_aware_experimental(json, discriminator.experimental).unwrap();
+
+        // The masked span replaces content with exactly one `{`, one `}`,
+        // spaces, and preserved newlines; everything outside is byte-identical.
+        assert_eq!(masked[..start], json[..start]);
+        assert_eq!(masked[end..], json[end..]);
+        let span = &masked[start..end];
+        assert!(span
+            .bytes()
+            .all(|b| matches!(b, b'{' | b'}' | b' ' | b'\r' | b'\n')));
+        assert_eq!(span.bytes().filter(|b| *b == b'{').count(), 1);
+        assert_eq!(span.bytes().filter(|b| *b == b'}').count(), 1);
+    }
+
+    #[test]
+    fn state_aware_rejects_non_object_experimental_block() {
+        // `null` maps to "absent" and is accepted (see
+        // `state_aware_null_experimental_is_accepted`); only non-null,
+        // non-object values are rejected.
+        for value in [r#""oops""#, "42", "[]"] {
+            let json = format!(r#"{{"phase":"provision","experimental":{value}}}"#);
+            let error = match load_mxc(&json) {
+                Err(ParseError::StateAware(error)) => error,
+                other => panic!("expected state-aware error for {value}, got {other:?}"),
+            };
+            assert!(
+                error
+                    .message
+                    .ends_with("Invalid configuration at `experimental`: expected an object"),
+                "got: {}",
+                error.message
+            );
+        }
     }
 
     #[test]
@@ -1521,6 +2128,29 @@ mod tests {
         assert_eq!(req.script_code, "echo hello");
         assert_eq!(req.script_timeout, 0);
         assert!(req.working_directory.is_empty());
+    }
+
+    #[test]
+    fn load_request_from_value_reports_and_logs_typed_error_path() {
+        let config = serde_json::json!({
+            "process": {
+                "commandLine": "echo hello",
+                "timeout": "soon"
+            }
+        });
+        let mut logger = test_logger();
+
+        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("Invalid configuration at `process.timeout`"));
+        assert!(message.contains("expected u32"));
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Invalid configuration at `process.timeout`")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1627,6 +2257,104 @@ mod tests {
             msg.contains("unknown variant") && msg.contains("invalid"),
             "expected serde unknown-variant rejection, got: {msg}"
         );
+        assert!(
+            msg.contains("Invalid configuration at `network.defaultPolicy`"),
+            "expected the policy path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wrong_value_type_reports_path_and_source_location() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo x",
+                "timeout": "soon"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid configuration at `process.timeout`"),
+            "expected the field path, got: {message}"
+        );
+        assert!(
+            message.contains("invalid type") && message.contains("expected u32"),
+            "expected the type mismatch, got: {message}"
+        );
+        assert!(
+            message.contains("line 4"),
+            "expected the source line, got: {message}"
+        );
+        assert_eq!(
+            logger
+                .get_buffer()
+                .lines()
+                .filter(|line| line.contains("process.timeout"))
+                .count(),
+            1,
+            "the path-aware diagnostic should be logged once"
+        );
+    }
+
+    #[test]
+    fn state_aware_parse_errors_reach_diagnostic_file_without_stderr_duplication() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let encoded = base64_encode(br#"{"phase":"teleport"}"#);
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(matches!(result, Err(ParseError::StateAware(_))));
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON error envelope owns the primary state-aware output"
+        );
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("Invalid configuration at `phase`"));
+        assert!(log.contains("unknown variant `teleport`"));
+    }
+
+    #[test]
+    fn out_of_range_value_reports_path() {
+        let json =
+            r#"{"process":{"commandLine":"echo x"},"network":{"proxy":{"localhost":70000}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid configuration at `network.proxy.localhost`"),
+            "expected the field path, got: {message}"
+        );
+        assert!(
+            message.contains("70000") && message.contains("expected u16"),
+            "expected the range mismatch, got: {message}"
+        );
+    }
+
+    #[test]
+    fn malformed_json_is_reported_as_syntax_not_policy_data() {
+        let json = r#"{"process":{"commandLine":"echo x"}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.contains("Invalid JSON syntax:"),
+            "expected a syntax error, got: {message}"
+        );
+        assert!(
+            !message.contains("Invalid configuration at"),
+            "syntax errors should not claim a policy path: {message}"
+        );
     }
 
     #[test]
@@ -1660,6 +2388,59 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request("nonexistent.json", &mut logger, false);
         assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Configuration file not found: nonexistent.json")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn file_not_found_path_with_newline_is_escaped() {
+        // A file path is untrusted input and may contain a newline on
+        // Linux/macOS; the diagnostic must escape it so it cannot inject a
+        // forged multi-line log entry.
+        let mut logger = test_logger();
+        let result = load_request("missing\nfile.json", &mut logger, false);
+        assert!(result.is_err());
+
+        let message = match result.unwrap_err() {
+            WxcError::ConfigParse(message) => message,
+            other => panic!("expected ConfigParse error, got: {other:?}"),
+        };
+        assert!(!message.contains('\n'), "raw newline leaked: {message}");
+        assert!(message.contains("missing\\nfile.json"), "got: {message}");
+    }
+
+    #[test]
+    fn empty_file_path_error_is_logged_once() {
+        let mut logger = test_logger();
+        let result = load_request("", &mut logger, false);
+        assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Configuration file not found:")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn file_read_error_is_logged_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut logger = test_logger();
+        let result = load_request(directory.path().to_str().unwrap(), &mut logger, false);
+        assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .matches("Failed to read configuration file")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1667,6 +2448,58 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request("not-valid-base64!!!", &mut logger, true);
         assert!(result.is_err());
+        assert_eq!(
+            logger
+                .get_buffer()
+                .lines()
+                .filter(|line| line.contains("Failed to decode base64 configuration"))
+                .count(),
+            1,
+            "the fatal diagnostic should be logged once"
+        );
+    }
+
+    #[test]
+    fn console_mode_logs_decode_errors_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = Logger::new(Mode::Console);
+        logger.enable_file_sink(&log_path).unwrap();
+
+        let result = load_request("not-valid-base64!!!", &mut logger, true);
+        assert!(result.is_err());
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("Failed to decode base64 configuration").count(),
+            1,
+            "console mode should emit one decode diagnostic"
+        );
+    }
+
+    #[test]
+    fn state_aware_semantic_errors_stay_off_primary_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("mxc.log");
+        let mut logger = test_logger();
+        logger.enable_file_sink(&log_path).unwrap();
+        let encoded = base64_encode(br#"{"phase":"provision","experimental":{"seatbelt":{}}}"#);
+
+        let result = load_mxc_request(&encoded, &mut logger, true);
+        assert!(matches!(result, Err(ParseError::StateAware(_))));
+        assert!(
+            logger.get_buffer().is_empty(),
+            "the JSON envelope owns primary state-aware error output"
+        );
+
+        drop(logger);
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            log.matches("'experimental.seatbelt' has moved").count(),
+            1,
+            "state-aware diagnostics should reach auxiliary sinks exactly once"
+        );
     }
 
     #[test]
@@ -1675,11 +2508,11 @@ mod tests {
         let mut logger = test_logger();
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+        assert!(logger.get_buffer().contains("Invalid JSON syntax:"));
     }
 
-    #[cfg(debug_assertions)]
     #[test]
-    fn learning_mode_adds_capability_in_debug() {
+    fn learning_mode_boolean_maps_to_deny_and_record_capability() {
         let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"learningMode": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -1688,23 +2521,56 @@ mod tests {
         assert!(req
             .policy
             .capabilities
-            .contains(&"permissiveLearningMode".to_string()));
-        assert!(logger.get_buffer().contains("WARNING"));
-    }
-
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn learning_mode_stripped_in_release() {
-        let json = r#"{"process": {"commandLine": "echo x"}, "containment": "processcontainer", "processContainer": {"capabilities": ["permissiveLearningMode"]}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
+            .contains(&"learningModeLogging".to_string()));
+        // The boolean must NOT inject the allow-all permissive capability.
         assert!(!req
             .policy
             .capabilities
             .contains(&"permissiveLearningMode".to_string()));
-        assert!(logger.get_buffer().contains("SECURITY"));
+    }
+
+    #[test]
+    fn explicit_learning_mode_capabilities_are_rejected_case_insensitively() {
+        for capability in [
+            "learningModeLogging",
+            "LearningModeLogging",
+            "permissiveLearningMode",
+            "PERMISSIVELEARNINGMODE",
+        ] {
+            let json = format!(
+                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let error = load_request(&encoded, &mut logger, true)
+                .expect_err("reserved learning-mode capability must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("reserved learning-mode capability"));
+            assert!(message.contains(capability));
+        }
+    }
+
+    #[test]
+    fn comma_delimited_capability_entries_are_rejected() {
+        for capability in [
+            "internetClient,permissiveLearningMode",
+            "learningModeLogging,internetClient",
+            "internetClient,privateNetworkClientServer",
+        ] {
+            let json = format!(
+                r#"{{"process": {{"commandLine": "echo x"}}, "containment": "processcontainer", "processContainer": {{"capabilities": ["{capability}"]}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let error = load_request(&encoded, &mut logger, true)
+                .expect_err("comma-delimited capability entry must be rejected");
+            let message = error.to_string();
+            assert!(message.contains("must not contain a comma"));
+            assert!(message.contains("separate JSON array entries"));
+            assert!(message.contains(capability));
+        }
     }
 
     // ====== Tests ported from C++ ConfigurationParserTests.cpp ======
@@ -1737,6 +2603,294 @@ mod tests {
         assert_eq!(req.policy.capabilities[0], "internetClient");
         assert_eq!(req.policy.capabilities[1], "privateNetworkClientServer");
         assert_eq!(req.policy.capabilities[2], "documentsLibrary");
+    }
+
+    #[test]
+    fn capture_denials_absent_leaves_policy_none() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.capture_denials.is_none());
+    }
+
+    #[test]
+    fn capture_denials_presence_enables_capture_without_path() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req
+            .policy
+            .capture_denials
+            .expect("captureDenials presence should enable capture");
+        assert!(cd.output_path.is_none());
+        // Omitting `mode` defaults to the safe block behavior.
+        assert_eq!(cd.mode, CaptureDenialsMode::Block);
+    }
+
+    #[test]
+    fn capture_denials_mode_block_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::Block);
+    }
+
+    #[test]
+    fn capture_denials_mode_allow_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(cd.mode, CaptureDenialsMode::Allow);
+    }
+
+    #[test]
+    fn capture_denials_block_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "block"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "block capture must additively inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "block must not inject permissiveLearningMode"
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_injects_permissive_learning_mode_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_default_injects_learning_mode_logging_capability() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "default (block) capture must inject learningModeLogging: {:?}",
+            req.policy.capabilities
+        );
+    }
+
+    #[test]
+    fn capture_denials_allow_overrides_learning_mode_boolean() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {
+                "learningMode": true,
+                "capabilities": ["internetClient"],
+                "captureDenials": {"mode": "allow"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"internetClient".to_string()),
+            "the workload's own capabilities must be preserved"
+        );
+        assert!(
+            req.policy
+                .capabilities
+                .contains(&"permissiveLearningMode".to_string()),
+            "allow capture must inject permissiveLearningMode"
+        );
+        assert!(
+            !req.policy
+                .capabilities
+                .contains(&"learningModeLogging".to_string()),
+            "allow capture must remove deny-and-record mode"
+        );
+        assert!(
+            !logger.get_buffer().contains("restrictions remain enforced"),
+            "parser must not log the superseded deny-and-record mode"
+        );
+    }
+
+    #[test]
+    fn capture_denials_unknown_mode_rejected() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"mode": "audit"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an unknown captureDenials mode must be rejected");
+        // serde surfaces the accepted variants; the message must name both so
+        // the error is actionable.
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("block") && msg.contains("allow"),
+            "error should list the valid modes: {msg}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_accepts_valid_absolute_output_path() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("denials.json");
+        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert_eq!(
+            cd.output_path.as_deref(),
+            Some(path.to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn capture_denials_relative_output_path_rejected() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"outputPath": "relative/denials.json"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a relative outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("absolute"),
+            "error should mention the absolute-path requirement: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_missing_parent_dir_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Parent directory `nonexistent` is never created.
+        let path = dir.path().join("nonexistent").join("denials.json");
+        let path_json = serde_json::to_string(&path.to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an outputPath whose parent is missing must be rejected");
+        assert!(
+            format!("{err:?}").contains("parent directory does not"),
+            "error should mention the missing parent directory: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_filesystem_root_output_path_rejected() {
+        // A bare filesystem root has no parent (`Path::parent()` == None) and
+        // cannot name a trace file. Use a platform-appropriate root.
+        let root = if cfg!(windows) { "C:\\" } else { "/" };
+        let root_json = serde_json::to_string(root).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {root_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a filesystem-root outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("directory root"),
+            "error should mention the directory-root rejection: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_denials_existing_directory_output_path_rejected() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path_json = serde_json::to_string(&dir.path().to_string_lossy()).unwrap();
+        let json = format!(
+            r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "containment": "processcontainer",
+                "processContainer": {{"captureDenials": {{"outputPath": {path_json}}}}}
+            }}"#
+        );
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("an existing directory outputPath must be rejected");
+        assert!(
+            format!("{err:?}").contains("existing directory"),
+            "error should identify the directory path: {err:?}"
+        );
     }
 
     #[test]
@@ -1877,6 +3031,67 @@ mod tests {
     }
 
     #[test]
+    fn network_specified_true_when_network_present() {
+        // An empty `network: {}` object still counts as "supplied".
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "network": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_specified);
+    }
+
+    #[test]
+    fn network_specified_false_when_network_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.network_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_when_ui_present() {
+        // An empty `ui: {}` still counts as "supplied" — the twin of
+        // `network_specified`. Backends with no UI primitive refuse on
+        // presence, because `UiPolicy::default()` is full lockdown and so an
+        // explicit lockdown `ui` is indistinguishable from an absent one.
+        let json = r#"{"process": {"commandLine": "echo x"}, "ui": {}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_false_when_ui_absent() {
+        let json = r#"{"process": {"commandLine": "echo x"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.ui_specified);
+    }
+
+    #[test]
+    fn ui_specified_true_on_state_aware_requests() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "isolation_session",
+            "ui": {"disable": true}
+        }"#;
+        match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(p) => assert!(p.request.policy.ui_specified),
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn filesystem_paths() {
         let json = r#"{
             "process": {"commandLine": "print('test')"},
@@ -1910,6 +3125,47 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    /// A blank grant names nothing, and previously flowed through to backends
+    /// that treat an empty path as "unset" (e.g. a NULL working directory).
+    #[test]
+    fn block_blank_filesystem_paths() {
+        for blank in ["", "   "] {
+            let json = format!(
+                r#"{{
+                "process": {{"commandLine": "print('test')"}},
+                "filesystem": {{ "readwritePaths": ["{blank}", "C:\\workspace"] }}
+            }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let result = load_request(&encoded, &mut logger, true);
+            let err = result.expect_err("blank path should be rejected");
+            assert!(
+                format!("{err}").contains("empty"),
+                "unexpected error for {blank:?}: {err}"
+            );
+        }
+    }
+
+    /// An interior NUL truncates the path once converted to a C/UTF-16 string,
+    /// so the grant enforced would not be the one requested.
+    #[test]
+    fn block_filesystem_paths_with_embedded_nul() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "filesystem": {
+                "readonlyPaths": ["C:\\workspace\u0000\\..\\secrets"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let result = load_request(&encoded, &mut logger, true);
+        let err = result.expect_err("embedded NUL should be rejected");
+        assert!(format!("{err}").contains("NUL"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2725,6 +3981,279 @@ mod tests {
     }
 
     #[test]
+    fn proxy_accepted_with_wslc_url_form() {
+        // WSLc supports the cooperative env-var proxy via a routable `url`.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        assert!(!req.policy.network_proxy.builtin_test_server);
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.to_url(), "http://proxy.example:8080");
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_localhost_form() {
+        // The localhost form implies a host-loopback proxy, which a WSLc
+        // container (own network namespace) cannot reach. Must be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"localhost": 8080}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_builtin_test_server() {
+        // builtinTestServer spins up an MXC-run in-host proxy, unreachable
+        // from a WSLc container. Must be rejected with the url-form message.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_non_http_scheme() {
+        // Non-HTTP schemes are silently ignored by many clients when injected
+        // as HTTP(S)_PROXY, which fails open. Reject at parse time.
+        for url in ["socks5://proxy.example:1080", "ftp://proxy.example:21"] {
+            let json = format!(
+                r#"{{
+                    "process": {{"commandLine": "echo hi"}},
+                    "containment": "processcontainer",
+                    "network": {{"proxy": {{"url": "{url}"}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{err}").contains("must use the 'http' or 'https' scheme"),
+                "expected scheme rejection for {url}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_scheme_error_redacts_credentials() {
+        // A rejected proxy URL must not echo embedded `user:password@`
+        // userinfo into the error (which reaches the diagnostic/log stream).
+        let json = r#"{
+            "process": {"commandLine": "echo hi"},
+            "containment": "processcontainer",
+            "network": {"proxy": {"url": "socks5://alice:s3cr3t@proxy.example:1080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("must use the 'http' or 'https' scheme"),
+            "expected scheme rejection, got: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cr3t") && !msg.contains("alice:s3cr3t"),
+            "credentials leaked into error: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example"),
+            "expected redacted userinfo in error: {msg}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_block_default() {
+        // A WSLc url proxy needs outbound networking; the default 'block'
+        // policy (defaultPolicy omitted) leaves the proxy unreachable.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("requires network.defaultPolicy='allow'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn proxy_rejects_wslc_url_with_host_lists() {
+        // Host lists are not forwarded to the proxy; reject to avoid silently
+        // weaker enforcement.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "proxy": {"url": "http://proxy.example:8080"},
+                "defaultPolicy": "allow",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowedHosts/blockedHosts"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_block_with_allowed_hosts() {
+        // 'block' default + an allowlist is the doomed in-container iptables path
+        // (Privileged != CAP_NET_ADMIN). Reject at parse time instead of failing
+        // the run at exec.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["example.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_host_filtering_allow_with_blocked_hosts() {
+        // 'allow' default + a blocklist is the other in-container iptables path.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_block_default_without_host_lists() {
+        // 'block' with no allowlist is a full cutoff (NetworkingMode::None) --
+        // enforceable, so it must NOT be rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+        assert!(req.policy.allowed_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_accepts_allow_default_without_host_lists() {
+        // 'allow' with no blocklist is full NAT (Bridged) -- enforceable, not rejected.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(req.policy.blocked_hosts.is_empty());
+    }
+
+    #[test]
+    fn wslc_rejects_allow_local_network_true() {
+        // A blanket inbound-listen grant is silently ignored by the WSLc runner
+        // (only explicit portMappings have inbound effect), so accepting it would
+        // promise reachability the backend never delivers. Reject at parse time.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowLocalNetwork=true is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_accepts_allow_local_network_false() {
+        // The default/explicit `false` is a no-op and must be accepted.
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"allowLocalNetwork": false}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
     fn new_toplevel_fields_parsed() {
         let json = r#"{"version": "0.6.0-alpha", "containerId": "abc-123", "containment": "lxc", "process": {"commandLine": "echo hi"}}"#;
         let encoded = base64_encode(json.as_bytes());
@@ -2840,6 +4369,10 @@ mod tests {
             msg.contains("unknown field") && msg.contains("bogus"),
             "nested unknown field should be rejected, got: {msg}"
         );
+        assert!(
+            msg.contains("Invalid configuration at `process.bogus`"),
+            "expected the unknown field path, got: {msg}"
+        );
     }
 
     #[test]
@@ -2875,7 +4408,7 @@ mod tests {
     fn experimental_port_mapping_unknown_field_accepted() {
         // The experimental surface is intentionally permissive (forward-compat):
         // an unknown field on a nested experimental struct must be tolerated and
-        // the known fields preserved (positive proof of F2 / R2-5).
+        // the known fields preserved.
         let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "wslc", "experimental": {"wslc": {"image": "python:3.12", "portMappings": [{"windowsPort": 8080, "containerPort": 80, "futureField": "ignored"}]}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
@@ -2888,19 +4421,28 @@ mod tests {
     }
 
     #[test]
-    fn experimental_isolation_user_unknown_field_accepted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok", "futureField": true}}}}"#;
+    fn one_shot_ignores_stray_isolation_session_config_rather_than_rejecting() {
+        // The one-shot surface takes no backend configuration at all, and the
+        // `experimental` block is deliberately permissive, so an unrecognised
+        // key there is silently ignored rather than rejected. Parsing must
+        // succeed and select the backend normally.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"unrecognizedSetting": {"nested": "value", "futureField": true}}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("one-shot must accept and ignore a stray isolation_session key");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
+    }
+
+    #[test]
+    fn one_shot_accepts_empty_isolation_session_block() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
-        let iso = req
-            .experimental
-            .isolation_session
-            .expect("iso config present");
-        let user = iso.user.expect("user present");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
+        assert_eq!(req.containment, ContainmentBackend::IsolationSession);
     }
 
     #[test]
@@ -3070,7 +4612,7 @@ mod tests {
     fn state_aware_rejects_experimental_seatbelt() {
         // `experimental.seatbelt` moved to the stable section; the state-aware
         // path must reject it with the migration message, not silently discard
-        // it (R2-1 — the experimental-channel completion of F1).
+        // it.
         let json = r#"{
             "phase": "provision",
             "containment": "isolation_session",
@@ -3241,6 +4783,43 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn schema_version_error_escapes_control_characters() {
+        // The invalid version is free-form user input echoed into a manual
+        // (non-serde) diagnostic; it must not carry raw ESC / newline bytes.
+        let error = validate_schema_version("1.\u{1b}[31m0\nX").unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains('\u{1b}'), "got: {message}");
+        assert!(!message.contains('\n'), "got: {message}");
+        assert!(
+            message.contains("\\u{1b}") || message.contains("\\x1b"),
+            "got: {message}"
+        );
+    }
+
+    #[test]
+    fn root_object_expecting_text_is_pinned_across_both_parse_passes() {
+        // serde's `expecting` attribute requires a string literal, so the
+        // wording is duplicated on `RequestDiscriminator` and `wire::MxcConfig`.
+        // Pin both diagnostics so the two parse passes cannot drift.
+        let discriminator_err =
+            match config_deserialize::from_str::<RequestDiscriminator<'_>>(r#""not an object""#) {
+                Ok(_) => panic!("non-object root must fail discriminator parse"),
+                Err(error) => error,
+            };
+        let wire_err = match config_deserialize::from_str::<wire::MxcConfig>(r#""not an object""#) {
+            Ok(_) => panic!("non-object root must fail wire parse"),
+            Err(error) => error,
+        };
+
+        assert!(discriminator_err
+            .to_string()
+            .contains("expected a configuration object"));
+        assert!(wire_err
+            .to_string()
+            .contains("expected a configuration object"));
     }
 
     #[test]
@@ -3607,125 +5186,23 @@ mod tests {
     }
 
     #[test]
-    fn isolation_session_config_defaults() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}}}"#;
+    fn isolation_session_section_still_marks_a_configured_backend() {
+        // `experimental.isolation_session` no longer maps to any domain
+        // config, but its presence on the WIRE model is what
+        // `present_backend_sections` reads to detect a configured backend.
+        // Pairing it with another backend section must still be refused, or
+        // removing the domain slot would have silently dropped the check.
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {}, "wslc": {"image": "alpine:latest"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_small() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "small"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Small
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_medium() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Medium
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_large() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "large"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Large
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_composable() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "composable"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert_eq!(
-            cfg.configuration_id,
-            crate::models::IsolationSessionConfigurationId::Composable
-        );
-    }
-
-    #[test]
-    fn isolation_session_config_unknown_is_rejected() {
-        // Strict enums: an unrecognized configurationId is rejected at
-        // deserialize time rather than silently defaulting to `composable`.
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "xlarge"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = err.to_string();
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("two backend sections must be refused");
+        let msg = format!("{err}");
         assert!(
-            msg.contains("unknown variant") && msg.contains("xlarge"),
-            "expected an unknown-variant rejection for configurationId 'xlarge', got: {msg}"
+            msg.contains("experimental.wslc") || msg.contains("isolation_session"),
+            "expected the conflicting section to be named, got: {msg}"
         );
-    }
-
-    #[test]
-    fn isolation_session_absent_from_experimental() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "experimental": {}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.experimental.isolation_session.is_none());
-    }
-
-    #[test]
-    fn isolation_session_user_field_round_trips_through_one_shot_parser() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"user": {"upn": "alice@contoso.com", "wamToken": "tok"}}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        let user = cfg
-            .user
-            .expect("user field should round-trip through the one-shot parser");
-        assert_eq!(user.upn, "alice@contoso.com");
-        assert_eq!(user.wam_token, "tok");
-    }
-
-    #[test]
-    fn isolation_session_user_absent_when_field_omitted() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "isolation_session", "experimental": {"isolation_session": {"configurationId": "medium"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        let cfg = req.experimental.isolation_session.unwrap();
-        assert!(cfg.user.is_none());
     }
 
     #[test]

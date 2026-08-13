@@ -3,9 +3,29 @@
 
 //! WSLC Common — WSL Container SDK integration for MXC.
 //!
-//! Provides Rust FFI bindings to the WSLC SDK C API and will contain
-//! the WSL Container runner and policy mapping modules.
+//! [`wslcsdk_sys`] holds the bindgen-generated FFI declarations for the WSLC
+//! SDK C API; [`wslc_bindings`] wraps them in the runtime loader and RAII
+//! guards the rest of the crate uses.
+//!
+//! On top of those sit the two execution models, both implemented by
+//! [`WSLContainerRunner`](wsl_container_runner::WSLContainerRunner) over one
+//! shared container lifecycle: run-to-completion (`ScriptRunner`, used by
+//! `wxc-exec`) and streaming (`SandboxBackend`, in [`sandbox`], used by the
+//! Rust SDK).
 
+pub mod container_steps;
+pub mod daemon_client;
+pub mod daemon_protocol;
+pub mod daemon_record;
+pub mod policy;
 pub mod policy_mapping;
+pub mod sandbox;
+pub mod state_aware;
+mod stream_buffer;
 pub mod wsl_container_runner;
 pub mod wslc_bindings;
+pub mod wslcsdk_sys;
+
+pub use state_aware::WslcStateAwareRunner;
+pub use wsl_container_runner::WSLContainerRunner;
+pub use wslc_bindings::is_available;

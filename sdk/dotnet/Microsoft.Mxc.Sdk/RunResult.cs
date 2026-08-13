@@ -20,4 +20,7 @@ public sealed class RunResult
 
     /// <summary>Everything the sandboxed process wrote to stderr.</summary>
     public string Stderr { get; init; } = string.Empty;
+
+    /// <summary>Structured outputs produced by optional sandbox features.</summary>
+    public SandboxOutputMetadata? OutputMetadata { get; init; }
 }

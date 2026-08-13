@@ -18,7 +18,7 @@
 use std::io::{Read, Write};
 
 use crate::logger::Logger;
-use crate::models::{ExecutionRequest, FailurePhase, ScriptResponse};
+use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use crate::script_runner::ScriptRunner;
 
 /// A handle to a running sandboxed process.
@@ -67,6 +67,18 @@ use crate::script_runner::ScriptRunner;
 ///   before touching the other can hang on output-heavy children. Taking only
 ///   one stream (leaving the other for `wait()` to drain) is always safe.
 pub trait SandboxProcess: Send {
+    /// Security warnings associated with this sandbox, such as a policy that
+    /// intentionally relaxes containment. The default is empty.
+    fn warnings(&self) -> &[String] {
+        &[]
+    }
+
+    /// Structured outputs available after the process has reached a terminal
+    /// state and backend teardown has completed.
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        None
+    }
+
     /// Take ownership of the child's stdin so the caller can write to it.
     /// Returns `None` if already taken. Drop the writer to send EOF.
     fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>>;
@@ -400,6 +412,7 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
             Ok(exit_code) => {
                 let mut response = ScriptResponse {
                     exit_code,
+                    output_metadata: child.output_metadata().cloned().map(Box::new),
                     failure_phase: if exit_code == 0 {
                         FailurePhase::None
                     } else {
@@ -422,10 +435,15 @@ impl<B: SandboxBackend> ScriptRunner for Runner<B> {
             Err(e) if e.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
                 exit_code: -1,
                 error_message: format!("script timed out after {}ms", request.script_timeout),
+                output_metadata: child.output_metadata().cloned().map(Box::new),
                 failure_phase: FailurePhase::Timeout,
                 ..Default::default()
             },
-            Err(e) => ScriptResponse::error(&format!("wait failed: {e}")),
+            Err(e) => {
+                let mut response = ScriptResponse::error(&format!("wait failed: {e}"));
+                response.output_metadata = child.output_metadata().cloned().map(Box::new);
+                response
+            }
         }
     }
 }

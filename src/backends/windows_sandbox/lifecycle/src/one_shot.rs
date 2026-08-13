@@ -289,20 +289,16 @@ fn current_exe_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "current_exe has no parent directory".to_string())
 }
 
-/// Check whether Windows Sandbox is installed by probing for
-/// `WindowsSandbox.exe`.
+/// Preflight: is Windows Sandbox installed here?
 ///
-/// Detection is by binary presence rather than a DISM feature query, which
-/// requires elevation and fails for ordinary users.
+/// Delegates to [`crate::availability::is_windows_sandbox_available`] so the
+/// runner's preflight uses the same trusted, `GetSystemDirectoryW`-based result
+/// as capability reporting — rather than an env-spoofable `%SystemRoot%` path.
 fn check_sandbox_available() -> Result<(), String> {
-    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    let sandbox_exe = std::path::Path::new(&system_root)
-        .join("System32")
-        .join("WindowsSandbox.exe");
-    if sandbox_exe.exists() {
+    if crate::availability::is_windows_sandbox_available() {
         Ok(())
     } else {
-        Err(format!("{} not found", sandbox_exe.display()))
+        Err("WindowsSandbox.exe not found; enable the Windows Sandbox optional feature".to_string())
     }
 }
 

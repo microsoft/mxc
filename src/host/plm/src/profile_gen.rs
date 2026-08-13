@@ -1,16 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Materialize `plm.wprp` next to the running `plm` binary on demand.
+//! Canonical embedded WPR profile.
 //!
-//! The canonical profile lives inline below as `EMBEDDED_WPRP`. There
-//! is no checked-in `plm.wprp` file and no build-time staging — the
-//! binary writes the file itself on first use of `plm start` /
-//! `plm log` when one isn't already next to the exe.
-
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::process;
+//! The restricted elevated child materializes these fixed bytes only in its
+//! own random temporary directory. Public callers cannot override the profile
+//! or select an elevated filesystem path.
 
 /// Canonical WPR profile. Edited here directly — there is no
 /// sibling `plm.wprp` file to keep in sync. `start.rs`'s
@@ -85,79 +80,6 @@ pub const EMBEDDED_WPRP: &str = r#"<!--
 </WindowsPerformanceRecorder>
 "#;
 
-/// Default filename for the staged profile. Lowercase to match what
-/// `main.rs` defaults to (case-sensitive trees fail opaquely otherwise).
-pub const WPRP_FILENAME: &str = "plm.wprp";
-
-/// Ensure `plm.wprp` exists in `exe_dir`. If a file is already
-/// present there, leave it untouched (an operator may have hand-
-/// edited it) and return its path. Otherwise atomically write
-/// `EMBEDDED_WPRP` to that path and return it.
-///
-/// Atomic write: stage into `plm.wprp.tmp.<pid>`, fsync, then
-/// `rename` over `plm.wprp`. This prevents a partial write (disk
-/// full, AV hold, Ctrl+C, OS-budget kill) from leaving an empty or
-/// truncated `plm.wprp` that every later run would silently adopt
-/// via the early-return existence check. The temp file is removed
-/// on any error path before the rename.
-pub fn ensure_wprp_next_to_exe(exe_dir: &Path) -> io::Result<PathBuf> {
-    let dst = exe_dir.join(WPRP_FILENAME);
-    if dst.exists() {
-        return Ok(dst);
-    }
-    let tmp = exe_dir.join(format!("{}.tmp.{}", WPRP_FILENAME, process::id()));
-    match write_then_rename(&tmp, &dst) {
-        Ok(()) => Ok(dst),
-        Err(e) => {
-            // Best-effort cleanup; ignore secondary errors so the
-            // caller sees the original failure.
-            let _ = std::fs::remove_file(&tmp);
-            // Lost a race with a concurrent staging: adopt the
-            // winner's copy rather than fail.
-            if e.kind() == io::ErrorKind::AlreadyExists && dst.exists() {
-                return Ok(dst);
-            }
-            Err(e)
-        }
-    }
-}
-
-fn write_then_rename(tmp: &Path, dst: &Path) -> io::Result<()> {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(tmp)?;
-    f.write_all(EMBEDDED_WPRP.as_bytes())?;
-    f.sync_all()?;
-    drop(f);
-    // Byte-compare the staged file against the compile-time source of
-    // truth. Detects filter drivers, disk-quota clamps, and AV rewrites
-    // that would otherwise let a corrupted `plm.wprp` slip through
-    // `write_all` + `sync_all` and be adopted on every subsequent run
-    // via the early-return existence check in `ensure_wprp_next_to_exe`.
-    let staged = std::fs::read(tmp)?;
-    if staged != EMBEDDED_WPRP.as_bytes() {
-        // Best-effort cleanup; propagate the integrity error, not the
-        // secondary remove failure.
-        let _ = std::fs::remove_file(tmp);
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "staged plm.wprp does not match embedded profile",
-        ));
-    }
-    // `rename` over a nonexistent dst is atomic on Windows + Unix.
-    // If another writer beat us to it, surface AlreadyExists so the
-    // caller can adopt the winner.
-    match std::fs::rename(tmp, dst) {
-        Ok(()) => Ok(()),
-        Err(e) if dst.exists() => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            format!("plm.wprp already exists: {e}"),
-        )),
-        Err(e) => Err(e),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,43 +88,5 @@ mod tests {
     fn embedded_wprp_declares_access_failure_profile() {
         assert!(EMBEDDED_WPRP.contains("<WindowsPerformanceRecorder"));
         assert!(EMBEDDED_WPRP.contains("AccessFailureProfile"));
-    }
-
-    #[test]
-    fn writes_file_when_absent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = ensure_wprp_next_to_exe(tmp.path()).unwrap();
-        assert!(p.exists());
-        assert_eq!(p.file_name().unwrap(), WPRP_FILENAME);
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), EMBEDDED_WPRP);
-    }
-
-    #[test]
-    fn preserves_existing_file_contents() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dst = tmp.path().join(WPRP_FILENAME);
-        std::fs::write(&dst, "operator-edited contents").unwrap();
-        let p = ensure_wprp_next_to_exe(tmp.path()).unwrap();
-        assert_eq!(p, dst);
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            "operator-edited contents"
-        );
-    }
-
-    #[test]
-    fn leaves_no_temp_file_after_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        ensure_wprp_next_to_exe(tmp.path()).unwrap();
-        let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().starts_with("plm.wprp.tmp."))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "stale tmp files: {:?}",
-            leftovers.iter().map(|e| e.file_name()).collect::<Vec<_>>()
-        );
     }
 }

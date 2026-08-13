@@ -11,6 +11,10 @@ link-wslcsdk = []
 [dependencies]
 wxc_common = { workspace = true }
 windows = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
 tar = "0.4"
 libloading = "0.8"
 
@@ -18,5 +22,5 @@ libloading = "0.8"
 tempfile.workspace = true
 
 [build-dependencies]
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"

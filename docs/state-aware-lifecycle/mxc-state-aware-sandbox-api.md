@@ -239,8 +239,10 @@ wire format and have different roles:
 | `containerId` | One-shot wire envelope (per `docs/schema.md`) | Caller-supplied (or auto-generated random hex) | Human-readable label, used as e.g. AppContainer profile name |
 
 State-aware non-provision calls carry `sandboxId` on the request; provision returns it
-on the response. Neither shape carries `containerId`. One-shot calls carry `containerId`
-(when present); they do not carry `sandboxId`.
+on the response. A state-aware request **may** also carry `containerId` — the parser
+preserves it into the request the backend receives — but it is inert for backends that
+do not use it as a label, and it is never a routing key on the state-aware path.
+One-shot calls carry `containerId` (when present); they do not carry `sandboxId`.
 
 ## 6. TypeScript SDK
 
@@ -266,16 +268,24 @@ type StateAwareContainmentBackend = Extract<ContainmentBackend, 'isolation_sessi
 // honor matrix (§10.3). Phases with no backend-specific or cross-cutting fields
 // declare a Config carrying only `version?`.
 
+// NOTE: the IsolationSession shapes below are *illustrative* — they show the
+// per-(backend, phase) Config pattern, not the shipped IsolationSession
+// contract. The authoritative shapes (including the provision-phase `appId`
+// and the three-field provision metadata) live in
+// `docs/isolation-session/state-aware-rust.md` and
+// `sdk/node/src/state-aware-types.ts`. The same caveat applies to the worked
+// example in §7.4 and the config-typing example in §10.2.
+
 interface IsolationSessionProvisionConfig {
   version?: string;
-  filesystem?: FilesystemConfig;
-  network?: NetworkConfig;
-  ui?: UiConfig;
+  // IsolationSession cannot filter or deny the container network, so provision
+  // requires the canonical unrestricted-network acknowledgment — the only accepted
+  // value. filesystem policy is rejected by this backend (§10.3).
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 
 interface IsolationSessionStartConfig {
   version?: string;
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
 }
 
 interface IsolationSessionExecConfig {
@@ -293,10 +303,12 @@ interface IsolationSessionDeprovisionConfig {
 
 interface IsolationSessionProvisionMetadata {
   agentUserName: string;
+  agentUserSid: string;
+  ephemeralWorkspacePath: string;
 }
 
 // WindowsSandbox holds a single active sandbox behind a persistent host-side
-// daemon. It has no Entra/user bundle. Filesystem policy is honored at
+// daemon. Filesystem policy is honored at
 // provision and is immutable thereafter (see §10.3).
 
 interface WindowsSandboxProvisionConfig {
@@ -500,18 +512,14 @@ import {
   execInSandboxAsync,
   stopSandbox,
   deprovisionSandbox,
-  getAvailableToolsPolicy,
   IsolationSessionProvisionConfig,
   SandboxSpawnOptions,
 } from '@microsoft/mxc-sdk';
 
-const tools = getAvailableToolsPolicy();
 const provisionConfig: IsolationSessionProvisionConfig = {
-  filesystem: {
-    readwritePaths: ['C:\\workspace', ...tools.readwritePaths],
-    readonlyPaths: tools.readonlyPaths,
-  },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  // IsolationSession cannot filter or deny the container network, so provision
+  // requires the canonical unrestricted-network acknowledgment (the only accepted value).
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 
 // IsolationSession is experimental, so every call carries `experimental: true`.
@@ -520,8 +528,8 @@ const opts: SandboxSpawnOptions = { experimental: true };
 // Provision — cross-cutting fields apply at this phase per the IS honor matrix (§10.3).
 const { sandboxId } = await provisionSandbox('isolation_session', provisionConfig, opts);
 
-// Start — backend-specific config picks the session size.
-await startSandbox(sandboxId, { configurationId: 'small' }, opts);
+// Start — IsolationSession takes no per-phase config here.
+await startSandbox(sandboxId, undefined, opts);
 
 // Exec — buffered convenience for short workloads.
 const result = await execInSandboxAsync(
@@ -570,8 +578,10 @@ The existing policy-discovery helpers (`getAvailableToolsPolicy`,
 `getUserProfilePolicy`, `getTemporaryFilesPolicy`) compose with state-aware Configs
 unchanged. They produce `FilesystemPolicyResult` fragments — `{ readonlyPaths,
 readwritePaths }` — whose shape matches `FilesystemConfig`'s readonly / readwrite path
-arrays. Consumers merge the fragments directly into a state-aware Config's `filesystem`
-field, as in the §6.3 example.
+arrays. Consumers merge the fragments directly into the `filesystem` field of a
+state-aware Config for a backend that honors filesystem policy at provision (e.g.
+WindowsSandbox); IsolationSession rejects filesystem policy, so its provision Config
+omits it.
 
 ## 7. Wire contract
 
@@ -579,7 +589,8 @@ The wire contract is a typed envelope, JSON-serialised, that flows from the SDK 
 executor (`wxc-exec` on Windows, `lxc-exec` on Linux) via the existing `--config-base64`
 CLI argument. Both ends agree on the same shape: the SDK serialises a TypeScript value,
 the executor parses the same value into a Rust struct (§9.1). The only open content in
-the envelope is at the leaves of `ErrorEnvelope.details`.
+the envelope is at the leaves of `ErrorEnvelope.details`; every other field, including
+the error envelope's named structured fields, is statically typed.
 
 ### 7.1 Request envelope
 
@@ -678,8 +689,8 @@ defined in §6.1, lifting backend-specific fields into the nested experimental b
 ```typescript
 interface ExperimentalStateAwareConfigs {
   isolation_session?: {
-    start?: { configurationId?: 'small' | 'medium' | 'large' | 'composable' };
-    // provision, exec, stop, deprovision omitted — IsolationSession has no
+    provision?: { appId?: string };
+    // start, exec, stop, deprovision omitted — IsolationSession has no
     // backend-specific config for those phases.
   };
   // future state-aware-capable backends add typed entries here
@@ -722,6 +733,24 @@ state-aware mode so `stdout` remains parseable without sentinels. (One-shot disp
 keeps its existing `stdout` logger behaviour — the stricter routing applies to
 state-aware only.)
 
+Configuration parse-phase failures that occur **after** the request is
+discriminated as state-aware (i.e. the `phase` field was recognized) follow the
+state-aware contract: the typed `{error}` envelope is the only primary output,
+while the human-readable actionable parse diagnostic is written only to
+configured auxiliary sinks (`--log-file` and the Windows diagnostic console). It
+is not duplicated to the logger's primary console/buffer output, so such a parse
+failure does not add stderr noise even with `--debug`. Dispatch-time failures,
+including typed per-backend configuration errors, use the same auxiliary-only
+diagnostic routing before the executor emits their typed `{error}` envelope.
+
+Failures that occur **before** discrimination is possible — malformed base64,
+non-UTF-8 bytes, or JSON so malformed that the `phase` field cannot be read —
+cannot be attributed to the state-aware path, so they retain the legacy
+behavior: the diagnostic is written to the primary output (stderr) and **no**
+`{error}` envelope is emitted. Callers that require an envelope even for
+unparseable input should validate that the payload is well-formed JSON before
+invoking `wxc-exec`.
+
 For exec specifically, MXC diagnostic output mixes with the script's own stderr when
 `--debug` is passed. This is a small amount of pre- and post-dispatch noise; consumers
 wanting clean separation should use `--log-file <path>` instead, which routes diagnostic
@@ -733,6 +762,9 @@ output to a file and leaves stderr as pure script content.
 interface ErrorEnvelope {
   code: ErrorCode;
   message: string;
+  operation?: string;
+  nativeCode?: string;
+  remediation?: string;
   details?: Record<string, unknown>;
 }
 
@@ -761,10 +793,45 @@ Because MXC diagnostic output is routed to `stderr` in state-aware mode, this
 stdout-based discrimination has no false positives or negatives — the content is always
 either pure envelope or pure script output.
 
+`code` and `message` are always present. `code` is the machine-readable category a
+consumer branches on; `message` is the human-readable description, and for a failure
+raised by an underlying platform API it is that API's own message, passed through
+verbatim rather than concatenated with the other fields.
+
+The three optional named fields describe a failure that originated in an underlying
+platform API:
+
+| Field | Meaning |
+|---|---|
+| `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. **Best-effort diagnostic, not a versioned contract** — see below. |
+| `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
+| `remediation` | The API's actionable "how to fix it" hint, when it supplies one. |
+
+**Availability.** These fields are currently populated only by **IsolationSession
+state-aware** operations. Windows Sandbox has no semantic error channel to derive them
+from, and the one-shot surface composes its full detail into `message` instead, so all
+three are uniformly absent there. Other backends may adopt them as they grow an
+equivalent channel — treat all three as optional on every backend, and branch program
+logic on `code` first.
+
+**Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
+
+**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
+`operation` marks that an API operation was in flight; the other two refine it, and
+neither ever appears alone. A failure MXC raises before or outside any API call — a
+malformed request or id, a policy rejection, or an internal failure of MXC's own
+machinery — carries only `code` and `message`.
+
+**Which fields earn a place here.** A named top-level field is for a **backend-neutral**
+concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows
+HRESULT, a Linux errno, or any other backend's failure. **Backend-specific** structured
+data belongs in `details` instead. That is what keeps `details` from becoming vestigial
+as named fields are added — it remains the designated home for anything without a
+cross-backend meaning.
+
 `ErrorEnvelope.details` is the only `Record<string, unknown>` in the contract. It's the
-escape hatch backends use to convey structured failure information that's
-per-error-code (a backend's native HRESULT, partial output captured before a timeout,
-etc.). Each backend's plan doc (§11) specifies what `details` contains for which error
+escape hatch backends use to convey structured failure information that has no dedicated
+field. Each backend's plan doc (§11) specifies what `details` contains for which error
 codes.
 
 ### 7.4 Worked example: IsolationSession end-to-end
@@ -777,15 +844,14 @@ shape, across all five phases.
 
 ```typescript
 const config: IsolationSessionProvisionConfig = {
-  filesystem: { readwritePaths: ['C:\\workspace'] },
-  network: { defaultPolicy: 'allow', allowedHosts: ['api.anthropic.com'] },
+  network: { defaultPolicy: 'allow', allowLocalNetwork: true },
 };
 const { sandboxId } = await provisionSandbox(
   'isolation_session',
   config,
   { experimental: true },
 );
-// sandboxId = "iso:reg-abc:prov-123"
+// sandboxId = "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 ```
 
 ```json
@@ -793,29 +859,32 @@ const { sandboxId } = await provisionSandbox(
   "version": "0.6.0-alpha",
   "containment": "isolation_session",
   "phase": "provision",
-  "filesystem": { "readwritePaths": ["C:\\workspace"] },
-  "network": { "defaultPolicy": "allow", "allowedHosts": ["api.anthropic.com"] }
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true }
 }
 ```
 
 ```rust
 // Parser deserializes the JSON above into an ExecutionRequest with
-//   request.policy.readwrite_paths = ["C:\\workspace"]
 //   request.policy.default_network_policy = NetworkPolicy::Allow
-//   request.policy.allowed_hosts = ["api.anthropic.com"]
+//   request.policy.allow_local_network = true
+//   request.policy.network_specified = true
 // (and the other top-level wire fields populated as today's one-shot path
-// already populates them). The dispatcher then calls:
+// already populates them). No filesystem policy appears because this backend
+// refuses it at every phase, and the network policy must be exactly the
+// canonical acknowledgment shown above. The dispatcher then calls:
 backend.provision(&request, /* config */ None)
 // returns Ok(ProvisionResult {
-//     sandbox_id: "iso:reg-abc:prov-123".into(),
+//     sandbox_id: "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0".into(),
 //     metadata: Some(IsolationSessionProvisionMetadata {
 //         agent_user_name: "_iso_abc_123".into(),
+//         agent_user_sid: "S-1-5-21-1001".into(),
+//         ephemeral_workspace_path: "C:\\ProgramData\\...\\_iso_abc_123".into(),
 //     }),
 // })
 ```
 
 ```json
-{ "result": { "sandboxId": "iso:reg-abc:prov-123", "metadata": { "agentUserName": "_iso_abc_123" } } }
+{ "result": { "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", "metadata": { "agentUserName": "_iso_abc_123", "agentUserSid": "S-1-5-21-1001", "ephemeralWorkspacePath": "C:\\ProgramData\\...\\_iso_abc_123" } } }
 ```
 
 #### Phase 2 — start
@@ -823,7 +892,7 @@ backend.provision(&request, /* config */ None)
 ```typescript
 await startSandbox(
   sandboxId,
-  { configurationId: 'small' },
+  undefined,
   { experimental: true },
 );
 ```
@@ -832,18 +901,18 @@ await startSandbox(
 {
   "version": "0.6.0-alpha",
   "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
-  "experimental": { "isolation_session": { "start": { "configurationId": "small" } } }
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-// Dispatcher deserializes `experimental.isolation_session.start` into
-// IsolationSessionStartConfig { configuration_id: Small }, then calls:
+// `start` carries no per-phase config for this backend — its StartConfig is
+// `()`, so the envelope above has no `experimental` block and the dispatcher
+// passes None:
 backend.start(
-    "iso:reg-abc:prov-123",
+    "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
     &request,
-    Some(IsolationSessionStartConfig { configuration_id: Small }),
+    /* config */ None,
 )
 // returns Ok(StartResult { metadata: None })
 ```
@@ -867,7 +936,7 @@ const r = await execInSandboxAsync(
 {
   "version": "0.6.0-alpha",
   "phase": "exec",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0",
   "process": { "commandLine": "echo hello", "timeout": 5000 }
 }
 ```
@@ -876,7 +945,7 @@ const r = await execInSandboxAsync(
 // Parser populates request.script_code = "echo hello", request.script_timeout =
 // 5000 from the wire-format `process` block (same path as one-shot). The
 // dispatcher then calls:
-backend.exec("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecConsumer::Executor)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 
@@ -898,12 +967,12 @@ await stopSandbox(sandboxId, {}, { experimental: true });
 {
   "version": "0.6.0-alpha",
   "phase": "stop",
-  "sandboxId": "iso:reg-abc:prov-123"
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-backend.stop("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.stop("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(StopResult { metadata: None })
 ```
 
@@ -921,12 +990,12 @@ await deprovisionSandbox(sandboxId, {}, { experimental: true });
 {
   "version": "0.6.0-alpha",
   "phase": "deprovision",
-  "sandboxId": "iso:reg-abc:prov-123"
+  "sandboxId": "iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0"
 }
 ```
 
 ```rust
-backend.deprovision("iso:reg-abc:prov-123", &request, /* config */ None)
+backend.deprovision("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
 // returns Ok(DeprovisionResult { metadata: None })
 ```
 
@@ -937,8 +1006,8 @@ backend.deprovision("iso:reg-abc:prov-123", &request, /* config */ None)
 #### Mapping summary
 
 The SDK auto-wraps backend-specific config under `experimental.<backend>.<phase>` when
-serialising state-aware calls — consumers write `configurationId` directly on the
-`IsolationSessionStartConfig`, the SDK builds the nested wire form. Cross-cutting
+serialising state-aware calls — consumers write `appId` directly on the
+`IsolationSessionProvisionConfig`, the SDK builds the nested wire form. Cross-cutting
 fields (`filesystem` / `network` / `ui`) on a per-(backend, phase) Config map directly
 to top-level wire fields — they are already wire-format-aligned in the Config, so the
 SDK passes them through unchanged. Cross-backend exec fields (`commandLine`, `cwd`,
@@ -1029,26 +1098,30 @@ implements one trait, the other, or both, depending on its declared participatio
 
 ### 9.1 Wire envelope (Rust mirror)
 
-MXC's parser at `src/core/wxc_common/src/config_parser.rs` deserializes the
-wire-format JSON directly into the typed wire model in
-`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`), then maps it into the
-typed domain models (`convert_wire_config` → `ExecutionRequest`, with `From`
-impls beside the domain types for the trivial enum/struct conversions) before
-dispatch. The state-aware path reuses this same wire model.
+`src/core/wxc_common/src/config_deserialize.rs` performs path-aware JSON
+deserialization into the typed wire model in
+`src/core/wxc_common/src/wire.rs` (`wire::MxcConfig`).
+`src/core/wxc_common/src/config_parser.rs` discriminates request shape,
+validates the wire model, and maps it into the typed domain models
+(`convert_wire_config` → `ExecutionRequest`, with `From` impls beside the
+domain types for trivial enum/struct conversions). The state-aware path reuses
+this wire model while retaining its per-backend `experimental` subtree for
+dispatch-time typing.
 
 ```rust
 // In config_parser.rs — discrimination is by presence of the `phase` key in
-// the decoded JSON; both shapes deserialize into the one wire::MxcConfig type,
-// which declares `phase` / `sandboxId` and the per-backend `experimental` block.
-let value: serde_json::Value = serde_json::from_str(&json_str)?;
-if value.get("phase").is_some() {
-    // state-aware: peel off the raw `experimental` block (typed per-backend at
-    // dispatch), deserialize the rest into wire::MxcConfig, then map.
-    convert_wire_state_aware(value, logger, allow_missing_command)
+// the source JSON without building a full untyped request tree.
+let discriminator: RequestDiscriminator<'_> =
+    config_deserialize::from_str(&json_str)?;
+if discriminator.phase.is_some() {
+    convert_wire_state_aware(
+        &json_str,
+        discriminator.experimental,
+        logger,
+        allow_missing_command,
+    )
 } else {
-    // one-shot: deserialize wire::MxcConfig from the source text (preserving
-    // serde line/column diagnostics) and map.
-    let cfg: wire::MxcConfig = serde_json::from_str(&json_str)?;
+    let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)?;
     convert_wire_config(cfg, logger, true, allow_missing_command)
 }
 ```
@@ -1073,8 +1146,10 @@ state-aware-only fields (`phase`, `sandboxId`, `experimental.<backend>.<phase>`)
 are extracted alongside the `ExecutionRequest` and bundled into a
 `ParsedStateAwareRequest` domain model — `{ request: ExecutionRequest, phase:
 Phase, containment: Option<ContainmentBackend>, sandbox_id: Option<String>,
-experimental_raw: Option<serde_json::Value> }` — that the dispatcher consumes
-(§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
+experimental_raw: Option<serde_json::Value>, source_text: Option<Box<str>> }` —
+that the dispatcher consumes (§9.3). `source_text` retains the decoded request
+text so per-backend per-phase config errors can be reported with whole-file
+source location (§9.3). The bundling does not modify `ExecutionRequest`'s shape. Domain models
 are exposed to the dispatch layer; the wire types are an implementation detail of
 the parser and schema generation.
 
@@ -1137,11 +1212,28 @@ pub trait StatefulSandboxBackend {
     }
 
     /// Required. Must execute the workload and return a handle.
+    ///
+    /// `consumer` is the caller's intent and is authoritative. This is
+    /// deliberately not `StdioMode`: that enum's `Inherit` means the OS hands
+    /// the child the executor's own handles, which no state-aware backend can
+    /// do, since the workload runs inside an isolation session, a VM, or
+    /// behind an SDK callback. What matters here is who is on the other end,
+    /// because that fixes the topology of the returned streams.
+    ///
+    /// `Library` (the library / FFI streaming path) means the caller drives
+    /// the streams itself, so an implementation must surface separate raw pipe
+    /// handles, allocate no pseudo-console, and not touch the host console.
+    /// `Executor` (the executor path) means the handle is relayed to the
+    /// binary's own stdio, where a pseudo-console is legitimate — and where
+    /// stderr may therefore arrive merged into stdout, leaving
+    /// `ExecHandle::stderr` null. A backend that probes the host to decide how
+    /// to wire stdio must confine that probe to the `Executor` case.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -1236,7 +1328,8 @@ pub struct ExecHandle {
     pub stdout: PipeHandle,
     /// Stderr pipe handle from the running process. Executor relays to its own stderr.
     pub stderr: PipeHandle,
-    /// Stdin pipe handle. Executor relays from its own stdin.
+    /// Stdin pipe handle. Not consumed by the executor relay, which forwards
+    /// no input; the streaming path hands it to an in-process caller.
     pub stdin: PipeHandle,
     /// Function to wait for exit; returns the exit code.
     pub waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
@@ -1259,8 +1352,10 @@ dispatcher from `experimental.<backend>.<phase>` and passed as the `config` para
 `MxcError` is the typed Rust equivalent of its SDK counterpart. `PipeHandle` is a
 platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
 descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` /
-`stderr` and writes to `stdin`, awaits exit via `waiter`, and calls `terminator` on
-cancellation signals.
+`stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
+It does **not** write to `stdin`: forwarding input needs an ownership model
+`ExecHandle` does not have yet, since a pipe reaches EOF only once every write
+handle is closed and the relay can only duplicate the backend's handle.
 
 `mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
@@ -1391,9 +1486,9 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
             validate_exec_common(request)?;
             backend.validate_exec(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let handle = backend.exec(sandbox_id, request, config)?;
+            let handle = backend.exec(sandbox_id, request, config, ExecConsumer::Executor)?;
             // relay_exec_to_stdio streams the script's pipes to the executor's
-            // stdout/stderr/stdin live, awaits exit, and returns the script's exit code.
+            // stdout/stderr live, awaits exit, and returns the script's exit code.
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
@@ -1426,7 +1521,13 @@ prefix) or `malformed_id` (no prefix structure) per §8.
 `Result<Option<C>, MxcError>`: it navigates the wire `experimental.<backend_key>.<phase_name>`
 JSON value and deserialises it into `C` when present, returns `Ok(None)` when absent,
 and surfaces malformed JSON as `malformed_request`. The dispatcher passes
-`B::BACKEND_KEY` so each backend reads from its own slot.
+`B::BACKEND_KEY` so each backend reads from its own slot. Typed errors carry the
+complete `experimental.<backend>.<phase>.<field>` JSON path **and** whole-file
+source location (line/column), at parity with base-config errors: the phase-config
+sub-slice is deserialised positionally out of the retained request text and its
+fragment-local serde location is translated back to whole-file coordinates. If the
+sub-slice cannot be located, deserialisation falls back to the value-based path,
+which still reports the JSON path (without a source location).
 `sandbox_id_required()` enforces that non-provision phases carry a `sandboxId`,
 returning `&str` on success or `malformed_request` on absence. `validate_exec_common`
 is a free function in `validator.rs` that checks cross-backend per-phase invariants
@@ -1496,28 +1597,34 @@ phase) Config from §6.1; it is a strict superset of the wire shape, adding
 as `applied` (§10.3).
 
 ```rust
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct IsolationSessionStartConfig {
-    pub configuration_id: IsolationSessionConfigurationId,
+pub struct IsolationSessionProvisionConfig {
+    pub app_id: Option<String>,
 }
 ```
 
 ```typescript
-interface IsolationSessionStartConfig {
+interface IsolationSessionProvisionConfig {
   version?: string;
-  configurationId?: 'small' | 'medium' | 'large' | 'composable';
+  appId?: string;
+  network: { defaultPolicy: 'allow'; allowLocalNetwork: true };
 }
 ```
 
 The TypeScript Config carries `version` (which the SDK serialises to the top-level
-wire `version` field) plus any cross-cutting fields the matrix marks `applied` for
-that phase (none for IsolationSession's `start`). The Rust struct receives only what
-the wire's `experimental.isolation_session.start` block carries —
-`{ "configurationId": "small" }` — because that is what the dispatcher deserialises
-into `Self::StartConfig` (§9.3). The SDK is responsible for splitting the consumer
-Config into top-level wire fields (cross-cutting, `version`) and the experimental
-sub-block; Rust sees only the post-split shape.
+wire `version` field) plus any cross-cutting fields the matrix marks as honored for
+that phase (for IsolationSession's `provision`, the required `network`
+acknowledgment). The Rust struct receives only what the wire's
+`experimental.isolation_session.provision` block carries —
+`{ "appId": "Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
+deserialises into `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
+the consumer Config into top-level wire fields (cross-cutting, `version`) and the
+experimental sub-block; Rust sees only the post-split shape.
+
+`provision` is used here because it is IsolationSession's **only** phase with a
+per-phase config; `start`, `exec`, `stop` and `deprovision` declare `()` and reject
+any payload in their slot.
 
 ### 10.3 Cross-cutting policy honor matrix
 
@@ -1525,19 +1632,29 @@ Each backend declares which phases honor which cross-cutting field (`filesystem`
 `network`, `ui`). The matrix shape is the proposal-level contract: a row per
 cross-cutting field, a column per phase, with values from the closed set
 `applied` / `rejected` / `ignored`. Specific values per backend are documented in each
-backend's plan doc (§11.6). For IsolationSession, illustrative values (final values
-documented in the backend's plan doc):
+backend's plan doc (§11.6). The IsolationSession row set below mirrors the shipped
+backend; the authoritative statement lives in
+[`isolation-session/state-aware-rust.md`](../isolation-session/state-aware-rust.md):
 
 | Field | provision | start | exec | stop | deprovision |
 |---|---|---|---|---|---|
-| `filesystem` | applied | rejected | rejected | rejected | rejected |
-| `network` | applied | rejected | rejected | rejected | rejected |
-| `ui` | applied | rejected | rejected | rejected | rejected |
+| `filesystem` | rejected | rejected | rejected | rejected | rejected |
+| `network` | required | rejected | rejected | rejected | rejected |
+| `ui` | rejected | rejected | rejected | rejected | rejected |
+
+`network` at provision is `required` rather than `applied`: the backend cannot filter
+or deny the container network, so nothing is enforced — the caller must supply the
+canonical unrestricted-network acknowledgment (`defaultPolicy=allow` +
+`allowLocalNetwork=true`, no host rules, no proxy) and every other value, including an
+absent policy, is refused. `ui` is `rejected` rather than `ignored`: an isolation
+session isolates the *host's* UI from contained code but does not deny that code UI
+capabilities, so no `ui` posture would be truthful and the section is refused rather
+than silently dropped. An omitted `ui` is accepted and applies no restriction.
 
 For WindowsSandbox, filesystem policy (readwrite/readonly/denied HOST paths) is
 applied at provision and frozen for the life of the sandbox; later phases reject it.
 `network` and `ui` are not yet honored at any phase (network isolation is enforced
-unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundle.
+unconditionally by the in-guest agent).
 
 > **Known gap (`deniedPaths`).** WindowsSandbox honors `deniedPaths` only as a
 > best-effort provision-time rejection (a `.wsb` mapped share cannot express a Deny
@@ -1556,8 +1673,9 @@ unconditionally by the in-guest agent). WindowsSandbox has no Entra `user` bundl
   the backend does not honor at that phase, and also fields the matrix would mark as
   `applied` but the runtime does not yet implement. For IsolationSession's matrix
   above, `IsolationSessionProvisionConfig` is the only Config that carries any
-  cross-cutting fields. The SDK currently exposes `filesystem` only; `network` and
-  `ui` will be added at provision when the IsolationSession runtime honors them.
+  cross-cutting fields. The SDK exposes `network` at provision — the required
+  unrestricted-network acknowledgment (`{ defaultPolicy: 'allow', allowLocalNetwork:
+  true }`), the only value the backend accepts; `filesystem` is rejected.
   The start, exec, stop, and deprovision Configs carry none of these fields. Callers
   cannot accidentally pass them.
 - **Runtime enforcement at Rust.** The backend's `validate_<phase>` hooks reject
@@ -1795,16 +1913,17 @@ per-stage configs stay under `experimental.<backend>.<phase>`.
 `experimental.<backend>.<phase>` to top-level `<backend>.<phase>`. The
 `experimental: true` SDK option is no longer required for that backend's state-aware
 calls (and the executor stops gating them behind `--experimental`). For example, a
-`start` call against IsolationSession migrates from this shape:
+`provision` call against IsolationSession migrates from this shape:
 
 ```json
 {
   "version": "0.6.0-alpha",
-  "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "experimental": {
     "isolation_session": {
-      "start": { "configurationId": "small" }
+      "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
     }
   }
 }
@@ -1815,10 +1934,11 @@ to this shape after the backend's state-aware path graduates:
 ```json
 {
   "version": "0.7.0-alpha",
-  "phase": "start",
-  "sandboxId": "iso:reg-abc:prov-123",
+  "phase": "provision",
+  "containment": "isolation_session",
+  "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "isolation_session": {
-    "start": { "configurationId": "small" }
+    "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
   }
 }
 ```

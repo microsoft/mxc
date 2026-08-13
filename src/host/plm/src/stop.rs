@@ -1,31 +1,124 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `plm stop` — stop the in-progress WPR trace and write `trace.etl`
-//! into a log directory.
+//! `plm stop` — keep caller-selected path handling and ETL analysis
+//! unelevated. Only the fixed `wpr -stop` operation runs in the restricted
+//! elevated child, which transfers the ETL back over an authenticated pipe.
 
 use anyhow::{Context, Result};
 use chrono::Local;
+use serde::Serialize;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
-use crate::config::{
-    deny_file_set, initialize_filesystem, load_config, update_from_access_events,
-    write_added_paths_summary,
+use crate::analysis::{
+    analyze_trace, legacy_config_inputs, write_denials, write_detection_summary,
 };
-use crate::event_parser::parse_events;
+use crate::config::{
+    deny_file_set, initialize_filesystem, load_config, merge_capabilities,
+    resolve_adjusted_config_path, save_adjusted_config, update_from_access_events,
+    write_added_paths_summary, write_requested_capabilities_summary,
+};
 use crate::wpr_path::wpr_command;
 
 pub struct StopOptions {
     pub log_dir: Option<PathBuf>,
     pub bin_path: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
-    pub adjusted_config_path: Option<PathBuf>,
     /// When set, skip `wpr -stop` and treat the supplied .etl as the
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
+    /// Exit code recorded in the canonical denials document.
+    pub exit_code: i32,
     pub verbose: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StopResult {
+    pub trace_path: PathBuf,
+    pub denials_path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjusted_config_path: Option<PathBuf>,
+}
+
+pub fn default_log_dir() -> PathBuf {
+    default_log_dir_with_local_app_data(std::env::var_os("LOCALAPPDATA").as_deref())
+}
+
+fn default_log_dir_with_local_app_data(local_app_data: Option<&OsStr>) -> PathBuf {
+    let stamp = format!(
+        "{}_pid{}",
+        Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
+        std::process::id()
+    );
+    local_app_data
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Microsoft")
+        .join("MXC")
+        .join("PLM")
+        .join("logs")
+        .join(stamp)
+}
+
+#[derive(Debug)]
+struct ConfigOutputPaths {
+    source: PathBuf,
+    snapshot: PathBuf,
+    adjusted: PathBuf,
+}
+
+fn prepare_config_output_paths(
+    config_path: Option<&Path>,
+    log_dir: &Path,
+    trace_path: &Path,
+    denials_path: &Path,
+) -> Result<Option<ConfigOutputPaths>> {
+    if same_config_target(trace_path, denials_path) {
+        anyhow::bail!(
+            "trace output {} would be overwritten by denials output {}",
+            trace_path.display(),
+            denials_path.display()
+        );
+    }
+
+    let Some(source) = config_path else {
+        return Ok(None);
+    };
+    let leaf = source
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config.json".into());
+    let snapshot = log_dir.join(leaf);
+    let adjusted = resolve_adjusted_config_path(&snapshot)?;
+
+    for (label, path) in [
+        ("source config", source),
+        ("config snapshot", snapshot.as_path()),
+        ("adjusted config", adjusted.as_path()),
+    ] {
+        if same_config_target(path, trace_path) || same_config_target(path, denials_path) {
+            anyhow::bail!(
+                "{label} path {} collides with a capture output",
+                path.display()
+            );
+        }
+    }
+    if same_config_target(source, &adjusted) || same_config_target(&snapshot, &adjusted) {
+        anyhow::bail!(
+            "adjusted config output {} collides with a source or snapshot config",
+            adjusted.display()
+        );
+    }
+
+    Ok(Some(ConfigOutputPaths {
+        source: source.to_path_buf(),
+        snapshot,
+        adjusted,
+    }))
 }
 
 /// Abstraction over `wpr -stop` invocations so the failure-mapping
@@ -41,10 +134,15 @@ impl WprStopper for WprExeStopper {
     fn stop(&mut self, trace_file: &Path) -> Result<ExitStatus> {
         let mut cmd = wpr_command();
         let resolved = cmd.get_program().to_string_lossy().into_owned();
-        cmd.arg("-stop")
+        let output = cmd
+            .arg("-stop")
             .arg(trace_file)
-            .status()
-            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to spawn wpr -stop ({resolved}): {e}"))?;
+        if !output.status.success() {
+            return Err(crate::start::describe_wpr_failure("stop", &output));
+        }
+        Ok(output.status)
     }
 }
 
@@ -55,10 +153,6 @@ pub fn stop_plm_trace_with<S: WprStopper>(stopper: &mut S, trace_file: &Path) ->
         anyhow::bail!("wpr -stop exited with {status}");
     }
     Ok(())
-}
-
-fn stop_plm_trace(trace_file: &Path) -> Result<()> {
-    stop_plm_trace_with(&mut WprExeStopper, trace_file)
 }
 
 /// Resolve `--bin-path` (or fall back to the calling exe directory)
@@ -93,18 +187,11 @@ pub fn resolve_bin_path(opt: Option<&Path>, exe_dir: &Path) -> (PathBuf, Option<
     }
 }
 
-pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
-    // $LogDir defaults to "<exe dir>\logs\<timestamp>_pid<PID>".
+pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
+    // $LogDir defaults to the caller-writable per-user local data directory.
     // Including PID + sub-second component avoids collisions when
     // parallel PLM tasks finish in the same second.
-    let log_dir = opts.log_dir.unwrap_or_else(|| {
-        let stamp = format!(
-            "{}_pid{}",
-            Local::now().format("%Y-%m-%d_%H%M%S%.3f"),
-            std::process::id()
-        );
-        exe_dir.join("logs").join(stamp)
-    });
+    let log_dir = opts.log_dir.unwrap_or_else(default_log_dir);
     std::fs::create_dir_all(&log_dir)
         .with_context(|| format!("failed to create log dir {}", log_dir.display()))?;
 
@@ -117,42 +204,44 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
         eprintln!("[plm] warning: {w}");
     }
 
-    let trace_file = if let Some(p) = opts.trace_file.as_ref() {
-        // Operator supplied a pre-captured .etl -- don't try to stop a
-        // (likely non-existent) live WPR session.
-        if !p.exists() {
-            anyhow::bail!("trace file does not exist: {}", p.display());
-        }
-        p.clone()
-    } else {
-        let p = log_dir.join("trace.etl");
-        stop_plm_trace(&p)?;
-        p
-    };
+    let trace_file = opts
+        .trace_file
+        .context("plm stop requires --trace-file from a retained guardian capture")?;
+    let denials_path = log_dir.join("denials.json");
+    let config_outputs = prepare_config_output_paths(
+        opts.config_path.as_deref(),
+        &log_dir,
+        &trace_file,
+        &denials_path,
+    )?;
+
+    if !trace_file.exists() {
+        anyhow::bail!("trace file does not exist: {}", trace_file.display());
+    }
 
     if opts.verbose {
         println!("Beginning event parsing, this may take several minutes");
     }
 
-    // Current directory at parse time -- events under this path are
-    // treated as test scaffolding noise and skipped.
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| p.to_string_lossy().trim_end_matches('\\').to_string());
+    let analysis = analyze_trace(&trace_file)?;
+    write_detection_summary(&analysis);
+    write_denials(&denials_path, &analysis, opts.exit_code)?;
 
-    let parse = parse_events(&trace_file, cwd.as_deref(), opts.verbose)?;
-
-    let config_path = match opts.config_path.as_ref() {
-        Some(p) => p,
-        None => return Ok(()),
+    let config_outputs = match config_outputs {
+        Some(paths) => paths,
+        None => {
+            return Ok(StopResult {
+                trace_path: trace_file,
+                denials_path,
+                adjusted_config_path: None,
+            })
+        }
     };
 
-    // Load the source config into memory FIRST, before any disk
-    // side effect touches the log directory. If the source is
-    // unreadable or malformed we want to bail before we've
-    // produced a half-populated log_dir (bare trace.etl + no
-    // config, no adjusted).
-    let base_config = load_config(config_path)?;
+    // Load the source config before copying or mutating it. The trace and
+    // canonical denials remain useful even if this compatibility-only
+    // adjusted-config phase fails.
+    let base_config = load_config(&config_outputs.source)?;
 
     // Copy the original config alongside the trace unconditionally
     // so operators always have a snapshot of the exact input that
@@ -161,23 +250,43 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     // attempt any edit-and-save cycle below: it's the operator's
     // only record of the pre-edit state, and losing it turns an
     // Adjusted_*.json into an un-auditable delta.
-    let leaf = config_path
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "config.json".into());
-    let dest_config = log_dir.join(&leaf);
-    std::fs::copy(config_path, &dest_config)
-        .with_context(|| format!("failed to copy {}", config_path.display()))?;
+    if !same_config_target(&config_outputs.source, &config_outputs.snapshot) {
+        std::fs::copy(&config_outputs.source, &config_outputs.snapshot)
+            .with_context(|| format!("failed to copy {}", config_outputs.source.display()))?;
+    }
 
-    if parse.is_empty() {
+    if analysis.denied_resources_truncated {
+        eprintln!(
+            "[plm] warning: denial analysis was truncated; skipping adjusted-config \
+             generation because the learned policy would be incomplete"
+        );
+        return Ok(StopResult {
+            trace_path: trace_file,
+            denials_path,
+            adjusted_config_path: None,
+        });
+    }
+
+    let current_directory = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let (valid_access_events, requested_capabilities) =
+        legacy_config_inputs(&analysis.denials, current_directory.as_deref());
+    write_requested_capabilities_summary(&requested_capabilities, opts.verbose);
+
+    if valid_access_events.is_empty() && requested_capabilities.is_empty() {
         // Nothing mergeable -- skip producing an Adjusted_*.json (which
         // would be byte-identical to the input and confuse the harness's
         // diff-based pass/fail signal).
-        return Ok(());
+        return Ok(StopResult {
+            trace_path: trace_file,
+            denials_path,
+            adjusted_config_path: None,
+        });
     }
 
     // Edit the pre-loaded copy of the config in memory rather than
-    // re-reading `dest_config` — this avoids a read-after-write on
+    // re-reading the snapshot — this avoids a read-after-write on
     // Windows where an AV filter can occasionally serve a stale or
     // empty buffer for a file that `std::fs::copy` just wrote.
     let mut config = base_config;
@@ -188,21 +297,127 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<()> {
     let added = update_from_access_events(
         &mut config,
         &bin_path_s,
-        &parse.valid_access_events,
+        &valid_access_events,
         &deny,
         opts.verbose,
     )?;
 
-    write_added_paths_summary(&added, opts.verbose);
-
-    // `adjusted_config_path` is accepted today so the wxc-exec --audit
-    // harness can pass it through; the Adjusted_*.json writer arrives
-    // in the next PR (config-generation).
-    if let Some(p) = opts.adjusted_config_path.as_ref() {
-        let _ = p;
+    if !requested_capabilities.is_empty() {
+        merge_capabilities(&mut config, &requested_capabilities)?;
     }
 
-    Ok(())
+    // Create the parent directory here — propagating any error — rather
+    // than silently inside the (now pure) resolver. A missing parent is
+    // surfaced instead of swallowed.
+    if let Some(parent) = config_outputs.adjusted.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!(
+                    "failed to create parent directory {} for adjusted config",
+                    parent.display()
+                )
+            })?;
+        }
+    }
+
+    save_adjusted_config(&config, &config_outputs.adjusted)?;
+
+    write_added_paths_summary(&added, opts.verbose);
+    Ok(StopResult {
+        trace_path: trace_file,
+        denials_path,
+        adjusted_config_path: Some(config_outputs.adjusted),
+    })
+}
+
+/// True iff `a` and `b` denote the same Windows target.
+///
+/// Existing files are canonicalized directly. For a not-yet-created output,
+/// the existing parent is canonicalized before the leaf is reattached, which
+/// still resolves junctions, symlinks, short names, and `.`/`..`. Existing
+/// targets are also compared by volume/file ID so hard links cannot bypass the
+/// pre-capture check. The final path comparison is case-insensitive because
+/// Windows paths are case-insensitive.
+fn same_config_target(a: &Path, b: &Path) -> bool {
+    use wxc_common::filesystem_object::{
+        compare_existing_filesystem_objects, ExistingObjectComparison,
+    };
+
+    match compare_existing_filesystem_objects(a, b) {
+        ExistingObjectComparison::Same | ExistingObjectComparison::Unknown => true,
+        ExistingObjectComparison::Different => {
+            windows_paths_equal_ignore_case(&target_comparison_key(a), &target_comparison_key(b))
+        }
+    }
+}
+
+fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
+}
+
+fn target_comparison_key(path: &Path) -> String {
+    let original = path.to_string_lossy().replace('/', "\\");
+    let is_verbatim = original.starts_with(r"\\?\");
+    let resolved = std::fs::canonicalize(path)
+        .or_else(|_| {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty());
+            let parent = parent.unwrap_or_else(|| Path::new("."));
+            let canonical_parent = std::fs::canonicalize(parent)?;
+            Ok::<_, std::io::Error>(match path.file_name() {
+                Some(file_name) => canonical_parent.join(file_name),
+                None => canonical_parent,
+            })
+        })
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf());
+    let key = resolved.to_string_lossy().replace('/', "\\");
+    let key = strip_verbatim_prefix(key);
+    normalize_win32_components(&key, !is_verbatim)
+}
+
+fn strip_verbatim_prefix(key: String) -> String {
+    let Some(rest) = key.strip_prefix(r"\\?\") else {
+        return key;
+    };
+    match rest.get(..4) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("UNC\\") => format!(r"\\{}", &rest[4..]),
+        _ => rest.to_string(),
+    }
+}
+
+fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -> String {
+    path.split('\\')
+        .map(|component| {
+            if component.is_empty() || component.ends_with(':') {
+                component
+            } else {
+                let component = if trim_trailing_dots_and_spaces {
+                    component.trim_end_matches([' ', '.'])
+                } else {
+                    component
+                };
+                let default_stream_suffix = "::$DATA";
+                let component = component
+                    .get(..component.len().saturating_sub(default_stream_suffix.len()))
+                    .filter(|_| {
+                        component
+                            .get(component.len().saturating_sub(default_stream_suffix.len())..)
+                            .is_some_and(|suffix| {
+                                suffix.eq_ignore_ascii_case(default_stream_suffix)
+                            })
+                    })
+                    .unwrap_or(component);
+                if trim_trailing_dots_and_spaces {
+                    component.trim_end_matches([' ', '.'])
+                } else {
+                    component
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\\")
 }
 
 #[cfg(test)]
@@ -217,6 +432,29 @@ mod tests {
         let (p, warn) = resolve_bin_path(None, &exe);
         assert_eq!(p, exe);
         assert!(warn.is_none(), "no operator intent means no warning");
+    }
+
+    #[test]
+    fn default_log_dir_uses_per_user_local_app_data() {
+        let root = Path::new(r"C:\Users\caller\AppData\Local");
+        let log_dir = default_log_dir_with_local_app_data(Some(root.as_os_str()));
+        assert!(log_dir.starts_with(root.join(r"Microsoft\MXC\PLM\logs")));
+    }
+
+    #[test]
+    fn default_log_dir_falls_back_to_temp_directory() {
+        let log_dir = default_log_dir_with_local_app_data(None);
+        assert!(log_dir.starts_with(std::env::temp_dir().join(r"Microsoft\MXC\PLM\logs")));
+    }
+
+    #[test]
+    fn lowercase_verbatim_unc_key_collides_with_normal_unc_key() {
+        let verbatim = normalize_win32_components(
+            &strip_verbatim_prefix(r"\\?\unc\server\share\denials.json".to_string()),
+            false,
+        );
+        let normal = normalize_win32_components(r"\\server\share\denials.json", true);
+        assert!(windows_paths_equal_ignore_case(&verbatim, &normal));
     }
 
     #[test]
@@ -306,5 +544,185 @@ mod tests {
             msg.contains("simulated spawn failure"),
             "error must surface the underlying io::Error context: {msg}",
         );
+    }
+
+    #[test]
+    fn trace_input_cannot_collide_with_denials_output() {
+        let path = Path::new(r"C:\captures\denials.json");
+        let error =
+            prepare_config_output_paths(None, Path::new(r"C:\captures"), path, path).unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+    }
+
+    #[test]
+    fn trailing_dot_trace_alias_cannot_collide_with_denials_output() {
+        let dir = std::env::temp_dir().join(format!("plm_alias_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = prepare_config_output_paths(
+            None,
+            &dir,
+            &dir.join("denials.json."),
+            &dir.join("denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_stream_trace_alias_cannot_collide_with_denials_output() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let error = prepare_config_output_paths(
+            None,
+            &dir,
+            &dir.join("denials.json::$DATA"),
+            &dir.join("denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn source_config_collision_is_rejected_before_capture() {
+        let trace = Path::new(r"C:\captures\trace.etl");
+        let error = prepare_config_output_paths(
+            Some(trace),
+            Path::new(r"C:\logs"),
+            trace,
+            Path::new(r"C:\logs\denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("source config"));
+    }
+
+    #[test]
+    fn source_config_hard_link_collision_is_rejected_before_capture() {
+        let dir = std::env::temp_dir().join(format!("plm_hard_link_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("config.json");
+        let trace = dir.join("trace.etl");
+        std::fs::write(&source, "{}").unwrap();
+        std::fs::hard_link(&source, &trace).unwrap();
+
+        let error =
+            prepare_config_output_paths(Some(&source), &dir, &trace, &dir.join("denials.json"))
+                .unwrap_err();
+        assert!(error.to_string().contains("source config"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_matches_identical_existing_path() {
+        // Two spellings of the same existing file must be detected as
+        // the same target so the snapshot-clobber guard fires.
+        let dir = std::env::temp_dir().join(format!("plm_same_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = dir.join("config.json");
+        std::fs::write(&a, b"{}").unwrap();
+        let b = dir.join(".").join("config.json");
+        assert!(
+            same_config_target(&a, &b),
+            "same file via different spelling"
+        );
+        let other = dir.join("Adjusted_config.json");
+        assert!(
+            !same_config_target(&a, &other),
+            "distinct files must not collide"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_matches_existing_hard_links() {
+        let dir = std::env::temp_dir().join(format!("plm_hard_link_key_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("source.json");
+        let alias = dir.join("alias.json");
+        std::fs::write(&source, "{}").unwrap();
+        std::fs::hard_link(&source, &alias).unwrap();
+        assert!(same_config_target(&source, &alias));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_is_case_insensitive_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_case_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lower = dir.join("denials.json");
+        let upper = dir.join("DENIALS.JSON");
+        assert!(same_config_target(&lower, &upper));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_is_unicode_case_insensitive_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_unicode_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(&dir.join("Ä.etl"), &dir.join("ä.etl")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_dot_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_dot_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json."),
+            &dir.join("denials.json")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_space_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_space_target_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json "),
+            &dir.join("denials.json")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_default_stream_for_new_outputs() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_key_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(same_config_target(
+            &dir.join("denials.json::$data"),
+            &dir.join("denials.json")
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_trailing_characters_after_default_stream() {
+        let dir = std::env::temp_dir().join(format!("plm_stream_trim_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for alias in ["denials.json::$DATA.", "denials.json::$DATA "] {
+            assert!(same_config_target(
+                &dir.join(alias),
+                &dir.join("denials.json")
+            ));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_config_target_normalizes_default_stream_for_verbatim_outputs() {
+        assert!(same_config_target(
+            Path::new(r"\\?\C:\captures\denials.json::$DATA"),
+            Path::new(r"\\?\C:\captures\denials.json")
+        ));
+    }
+
+    #[test]
+    fn same_config_target_preserves_trailing_dot_for_verbatim_outputs() {
+        assert!(!same_config_target(
+            Path::new(r"\\?\C:\captures\denials.json."),
+            Path::new(r"\\?\C:\captures\denials.json")
+        ));
     }
 }

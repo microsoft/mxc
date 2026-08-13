@@ -1,0 +1,5 @@
+{
+    "version": "0.8.0-alpha",
+    "phase": "deprovision",
+    "sandboxId": "{{SANDBOX_ID}}"
+}

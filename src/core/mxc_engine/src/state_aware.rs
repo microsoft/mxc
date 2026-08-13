@@ -5,8 +5,8 @@
 //!
 //! The single home for resolving a parsed state-aware request to its backend
 //! and driving the per-phase flow. It centralizes the backend-specific
-//! construction that previously lived inline in `wxc-exec` so the binary can
-//! shrink to a thin CLI shell.
+//! construction that would otherwise live inline in `wxc-exec` so the binary
+//! can shrink to a thin CLI shell.
 //!
 //! Backends whose `StatefulSandboxBackend` impl lives in a `backends/*` crate
 //! (which depends on `wxc_common`, so the construction can't live inside
@@ -25,6 +25,40 @@ use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase
 
 use crate::error::Error;
 
+/// The `backend_unavailable` error returned when a state-aware WSLc request
+/// reaches a build compiled without the `wslc` feature (or a non-Windows
+/// target). Mirrors the documented error mapping so the availability probe can
+/// skip a feature-off build instead of misreading `unsupported_phase`.
+#[cfg(not(all(target_os = "windows", feature = "wslc")))]
+fn wslc_unavailable() -> MxcError {
+    MxcError::backend_unavailable(
+        "the WSLc backend is not available in this build (compiled without the `wslc` feature)",
+    )
+}
+
+/// Reject a state-aware request for an experimental backend when the caller has
+/// not opted in via `--experimental`. Applied by both the envelope dispatcher
+/// ([`run_state_aware`]) and the streaming exec dispatcher ([`exec_state_aware`])
+/// so no entry point can reach an experimental backend without the flag.
+fn require_experimental_optin(
+    backend: &wxc_common::models::ContainmentBackend,
+    parsed: &ParsedStateAwareRequest,
+) -> Result<(), MxcError> {
+    if matches!(
+        backend,
+        wxc_common::models::ContainmentBackend::WindowsSandbox
+            | wxc_common::models::ContainmentBackend::IsolationSession
+            | wxc_common::models::ContainmentBackend::Wslc
+    ) && !parsed.request.experimental_enabled
+    {
+        return Err(MxcError::backend_unavailable(format!(
+            "{backend:?} is an experimental backend; pass --experimental to enable state-aware \
+             dispatch against it"
+        )));
+    }
+    Ok(())
+}
+
 /// Resolve `parsed`'s backend and run the requested state-aware phase.
 ///
 /// On envelope phases this returns [`DispatchOutcome::Envelope`]; on the exec
@@ -36,17 +70,7 @@ pub fn run_state_aware(
     dry_run: bool,
 ) -> Result<DispatchOutcome, MxcError> {
     let backend = resolve_backend(&parsed)?;
-    if matches!(
-        backend,
-        wxc_common::models::ContainmentBackend::WindowsSandbox
-            | wxc_common::models::ContainmentBackend::IsolationSession
-    ) && !parsed.request.experimental_enabled
-    {
-        return Err(MxcError::backend_unavailable(format!(
-            "{backend:?} is an experimental backend; pass --experimental to enable state-aware \
-             dispatch against it"
-        )));
-    }
+    require_experimental_optin(&backend, &parsed)?;
     match backend {
         #[cfg(target_os = "windows")]
         wxc_common::models::ContainmentBackend::WindowsSandbox => {
@@ -58,6 +82,15 @@ pub fn run_state_aware(
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => {
+            let mut runner = wslc_common::WslcStateAwareRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
+        // Feature-off build: keep the documented `backend_unavailable` contract
+        // rather than falling through to the generic `unsupported_phase`.
+        #[cfg(not(all(target_os = "windows", feature = "wslc")))]
+        wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         _ => run_state_aware_fallback(parsed, dry_run),
     }
 }
@@ -73,6 +106,7 @@ pub fn exec_state_aware(
     parsed: ParsedStateAwareRequest,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     let backend = resolve_backend(&parsed)?;
+    require_experimental_optin(&backend, &parsed)?;
     match backend {
         #[cfg(all(target_os = "windows", feature = "isolation_session"))]
         wxc_common::models::ContainmentBackend::IsolationSession => {
@@ -80,9 +114,22 @@ pub fn exec_state_aware(
             let handle =
                 wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
             Ok(Box::new(
-                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle),
+                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
             ))
         }
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => {
+            let mut runner = wslc_common::WslcStateAwareRunner::new();
+            let handle =
+                wxc_common::state_aware_dispatch::dispatch_state_aware_exec(&mut runner, parsed)?;
+            Ok(Box::new(
+                wxc_common::exec_stream::ExecSandboxProcess::from_exec_handle(handle)?,
+            ))
+        }
+        // Feature-off build: keep the documented `backend_unavailable` contract
+        // rather than falling through to the generic `unsupported_phase`.
+        #[cfg(not(all(target_os = "windows", feature = "wslc")))]
+        wxc_common::models::ContainmentBackend::Wslc => Err(wslc_unavailable()),
         _ => Err(MxcError::unsupported_phase(format!(
             "backend {:?} does not implement the state-aware lifecycle",
             backend
@@ -174,9 +221,36 @@ mod tests {
             sandbox_id: None,
             correlation_vector: None,
             experimental_raw: None,
+            source_text: None,
         };
 
         let error = run_state_aware(parsed, false).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
+        assert!(error.message.contains("--experimental"));
+    }
+
+    #[test]
+    fn exec_experimental_backend_requires_flag() {
+        // The streaming exec entry point applies the same opt-in gate as the
+        // envelope dispatcher: a `wslc:` exec without `--experimental` must be
+        // refused before reaching the backend.
+        let parsed = ParsedStateAwareRequest {
+            request: ExecutionRequest::default(),
+            phase: Phase::Exec,
+            containment: Some(ContainmentBackend::Wslc),
+            sandbox_id: Some("wslc:00000000000000000000000000000000".to_string()),
+            correlation_vector: None,
+            experimental_raw: None,
+            source_text: None,
+        };
+
+        let error = match exec_state_aware(parsed) {
+            Ok(_) => {
+                panic!("expected experimental gate to reject wslc exec without --experimental")
+            }
+            Err(e) => e,
+        };
 
         assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
         assert!(error.message.contains("--experimental"));

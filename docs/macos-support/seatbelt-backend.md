@@ -175,12 +175,99 @@ settings live under a top-level `seatbelt` key:
 | Policy field | Generated rule | Effect |
 |---|---|---|
 | `readonlyPaths` | `(allow file-read* (subpath …))` | Script can read these subtrees |
-| `readwritePaths` | `(allow file-read* file-write* (subpath …))` | Script can read and write |
-| `deniedPaths` | `(deny file-read* file-write* (subpath …))` emitted **last** | Overrides any broader allow above |
+| `readwritePaths` | `(allow file-read* file-write* network-bind network-outbound (subpath …))` | Script can read and write, and bind/connect AF_UNIX sockets under these subtrees |
+| `readonlyPaths` (nested under a read-write path) | `(deny file-write* network-bind network-outbound (subpath …))` | Removes write and socket authority a shallower read-write rule would otherwise grant |
+| `deniedPaths` | `(deny file-read* file-write* network-bind network-outbound (subpath …))` emitted **last** | Overrides any broader allow above |
 
-Apple's Seatbelt evaluates rules with last-match-wins semantics within an
-operation, so denies emitted after allows correctly override them. This
-matches MXC's `denied_paths` contract on every other backend.
+Apple's Seatbelt evaluates rules with last-match-wins semantics between rules
+that carry a **filter**, so denies emitted after allows correctly override them.
+This matches MXC's `denied_paths` contract on every other backend. An
+*unfiltered* rule does not participate: a later `(allow network-outbound)` with
+no filter will not override an earlier path-scoped deny.
+
+`readonlyPaths` and `readwritePaths` are emitted **shallow-to-deep**, one rule
+per path, using the same ordering the Linux backends apply
+(`wxc_common::filesystem_resolve`). Last-match-wins then makes the *deepest*
+intent win at every path, so a read-only entry nested inside a broader
+read-write subtree stays read-only. That last part needs an explicit
+`(deny file-write* network-bind network-outbound …)` per read-only path,
+because the read-only `allow` only names `file-read*` — it says nothing about
+write or socket operations, so on its own it cannot displace a broader grant.
+
+`deniedPaths` is not part of that plan. It is emitted last so it outranks the
+filtered allows above regardless of depth. Its position relative to the network
+rules does not matter: as noted above, an unfiltered allow cannot override it.
+
+#### Path resolution
+
+Policy paths are rewritten before they are emitted into the profile:
+
+1. A leading `~` / `~/…` is expanded against `$HOME`.
+2. Redundant lexical segments are collapsed: repeated separators (`//tmp`),
+   `.` segments (`/./tmp`), and a trailing `/`. A `..` segment is **rejected**
+   as a config error rather than resolved — macOS resolves `..` physically,
+   after following symlinks (`/tmp/..` is `/private`, not `/`), so resolving it
+   lexically could silently point the rule somewhere else.
+3. A leading symlinked root path segment is rewritten to its real target:
+   `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
+   `/System/Volumes/Data/home`.
+
+A `..` segment is rejected on this backend only. The shared config parser
+accepts it, so a cross-backend policy using `..` will fail on macOS and run
+elsewhere. That is intentional: the alternative is the failure mode this whole
+section exists to remove — the rule would be emitted, match nothing, and for
+`deniedPaths` fail open. Resolving `..` correctly needs `std::fs::canonicalize`
+against the live filesystem, which the profile builder deliberately avoids so it
+stays pure string generation, unit-testable on any host.
+
+After resolution, the most-restrictive-wins precedence (`deny` > `readonly` >
+`readwrite`) is re-applied to the **resolved** paths. The shared config parser
+already applies it, but only to the raw strings, so two spellings of the same
+path (`readonlyPaths: ["/private/tmp/x"]` and `readwritePaths: ["/tmp/x"]`)
+survive it and collide only here. Seatbelt is last-match-wins and the read-write
+rule is emitted second, so without this the weaker grant would win and silently
+make a read-only path writable.
+
+Steps 2 and 3 are mandatory, not cosmetic. Those root entries are symlinks on macOS,
+and the kernel fully resolves a path before matching it against a profile
+filter — so a rule written against the unresolved path never matches and is
+silently dead. This applies to the automatic `$TMPDIR` grant too, which
+resolves to `/var/folders/…`. `/Users` needs no rewriting: it is a *firmlink*,
+not a symlink, so it is already the canonical path.
+
+#### UNIX-domain sockets
+
+Seatbelt matches AF_UNIX sockets by **path** — `bind()` under `network-bind`
+and `connect()` under `network-outbound` — while the `(local ip)` / `(remote
+ip)` filters used by the network policy cover IP sockets only. MXC therefore
+governs AF_UNIX sockets with the **filesystem** policy, not the network policy:
+both halves are permitted anywhere the sandbox may already create files.
+
+This is deliberate. A socket is a filesystem object reachable only by processes
+that can traverse to its path, and Node toolchains (tsx, vite, esbuild, jest
+workers) need both halves for their IPC pipes. Gating them behind
+`allowLocalNetwork` would force real network ingress on just to run a build.
+Because the rules are path-scoped they never widen IP binding or IP egress,
+which stay governed by `defaultPolicy` and `allowLocalNetwork`.
+
+There is a real tradeoff to be aware of, though: `connect()` is a capability
+that `file-write*` alone did not grant. A sandbox with a broad `readwritePaths`
+root can now talk to any **pre-existing** listener underneath it, and a control
+socket (Docker, `ssh-agent`, `gpg-agent`) is a meaningful target. Prefer a
+narrow read-write root, and put any sensitive socket in `deniedPaths`, which
+overrides this grant.
+
+Two asymmetries are intentional:
+
+- `readonlyPaths` grants **neither** operation. A socket is a bidirectional
+  channel, not a read.
+- `deniedPaths` denies `network-outbound`, overriding **both** kinds of allow
+  that can reach it: a broader `readwritePaths` subtree containing the denied
+  path, and the *unfiltered* `(allow network-outbound)` emitted by
+  `defaultPolicy: "allow"` and the remote-proxy fallback. Without the deny the
+  sandbox could `connect()` to a pre-existing socket inside a denied subtree —
+  a Docker, `ssh-agent` or `gpg-agent` socket is a control plane, so that would
+  be an escape.
 
 A baseline of read-only system paths (`/usr/lib`, `/usr/libexec`,
 `/usr/share`, `/System`, `/Library`, `/private/var/db/timezone`,
@@ -194,8 +281,9 @@ independently of the profile.
 
 | Policy | Generated rule |
 |---|---|
-| `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all sockets. |
+| `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all IP sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
+| `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — on its own this is what lets a process `listen()` on a local address; it covers the `bind()` too. (`network-bind (local ip)` alone is *not* enough: `bind()` succeeds and `listen()` is denied.) Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
 | `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
 | `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
 | `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |

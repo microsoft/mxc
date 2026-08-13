@@ -195,14 +195,15 @@ type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, Wi
 type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
-type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, never>>;
+// `wslc.provision` is the state-aware-only nested provision-phase config; the
+// one-shot public `WslcConfig` intentionally omits it (state-aware config is
+// surfaced through `state-aware-types.ts`, not the one-shot policy surface).
+type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, 'provision'>>;
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
-// `processContainer.learningMode` is a wire field the SDK does not expose (the
-// AppContainer permissive learning mode is not surfaced through the policy API).
 type _ProcessContainerWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'learningMode'>
+  Equivalent<OnlyInWire<ProcessContainerConfig, WireProcessContainer>, 'captureDenials'>
 >;
 
 // `seatbelt.guiAccess` and `seatbelt.launchMethod` are wire fields the one-shot

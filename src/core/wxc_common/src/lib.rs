@@ -4,11 +4,13 @@
 // Platform-agnostic modules (shared by wxc-exec, lxc-exec, mxc-exec-mac
 // and every backend crate).
 pub mod cmdline;
+mod config_deserialize;
 pub mod config_parser;
 pub mod encoding;
 pub mod error;
 pub mod exec_stream;
 pub mod filesystem_access;
+pub mod filesystem_canonical;
 pub mod filesystem_object;
 pub mod filesystem_resolve;
 pub mod id;
@@ -18,6 +20,7 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
 pub mod state_aware_backend;
@@ -49,6 +52,8 @@ pub mod filesystem_dacl;
 pub mod process_util;
 #[cfg(target_os = "windows")]
 pub mod string_util;
+#[cfg(target_os = "windows")]
+pub mod system_dir;
 
 // Unix-specific modules (shared by the Seatbelt and Bubblewrap backends).
 #[cfg(unix)]

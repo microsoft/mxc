@@ -48,10 +48,12 @@ jobs:
         cargoFeatures: hyperlight isolation_session microvm wslc
         signPattern: |
             wxc-exec.exe
+            plm.exe
             wxc-host-prep.exe
             winhttp-proxy-shim.exe
             wxc-windows-sandbox-daemon.exe
             wxc-windows-sandbox-guest.exe
+            wxc-wslc-daemon.exe
             wxc-test-proxy.exe
             mxc-diagnostic-console.exe
 

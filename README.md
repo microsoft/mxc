@@ -219,13 +219,15 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 
 ### Audit Mode (Permissive Learning Mode)
 
-`--audit` runs the policy in **permissive** mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. See [src/host/plm/readme.md](src/host/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
+`--audit` runs a Windows **ProcessContainer** policy in permissive mode — denied operations are logged but allowed to proceed — and starts a Permissive Learning Mode (PLM) ETW trace alongside the workload. `wxc-exec.exe` and the public `plm.exe` remain unelevated; PLM uses UAC only for fixed WPR start/stop controls, no service is added, and ETL/status handoff stays on a unique authenticated local named pipe while every caller-selected log/config/trace destination and ETL analysis stay under the caller token. It is rejected for Windows Sandbox, WSLC, IsolationSession, and every other containment backend because those paths do not honor the AppContainer learning-mode capability. It is the developer inner-loop flow for discovering the capabilities and paths a workload needs. See [src/host/plm/readme.md](src/host/plm/readme.md) for the full PLM tool reference, including standalone `plm.exe` invocation (e.g. re-processing an existing `.etl` with `plm stop --trace-file …`).
 
 ```bash
 wxc-exec.exe --audit policy.json
 ```
 
-> **Warning:** In release builds, `--audit` relaxes the rejection of `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring.
+Use `--audit-verbose` to also stream PLM lifecycle diagnostics to stderr. Successful runs always print the artifact directory containing `trace.etl`, `denials.json`, and any adjusted configuration.
+
+> **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
 ## Telemetry (Experimental)
 

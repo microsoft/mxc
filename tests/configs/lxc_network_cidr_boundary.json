@@ -1,0 +1,33 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Network-CIDR-Boundary",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "true"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "enforcementMode": "firewall",
+    "allowedHosts": [
+      "0.0.0.0/0",
+      "::/0",
+      "140.82.112.5",
+      "140.82.112.5/20",
+      "140.82.112.5/32",
+      "2606:50c0:8000::153/32"
+    ],
+    "blockedHosts": [
+      "198.51.100.42",
+      "198.51.100.42/32",
+      "2001:db8::5",
+      "2001:db8::5/128"
+    ]
+  }
+}
