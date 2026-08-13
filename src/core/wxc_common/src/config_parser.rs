@@ -703,16 +703,16 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
 // silently accepted and `script_code` is left empty.
 //
-// `state_aware_wslc_exec` identifies the state-aware exec exception: network
-// mode was fixed at provision, so a proxy-only exec inherits that mode rather
-// than restating `defaultPolicy`. Backend phase validation still rejects every
-// post-provision network-mode or host-filtering field.
+// `state_aware` marks the state-aware lifecycle, where the WSLc network checks
+// below are skipped: the mode is fixed at provision, so a later phase omits
+// `defaultPolicy`, and the backend's per-phase gates reject the same inputs as
+// `policy_validation` rather than a parse error.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
-    state_aware_wslc_exec: bool,
+    state_aware: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1048,7 +1048,7 @@ fn convert_wire_config(
         // Require an 'allow' default with no host lists so the proxy is reachable.
         if containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
-            && !state_aware_wslc_exec
+            && !state_aware
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1064,18 +1064,25 @@ fn convert_wire_config(
         // WSLc cannot enforce per-host egress filtering: containers lack
         // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
         // cannot expose VM-level enforcement without breaking other security
-        // guarantees (e.g. MDE). Reject up front; the backend's validate_runner
-        // enforces the same for requests that bypass this parser. Bare defaults
-        // with no host lists (full cutoff / full NAT) are enforceable, left as-is.
+        // guarantees (e.g. MDE). Reject any non-empty host list up front —
+        // including one redundant with the default (`block` + blockedHosts,
+        // `allow` + allowedHosts), which would otherwise be silently ignored
+        // (a fail-open footgun). The backend's validate_runner enforces the
+        // same for requests that bypass this parser. Bare defaults with no host
+        // lists (full cutoff / full NAT) are enforceable, left as-is.
+        //
+        // One-shot only: the state-aware path reaches the same rejection through
+        // the backend policy gate (`reject_host_filtering`), which reports it as
+        // `policy_validation` rather than a parse error, so firing here would
+        // mislabel a well-formed but unsupported policy as `malformed_request`.
         if containment == ContainmentBackend::Wslc {
-            if policy.needs_host_filtering() {
-                let msg = "WSLc: per-host egress filtering (allowedHosts with \
-                           defaultPolicy='block', or blockedHosts with \
-                           defaultPolicy='allow') is not supported. A WSLc container has \
-                           no CAP_NET_ADMIN for in-container iptables, and VM-level \
-                           enforcement is not available without breaking other security \
-                           guarantees (e.g. MDE). Use network.proxy (defaultPolicy='allow') \
-                           for cooperative host filtering, or remove the host lists.";
+            if !state_aware && policy.has_host_lists() {
+                let msg = "WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not \
+                           supported. A WSLc container has no CAP_NET_ADMIN for in-container \
+                           iptables, and VM-level enforcement is not available without breaking \
+                           other security guarantees (e.g. MDE). Use network.proxy \
+                           (defaultPolicy='allow') for cooperative host filtering, or remove the \
+                           host lists.";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1492,18 +1499,8 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let state_aware_wslc_exec = phase == Phase::Exec
-        && cfg
-            .containment
-            .as_ref()
-            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
-    let mut request = convert_wire_config(
-        cfg,
-        logger,
-        require_process,
-        allow_missing_command,
-        state_aware_wslc_exec,
-    )?;
+    let mut request =
+        convert_wire_config(cfg, logger, require_process, allow_missing_command, true)?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -4511,6 +4508,54 @@ mod tests {
             "network": {
                 "defaultPolicy": "allow",
                 "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_redundant_block_with_blocked_hosts() {
+        // 'block' default + a blocklist is redundant (block already denies), but
+        // must still be rejected rather than silently ignored — a fail-open
+        // footgun otherwise (#824 Gap 1).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "blockedHosts": ["evil.example"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("per-host egress filtering"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn wslc_rejects_redundant_allow_with_allowed_hosts() {
+        // 'allow' default + an allowlist is the classic "I meant an allowlist"
+        // typo: it would previously permit ALL egress (the list ignored). Reject
+        // it instead of failing open (#824 Gap 1).
+        let json = r#"{
+            "version": "0.6.0-alpha",
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowedHosts": ["github.com"]
             }
         }"#;
         let encoded = base64_encode(json.as_bytes());

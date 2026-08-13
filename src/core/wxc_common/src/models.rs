@@ -792,6 +792,16 @@ impl ContainerPolicy {
             &self.blocked_hosts,
         )
     }
+
+    /// True when any host list is present, regardless of the default policy.
+    /// Unlike [`needs_host_filtering`], this also flags a list that is
+    /// *redundant* with the default (`block` + `blockedHosts`, `allow` +
+    /// `allowedHosts`). WSLc cannot enforce per-host filtering in any form, so
+    /// it must fail closed on any non-empty list rather than silently ignore a
+    /// redundant one.
+    pub fn has_host_lists(&self) -> bool {
+        !self.allowed_hosts.is_empty() || !self.blocked_hosts.is_empty()
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
