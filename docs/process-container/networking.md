@@ -77,6 +77,30 @@ communication must set `ingress.default` to `"allow"` and accept that Windows en
 server behavior. On an enforcing BaseContainer path, per-container WFP permits the MXC client container to connect only
 to the configured loopback address and port and blocks direct public and private destinations.
 
+#### Non-AppContainer proxy (explicit opt-in)
+
+Packaged and unpackaged non-AppContainer proxies use the host-loopback path instead of an identity-scoped peer:
+
+```jsonc
+{
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "allow"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  }
+  // No processContainer.network.allowedProxyPeer.
+}
+```
+
+MXC does not grant `privateNetworkClientServer` for this path. The proxy is not isolated or authorized by an
+AppContainer identity, so it is intended primarily for development and debugging. Packaged deployments can own the
+port-scoped firewall rule in the package; unpackaged deployments require an installer- or administrator-owned rule.
+
 #### HTTP client guidance
 
 Code inside the ProcessContainer should use WinHTTP or an HTTP library that queries the system for proxy information.
@@ -120,11 +144,6 @@ declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its ap
 requires its installer or administrator to own an equivalent rule scoped to the proxy executable and configured port. See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
-
-For a non-AppContainer proxy, omit `processContainer.network.allowedProxyPeer` and set
-`ingress.hostLoopback: "allow"`. Packaged deployments can own the port-scoped firewall rule in the package; unpackaged
-deployments require the installer or administrator to own it. These paths do not provide AppContainer isolation or
-proxy-peer identity scoping and are intended primarily for development and debugging.
 
 ### Model 3: externally blocked (most restrictive)
 
