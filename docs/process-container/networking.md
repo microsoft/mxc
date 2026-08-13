@@ -58,7 +58,6 @@ This matrix covers the direction defaults without explicit internet egress rules
       "default": "deny",
       "hostLoopback": "deny"
     }
-    // direct egress, filtered by WFP
   }
 }
 ```
