@@ -1,7 +1,8 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phase 1 merged in PR #807, Phase 2 merged in
-PR #816, and Phase 3 is under review in PR #835
+PR #816, Phase 3 is under review in PR #835, and Phase 4 is under review in
+PR #838
 
 Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 (2026-08-10)
