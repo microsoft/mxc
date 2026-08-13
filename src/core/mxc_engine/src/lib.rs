@@ -50,6 +50,8 @@ pub use policy::{
     WslcSection,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
+#[cfg(target_os = "windows")]
+pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};

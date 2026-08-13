@@ -1116,8 +1116,9 @@ impl AppContainerScriptRunner {
         // ordering means a guardian-start failure can terminate the
         // still-suspended child without ever leaving an active host-wide
         // WPR trace running.
-        let (capture_session, capture_output_path): (
+        let (capture_session, capture_output_path, capture_etl_path): (
             Option<Box<dyn GuardedCaptureSession>>,
+            Option<std::path::PathBuf>,
             Option<std::path::PathBuf>,
         ) = match (
             self.guarded_capture_factory.as_ref(),
@@ -1159,7 +1160,10 @@ impl AppContainerScriptRunner {
                             "guarded WPR captureDenials session started (output: {})",
                             output_path.display()
                         ));
-                        (Some(session), Some(output_path))
+                        let etl_path = (capture_config.retain_etl
+                            && factory.allows_trace_transfer())
+                        .then(|| output_path.with_extension("etl"));
+                        (Some(session), Some(output_path), etl_path)
                     }
                     Err(e) => {
                         // No active trace exists yet -- terminate the
@@ -1179,7 +1183,7 @@ impl AppContainerScriptRunner {
                     }
                 }
             }
-            _ => (None, None),
+            _ => (None, None, None),
         };
 
         let (stdout_read, stderr_read) = match capture_reads {
@@ -1196,6 +1200,7 @@ impl AppContainerScriptRunner {
             pid: pi.dwProcessId,
             capture_session,
             capture_output_path,
+            capture_etl_path,
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -1250,6 +1255,8 @@ struct SpawnedChild {
     /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
     /// is `Some`.
     capture_output_path: Option<std::path::PathBuf>,
+    /// Caller-visible ETL destination when retention is requested.
+    capture_etl_path: Option<std::path::PathBuf>,
     /// Parent's stdin write-end (Some only when spawned for streaming).
     stdin_write: Option<OwnedHandle>,
     /// Parent's stdout/stderr read-ends (Some only in streaming mode).
@@ -1500,6 +1507,10 @@ impl SandboxBackend for AppContainerScriptRunner {
             .capture_denials
             .as_ref()
             .is_some_and(|config| config.retain_etl)
+            && !self
+                .guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer())
         {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -1602,6 +1613,8 @@ struct AppContainerSandboxProcess {
     /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
     /// is `Some`.
     capture_output_path: Option<std::path::PathBuf>,
+    /// Caller-visible ETL destination when retention is requested.
+    capture_etl_path: Option<std::path::PathBuf>,
     /// Exit code of the child, recorded by `wait` before teardown so the
     /// denials summary can carry it. `None` on the `Drop`/early-exit path.
     last_exit_code: Option<i32>,
@@ -1658,12 +1671,13 @@ impl AppContainerSandboxProcess {
             teardown_result: None,
             capture_session: child.capture_session.take(),
             capture_output_path: child.capture_output_path.take(),
+            capture_etl_path: child.capture_etl_path.take(),
             last_exit_code: None,
             output_metadata: None,
         }
     }
 
-    fn run_teardown(&mut self) -> std::io::Result<()> {
+    fn run_teardown(&mut self, allow_trace_transfer: bool) -> std::io::Result<()> {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
@@ -1680,18 +1694,30 @@ impl AppContainerSandboxProcess {
 
         // Stop and analyze the guarded WPR capture now that the child has
         // exited and been reaped (both `wait` and `Drop` kill + reap before
-        // calling this). `stop_analyzed` returns only the bounded,
-        // process-scoped `AnalysisResult` -- the raw host-wide ETL never
-        // crosses back into this process. Write it through the same shared
-        // `capture_output` plumbing the native BaseContainer path uses, so
-        // the two paths emit byte-identical JSON.
+        // calling this). All callers receive the bounded, process-scoped
+        // `AnalysisResult`; requests with `retainEtl` also receive the sealed
+        // trace. Write the analysis through the same shared `capture_output`
+        // plumbing the native BaseContainer path uses.
         let result: std::io::Result<()> = if let Some(mut session) = self.capture_session.take() {
             let output_path = self.capture_output_path.take();
+            let etl_path = self
+                .capture_etl_path
+                .take()
+                .filter(|_| allow_trace_transfer);
             let exit_code = self.last_exit_code.unwrap_or(-1);
-            let capture_result = match session.stop_analyzed() {
+            let capture_result = match etl_path.as_deref() {
+                Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
+                None => session.stop_analyzed(),
+            };
+            let capture_result = match capture_result {
                 Ok(analysis) => match output_path {
                     Some(output_path) => {
                         capture_output::write_denials_document(analysis, exit_code, &output_path)
+                            .map(|mut metadata| {
+                                metadata.etl_path =
+                                    etl_path.map(|path| path.to_string_lossy().into_owned());
+                                metadata
+                            })
                     }
                     None => Err(std::io::Error::other(
                         "captureDenials internal output path was not initialized",
@@ -1850,7 +1876,7 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
-        let teardown_result = self.run_teardown();
+        let teardown_result = self.run_teardown(true);
         capture_output::combine_process_and_teardown_results(result, teardown_result)
     }
 }
@@ -1870,7 +1896,7 @@ impl Drop for AppContainerSandboxProcess {
         unsafe {
             let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
-        if let Err(error) = self.run_teardown() {
+        if let Err(error) = self.run_teardown(false) {
             capture_output::write_stderr_line_best_effort(format_args!(
                 "captureDenials teardown failed during drop: {error}"
             ));
@@ -2175,6 +2201,15 @@ mod tests {
                 fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
                     Ok(AnalysisResult::complete(Vec::new()))
                 }
+
+                fn stop_analyzed_with_trace(
+                    &mut self,
+                    trace_destination: &std::path::Path,
+                ) -> Result<AnalysisResult, String> {
+                    std::fs::write(trace_destination, b"fake etl")
+                        .map_err(|error| error.to_string())?;
+                    Ok(AnalysisResult::complete(Vec::new()))
+                }
             }
             Ok(Box::new(FakeSession))
         }
@@ -2425,12 +2460,38 @@ mod tests {
 
         let error = runner
             .validate(&request)
-            .expect_err("guarded capture must not expose its host-wide ETL");
+            .expect_err("the configured guarded provider cannot transfer ETL");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
         assert_eq!(
             error.error_message,
             crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
         );
+    }
+
+    #[test]
+    fn validate_runner_allows_guarded_etl_when_provider_supports_transfer() {
+        struct RetainingGuardedCaptureFactory;
+        impl GuardedCaptureFactory for RetainingGuardedCaptureFactory {
+            fn allows_trace_transfer(&self) -> bool {
+                true
+            }
+
+            fn start(&self, owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
+                FakeGuardedCaptureFactory.start(owner_pid)
+            }
+        }
+
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(RetainingGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        runner
+            .validate(&request)
+            .expect("a transfer-capable guarded provider should permit ETL retention");
     }
 }

@@ -2188,6 +2188,20 @@ impl BaseContainerRunner {
         } else {
             None
         };
+        let guarded_capture_etl_path = (guarded_capture_session.is_some()
+            && capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl)
+            && self
+                .guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer()))
+        .then(|| {
+            capture_output_path
+                .as_ref()
+                .map(|path| path.with_extension("etl"))
+        })
+        .flatten();
 
         // The child was created suspended; now that it is in the job object (so
         // every descendant it spawns is captured), resume its main thread.
@@ -2251,6 +2265,7 @@ impl BaseContainerRunner {
             proxy_coordinator: std::mem::take(&mut self.proxy_coordinator),
             capture_session,
             guarded_capture_session,
+            guarded_capture_etl_path,
             security_environment,
             managed_capture: managed_capture.take(),
             capture_output_path,
@@ -2290,6 +2305,8 @@ struct BaseChild {
     /// Live guarded WPR session used when the legacy SBOX tier supplies
     /// containment and native PSEC/V2 capture is unavailable.
     guarded_capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Caller-visible guarded ETL destination when retention is requested.
+    guarded_capture_etl_path: Option<PathBuf>,
     /// Non-capture PSEC environment retained until the child exits so policy
     /// enforcement outlives the process tree.
     security_environment: Option<ProcessSecurityEnvironment>,
@@ -2322,6 +2339,10 @@ impl SandboxBackend for BaseContainerRunner {
                 .capture_denials
                 .as_ref()
                 .is_some_and(|config| config.retain_etl)
+            && !self
+                .guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer())
         {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -2466,6 +2487,8 @@ struct BaseContainerSandboxProcess {
     /// in `run_teardown` once the child has exited and been reaped.
     capture_session: Option<Box<dyn CaptureSessionOps>>,
     guarded_capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Caller-visible guarded ETL destination when retention is requested.
+    guarded_capture_etl_path: Option<PathBuf>,
     /// Non-capture PSEC environment, closed after the child exits and is reaped.
     security_environment: Option<ProcessSecurityEnvironment>,
     /// Protected per-run ETL path and its cleanup guard.
@@ -2515,6 +2538,7 @@ impl BaseContainerSandboxProcess {
             teardown_result: None,
             capture_session: child.capture_session.take(),
             guarded_capture_session: child.guarded_capture_session.take(),
+            guarded_capture_etl_path: child.guarded_capture_etl_path.take(),
             security_environment: child.security_environment.take(),
             managed_capture: child.managed_capture.take(),
             capture_output_path: child.capture_output_path.take(),
@@ -2672,9 +2696,16 @@ impl BaseContainerSandboxProcess {
         let guarded_capture_result = if let Some(mut session) = self.guarded_capture_session.take()
         {
             let output_path = self.capture_output_path.take();
+            let etl_path = self
+                .guarded_capture_etl_path
+                .take()
+                .filter(|_| allow_retention);
             let exit_code = self.last_exit_code.unwrap_or(-1);
-            let result = session
-                .stop_analyzed()
+            let stop_result = match etl_path.as_deref() {
+                Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
+                None => session.stop_analyzed(),
+            };
+            let result = stop_result
                 .map_err(|error| {
                     std::io::Error::other(format!(
                         "captureDenials failed to stop and analyze guarded WPR: {error}"
@@ -2684,7 +2715,11 @@ impl BaseContainerSandboxProcess {
                     let output_path = output_path.ok_or_else(|| {
                         std::io::Error::other("captureDenials output path was not initialized")
                     })?;
-                    write_denials_document(analysis, exit_code, &output_path)
+                    write_denials_document(analysis, exit_code, &output_path).map(|mut metadata| {
+                        metadata.etl_path =
+                            etl_path.map(|path| path.to_string_lossy().into_owned());
+                        metadata
+                    })
                 });
             if let Ok(metadata) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {
@@ -4593,12 +4628,41 @@ mod tests {
 
         let error = runner
             .validate(&request)
-            .expect_err("guarded capture must not expose its host-wide ETL");
+            .expect_err("the configured guarded provider cannot transfer ETL");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
         assert_eq!(
             error.error_message,
             crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
         );
+    }
+
+    #[test]
+    fn validate_runner_allows_guarded_etl_when_provider_supports_transfer() {
+        struct NeverStartedFactory;
+        impl GuardedCaptureFactory for NeverStartedFactory {
+            fn allows_trace_transfer(&self) -> bool {
+                true
+            }
+
+            fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
+                Err("not started during validation".to_string())
+            }
+        }
+
+        let runner = BaseContainerRunner {
+            psec_usable_override: Some(false),
+            guarded_capture_factory: Some(Arc::new(NeverStartedFactory)),
+            ..Default::default()
+        };
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        runner
+            .validate(&request)
+            .expect("a transfer-capable guarded provider should permit ETL retention");
     }
 }

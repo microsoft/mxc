@@ -99,9 +99,15 @@ stays enforced:
    their process needs. `--audit` is rejected for every other Windows backend.
    It is also mutually exclusive with `captureDenials`; use
    `captureDenials.mode: "allow"` for permissive application-driven capture.
-   It triggers UAC, injects `permissiveLearningMode`, and drives a WPR/ETW
-   permissive-learning-mode trace for the run. This is typically a static
-   config the developer iterates on locally.
+   It is a compatibility wrapper over `captureDenials.mode: "allow"` with ETL
+   retention forced on, and injects `permissiveLearningMode`. The selected
+   ProcessContainer capture backend owns the trace lifecycle: complete PSEC/V2
+   hosts use native capture without PLM or UAC, while legacy or incompatible
+   tiers use the session-scoped guarded-WPR fallback and elevate only its
+   fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
+   relocates them to `denials.json` and `trace.etl`, and generates the source
+   snapshot and `Adjusted_*.json` from canonical denials without decoding ETL
+   again. Truncated analysis skips the adjusted config.
 
    ```
    wxc-exec --audit --config <config>
@@ -235,9 +241,9 @@ C# SDK exposes it through `RunResult.OutputMetadata` and
 By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
 analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
-for diagnostics after a terminal wait when native PSEC/V2 capture is selected.
-Guarded-WPR fallback rejects `retainEtl: true` with `backend_unavailable`
-rather than returning its raw host-wide trace. Retention-enabled captures begin under
+for diagnostics after a terminal wait. Both native PSEC/V2 capture and the
+guarded-WPR fallback honor retention; guarded WPR transfers the sealed trace
+back to the unelevated caller after process-scoped analysis. Retention-enabled captures begin under
 `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and move to a protected
 per-run directory under `capture-denials\retained` only after sealing succeeds.
 Abandoning or disposing a process without a terminal wait deletes the internal

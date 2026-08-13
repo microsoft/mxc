@@ -25,19 +25,19 @@
 
 use learning_mode_core::AnalysisResult;
 
-/// Guarded WPR returns only bounded process-scoped analysis; its raw host-wide
-/// ETL cannot be exposed through caller-visible output.
+/// Error returned when an injected guarded-capture implementation cannot
+/// transfer retained ETL requested by the caller.
 pub const RETAIN_ETL_UNSUPPORTED_MSG: &str =
-    "processContainer.captureDenials.retainEtl requires native PSEC/V2 capture; \
-     guarded-WPR fallback cannot return the raw host-wide ETL";
+    "processContainer.captureDenials.retainEtl is not supported by the configured \
+     guarded-WPR capture provider";
 
 /// A live guarded WPR capture session scoped to one sandboxed process tree.
 ///
 /// Implementations own the elevated PLM child connection. [`stop_analyzed`]
 /// asks the guardian to stop the host-wide WPR trace and decode it, returning
-/// only the bounded, process-scoped [`AnalysisResult`] — the raw ETL never
-/// crosses back into this process, satisfying the "raw host-wide ETL must
-/// never cross into SDK output" requirement.
+/// the bounded, process-scoped [`AnalysisResult`]. When the caller explicitly
+/// requests `retainEtl`, implementations that support trace transfer may also
+/// return the sealed ETL through [`stop_analyzed_with_trace`].
 ///
 /// [`stop_analyzed`]: GuardedCaptureSession::stop_analyzed
 pub trait GuardedCaptureSession: Send {
@@ -70,6 +70,13 @@ pub trait GuardedCaptureSession: Send {
     /// the stop/analyze round trip fails, or the guardian reports a decode
     /// error.
     fn stop_analyzed(&mut self) -> Result<AnalysisResult, String>;
+
+    /// Stops and analyzes the guarded capture, and transfers the sealed ETL to
+    /// `trace_destination` when the caller explicitly requests ETL retention.
+    fn stop_analyzed_with_trace(
+        &mut self,
+        trace_destination: &std::path::Path,
+    ) -> Result<AnalysisResult, String>;
 }
 
 /// Starts a [`GuardedCaptureSession`] for the calling (unelevated) process.
@@ -77,6 +84,12 @@ pub trait GuardedCaptureSession: Send {
 /// Implementations are constructed by a higher layer (`mxc_engine`) that can
 /// depend on `plm`; `appcontainer_common` only ever sees the trait object.
 pub trait GuardedCaptureFactory: Send + Sync {
+    /// Whether this factory can transfer the sealed ETL when `retainEtl` is
+    /// requested. Implementations that only support analysis keep the default.
+    fn allows_trace_transfer(&self) -> bool {
+        false
+    }
+
     /// Starts a new guarded WPR capture session.
     ///
     /// `owner_pid` is the calling (unelevated) process's own OS process id —
@@ -132,11 +145,23 @@ mod tests {
         fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
             Ok(self.analysis.clone())
         }
+
+        fn stop_analyzed_with_trace(
+            &mut self,
+            trace_destination: &std::path::Path,
+        ) -> Result<AnalysisResult, String> {
+            std::fs::write(trace_destination, b"fake etl").map_err(|error| error.to_string())?;
+            Ok(self.analysis.clone())
+        }
     }
 
     struct FakeFactory;
 
     impl GuardedCaptureFactory for FakeFactory {
+        fn allows_trace_transfer(&self) -> bool {
+            true
+        }
+
         fn start(&self, owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
             if owner_pid == 0 {
                 return Err("owner pid must be non-zero".to_string());

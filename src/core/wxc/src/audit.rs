@@ -1,378 +1,374 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Graceful-exit PLM audit-trace lifecycle for `wxc-exec --audit`.
-//!
-//! **Invariant: `wxc-exec.exe` runs unelevated.** Starting a WPR
-//! kernel ETW session requires administrator, so `--audit` does NOT
-//! self-elevate `wxc-exec`; instead it launches PLM's hidden, fixed-operation
-//! START child through UAC and retains its authenticated control pipe.
-//!
-//! The child opens and validates the wxc-exec owner before starting WPR, stays
-//! alive through the workload, and cancels on owner death or pipe break.
-//! The retained child also performs the fixed stop and ETL transfer operation,
-//! so the normal audit lifecycle needs only the original UAC prompt. The
-//! singleton is released only after that child reports the trace stopped.
-//!
-//! The retained child exclusively owns the protected host-wide named-mutex
-//! singleton (`Global\Mxc_Plm_Audit`) together with its WPR session.
+//! `wxc-exec --audit` compatibility artifacts built on `captureDenials`.
 
-use wxc_common::logger::Logger;
+use std::path::{Path, PathBuf};
 
-const PLM_ANALYSIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-const PLM_WAIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-const MAX_PLM_OUTPUT_BYTES: usize = 1024 * 1024;
-const OUTPUT_TRUNCATED_MARKER: &[u8] = b"\n[PLM output truncated]\n";
+use wxc_common::models::{
+    CaptureDenialsConfig, CaptureDenialsMode, ExecutionRequest, ScriptResponse,
+};
 
-/// Path to `plm.exe`, expected to sit next to `wxc-exec.exe` in the
-/// same install directory. Returns `None` when the current exe path
-/// can't be resolved.
-pub fn plm_exe_path() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("plm.exe")))
+#[derive(Debug)]
+pub struct AuditContext {
+    pub log_dir: PathBuf,
+    pub config_path: Option<PathBuf>,
 }
 
-pub struct CapturedAudit {
-    pub log_dir: std::path::PathBuf,
-    pub trace_path: std::path::PathBuf,
+pub fn prepare_request(
+    request: &mut ExecutionRequest,
+    config_path: Option<PathBuf>,
+) -> Result<AuditContext, String> {
+    prepare_request_in(request, config_path, plm::stop::default_log_dir())
 }
 
-pub fn capture_and_stop(
-    guard: &mut AuditTraceGuard,
-    logger: &mut Logger,
-) -> Result<CapturedAudit, String> {
-    use std::fmt::Write as _;
-
-    let log_dir = plm::stop::default_log_dir();
+fn prepare_request_in(
+    request: &mut ExecutionRequest,
+    config_path: Option<PathBuf>,
+    log_dir: PathBuf,
+) -> Result<AuditContext, String> {
     std::fs::create_dir_all(&log_dir)
         .map_err(|error| format!("failed to create audit log directory: {error}"))?;
-    let trace_path = log_dir.join("trace.etl");
-
-    let _ = writeln!(
-        logger,
-        "[audit] stopping trace into {}",
-        trace_path.display()
-    );
-    guard.stop(&trace_path, logger).map_err(|error| {
-        let message = format!("failed to stop and transfer PLM trace: {error:#}");
-        let _ = writeln!(logger, "[audit] {message}");
-        message
-    })?;
-    Ok(CapturedAudit {
+    request.policy.capture_denials = Some(CaptureDenialsConfig {
+        mode: CaptureDenialsMode::Allow,
+        output_path: Some(log_dir.join("denials.json").to_string_lossy().into_owned()),
+        retain_etl: true,
+    });
+    Ok(AuditContext {
         log_dir,
-        trace_path,
+        config_path,
     })
 }
 
-/// Run a normal public PLM command after wxc-exec has released the singleton.
-pub fn run_plm_command(args: &[&std::ffi::OsStr], logger: &mut Logger, verbose: bool) -> bool {
-    use std::fmt::Write as _;
-
-    let Some(plm) = plm_exe_path() else {
-        let _ = writeln!(logger, "[audit] could not resolve plm.exe path");
-        return false;
-    };
-    if !plm.exists() {
-        let _ = writeln!(
-            logger,
-            "[audit] plm.exe not found at {} - skipping",
-            plm.display()
-        );
-        return false;
-    }
-
-    let mut summary = String::new();
-    let _ = write!(summary, "[audit] running {}", plm.display());
-    for a in args {
-        let _ = write!(summary, " {}", a.to_string_lossy());
-    }
-    let _ = writeln!(logger, "{summary}");
-    if verbose {
-        eprintln!("{summary}");
-    }
-
-    let output = std::process::Command::new(&plm)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("failed to spawn public plm.exe: {error}"))
-        .and_then(|child| wait_with_output_timeout(child, PLM_ANALYSIS_TIMEOUT));
-    report_plm_output(output, logger, verbose)
-}
-
-fn wait_with_output_timeout(
-    mut child: std::process::Child,
-    timeout: std::time::Duration,
-) -> Result<std::process::Output, String> {
-    let Some(stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("public plm.exe stdout was not captured".to_string());
-    };
-    let Some(stderr) = child.stderr.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err("public plm.exe stderr was not captured".to_string());
-    };
-    let stdout_reader = match std::thread::Builder::new()
-        .name("plm-audit-stdout".to_string())
-        .spawn(move || read_bounded_output(stdout, MAX_PLM_OUTPUT_BYTES))
-    {
-        Ok(reader) => reader,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("failed to start plm stdout reader: {error}"));
-        }
-    };
-    let stderr_reader = match std::thread::Builder::new()
-        .name("plm-audit-stderr".to_string())
-        .spawn(move || read_bounded_output(stderr, MAX_PLM_OUTPUT_BYTES))
-    {
-        Ok(reader) => reader,
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stdout_reader.join();
-            return Err(format!("failed to start plm stderr reader: {error}"));
-        }
-    };
-
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(PLM_WAIT_POLL_INTERVAL);
-            }
-            Ok(None) => {
-                child.kill().map_err(|error| {
-                    format!(
-                        "public plm.exe exceeded the {} second audit-analysis timeout, \
-                         but termination failed: {error}",
-                        timeout.as_secs()
-                    )
-                })?;
-                child.wait().map_err(|error| {
-                    format!(
-                        "public plm.exe exceeded the {} second audit-analysis timeout, \
-                         was terminated, but could not be reaped: {error}",
-                        timeout.as_secs()
-                    )
-                })?;
-                return Err(format!(
-                    "public plm.exe exceeded the {} second audit-analysis timeout and was terminated",
-                    timeout.as_secs()
-                ));
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("failed to poll public plm.exe: {error}"));
-            }
-        }
-    };
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| "public plm.exe stdout reader panicked".to_string())?
-        .map_err(|error| format!("failed to read public plm.exe stdout: {error}"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| "public plm.exe stderr reader panicked".to_string())?
-        .map_err(|error| format!("failed to read public plm.exe stderr: {error}"))?;
-    Ok(std::process::Output {
-        status,
-        stdout,
-        stderr,
-    })
-}
-
-fn read_bounded_output(mut reader: impl std::io::Read, limit: usize) -> std::io::Result<Vec<u8>> {
-    let mut output = Vec::with_capacity(limit.min(64 * 1024));
-    let mut buffer = [0u8; 8192];
-    let mut truncated = false;
-    loop {
-        let count = reader.read(&mut buffer)?;
-        if count == 0 {
-            break;
-        }
-        let remaining = limit.saturating_sub(output.len());
-        let retained = remaining.min(count);
-        output.extend_from_slice(&buffer[..retained]);
-        truncated |= retained != count;
-    }
-    if truncated {
-        let marker = &OUTPUT_TRUNCATED_MARKER[..OUTPUT_TRUNCATED_MARKER.len().min(limit)];
-        let marker_start = output.len().saturating_sub(marker.len());
-        output.truncate(marker_start);
-        output.extend_from_slice(marker);
-    }
-    Ok(output)
-}
-
-fn report_plm_output(
-    output: Result<std::process::Output, String>,
-    logger: &mut Logger,
+pub fn finalize(
+    response: &mut ScriptResponse,
+    context: &AuditContext,
+    exe_dir: &Path,
     verbose: bool,
-) -> bool {
-    use std::fmt::Write as _;
-
-    match output {
-        Ok(run) if run.status.success() => {
-            if verbose {
-                replay_captured(logger, &run.stdout, &run.stderr);
-            }
-            true
-        }
-        Ok(run) => {
-            let code = run.status.code().unwrap_or(-1);
-            let _ = writeln!(logger, "[audit] plm exited with code {code}");
-            replay_captured(logger, &run.stdout, &run.stderr);
-            if verbose {
-                eprintln!("[audit] plm exited with code {code}");
-            }
-            false
-        }
-        Err(error) => {
-            let _ = writeln!(logger, "[audit] failed to launch plm: {error}");
-            if verbose {
-                eprintln!("[audit] failed to launch plm: {error}");
-            }
-            false
-        }
+) -> Result<(), String> {
+    let metadata = response
+        .output_metadata
+        .as_mut()
+        .ok_or_else(|| "captureDenials returned no output metadata".to_string())?;
+    if let Some(error) = metadata.capture_denials_error.as_ref() {
+        return Err(format!(
+            "captureDenials finalization failed: {}; retained ETL: {}",
+            error.message, error.etl_path
+        ));
     }
-}
-
-/// Replay captured stdout/stderr bytes to the current process's own
-/// streams. Used on failure (and in verbose mode on success) so the happy path
-/// can stay silent while diagnostics still surface.
-fn replay_captured(logger: &mut Logger, stdout: &[u8], stderr: &[u8]) {
-    use std::fmt::Write as _;
-    use std::io::Write as _;
-    if !stdout.is_empty() {
-        let _ = std::io::stdout().write_all(stdout);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(stdout));
+    let capture = metadata
+        .capture_denials
+        .as_mut()
+        .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
+    let source_denials = PathBuf::from(&capture.output_path);
+    let source_etl = capture
+        .etl_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "captureDenials did not return the retained ETL path".to_string())?;
+    if !source_denials.is_file() {
+        return Err(format!(
+            "captureDenials output file is missing: {}",
+            source_denials.display()
+        ));
     }
-    if !stderr.is_empty() {
-        let _ = std::io::stderr().write_all(stderr);
-        let _ = write!(logger, "{}", String::from_utf8_lossy(stderr));
+    if !source_etl.is_file() {
+        return Err(format!(
+            "captureDenials retained ETL is missing: {}",
+            source_etl.display()
+        ));
     }
-}
 
-/// Stack-owned guarded START session.
-#[derive(Debug)]
-pub struct AuditTraceGuard {
-    session: plm::elevated::GuardedSession,
-}
-
-impl AuditTraceGuard {
-    pub fn start(logger: &mut Logger, verbose: bool) -> Result<Self, String> {
-        use std::fmt::Write as _;
-
-        let plm = plm_exe_path().ok_or_else(|| {
-            let message = "could not resolve plm.exe path".to_string();
-            let _ = writeln!(logger, "[audit] {message}");
-            message
+    let document: learning_mode_core::DenialsDocument =
+        serde_json::from_slice(&std::fs::read(&source_denials).map_err(|error| {
+            format!(
+                "failed to read captureDenials output {}: {error}",
+                source_denials.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "captureDenials output {} is not valid canonical denials JSON: {error}",
+                source_denials.display()
+            )
         })?;
-        if !plm.exists() {
-            let message = format!("plm.exe not found at {}", plm.display());
-            let _ = writeln!(logger, "[audit] {message}");
-            return Err(message);
-        }
+    validate_metadata(capture, &document)?;
 
-        let summary = format!("[audit] running {} start", plm.display());
-        let _ = writeln!(logger, "{summary}");
-        if verbose {
-            eprintln!("{summary}");
-        }
-        let owner_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
-        plm::elevated::start_guarded_session_with_executable(&plm, owner_pid)
-            .map(|session| Self { session })
-            .map_err(|error| {
-                let message = format!("guarded plm start failed: {error:#}");
-                let _ = writeln!(logger, "[audit] {message}");
-                if verbose {
-                    eprintln!("[audit] {message}");
-                }
-                message
+    let final_denials = context.log_dir.join("denials.json");
+    let final_etl = context.log_dir.join("trace.etl");
+    ensure_destination_available(&source_etl, &final_etl)?;
+    ensure_destination_available(&source_denials, &final_denials)?;
+    move_new_file(&source_etl, &final_etl)?;
+    move_new_file(&source_denials, &final_denials)?;
+    remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
+
+    plm::stop::postprocess_denials(
+        &document,
+        &plm::stop::PostProcessOptions {
+            log_dir: context.log_dir.clone(),
+            bin_path: None,
+            config_path: context.config_path.clone(),
+            trace_path: final_etl.clone(),
+            denials_path: final_denials.clone(),
+            verbose,
+        },
+        exe_dir,
+    )
+    .map_err(|error| format!("failed to generate audit compatibility artifacts: {error:#}"))?;
+
+    capture.output_path = final_denials.to_string_lossy().into_owned();
+    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
+    Ok(())
+}
+
+fn validate_metadata(
+    capture: &wxc_common::models::CaptureDenialsOutput,
+    document: &learning_mode_core::DenialsDocument,
+) -> Result<(), String> {
+    if capture.kind != wxc_common::models::CaptureDenialsOutput::KIND
+        || capture.exit_code != document.summary.exit_code
+        || capture.total_denials != document.summary.total_denials
+        || capture.denied_resources_truncated != document.summary.denied_resources_truncated
+    {
+        return Err(
+            "captureDenials metadata does not match the canonical denials document".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
+    if source == destination {
+        return Ok(());
+    }
+    ensure_destination_available(source, destination)?;
+    match std::fs::rename(source, destination) {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            std::fs::copy(source, destination).map_err(|copy_error| {
+                format!(
+                    "failed to move audit artifact {} to {}: {rename_error}; \
+                     copy fallback failed: {copy_error}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            std::fs::remove_file(source).map_err(|remove_error| {
+                let _ = std::fs::remove_file(destination);
+                format!(
+                    "copied audit artifact to {}, but failed to remove source {}: {remove_error}",
+                    destination.display(),
+                    source.display()
+                )
             })
+        }
     }
+}
 
-    pub fn stop(
-        &mut self,
-        trace_destination: &std::path::Path,
-        logger: &mut Logger,
-    ) -> Result<(), String> {
-        use std::fmt::Write as _;
-
-        self.session.stop(trace_destination).map_err(|error| {
-            let message = format!("guarded PLM stop failed: {error:#}");
-            let _ = writeln!(logger, "[audit] {message}");
-            message
-        })
+fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
+    if source != destination && destination.exists() {
+        return Err(format!(
+            "audit artifact destination already exists: {}",
+            destination.display()
+        ));
     }
+    Ok(())
+}
 
-    pub fn cancel(&mut self, logger: &mut Logger) -> Result<(), String> {
-        use std::fmt::Write as _;
-
-        self.session.cancel().map_err(|error| {
-            let message = format!("guarded PLM cancellation failed: {error:#}");
-            let _ = writeln!(logger, "[audit] {message}");
-            message
-        })
+fn remove_empty_managed_directory(
+    directory: Option<&Path>,
+    audit_dir: &Path,
+) -> Result<(), String> {
+    let Some(directory) = directory else {
+        return Ok(());
+    };
+    let is_retained_capture_dir = directory
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case("retained"));
+    if directory == audit_dir || !is_retained_capture_dir {
+        return Ok(());
+    }
+    match std::fs::remove_dir(directory) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "failed to remove empty retained-ETL directory {}: {error}",
+            directory.display()
+        )),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    use learning_mode_core::{DenialSummary, DenialsDocument};
+    use wxc_common::models::{
+        CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
 
     #[test]
-    fn analysis_watchdog_terminates_timed_out_child() {
-        let child = std::process::Command::new("powershell.exe")
-            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("spawn long-running child");
-        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, child.id()) }
-            .expect("open child synchronization handle");
+    fn prepare_injects_allow_capture_and_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        let config_path = PathBuf::from(r"C:\policy.json");
+        let mut request = ExecutionRequest::default();
 
-        let error = wait_with_output_timeout(child, std::time::Duration::from_millis(50))
-            .expect_err("watchdog should time out");
-        assert!(error.contains("timeout"));
+        let context =
+            prepare_request_in(&mut request, Some(config_path.clone()), log_dir.clone()).unwrap();
+        let capture = request.policy.capture_denials.as_ref().unwrap();
+
+        assert_eq!(capture.mode, CaptureDenialsMode::Allow);
+        assert!(capture.retain_etl);
         assert_eq!(
-            unsafe { WaitForSingleObject(process, 1_000) },
-            WAIT_OBJECT_0,
-            "timed-out child should be terminated and reaped"
+            capture.output_path.as_deref(),
+            Some(log_dir.join("denials.json").to_string_lossy().as_ref())
         );
-        unsafe {
-            let _ = CloseHandle(process);
+        assert_eq!(context.config_path, Some(config_path));
+        assert!(context.log_dir.is_dir());
+    }
+
+    #[test]
+    fn finalize_relocates_outputs_and_updates_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        let retained_dir = directory.path().join("retained").join("run");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::create_dir_all(&retained_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = retained_dir.join("capture.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(23, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 23);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        finalize(&mut response, &context, directory.path(), false).unwrap();
+
+        assert!(!source_denials.exists());
+        assert!(!source_etl.exists());
+        assert!(!retained_dir.exists());
+        assert_eq!(std::fs::read(log_dir.join("trace.etl")).unwrap(), b"etl");
+        let capture = response
+            .output_metadata
+            .as_ref()
+            .unwrap()
+            .capture_denials
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            Path::new(&capture.output_path),
+            log_dir.join("denials.json")
+        );
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(log_dir.join("trace.etl").as_path())
+        );
+    }
+
+    #[test]
+    fn finalize_rejects_missing_or_failed_capture_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let context = AuditContext {
+            log_dir: directory.path().join("audit"),
+            config_path: None,
+        };
+        let mut missing = ScriptResponse::default();
+        assert!(finalize(&mut missing, &context, directory.path(), false)
+            .unwrap_err()
+            .contains("no output metadata"));
+
+        let mut failed = ScriptResponse {
+            output_metadata: Some(Box::new(SandboxOutputMetadata {
+                capture_denials: None,
+                capture_denials_error: Some(CaptureDenialsErrorOutput {
+                    message: "decode failed".to_string(),
+                    etl_path: r"C:\retained\capture.etl".to_string(),
+                }),
+            })),
+            ..Default::default()
+        };
+        let error = finalize(&mut failed, &context, directory.path(), false).unwrap_err();
+        assert!(error.contains("decode failed"));
+        assert!(error.contains("capture.etl"));
+    }
+
+    #[test]
+    fn finalize_rejects_malformed_json_without_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        std::fs::write(&source_denials, b"{").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir,
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("canonical denials JSON"));
+        assert!(source_denials.exists());
+        assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn finalize_preflights_both_destinations_before_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        std::fs::write(log_dir.join("denials.json"), b"existing").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("destination already exists"));
+        assert!(source_denials.exists());
+        assert!(source_etl.exists());
+        assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    fn response_with_capture(
+        denials_path: &Path,
+        etl_path: &Path,
+        exit_code: i32,
+    ) -> ScriptResponse {
+        ScriptResponse {
+            exit_code,
+            output_metadata: Some(Box::new(SandboxOutputMetadata {
+                capture_denials: Some(CaptureDenialsOutput {
+                    kind: CaptureDenialsOutput::KIND.to_string(),
+                    output_path: denials_path.to_string_lossy().into_owned(),
+                    exit_code,
+                    total_denials: 0,
+                    denied_resources_truncated: false,
+                    etl_path: Some(etl_path.to_string_lossy().into_owned()),
+                }),
+                capture_denials_error: None,
+            })),
+            ..Default::default()
         }
-    }
-
-    #[test]
-    fn analysis_output_reader_caps_and_drains_child_output() {
-        let input_len = MAX_PLM_OUTPUT_BYTES + 4096;
-        let mut input = std::io::Cursor::new(vec![b'x'; input_len]);
-        let captured =
-            read_bounded_output(&mut input, MAX_PLM_OUTPUT_BYTES).expect("bounded output read");
-        assert_eq!(input.position(), input_len as u64);
-        assert_eq!(captured.len(), MAX_PLM_OUTPUT_BYTES);
-        assert!(captured.ends_with(OUTPUT_TRUNCATED_MARKER));
-    }
-
-    #[test]
-    fn analysis_output_reader_honors_limits_smaller_than_marker() {
-        let captured =
-            read_bounded_output(std::io::Cursor::new([b'x'; 32]), 8).expect("bounded output read");
-        assert_eq!(captured.len(), 8);
-        assert_eq!(captured, OUTPUT_TRUNCATED_MARKER[..8]);
     }
 }

@@ -181,6 +181,15 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
             .stop_analyzed()
             .map_err(|e| format!("guarded WPR stop/analyze failed: {e:#}"))
     }
+
+    fn stop_analyzed_with_trace(
+        &mut self,
+        trace_destination: &std::path::Path,
+    ) -> Result<AnalysisResult, String> {
+        self.session
+            .stop_analyzed_with_trace(trace_destination)
+            .map_err(|e| format!("guarded WPR stop/analyze/trace transfer failed: {e:#}"))
+    }
 }
 
 /// [`GuardedCaptureFactory`] that starts a guarded WPR capture session via the
@@ -188,6 +197,10 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
 pub struct PlmGuardedCaptureFactory;
 
 impl GuardedCaptureFactory for PlmGuardedCaptureFactory {
+    fn allows_trace_transfer(&self) -> bool {
+        true
+    }
+
     fn start(&self, owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
         let plm_path = plm_exe_path()?;
         start_with_plm_path(&plm_path, owner_pid)
@@ -231,7 +244,7 @@ fn start_with_plm_path(
 /// than constructing a `PlmGuardedCaptureFactory` unconditionally at every call
 /// site) keeps `run.rs` / `dispatch.rs` from wiring a factory the request never
 /// needed.
-pub fn factory_for_request(
+pub(crate) fn factory_for_request(
     request: &wxc_common::models::ExecutionRequest,
 ) -> Option<std::sync::Arc<dyn GuardedCaptureFactory>> {
     if request.policy.capture_denials.is_some() {
@@ -271,6 +284,16 @@ mod tests {
         let mut request = wxc_common::models::ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
         assert!(factory_for_request(&request).is_some());
+    }
+
+    #[test]
+    fn plm_factory_supports_requested_trace_transfer() {
+        let mut request = wxc_common::models::ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+
+        assert!(factory_for_request(&request)
+            .unwrap()
+            .allows_trace_transfer());
     }
 
     #[test]

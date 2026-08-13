@@ -3153,6 +3153,7 @@ dependencies = [
  "appcontainer_common",
  "clap",
  "hyperlight_common",
+ "learning_mode_core",
  "mxc_build_common",
  "mxc_engine",
  "nanvix_binaries",
