@@ -696,6 +696,10 @@ pub struct SandboxRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
+    /// Security warnings emitted while the policy was parsed and validated.
+    /// Spawn-time warnings are merged with these before the public SDK sees the
+    /// resulting sandbox handle.
+    pub(crate) policy_warnings: Vec<String>,
 }
 
 impl SandboxRequest {
@@ -844,7 +848,11 @@ pub fn build_request_with_containment(
     // `script_code` before running), so tolerate a missing command.
     let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
-    Ok(SandboxRequest { inner })
+    let policy_warnings = logger.take_warnings();
+    Ok(SandboxRequest {
+        inner,
+        policy_warnings,
+    })
 }
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
@@ -1371,6 +1379,45 @@ mod tests {
             .blocked_hosts
             .contains(&"blocked.example".to_string()));
         assert!(request.inner.policy.allow_local_network);
+    }
+
+    #[test]
+    fn build_request_retains_policy_security_warnings() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            ..Default::default()
+        });
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect("relaxed policy should build");
+
+        assert!(
+            request
+                .policy_warnings
+                .iter()
+                .any(|warning| warning.contains("network.defaultPolicy=allow")),
+            "parser warning must survive on the SDK request: {:?}",
+            request.policy_warnings
+        );
+    }
+
+    #[test]
+    fn build_request_secure_defaults_have_no_policy_warnings() {
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect("secure-default policy should build");
+
+        assert!(
+            request.policy_warnings.is_empty(),
+            "secure defaults must stay quiet: {:?}",
+            request.policy_warnings
+        );
     }
 
     #[cfg(target_os = "macos")]

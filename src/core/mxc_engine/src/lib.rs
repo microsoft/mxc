@@ -66,12 +66,9 @@ use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     let process = dispatch::spawn_runner(&request.inner, &mut logger).map_err(Error::from)?;
-    let mut warnings = process.warnings().to_vec();
-    for warning in logger.take_warnings() {
-        if !warnings.contains(&warning) {
-            warnings.push(warning);
-        }
-    }
+    let mut warnings = request.policy_warnings.clone();
+    append_unique(&mut warnings, process.warnings().iter().cloned());
+    append_unique(&mut warnings, logger.take_warnings());
     if warnings.is_empty() {
         Ok(process)
     } else {
@@ -79,6 +76,14 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
             inner: process,
             warnings,
         }))
+    }
+}
+
+fn append_unique(warnings: &mut Vec<String>, additional: impl IntoIterator<Item = String>) {
+    for warning in additional {
+        if !warnings.contains(&warning) {
+            warnings.push(warning);
+        }
     }
 }
 
@@ -131,5 +136,22 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
         self.inner.stderr_closer()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_unique;
+
+    #[test]
+    fn append_unique_preserves_order_and_removes_duplicates() {
+        let mut warnings = vec!["policy".to_string()];
+
+        append_unique(
+            &mut warnings,
+            ["backend", "policy", "spawn"].map(str::to_string),
+        );
+
+        assert_eq!(warnings, ["policy", "backend", "spawn"]);
     }
 }
