@@ -45,7 +45,8 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::JobObjects::{
     IsProcessInJob, JobObjectAssociateCompletionPortInformation,
     JobObjectBasicAccountingInformation, QueryInformationJobObject, SetInformationJobObject,
-    JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
 };
 use windows::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
@@ -324,6 +325,10 @@ impl GuardedOwner {
                 anyhow::bail!("guarded PLM owner exited before stop");
             }
 
+            if let Some(error) = self.tracker_failure()? {
+                return self.stop_and_discard_after_tracker_failure(pipe, error);
+            }
+
             let state = match pipe_state(pipe) {
                 Ok(state) => state,
                 Err(error) => return Err(self.fail_after_monitor_error(error)),
@@ -425,6 +430,64 @@ impl GuardedOwner {
             .finish()
     }
 
+    fn tracker_failure(&self) -> Result<Option<String>> {
+        self.job_tracker
+            .as_ref()
+            .map(JobProcessTracker::failure)
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    fn stop_and_discard_after_tracker_failure(
+        &mut self,
+        pipe: &mut std::fs::File,
+        _tracker_error: String,
+    ) -> Result<()> {
+        let failure = self
+            .job_tracker
+            .take()
+            .context("guarded WPR tracker failure lost its process-tree state")?
+            .finish_failure()?;
+        if let Some(termination_error) = failure.termination_error {
+            let error = anyhow::anyhow!(
+                "guarded WPR process tracking failed and the sandbox job could not be terminated; \
+                 the trace was left for guarded recovery: {}; {termination_error}",
+                failure.message
+            );
+            self.preserve_after_start_error();
+            write_error_response(pipe, &error)?;
+            return Err(error);
+        }
+
+        // The tracker worker has terminated the attested sandbox job. Stop
+        // retaining process handles before sealing and deleting the raw
+        // host-wide trace; no analysis is safe once process scoping failed.
+        let error = anyhow::anyhow!(
+            "guarded WPR process tracking failed; the sandbox job was terminated and its trace \
+             was discarded: {}",
+            failure.message
+        );
+        let result = (|| {
+            crate::wpr_path::verify_wpr_present().map_err(anyhow::Error::msg)?;
+            let scratch = SecureScratch::new()?;
+            run_monitored_wpr_stop(pipe, self, scratch.trace_path())?;
+            self.mark_stopped()?;
+            write_header(pipe, ResponseKind::Stopped, 0)
+                .and_then(|_| pipe.flush())
+                .context("failed to return elevated PLM WPR-stopped milestone")?;
+            write_error_response(pipe, &error)
+        })();
+        if let Err(stop_error) = result {
+            self.preserve_after_start_error();
+            let combined = error.context(format!(
+                "additionally failed to stop and discard the guarded WPR trace: {stop_error:#}"
+            ));
+            write_error_response(pipe, &combined)?;
+            return Err(combined);
+        }
+        Err(error)
+    }
+
     fn preserve_after_start_error(&mut self) {
         if self.lifecycle.abandon_started_trace() == GuardAction::Preserve {
             self.preserve_uncertain_trace();
@@ -504,6 +567,7 @@ struct ProcessTrackerState {
     notification_sequence: usize,
     active_process_zero_filetime: Option<u64>,
     error: Option<String>,
+    termination_error: Option<String>,
 }
 
 impl ProcessTrackerState {
@@ -519,6 +583,7 @@ impl ProcessTrackerState {
             notification_sequence: 0,
             active_process_zero_filetime: None,
             error: None,
+            termination_error: None,
         }
     }
 
@@ -643,6 +708,11 @@ struct JobProcessTracker {
     completion_port: OwnedHandle,
     state: Arc<Mutex<ProcessTrackerState>>,
     worker: Option<JoinHandle<()>>,
+}
+
+struct TrackerFailure {
+    message: String,
+    termination_error: Option<String>,
 }
 
 impl JobProcessTracker {
@@ -820,6 +890,28 @@ impl JobProcessTracker {
         })
     }
 
+    fn failure(&self) -> Result<Option<String>> {
+        self.state
+            .lock()
+            .map(|state| state.error.clone())
+            .map_err(|_| anyhow::anyhow!("guarded WPR job tracker state was poisoned"))
+    }
+
+    fn finish_failure(mut self) -> Result<TrackerFailure> {
+        self.stop_worker();
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("guarded WPR job tracker state was poisoned"))?;
+        Ok(TrackerFailure {
+            message: state
+                .error
+                .take()
+                .context("guarded WPR job tracker failure was not retained")?,
+            termination_error: state.termination_error.take(),
+        })
+    }
+
     fn stop_worker(&mut self) {
         if let Some(worker) = self.worker.take() {
             let _ = unsafe {
@@ -901,9 +993,11 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
             )
         };
         if let Err(error) = result {
-            if let Ok(mut state) = state.lock() {
-                state.fail(format!("guarded WPR job tracker wait failed: {error}"));
-            }
+            fail_tracker_and_terminate_job(
+                job,
+                state,
+                format!("guarded WPR job tracker wait failed: {error}"),
+            );
             return;
         }
         if message == TRACKER_STOP_MESSAGE {
@@ -911,20 +1005,55 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
         }
         let pid = overlapped as usize as u32;
         let observed_filetime = current_filetime();
-        let Ok(mut state) = state.lock() else {
+        let Ok(mut tracker_state) = state.lock() else {
             return;
         };
+        let was_failed = tracker_state.error.is_some();
         match message {
             JOB_OBJECT_MSG_NEW_PROCESS => {
-                state.process_started(pid, observed_filetime, || attest_job_process(job, pid));
+                tracker_state
+                    .process_started(pid, observed_filetime, || attest_job_process(job, pid));
             }
             JOB_OBJECT_MSG_EXIT_PROCESS | JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
-                state.process_exited(pid, observed_filetime);
+                tracker_state.process_exited(pid, observed_filetime);
             }
             JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO => {
-                state.all_processes_exited(observed_filetime);
+                tracker_state.all_processes_exited(observed_filetime);
             }
             _ => {}
+        }
+        let newly_failed = !was_failed && tracker_state.error.is_some();
+        drop(tracker_state);
+        if newly_failed {
+            terminate_failed_tracker_job(job, state);
+        }
+    }
+}
+
+fn fail_tracker_and_terminate_job(
+    job: HANDLE,
+    state: &Arc<Mutex<ProcessTrackerState>>,
+    message: String,
+) {
+    let newly_failed = match state.lock() {
+        Ok(mut state) => {
+            let newly_failed = state.error.is_none();
+            state.fail(message);
+            newly_failed
+        }
+        Err(_) => true,
+    };
+    if newly_failed {
+        terminate_failed_tracker_job(job, state);
+    }
+}
+
+fn terminate_failed_tracker_job(job: HANDLE, state: &Arc<Mutex<ProcessTrackerState>>) {
+    if let Err(error) = unsafe { TerminateJobObject(job, u32::MAX) } {
+        if let Ok(mut state) = state.lock() {
+            let termination_error =
+                format!("failed to terminate sandbox job after tracker failure: {error}");
+            state.termination_error = Some(termination_error);
         }
     }
 }
@@ -1022,9 +1151,8 @@ impl GuardedSession {
             .pipe
             .take()
             .context("guarded PLM control connection is already closed")?;
-        pipe.write_all(&[CONTROL_STOP])
+        send_control_unless_response_pending(&mut pipe, CONTROL_STOP)
             .context("failed to send guarded PLM STOP")?;
-        pipe.flush().context("failed to flush guarded PLM STOP")?;
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
@@ -1062,10 +1190,8 @@ impl GuardedSession {
             .pipe
             .take()
             .context("guarded PLM control connection is already closed")?;
-        pipe.write_all(&[CONTROL_STOP_AND_DISCARD])
+        send_control_unless_response_pending(&mut pipe, CONTROL_STOP_AND_DISCARD)
             .context("failed to send guarded PLM discard STOP")?;
-        pipe.flush()
-            .context("failed to flush guarded PLM discard STOP")?;
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
@@ -1103,10 +1229,8 @@ impl GuardedSession {
             .pipe
             .take()
             .context("guarded PLM control connection is already closed")?;
-        pipe.write_all(&[CONTROL_STOP_AND_ANALYZE])
+        send_control_unless_response_pending(&mut pipe, CONTROL_STOP_AND_ANALYZE)
             .context("failed to send guarded PLM analyzed STOP")?;
-        pipe.flush()
-            .context("failed to flush guarded PLM analyzed STOP")?;
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
@@ -1128,6 +1252,64 @@ impl GuardedSession {
             self.pipe = Some(pipe);
             result
         }
+    }
+}
+
+fn send_control_unless_response_pending(pipe: &mut std::fs::File, control: u8) -> Result<()> {
+    if guardian_terminal_response_pending(pipe)? {
+        return Ok(());
+    }
+    pipe.write_all(&[control])
+        .and_then(|_| pipe.flush())
+        .context("failed to write guarded PLM control byte")
+}
+
+fn guardian_terminal_response_pending(pipe: &std::fs::File) -> Result<bool> {
+    match pipe_state(pipe)? {
+        PipeState::Empty => return Ok(false),
+        PipeState::Closed(error) => anyhow::bail!(
+            "guarded PLM control pipe closed before stop (PeekNamedPipe error {error})"
+        ),
+        PipeState::Data(_) => {}
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let mut header = [0u8; HEADER_LEN];
+        let mut bytes_read = 0u32;
+        let mut available = 0u32;
+        unsafe {
+            PeekNamedPipe(
+                HANDLE(pipe.as_raw_handle()),
+                Some(header.as_mut_ptr().cast()),
+                HEADER_LEN as u32,
+                Some(&mut bytes_read),
+                Some(&mut available),
+                None,
+            )
+        }
+        .context("failed to inspect pending guarded PLM response")?;
+
+        if bytes_read as usize >= HEADER_LEN {
+            let response = read_header(&mut header.as_slice())
+                .context("invalid unsolicited guarded PLM response")?;
+            return match response.kind {
+                ResponseKind::Stopped | ResponseKind::Error => Ok(true),
+                kind => anyhow::bail!(
+                    "unexpected unsolicited guarded PLM {kind:?} response before stop"
+                ),
+            };
+        }
+        if available == 0 {
+            return Ok(false);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for the pending guarded PLM response header \
+                 ({bytes_read}/{HEADER_LEN} bytes available)"
+            );
+        }
+        std::thread::sleep(TRANSFER_POLL_INTERVAL);
     }
 }
 
@@ -2356,6 +2538,34 @@ mod tests {
     }
 
     #[test]
+    fn tracker_failure_terminates_the_attested_job() {
+        use windows::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+
+        let job = OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap());
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        unsafe { AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())) }.unwrap();
+
+        let state = Arc::new(Mutex::new(ProcessTrackerState::new(1, child.id())));
+        fail_tracker_and_terminate_job(job.0, &state, "terminal tracker failure".to_string());
+
+        assert_eq!(
+            unsafe { WaitForSingleObject(HANDLE(child.as_raw_handle()), 5_000) },
+            WAIT_OBJECT_0,
+            "tracker failure must terminate the sandbox job promptly"
+        );
+        child.wait().unwrap();
+        assert!(state
+            .lock()
+            .unwrap()
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal tracker failure")));
+    }
+
+    #[test]
     fn root_notifications_are_optional_and_not_double_counted() {
         for include_start in [false, true] {
             let mut state = ProcessTrackerState::new(1, 42);
@@ -2490,6 +2700,45 @@ mod tests {
             std::thread::sleep(POLL_INTERVAL);
         }
         panic!("closed test pipe remained connected");
+    }
+
+    #[test]
+    fn pending_guardian_response_suppresses_a_new_control_byte() {
+        let (mut client, mut server) = connected_pipe_pair();
+        write_header(&mut server, ResponseKind::Stopped, 0).unwrap();
+        server.flush().unwrap();
+
+        send_control_unless_response_pending(&mut client, CONTROL_STOP_AND_ANALYZE).unwrap();
+
+        assert_eq!(pipe_state(&server).unwrap(), PipeState::Empty);
+        assert_eq!(
+            read_header(&mut client).unwrap().kind,
+            ResponseKind::Stopped
+        );
+    }
+
+    #[test]
+    fn unrelated_pending_response_does_not_suppress_a_control_byte() {
+        let (mut client, mut server) = connected_pipe_pair();
+        write_header(&mut server, ResponseKind::Success, 0).unwrap();
+        server.flush().unwrap();
+
+        let error = send_control_unless_response_pending(&mut client, CONTROL_STOP_AND_ANALYZE)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unexpected unsolicited"));
+        assert_eq!(pipe_state(&server).unwrap(), PipeState::Empty);
+    }
+
+    #[test]
+    fn empty_guardian_pipe_receives_the_requested_control_byte() {
+        let (mut client, mut server) = connected_pipe_pair();
+
+        send_control_unless_response_pending(&mut client, CONTROL_STOP_AND_ANALYZE).unwrap();
+
+        let mut control = [0u8; 1];
+        server.read_exact(&mut control).unwrap();
+        assert_eq!(control[0], CONTROL_STOP_AND_ANALYZE);
     }
 
     #[test]
