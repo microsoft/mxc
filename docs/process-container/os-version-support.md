@@ -84,8 +84,8 @@ probing is the source of truth.
 
 The PSEC contract cannot represent `processContainer.leastPrivilege`, so
 requests using that option use the transitional SBOX contract instead of
-failing. MXC also does not yet supply the AppContainer peer identity required by
-the current model-2 SBOX proxy contract. On hosts with
+failing. MXC also does not yet supply the package-family or AppContainer-profile
+peer identity required by the current model-2 SBOX proxy contract. On hosts with
 `Experimental_QuerySandboxSupport`, proxy requests therefore skip
 BaseContainer and continue to the AppContainer fallback; older query-less hosts
 retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
@@ -129,8 +129,8 @@ Notes:
   primitive and works on every release.
 - OS-configured WinHTTP proxy (passed in the FlatBuffer spec to
   `CreateProcessInSandbox`) is used only on legacy query-less T1 hosts. The
-  capability-aware model-2 contract requires an AppContainer proxy peer
-  identity that MXC does not yet author, so those hosts use the AppContainer
+  capability-aware model-2 contract requires a package-family or
+  AppContainer-profile proxy peer identity that MXC does not yet author, so those hosts use the AppContainer
   compatibility fallback.
 - The AppContainer compatibility path uses `winhttp-proxy-shim.exe`. It is not
   the forward-looking proxy architecture; support for the model-2 BaseContainer

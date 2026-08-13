@@ -330,8 +330,9 @@ does not satisfy model 2; see the implementation doc for its limitations.
 
 **Connectivity models:**
 
-- **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. A packaged or
-  unpackaged AppContainer proxy uses `allowedProxyPeer` and requires `ingress.default: "allow"` to grant
+- **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
+  with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
+  AppContainer proxy uses its profile name. The MXC client requires `ingress.default: "allow"` to grant
   `privateNetworkClientServer`. That capability permits private-network client and server traffic by Windows design.
 - **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules.
   Private-network outbound also requires `ingress.default: "allow"` and remains subject to the same `egress` rules.
