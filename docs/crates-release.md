@@ -300,12 +300,9 @@ These must be resolved before the first real (non-dry-run) publish:
    have the `Rust` content type enabled, requested through the ESRP onboarding
    portal.
 3. **crates.io rate limit** — the default `PublishNew` rate limit is burst-5
-   plus 1 per 10 minutes.  A first release of the whole closure will be
-   throttled.  An override must be requested from help@crates.io before the
-   first publish.  The `publishDelaySeconds` wait in the publish job does not
-   substitute for it: waiting out the limit would need ten minutes per crate
-   past the fifth, roughly 160 minutes across the closure, which no workable
-   job timeout accommodates.
+   plus 1 per 10 minutes.  `publishDelaySeconds` is set to 660 to wait it out,
+   which spends 231 minutes across the closure and is why the publish job
+   allows 360 minutes.  An override from help@crates.io would remove the wait.
 4. **Pipeline registration** — `.azure-pipelines/1ES.Release.Crates.yml` is new
    and must be registered as a pipeline in Azure DevOps, and that pipeline must
    be authorized to use the `MXC-ESRP-Signing` variable group.
@@ -316,7 +313,7 @@ These must be resolved before the first real (non-dry-run) publish:
 |------|---------|
 | `.azure-pipelines/1ES.Release.Crates.yml` | Top-level release pipeline — the release-ref gate and the stage wiring |
 | `.azure-pipelines/templates/Package.Crates.Job.yml` | Packaging job — runs `cargo package` over the derived order and produces the artifact |
-| `.azure-pipelines/templates/Publish.CratesIo.Job.yml` | ESRP publish job — declares `crateOrder`, sets a 120-minute job timeout, caps each ESRP release at `esrpTimeoutMinutes`, and runs one staging step, one `EsrpRelease@12` task, and one index wait per crate |
+| `.azure-pipelines/templates/Publish.CratesIo.Job.yml` | ESRP publish job — declares `crateOrder`, sets a 360-minute job timeout, caps each ESRP release at `esrpTimeoutMinutes`, and runs one staging step, one rate-limit wait, and one `EsrpRelease@12` task per crate |
 | `scripts/ci/Get-CrateOrder.ps1` | Computes the leaf-first order from `cargo metadata` — run by packaging, and by a developer regenerating `crateOrder` |
 | `scripts/ci/Invoke-CratePackage.ps1` | Packages the closure and copies the `.crate` files where the artifact task reads them — run by the packaging job |
 | `src/Cargo.toml` | Workspace version (single source of truth for all crate versions) |

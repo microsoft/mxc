@@ -56,21 +56,15 @@ parameters:
   - name: dryRun
     type: boolean
     default: true
-  # Seconds to wait after each publish before the next crate goes up.
-  # crates.io does not serve a new version from its index the moment the
-  # upload returns, and the next crate in the order depends on the one just
-  # published.  ESRP is not cargo, so nothing else here performs the index
-  # wait that `cargo publish` does.
-  #
-  # This does not address the crates.io publish rate limit, which needs ten
-  # minutes per crate past the fifth and so cannot fit any workable job
-  # timeout — that needs the override in docs/crates-release.md.
+  # Seconds to wait before each publish.  Covers the crates.io index catching
+  # up, and the one-off PublishNew rate limit of one new crate per 10 minutes
+  # plus a minute of margin.
   #
   # Raise it only together with timeoutInMinutes below: across 21 crates,
   # every 60 seconds here spends 21 minutes of the job budget.
   - name: publishDelaySeconds
     type: number
-    default: 90
+    default: 660
   # Cap on a single ESRP release.  The agent cannot see crates.io — ESRP
   # performs the upload from its own infrastructure, and 1ES network isolation
   # blocks this job from reading a public registry — so a hung release is the
@@ -89,12 +83,12 @@ jobs:
     # Azure DevOps defaults an unspecified job timeout to 60 minutes, which 21
     # sequential ESRP releases plus their waits can exceed.  A job killed part
     # way through leaves the closure half published, and a publish cannot be
-    # undone.
+    # undone.  The 660s wait alone spends 231 minutes across the closure.
     #
     # 1ES honors this on a releaseJob: v1/Jobs/ReleaseJob.yml copies every job
     # key through, excluding only templateContext, variables, steps, pool, and
     # container.
-    timeoutInMinutes: 120
+    timeoutInMinutes: 360
     pool:
       name: Azure-Pipelines-1ESPT-ExDShared
       image: windows-2022
@@ -167,6 +161,21 @@ jobs:
                 Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping ESRP publish for ${{ crate }} (staged .crate only)."
               displayName: "DRY RUN: skip publish ${{ crate }}"
           - ${{ else }}:
+            # The wait leads each publish rather than trailing it, so it also
+            # covers the first crate.  The rate-limit budget is shared across
+            # Microsoft and may already be spent when the job starts, which is
+            # a trailing wait's blind spot.  Leading also drops the pointless
+            # wait after the last crate.
+            #
+            # Azure DevOps has no built-in wait for an agent job: Delay is the
+            # only delay task and declares runsOn: Server.  Hence a script.
+            - pwsh: |
+                $ErrorActionPreference = 'Stop'
+                $delay = ${{ parameters.publishDelaySeconds }}
+                if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+                Write-Host "waited $delay s before ${{ crate }}"
+              displayName: "Wait before ${{ crate }}"
+
             - task: EsrpRelease@12
               displayName: "Publish ${{ crate }} to crates.io"
               # A release that never completes would otherwise sit here until
@@ -192,21 +201,3 @@ jobs:
                 serviceendpointurl: 'https://api.esrp.microsoft.com'
                 mainpublisher: 'ESRPRELPACMAN'
                 domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
-
-            # Give crates.io time to serve the version just published before
-            # the crate that depends on it goes up.  Azure DevOps has no
-            # built-in wait for an agent job: Delay is the only delay task of
-            # the 225 first-party tasks and its task.json declares
-            # runsOn: Server, so it runs in agentless jobs only.  Hence a
-            # script.  It stays silent while waiting and prints once the delay
-            # has elapsed.
-            #
-            # The last crate is waited on too, which costs one extra delay at
-            # the end of the job.  Special-casing it is not worth the
-            # expression.
-            - pwsh: |
-                $ErrorActionPreference = 'Stop'
-                $delay = ${{ parameters.publishDelaySeconds }}
-                if ($delay -gt 0) { Start-Sleep -Seconds $delay }
-                Write-Host "waited $delay s after ${{ crate }}"
-              displayName: "Wait after ${{ crate }}"
