@@ -97,9 +97,11 @@ Packaged and unpackaged non-AppContainer proxies use the host-loopback path inst
 }
 ```
 
-MXC does not grant `privateNetworkClientServer` for this path. The proxy is not isolated or authorized by an
-AppContainer identity, so it is intended primarily for development and debugging. Packaged deployments can own the
-port-scoped firewall rule in the package; unpackaged deployments require an installer- or administrator-owned rule.
+MXC does not grant `privateNetworkClientServer` for this path. `ingress.hostLoopback: "allow"` selects the Windows
+loopback exemption, which is bidirectional and cannot be scoped to only the configured proxy endpoint. The proxy is not
+isolated or authorized by an AppContainer identity, so this compatibility path is intended primarily for development
+and debugging. Packaged deployments can own the port-scoped firewall rule in the package; unpackaged deployments
+require an installer- or administrator-owned rule.
 
 #### HTTP client guidance
 
