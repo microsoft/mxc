@@ -137,7 +137,8 @@ MXC grants the client container `privateNetworkClientServer` through `ingress.de
 identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
 bidirectional host-loopback access. This is the lowest-enforcement deployment option because common WFP endpoint
 scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
-development and debugging and requires an installer- or administrator-owned firewall rule.
+development and debugging and requires an installer- or administrator-owned firewall rule scoped to the proxy
+executable and configured port.
 
 #### HTTP client guidance
 
