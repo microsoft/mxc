@@ -104,20 +104,27 @@ The caller must:
 
 #### Proxy identity and firewall authorization
 
-A packaged AppContainer proxy is recommended. Supported deployment options are:
+An AppContainer proxy is recommended. Supported deployment options are:
 
 | Proxy deployment | `allowedProxyPeer` | Enforcement |
 |---|---|---|
 | Packaged AppContainer | Package family name | AppContainer isolation and package firewall rule |
 | Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
+| Packaged non-AppContainer | Omit | Host-loopback access and package firewall rule |
+| Unpackaged non-AppContainer | Omit | Host-loopback access and administrator firewall rule |
 
 The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
-Firewall's block-inbound-to-non-allowed-apps policy. A packaged proxy uses the package-owned firewall declaration shown
-in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
+Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
+declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
 requires its installer or administrator to own an equivalent rule scoped to the proxy executable and configured port. See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
+
+For a non-AppContainer proxy, omit `processContainer.network.allowedProxyPeer` and set
+`ingress.hostLoopback: "allow"`. Packaged deployments can own the port-scoped firewall rule in the package; unpackaged
+deployments require the installer or administrator to own it. These paths do not provide AppContainer isolation or
+proxy-peer identity scoping and are intended primarily for development and debugging.
 
 ### Model 3: externally blocked (most restrictive)
 
