@@ -92,14 +92,8 @@ Model 2 involves two separate processes:
 | Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
 | Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
 
-Regardless of proxy type, an enforcing BaseContainer path applies per-container WFP rules that permit the MXC client
-container to connect only to the configured loopback address and port. `allowedProxyPeer` adds proxy identity binding
-on top of that common endpoint enforcement.
-
-All deployments use `ingress.default: "allow"` because ProcessContainer uses it as the capability gate for
-`privateNetworkClientServer`. This is a Windows capability requirement, not a statement that the proxy connection
-enters the MXC client container; the client initiates that connection. The capability is bidirectional, so it also
-permits private-network server traffic.
+All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
+common WFP endpoint enforcement.
 
 `ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
 opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
@@ -158,11 +152,10 @@ apply when `runtimeConfig.networkProxy` is present.
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
 
-The identity-scoped and host-loopback paths are
-mutually exclusive. When `allowedProxyPeer` is present, MXC resolves the package family or AppContainer profile and
-grants the private-network capability selected by `ingress.default`. When it is omitted, MXC uses the configured proxy
-endpoint without peer identity binding and requires bidirectional host-loopback access. MXC configures the per-container
-WinHTTP proxy for either path.
+The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
+the package family or AppContainer profile and grants the private-network capability selected by `ingress.default`.
+When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and requires bidirectional
+host-loopback access. MXC configures the per-container WinHTTP proxy for either path.
 
 The caller must:
 
