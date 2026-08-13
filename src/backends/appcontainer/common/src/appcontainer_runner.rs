@@ -615,7 +615,7 @@ impl AppContainerScriptRunner {
     }
 
     /// Marks `deniedPaths` as enforced by the dispatcher's per-run DACL guard.
-    pub fn with_external_denied_paths(mut self) -> Self {
+    pub(crate) fn with_external_denied_paths(mut self) -> Self {
         self.denied_paths_enforced_externally = true;
         self
     }
