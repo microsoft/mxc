@@ -573,22 +573,63 @@ mod tests {
 
     #[test]
     fn inherited_output_handle_cannot_block_control_completion() {
+        struct DescendantCleanup {
+            pid_path: PathBuf,
+        }
+
+        impl DescendantCleanup {
+            fn pid(&self) -> Option<u32> {
+                std::fs::read_to_string(&self.pid_path)
+                    .ok()?
+                    .trim()
+                    .parse()
+                    .ok()
+            }
+        }
+
+        impl Drop for DescendantCleanup {
+            fn drop(&mut self) {
+                let Some(pid) = self.pid() else {
+                    return;
+                };
+                let _ = Command::new("taskkill.exe")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let cleanup = DescendantCleanup {
+            pid_path: directory.path().join("descendant.pid"),
+        };
+        let pid_path = cleanup.pid_path.to_string_lossy().replace('\'', "''");
         let mut command = Command::new("powershell.exe");
         command.args([
             "-NoProfile",
             "-Command",
-            "[Console]::Out.WriteLine('INHERITED_HANDLE_SENTINEL'); [Console]::Out.Flush(); \
-             Start-Process powershell.exe -NoNewWindow -ArgumentList \
-             '-NoProfile','-Command','Start-Sleep -Seconds 4'",
+            &format!(
+                "$p = Start-Process powershell.exe -NoNewWindow -PassThru -ArgumentList \
+                 '-NoProfile','-Command','Start-Sleep -Seconds 120'; \
+                 [IO.File]::WriteAllText('{pid_path}', [string]$p.Id); \
+                 Write-Output \"PID=$($p.Id)\""
+            ),
         ]);
         let started = Instant::now();
 
-        let error =
-            run_wpr_command(command, "test", "powershell.exe", Duration::from_secs(5)).unwrap_err();
+        let error = run_wpr_command(command, "test", "powershell.exe", Duration::from_secs(30))
+            .unwrap_err();
         let control_elapsed = started.elapsed();
+        let message = format!("{error:#}");
+        let pid = cleanup
+            .pid()
+            .expect("descendant PID should be recorded for cleanup");
 
+        assert!(message.contains("output drain failed"));
+        assert!(message.contains(&format!("PID={pid}")));
         assert!(may_have_changed_wpr_state(&error));
-        assert!(control_elapsed < Duration::from_secs(15));
+        assert!(control_elapsed < Duration::from_secs(40));
     }
 
     /// Whether `element` carries an attribute `name` whose (unescaped)

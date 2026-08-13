@@ -38,6 +38,7 @@ use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
+use crate::container_steps::OutStream;
 use crate::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, DeprovisionConfig, ErrKind, ExecConfig,
     ProvisionConfig, StartConfig, StopConfig, StreamFrame, MAX_FRAME_SIZE, PROTOCOL_VERSION,
@@ -122,10 +123,10 @@ const OPEN_RETRY: Duration = Duration::from_millis(20);
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 
-/// The captured result of an exec run. Live stdout/stderr framing is a daemon
-/// fill-in; today the daemon returns only the terminal exit code, so these
-/// buffers are usually empty, but the client already accumulates any
-/// [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] the daemon sends.
+/// The captured result of an exec run: the exit code plus fully-buffered
+/// stdout/stderr. Prefer [`DaemonClient::exec_streaming`] to relay output as it
+/// arrives; this buffering variant is for callers (and tests) that want the
+/// whole capture at once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExecResult {
     pub exit_code: i32,
@@ -285,12 +286,46 @@ impl DaemonClient {
     }
 
     /// Run a command in a started container to completion, returning its exit
-    /// code and any streamed output.
+    /// code and fully-buffered output.
+    ///
+    /// A convenience wrapper over [`exec_streaming`](Self::exec_streaming) that
+    /// accumulates every stdout/stderr chunk into an [`ExecResult`].
+    ///
+    /// **Unbounded capture — trusted/bounded output only.** This buffers the
+    /// entire stream in memory with no cap, so container-controlled output can
+    /// exhaust the caller's process memory. It is intended for tests and callers
+    /// that already know the command's output is small and bounded. Any path that
+    /// relays or handles live/untrusted output must use
+    /// [`exec_streaming`](Self::exec_streaming) (the production state-aware runner
+    /// does), which buffers nothing and lets the caller apply its own policy.
+    pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit_code = self.exec_streaming(config, |stream, data| match stream {
+            OutStream::Stdout => stdout.extend_from_slice(data),
+            OutStream::Stderr => stderr.extend_from_slice(data),
+        })?;
+        Ok(ExecResult {
+            exit_code,
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Run a command in a started container, invoking `on_output` for each live
+    /// stdout/stderr chunk **as it arrives**, and returning the exit code once
+    /// the run completes.
     ///
     /// After the daemon admits the exec with `Ok`, this reads the
-    /// [`StreamFrame`] data phase — accumulating stdout/stderr — until the
-    /// terminal [`StreamFrame::Exit`] (or [`StreamFrame::Error`]).
-    pub fn exec(&self, config: ExecConfig) -> DaemonResult<ExecResult> {
+    /// [`StreamFrame`] data phase, dispatching `Stdout`/`Stderr` chunks to the
+    /// callback until the terminal [`StreamFrame::Exit`] (or
+    /// [`StreamFrame::Error`]). Unlike [`exec`](Self::exec), nothing is buffered
+    /// here — the caller decides what to do with each chunk.
+    pub fn exec_streaming(
+        &self,
+        config: ExecConfig,
+        mut on_output: impl FnMut(OutStream, &[u8]),
+    ) -> DaemonResult<i32> {
         let mut pipe = self.open_pipe()?;
         write_frame(&mut pipe, &DaemonRequest::Exec(config))?;
 
@@ -306,15 +341,11 @@ impl DaemonClient {
             }
         }
 
-        let mut result = ExecResult::default();
         loop {
             match read_frame::<StreamFrame>(&mut pipe)? {
-                StreamFrame::Stdout { data } => result.stdout.extend_from_slice(&data),
-                StreamFrame::Stderr { data } => result.stderr.extend_from_slice(&data),
-                StreamFrame::Exit { code } => {
-                    result.exit_code = code;
-                    return Ok(result);
-                }
+                StreamFrame::Stdout { data } => on_output(OutStream::Stdout, &data),
+                StreamFrame::Stderr { data } => on_output(OutStream::Stderr, &data),
+                StreamFrame::Exit { code } => return Ok(code),
                 StreamFrame::Error { message } => {
                     return Err(DaemonError::transport(format!("exec failed: {message}")))
                 }

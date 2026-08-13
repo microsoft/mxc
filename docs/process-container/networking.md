@@ -77,6 +77,69 @@ communication must set `ingress.default` to `"allow"` and accept that Windows en
 server behavior. On an enforcing BaseContainer path, per-container WFP permits the MXC client container to connect only
 to the configured loopback address and port and blocks direct public and private destinations.
 
+#### Proxy deployment choices
+
+Model 2 involves two separate processes:
+
+- **MXC client container:** the BaseContainer created by MXC, which runs the caller's workload and initiates HTTP/S
+  connections to the proxy.
+- **Proxy process:** a caller-created process that is already running outside the MXC client container. It may be
+  packaged or unpackaged, with or without AppContainer isolation.
+
+MXC must reject a `runtimeConfig.networkProxy` endpoint that is not loopback. The caller must configure the proxy to
+bind only the exact loopback address and port supplied to MXC.
+
+| External proxy | `allowedProxyPeer` | MXC client policy | Additional proxy identity |
+|---|---|---|---|
+| Packaged proxy | Package Family Name | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
+| Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
+| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
+
+All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
+common WFP endpoint enforcement. The proxy endpoint is the loopback address and port in
+`runtimeConfig.networkProxy`. The packaged row covers both AppContainer and non-AppContainer proxies because their
+client policy and package identity are the same; the enforcement table below separates their additional protections.
+
+`ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
+opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
+non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That authorizes both
+host-loopback directions, but Model 2 WFP still restricts client-container egress to the configured proxy endpoint.
+Host-loopback clients can reach listeners in the MXC client container.
+
+#### Identity-scoped proxy
+
+Use the canonical [ProcessContainer schema 0.8 configuration](examples/0.8.0-schema.md), which shows
+`runtimeConfig.networkProxy`, `processContainer.network.allowedProxyPeer`, and their relationship in one place.
+Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
+the AppContainer profile name for an unpackaged AppContainer proxy.
+
+#### Unpackaged non-AppContainer proxy
+
+An unpackaged non-AppContainer proxy has no package family or AppContainer profile identity:
+
+```jsonc
+{
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": {
+      "default": "allow",
+      "hostLoopback": "allow"
+    }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  }
+  // No processContainer.network.allowedProxyPeer.
+}
+```
+
+MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
+identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
+bidirectional host-loopback access. This is the lowest-enforcement deployment option because common WFP endpoint
+scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
+development and debugging and requires an installer- or administrator-owned firewall rule scoped to the proxy
+executable and configured port.
+
 #### HTTP client guidance
 
 Code inside the ProcessContainer should use WinHTTP or an HTTP library that queries the system for proxy information.
@@ -95,12 +158,40 @@ apply when `runtimeConfig.networkProxy` is present.
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
 
+The identity-scoped and host-loopback paths are mutually exclusive. When `allowedProxyPeer` is present, MXC resolves
+the package family or AppContainer profile and grants the private-network capability selected by `ingress.default`.
+When it is omitted, MXC uses the configured proxy endpoint without peer identity binding and requires bidirectional
+host-loopback access. MXC configures the per-container WinHTTP proxy for either path.
+
 The caller must:
 
 - create and authorize the proxy;
 - start it before the BaseContainer;
 - keep it alive until the client exits; and
 - leave egress deny-default with no direct allow or deny rules.
+
+#### Proxy identity and firewall authorization
+
+The WFP loopback-address-and-port restriction described above applies to every row. The table compares the additional
+OS enforcement provided for the external proxy. A packaged AppContainer proxy provides the best enforcement. The two
+middle rows provide different protections and are not ordered relative to each other.
+
+| Proxy deployment | `allowedProxyPeer` | Additional OS enforcement |
+|---|---|---|
+| Packaged AppContainer | Package family name | **Best:** AppContainer isolation, package identity, package firewall |
+| Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
+| Packaged non-AppContainer | Package family name | Package identity and package firewall; no AppContainer isolation |
+| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; administrator firewall |
+
+The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
+Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
+declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
+`uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
+requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
+executable, and configured port.
+See
+[CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
+for unpackaged profile creation.
 
 ### Model 3: externally blocked (most restrictive)
 
