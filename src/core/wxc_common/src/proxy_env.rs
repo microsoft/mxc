@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Cooperative HTTP/HTTPS proxy env-var handling shared by the Linux
-//! (Bubblewrap) and WSLc backends.
+//! (Bubblewrap and LXC) and WSLc backends.
 //!
 //! When a backend cannot install a netfilter drop-floor (WSLc has no
 //! iptables in its kernel; Bubblewrap deliberately skips iptables while a
@@ -25,6 +25,11 @@
 //!   `ENV`, so an image `NO_PROXY=*` could survive. To neutralize it, WSLc
 //!   sets `NO_PROXY`/`no_proxy` ([`PROXY_NEUTRALIZE_KEYS`]) to the *empty*
 //!   string rather than omitting them.
+//! - LXC ([`apply_proxy_env`]) pairs these cooperative vars with its iptables
+//!   policy. It forces `--clear-env`, so like Bubblewrap it inherits nothing,
+//!   and when a proxy is configured it reuses [`apply_cooperative_proxy_env`],
+//!   emitting the same empty `NO_PROXY`/`no_proxy` neutralizer that
+//!   `--clear-env` then makes moot.
 //!
 //! Functions here operate on `"KEY=VALUE"` strings, so they are
 //! platform-agnostic and unit-testable on every host.
@@ -303,30 +308,25 @@ pub fn apply_cooperative_proxy_env(caller_env: &[String], proxy_url: &str) -> Ve
     effective
 }
 
-/// Scrub proxy env vars from `env` in place, then point them at `proxy` when it
-/// carries an address.
+/// When `proxy` carries an address, scrub the caller's proxy env vars and point
+/// them at it; when it does not, leave `env` untouched.
 ///
 /// `env` is the `ExecutionRequest::env` representation, `KEY=VALUE` strings; an
-/// entry with no `=` is a bare key, so a valueless `HTTP_PROXY` is scrubbed too.
+/// entry with no `=` is a bare key, so a valueless `HTTP_PROXY` is scrubbed too
+/// when a proxy is active.
+///
+/// A disabled proxy leaves the caller's explicit request values in place, as
+/// Bubblewrap does: these are request-supplied, not inherited host state, and
+/// the firewall -- not this scrub -- decides whether their endpoint is
+/// reachable.
 ///
 /// LXC shares one key set with Bubblewrap and WSLc rather than keeping a
 /// parallel list, so the backends cannot drift into scrubbing different
 /// variables.
-///
-/// The returned flag tells the caller to pass `--clear-env`. It is required
-/// even for an empty environment: without it `lxc-attach` inherits the MXC host
-/// process environment, which carries proxy variables and credentials of its
-/// own.
-pub fn apply_proxy_env(env: &mut Vec<String>, proxy: &ProxyConfig) -> bool {
+pub fn apply_proxy_env(env: &mut Vec<String>, proxy: &ProxyConfig) {
     if let Some(address) = &proxy.address {
         *env = apply_cooperative_proxy_env(env, &address.to_url());
-        return true;
     }
-
-    // With the proxy disabled the vars are still stripped, so a caller cannot
-    // point the sandbox at an egress path the policy never authorized.
-    env.retain(|entry| !is_managed_proxy_key(env_key(entry)));
-    true
 }
 
 #[cfg(test)]

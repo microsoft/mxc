@@ -437,7 +437,7 @@ impl ProxyAddress {
     ///
     /// The URL keeps its hostname; [`ProxyHostPin`] carries the reason.
     pub fn host_pin(&self, ip: IpAddr) -> Result<Option<ProxyHostPin>, WxcError> {
-        let hostname = Self::unbracket(&self.address);
+        let hostname = unbracket_host(&self.address);
 
         // An IP literal needs no pin. Unbracket first so a bracketed IPv6
         // literal is recognized as a literal rather than mistaken for a
@@ -486,12 +486,16 @@ impl ProxyAddress {
         }
     }
 
-    /// Strips one pair of surrounding `[` `]` from a bracketed IPv6 literal.
-    fn unbracket(host: &str) -> &str {
-        host.strip_prefix('[')
-            .and_then(|rest| rest.strip_suffix(']'))
-            .unwrap_or(host)
-    }
+}
+
+/// Strips one pair of surrounding `[` `]` from a bracketed IPv6 literal.
+///
+/// A URL host component keeps the brackets, but `IpAddr::from_str`, hosts
+/// files, and iptables all reject them.
+pub fn unbracket_host(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 /// Proxy configuration parsed from the `network.proxy` JSON field.

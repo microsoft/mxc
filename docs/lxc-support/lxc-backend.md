@@ -109,6 +109,8 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
+Everything in this section requires `enforcementMode` to be `firewall` or `both`.  Under the default `capabilities` mode, MXC installs no iptables rules at all, so `defaultPolicy`, `allowedHosts`, and `blockedHosts` are parsed but never take effect.
+
 Network policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
 | Policy | Implementation |

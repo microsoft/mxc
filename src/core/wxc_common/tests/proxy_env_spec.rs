@@ -317,10 +317,9 @@ fn cooperative_env_appends_managed_keys_after_non_proxy_entries() {
 // ---------------------------------------------------------------------------
 
 // Protects client (a): when the proxy carries an address, LXC needs the env
-// pointed at it and NO_PROXY neutralized. The keys are set to the proxy's URL
-// and the return is true so LXC emits --clear-env.
+// pointed at it and NO_PROXY neutralized.
 #[test]
-fn apply_proxy_env_enabled_sets_keys_and_returns_true() {
+fn apply_proxy_env_enabled_sets_keys() {
     let proxy = ProxyConfig {
         address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
         builtin_test_server: false,
@@ -331,11 +330,9 @@ fn apply_proxy_env_enabled_sets_keys_and_returns_true() {
         "HTTP_PROXY=http://evil:1".to_string(),
     ];
 
-    let force_clean = apply_proxy_env(&mut env, &proxy);
+    apply_proxy_env(&mut env, &proxy);
 
-    assert!(force_clean);
-    assert!(!env.iter().any(|e| e.contains("evil")));
-    assert!(PROXY_SET_KEYS
+    assert!(!env.iter().any(|e| e.contains("evil")));    assert!(PROXY_SET_KEYS
         .iter()
         .all(|k| value_for(&env, k) == Some(expected_url.as_str())));
     assert!(PROXY_NEUTRALIZE_KEYS
@@ -354,45 +351,32 @@ fn apply_proxy_env_scrubs_bare_valueless_proxy_key() {
     };
     let mut env = vec!["HTTP_PROXY".to_string(), "PATH=/usr/bin".to_string()];
 
-    let force_clean = apply_proxy_env(&mut env, &proxy);
+    apply_proxy_env(&mut env, &proxy);
 
-    assert!(force_clean);
     assert!(!env.iter().any(|e| e == "HTTP_PROXY"));
     assert_eq!(value_for(&env, "PATH"), Some("/usr/bin"));
 }
 
-// Protects client (a) and (d): even with no proxy configured, LXC must still
-// force a clean environment so lxc-attach cannot inherit the MXC host process
-// env (which carries proxy vars and credentials). Caller proxy keys are
-// scrubbed and the return is still true.
+// Protects client (a) and (d): with no proxy configured, the caller's proxy
+// vars are request-supplied, not inherited host state, so they are preserved --
+// as Bubblewrap does in its inactive case (bwrap_command.rs). The firewall, not
+// this scrub, governs whether their endpoint is reachable.
 #[test]
-fn apply_proxy_env_disabled_still_scrubs_and_returns_true() {
+fn apply_proxy_env_disabled_preserves_request_proxy_vars() {
     let proxy = ProxyConfig::default();
-    let mut env = vec![
+    let original = vec![
         "PATH=/usr/bin".to_string(),
-        "HTTP_PROXY=http://host-proxy:9".to_string(),
+        "HTTP_PROXY=http://caller-proxy:9".to_string(),
         "NO_PROXY=internal".to_string(),
     ];
+    let mut env = original.clone();
 
-    let force_clean = apply_proxy_env(&mut env, &proxy);
+    apply_proxy_env(&mut env, &proxy);
 
-    assert!(force_clean);
-    assert!(!env.iter().any(|e| e.contains("host-proxy")));
-    assert!(!env.iter().any(|e| e.contains("internal")));
-    assert_eq!(value_for(&env, "PATH"), Some("/usr/bin"));
-}
-
-// Protects client (a): the return contract is "always true, including when env
-// ends up empty" -- the empty vector still tells LXC to emit --clear-env so an
-// empty env does not silently inherit the host environment.
-#[test]
-fn apply_proxy_env_returns_true_for_empty_env() {
-    let proxy = ProxyConfig::default();
-    let mut env: Vec<String> = Vec::new();
-
-    let force_clean = apply_proxy_env(&mut env, &proxy);
-
-    assert!(force_clean);
+    assert_eq!(
+        env, original,
+        "a disabled proxy must leave the caller's request env untouched"
+    );
 }
 
 // ---------------------------------------------------------------------------
