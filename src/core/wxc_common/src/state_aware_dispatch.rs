@@ -23,7 +23,8 @@ use crate::id::parse_sandbox_id_prefix;
 use crate::models::ContainmentBackend;
 use crate::mxc_error::{MxcError, ResponseEnvelope};
 use crate::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
 use crate::state_aware_request::{ParsedStateAwareRequest, Phase};
 use crate::validator::validate_exec_common;
@@ -86,7 +87,7 @@ pub fn dispatch_state_aware_exec<B: StatefulSandboxBackend>(
     let config = parsed.deserialize_config::<B::ExecConfig>(B::BACKEND_KEY, "exec")?;
     validate_exec_common(&request)?;
     backend.validate_exec(&sandbox_id, &request, config.as_ref())?;
-    backend.exec(&sandbox_id, &request, config)
+    backend.exec(&sandbox_id, &request, config, ExecConsumer::Library)
 }
 
 /// Per-backend phase router. The `run_state_aware` arm for a participating
@@ -132,7 +133,7 @@ pub fn dispatch_state_aware<B: StatefulSandboxBackend>(
             if dry_run {
                 return Ok(DispatchOutcome::Envelope(empty_result_envelope()));
             }
-            let handle = backend.exec(&sandbox_id, &request, config)?;
+            let handle = backend.exec(&sandbox_id, &request, config, ExecConsumer::Executor)?;
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }
@@ -288,6 +289,11 @@ mod tests {
         provision_calls: Cell<u32>,
         start_calls: Cell<u32>,
         exec_calls: Cell<u32>,
+        /// The [`ExecConsumer`] the dispatcher passed to the most recent
+        /// `exec`. Recorded so the caller-intent split can be asserted --
+        /// swapping the two would otherwise compile and silently change
+        /// behaviour on both paths.
+        last_exec_consumer: Cell<Option<ExecConsumer>>,
         stop_calls: Cell<u32>,
         deprovision_calls: Cell<u32>,
         validate_provision_calls: Cell<u32>,
@@ -305,6 +311,7 @@ mod tests {
                 provision_calls: Cell::new(0),
                 start_calls: Cell::new(0),
                 exec_calls: Cell::new(0),
+                last_exec_consumer: Cell::new(None),
                 stop_calls: Cell::new(0),
                 deprovision_calls: Cell::new(0),
                 validate_provision_calls: Cell::new(0),
@@ -359,8 +366,10 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
+            consumer: ExecConsumer,
         ) -> Result<ExecHandle, MxcError> {
             self.exec_calls.set(self.exec_calls.get() + 1);
+            self.last_exec_consumer.set(Some(consumer));
             Err(MxcError::backend_error("stub exec not wired"))
         }
         fn stop(
@@ -475,6 +484,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
+            _consumer: ExecConsumer,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("typed stub exec not wired"))
         }
@@ -504,6 +514,12 @@ mod tests {
             experimental_raw: exp,
             source_text: None,
         }
+    }
+
+    fn parsed_runnable_exec(sandbox_id: &str) -> ParsedStateAwareRequest {
+        let mut p = parsed(Phase::Exec, Some(sandbox_id), None);
+        p.request.script_code = "echo hi".to_string();
+        p
     }
 
     fn assert_envelope(outcome: DispatchOutcome) -> Value {
@@ -601,6 +617,37 @@ mod tests {
         assert_eq!(b.validate_exec_calls.get(), 1);
         assert_eq!(b.exec_calls.get(), 0);
         assert_eq!(env, json!({"result": {}}));
+    }
+
+    // The two dispatch entry points differ in who consumes the exec's streams,
+    // and the backend has to be told which. Both directions are pinned.
+
+    /// The executor path relays the handle to its own stdio, so the backend is
+    /// told a human is on the other end and a pseudo-console is legitimate.
+    #[test]
+    fn executor_dispatch_passes_executor_consumer_to_exec() {
+        let mut b = StubBackend::new();
+        let _ = dispatch_state_aware(&mut b, parsed_runnable_exec("stubd:abc"), false);
+        assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
+        assert_eq!(
+            b.last_exec_consumer.get(),
+            Some(ExecConsumer::Executor),
+            "the executor path must not ask a backend for caller-owned pipes"
+        );
+    }
+
+    /// The streaming path hands the caller the streams, so the backend must be
+    /// told to surface separate raw pipes and leave the host console alone.
+    #[test]
+    fn streaming_dispatch_passes_library_consumer_to_exec() {
+        let mut b = StubBackend::new();
+        let _ = dispatch_state_aware_exec(&mut b, parsed_runnable_exec("stubd:abc"));
+        assert_eq!(b.exec_calls.get(), 1, "exec should have been reached");
+        assert_eq!(
+            b.last_exec_consumer.get(),
+            Some(ExecConsumer::Library),
+            "the streaming path must never let a backend touch the caller's console"
+        );
     }
 
     // The remaining three phases complete the dry-run contract: `--dry-run`
