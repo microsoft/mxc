@@ -13,7 +13,7 @@ the shared policy.
 | `allowedHosts` | `egress.allow[].to[].cidr` | 0.8 uses IP/CIDR only and can scope by port/protocol |
 | `blockedHosts` | `egress.deny[].to[].cidr` | 0.8 uses IP/CIDR only and deny overrides allow |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
-| `allowLocalNetwork` | `ingress.default` | Controls private-network communication |
+| `allowLocalNetwork` | `ingress.default` | Capability gate; outbound follows `egress` |
 | No equivalent | `ingress.hostLoopback` | New host-loopback inbound control |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
@@ -22,13 +22,14 @@ the shared policy.
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
 On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
-`ingress` governs traffic entering the container. ProcessContainer maps `egress` to traffic sent to public addresses
-and maps `ingress.default` to Windows' `privateNetworkClientServer` capability, which enables private-network
-communication in both directions.
+`ingress` governs traffic entering the container. ProcessContainer also applies `egress` rules to all outbound
+destinations, but private-network traffic additionally requires `ingress.default: "allow"` to grant Windows'
+bidirectional `privateNetworkClientServer` capability.
 
-`allowLocalNetwork` still maps only to `ingress.default`. This preserves existing ProcessContainer private-network
-behavior while allowing backends with clean private-network separation to enforce independent outbound and inbound
-policy.
+`allowLocalNetwork` still maps only to `ingress.default`; it must not change `egress.default`. On ProcessContainer this
+grants the capability required for private-network traffic, but outbound private destinations remain subject to
+`egress`. A caller migrating deny-default policy must add explicit private CIDR allow rules for any required outbound
+private access.
 
 ## Direct egress
 
@@ -122,8 +123,9 @@ migrates to deny-default egress with allowed private/LAN inbound:
 ```
 
 On backends that cleanly separate private-network ingress from egress, this does not grant outbound private-network or
-internet access. On ProcessContainer, `ingress.default: "allow"` preserves the legacy `allowLocalNetwork` behavior by
-granting bidirectional private-network communication, while traffic to public addresses remains denied.
+internet access. On ProcessContainer, `ingress.default: "allow"` grants the bidirectional private-network capability,
+but deny-default `egress` still blocks outbound public and private destinations unless an allow rule or the configured
+proxy path applies.
 
 ## Backend-specific schema 0.8 configuration
 

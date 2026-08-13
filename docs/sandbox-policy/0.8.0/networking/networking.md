@@ -277,9 +277,9 @@ What is and is not routed through the proxy is described under Outbound Traffic 
 **Reality:** Enforcement fidelity varies. A capability available on one backend (e.g., per-AppContainer WFP filters) may not have an equivalent on another. Cooperation-dependent routing (e.g., honoring proxy env vars) is allowed only as an optimization above an enforcing layer that already blocks non-cooperative traffic; it is never the enforcement mechanism itself.
 
 Backends that cleanly separate private-network ingress from egress apply both directions independently. Windows
-AppContainer exposes `privateNetworkClientServer` as one bidirectional capability, so ProcessContainer requires
-`ingress.default: "allow"` for private-network access in either direction and applies `egress` to traffic sent to
-public addresses.
+AppContainer requires the bidirectional `privateNetworkClientServer` capability before private-network traffic can
+flow in either direction. ProcessContainer therefore requires `ingress.default: "allow"` for outbound private-network
+access, after which `egress` rules apply to both public and private outbound destinations.
 
 ### D8: Delegation from the invoking user
 
@@ -305,21 +305,21 @@ does not satisfy model 2; see the implementation doc for its limitations.
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. A packaged or
   unpackaged AppContainer proxy uses `allowedProxyPeer` and requires `ingress.default: "allow"` to grant
   `privateNetworkClientServer`. That capability permits private-network client and server traffic by Windows design.
-- **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules;
-  private-network communication still depends on `ingress.default`.
+- **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules.
+  Private-network outbound also requires `ingress.default: "allow"` and remains subject to the same `egress` rules.
 - **Model 3:** Grants no `internetClient`, private-network capability, or loopback exemptions.
 
 **Enforcement:**
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | WFP dynamic filters for IPv4/IPv6, scoped to AppContainer SID | Internet destinations only |
+| IP/CIDR allow/block | IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
 | Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
 | Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration | Private network follows `ingress.default` |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
-| Private network | `privateNetworkClientServer` via `ingress.default` | Bidirectional; not narrowed by `egress` |
+| Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
 | DNS | DNS queries follow same IP/CIDR allow/block rules as other traffic. No domain-based filtering. | If DNS resolver IP is blocked, DNS fails. If allowed, sandbox can resolve any domain. **For HTTP(S) via the proxy, DNS resolution happens in the proxy.** |
 | Bypass resistance | High. Kernel-enforced WFP filters. Bypass requires kernel compromise or AppContainer escape (elevation). | |

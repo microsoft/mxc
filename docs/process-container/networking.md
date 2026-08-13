@@ -14,7 +14,7 @@ On ProcessContainer paths with OS-scoped enforcement, each container gets two en
 container SID and applied with no UAC prompt per launch. The AppContainer compatibility behavior is documented in
 section 2 and is not equivalent to these guarantees.
 
-- **WFP internet filters:** block traffic to public addresses by default, then allow or block specific public
+- **WFP egress filters:** block outbound traffic by default, then allow or block specific public or private
   destinations by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over
   an allow. The rules apply only to this container.
 - **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g., the WinHTTP/Chromium stack) at a
@@ -26,15 +26,15 @@ section 2 and is not equivalent to these guarantees.
 The examples below use the proposed schema 0.8 network shape.
 
 Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
-maps `ingress.default: "allow"` to private-network communication in both directions. `egress` controls traffic to
-public addresses and does not independently narrow private-network client connections. `ingress.hostLoopback` remains
-the separate host-loopback control.
+requires `ingress.default: "allow"` before the container can communicate with private-network addresses. Enabling it
+also permits private-network server traffic. `egress` rules still govern outbound public and private destinations;
+`ingress.hostLoopback` remains the separate host-loopback control.
 
 | Egress default | Ingress default | AppContainer capabilities | Result |
 |---|---|---|---|
 | `deny` | `deny` | None | Internet and private-network traffic are denied. |
 | `allow` | `deny` | `internetClient` | Internet outbound is allowed; private-network traffic is denied. |
-| `deny` | `allow` | `privateNetworkClientServer` | Internet is denied; private-network traffic is allowed both ways. |
+| `deny` | `allow` | `privateNetworkClientServer` | Outbound denied; private-network inbound allowed. |
 | `allow` | `allow` | Both capabilities | Internet outbound and bidirectional private-network traffic are allowed. |
 
 This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
@@ -74,7 +74,7 @@ This matrix covers the direction defaults without explicit internet egress rules
 
 This is a ProcessContainer-specific mapping. Callers that need a private-network proxy or any other private-network
 communication must set `ingress.default` to `"allow"` and accept that Windows enables both private-network client and
-server behavior. WFP continues to enforce the separate `egress` policy for public addresses.
+server behavior. WFP continues to enforce `egress` rules for outbound public and private destinations.
 
 #### Contained AppContainer proxy
 
@@ -166,10 +166,11 @@ compatibility behavior is not model 2 enforcement.
 
 ## 3. WFP enforcement
 
-The BaseContainer contracts apply WFP filters for public addresses in the OS's elevated context and own their lifetime.
+The BaseContainer contracts apply outbound WFP filters in the OS's elevated context and own their lifetime.
 Downlevel WFP installation, elevation, and cleanup are future work and are not part of the initial schema 0.8
 downlevel support.
 
-`internetClient` and WFP implement the `egress` policy for public addresses. `privateNetworkClientServer` is a
-separate, intentionally bidirectional Windows capability selected through `ingress.default`. ProcessContainer cannot
-represent independent private-network outbound and inbound controls.
+WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.
+`privateNetworkClientServer`, selected through `ingress.default`, is the prerequisite for private-network access and
+also enables private-network inbound traffic. ProcessContainer therefore cannot allow private-network outbound while
+denying private-network inbound.
