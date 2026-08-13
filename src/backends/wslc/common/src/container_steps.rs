@@ -806,22 +806,24 @@ pub unsafe fn resolve_image(
 ///
 /// # Safety
 /// `sdk` must hold valid function pointers and `session` must be a live handle.
+#[allow(clippy::too_many_arguments)]
 pub unsafe fn create_daemon_container(
     sdk: &WslcSdk,
     session: WslcSession,
     image: &str,
     mounts: &[VolumeMount],
+    port_mappings: &[PortMapping],
     net_mode: WslcContainerNetworkingMode,
     keepalive: &mut ProcessSettings,
     logger: &mut Logger,
 ) -> Result<WslcContainerGuard, ScriptResponse> {
-    // Daemon containers never forward ports (no state-aware port-mapping config)
-    // and set no container flags (auto-remove/gpu/privileged are one-shot-only).
+    // Daemon containers set no container flags (auto-remove / gpu / privileged
+    // are one-shot-only); port forwards come from the provision phase config.
     let mut container_settings = ContainerSettings::build(
         sdk,
         image,
         mounts,
-        &[],
+        port_mappings,
         net_mode,
         WslcContainerFlags::WSLC_CONTAINER_FLAG_NONE,
         logger,

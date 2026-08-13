@@ -84,6 +84,10 @@ export interface Experimental {
    */
   seatbelt?: Seatbelt | null;
   /**
+   * Telemetry configuration.
+   */
+  telemetry?: Telemetry | null;
+  /**
    * Placeholder feature for testing experimental infrastructure.
    */
   test?: TestFeature | null;
@@ -139,13 +143,13 @@ export interface IsolationSession {
 
 /**
  * Provision-phase IsolationSession configuration (state-aware lifecycle).
- *
+ * 
  * The only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.
  */
 export interface IsolationSessionProvisionPhase {
   /**
    * Optional identifier for the calling application.
-   *
+   * 
    * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
   appId?: string | null;
@@ -359,16 +363,8 @@ export interface Process {
   cwd?: string | null;
   /**
    * Environment variables as `"KEY=VALUE"` strings.
-   *
-   * Omit the field to give the child the backend's default environment (on Windows, the user's profile block). Supply it — including as an empty array — and it is used verbatim; MXC adds nothing to it unless `inheritDefaultEnv` is set.
    */
   env?: string[] | null;
-  /**
-   * Start from the backend's default environment and layer `env` on top of it, rather than replacing it (default false).
-   *
-   * This exists because the default environment is not something a caller can assemble: on Windows it is the user's profile block, which only the OS can produce. Entries in `env` override same-named defaults. Has no effect on backends whose default environment is empty, and none when `env` is omitted (that already yields the default).
-   */
-  inheritDefaultEnv?: boolean | null;
   /**
    * Wall-clock timeout in milliseconds.
    */
@@ -474,13 +470,14 @@ export interface Seatbelt {
 }
 
 /**
- * Telemetry configuration (`telemetry`).
+ * Telemetry configuration (`experimental.telemetry`).
  */
 export interface Telemetry {
   /**
-   * Explicit telemetry opt-in for this invocation. `true` = opt in (still subject to the user's consent and to administrative policy — it can never turn telemetry on for someone who has not consented), `false` = force off, omitted = off.
+   * Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).
    */
   enabled?: boolean | null;
+  [k: string]: unknown;
 }
 
 /**
@@ -585,9 +582,9 @@ export interface Wslc {
 }
 
 /**
- * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
- *
- * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries what the amortized daemon session honors: the container image (or a local tarball to import) and the host↔container port forwards.
+ * 
+ * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. `portMappings`, by contrast, is per-container (not per-session) so it is honored here, matching the one-shot surface. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
  */
 export interface WslcProvisionPhase {
   /**
@@ -598,11 +595,15 @@ export interface WslcProvisionPhase {
    * Path to a local image tarball to import instead of pulling.
    */
   imageTarPath?: string | null;
+  /**
+   * Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings. Mirrors the one-shot `Wslc::port_mappings`.
+   */
+  portMappings?: PortMapping[] | null;
   [k: string]: unknown;
 }
 
 /**
- * Rolling compatibility model retained as a test oracle while production requests use registered exact contracts. It includes historical fields that exact `0.9.0-alpha` rejects; authors should use the exact development schema.
+ * MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.
  */
 export interface MXCConfiguration {
   /**
@@ -621,6 +622,10 @@ export interface MXCConfiguration {
    * Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time.
    */
   containment?: Containment | null;
+  /**
+   * Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless experimental telemetry is enabled; not valid on one-shot requests.
+   */
+  correlationVector?: string | null;
   /**
    * Experimental features. Only honored when `--experimental` is passed.
    */
@@ -669,10 +674,6 @@ export interface MXCConfiguration {
    * macOS Seatbelt backend configuration. Used when containment is `seatbelt`.
    */
   seatbelt?: Seatbelt | null;
-  /**
-   * Telemetry configuration.
-   */
-  telemetry?: Telemetry | null;
   /**
    * Cross-platform UI isolation policy.
    */

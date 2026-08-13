@@ -79,6 +79,7 @@ fn convert_wslc_provision(value: contract::WslcProvision) -> WslcProvisionConfig
     WslcProvisionConfig {
         image: image.into_option(),
         image_tar_path: image_tar_path.into_option(),
+        port_mappings: None,
     }
 }
 

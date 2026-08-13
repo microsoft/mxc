@@ -137,6 +137,14 @@ The legacy `defaultPolicy`/`network.proxy` vocabulary documented in older
 published contracts is not a v0.9 compatibility fallback. The new v0.9
 directional requirements do not change those published contracts.
 
+## Port forwarding
+
+`experimental.wslc.provision.portMappings` forwards host (Windows) ports to the container, mirroring
+the one-shot `experimental.wslc.portMappings` surface. Each entry is `{ windowsPort, containerPort }`
+(both 1–65535; `protocol` defaults to and only accepts `tcp` — `udp` is rejected because the WSLC
+SDK runtime returns `E_NOTIMPL`). Port mappings are per-container, applied at `WslcCreateContainer`
+during `provision`, and frozen for the sandbox's lifetime. A duplicate `windowsPort` is rejected with
+`policy_validation`. Post-provision phases carry no port config.
 ## Error mapping
 
 Exact-contract `malformed_request` failures occur before daemon connection and

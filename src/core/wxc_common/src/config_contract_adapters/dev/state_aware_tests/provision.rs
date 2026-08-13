@@ -208,6 +208,7 @@ fn rolling_wslc_conversion_has_independent_expected_fields() {
         let wire = wire::WslcProvisionPhase {
             image: image.map(str::to_owned),
             image_tar_path: image_tar_path.map(str::to_owned),
+            port_mappings: None,
         };
         let runtime = WslcProvisionConfig::from(wire);
         assert_eq!(runtime.image.as_deref(), image);

@@ -291,6 +291,8 @@ pub struct WslcProvisionConfig {
     pub image: Option<String>,
     /// Local image tarball to import instead of pulling an image.
     pub image_tar_path: Option<String>,
+    /// Host -> container port forwards, validated by the backend at provision.
+    pub port_mappings: Option<Vec<crate::wire::PortMapping>>,
 }
 
 #[cfg(test)]
@@ -299,10 +301,12 @@ impl From<crate::wire::WslcProvisionPhase> for WslcProvisionConfig {
         let crate::wire::WslcProvisionPhase {
             image,
             image_tar_path,
+            port_mappings,
         } = config;
         Self {
             image,
             image_tar_path,
+            port_mappings,
         }
     }
 }
@@ -841,6 +845,16 @@ impl ContainerPolicy {
             &self.blocked_hosts,
         )
     }
+
+    /// True when any host list is present, regardless of the default policy.
+    /// Unlike [`needs_host_filtering`], this also flags a list that is
+    /// *redundant* with the default (`block` + `blockedHosts`, `allow` +
+    /// `allowedHosts`). WSLc cannot enforce per-host filtering in any form, so
+    /// it must fail closed on any non-empty list rather than silently ignore a
+    /// redundant one.
+    pub fn has_host_lists(&self) -> bool {
+        !self.allowed_hosts.is_empty() || !self.blocked_hosts.is_empty()
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
@@ -1281,6 +1295,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: None,
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 None,
                 None,
@@ -1289,6 +1304,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: Some(String::new()),
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 Some(""),
                 None,
@@ -1297,6 +1313,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: None,
                     image_tar_path: Some(String::new()),
+                    port_mappings: None,
                 },
                 None,
                 Some(""),
@@ -1305,6 +1322,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: Some(String::new()),
                     image_tar_path: Some(String::new()),
+                    port_mappings: None,
                 },
                 Some(""),
                 Some(""),
@@ -1313,6 +1331,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: None,
+                    port_mappings: None,
                 },
                 Some("custom/image:tag"),
                 None,
@@ -1321,6 +1340,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: None,
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    port_mappings: None,
                 },
                 None,
                 Some("C:\\images\\custom.tar"),
@@ -1329,6 +1349,7 @@ mod tests {
                 crate::wire::WslcProvisionPhase {
                     image: Some("custom/image:tag".to_string()),
                     image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+                    port_mappings: None,
                 },
                 Some("custom/image:tag"),
                 Some("C:\\images\\custom.tar"),
@@ -1367,6 +1388,7 @@ mod tests {
             WslcProvisionConfig {
                 image: None,
                 image_tar_path: None,
+                port_mappings: None,
             }
         );
     }
