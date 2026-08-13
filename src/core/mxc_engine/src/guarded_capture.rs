@@ -22,23 +22,20 @@ use windows::Win32::System::LibraryLoader::{
 };
 
 const GUARDIAN_CONFIRM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+const MAX_GUARDIAN_CONFIRM_ATTEMPTS: usize = 3;
 
 fn confirm_guardian_release_after_discard_failure(
-    discard_error: String,
     mut confirm_release: impl FnMut() -> Result<(), String>,
-    mut on_retry: impl FnMut(&str),
+    mut on_retry: impl FnMut(usize, &str),
 ) -> Result<(), String> {
-    loop {
+    for attempt in 1..=MAX_GUARDIAN_CONFIRM_ATTEMPTS {
         match confirm_release() {
-            Ok(()) => {
-                return Err(format!(
-                    "guarded WPR discard failed: {discard_error}; guardian termination was \
-                     confirmed by the cleanup fallback"
-                ));
-            }
-            Err(error) => on_retry(&error),
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < MAX_GUARDIAN_CONFIRM_ATTEMPTS => on_retry(attempt, &error),
+            Err(error) => return Err(error),
         }
     }
+    unreachable!("guardian confirmation attempt range is non-empty")
 }
 
 /// Resolve `plm.exe` next to the module containing `mxc_engine`.
@@ -106,17 +103,30 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
             Err(error) => error,
         };
 
-        confirm_guardian_release_after_discard_failure(
-            format!("{discard_error:#}"),
+        match confirm_guardian_release_after_discard_failure(
             || self.session.cancel().map_err(|error| format!("{error:#}")),
-            |error| {
+            |attempt, error| {
                 eprintln!(
                     "[mxc] guarded WPR guardian termination remains unconfirmed after \
-                     discard failure; sandbox enforcement is still active: {error}"
+                     discard failure (attempt {attempt}/{MAX_GUARDIAN_CONFIRM_ATTEMPTS}); \
+                     sandbox enforcement is still active: {error}"
                 );
                 std::thread::sleep(GUARDIAN_CONFIRM_RETRY_DELAY);
             },
-        )
+        ) {
+            Ok(()) => Err(format!(
+                "guarded WPR discard failed: {discard_error:#}; guardian termination was \
+                 confirmed by the cleanup fallback"
+            )),
+            Err(error) => {
+                eprintln!(
+                    "[mxc] guarded WPR guardian termination could not be confirmed after \
+                     {MAX_GUARDIAN_CONFIRM_ATTEMPTS} attempts; aborting to preserve sandbox \
+                     enforcement: {error}"
+                );
+                std::process::abort();
+            }
+        }
     }
 
     fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
@@ -216,8 +226,7 @@ mod tests {
         let mut attempts = 0;
         let mut retries = Vec::new();
 
-        let error = confirm_guardian_release_after_discard_failure(
-            "discard protocol failed".to_string(),
+        confirm_guardian_release_after_discard_failure(
             || {
                 attempts += 1;
                 if attempts < 3 {
@@ -226,19 +235,39 @@ mod tests {
                     Ok(())
                 }
             },
-            |error| retries.push(error.to_string()),
+            |attempt, error| retries.push((attempt, error.to_string())),
         )
-        .unwrap_err();
+        .unwrap();
 
         assert_eq!(attempts, 3);
         assert_eq!(
             retries,
             [
-                "confirmation attempt 1 failed",
-                "confirmation attempt 2 failed"
+                (1, "confirmation attempt 1 failed".to_string()),
+                (2, "confirmation attempt 2 failed".to_string())
             ]
         );
-        assert!(error.contains("discard protocol failed"));
-        assert!(error.contains("guardian termination was confirmed"));
+    }
+
+    #[test]
+    fn discard_failure_stops_after_bounded_confirmation_attempts() {
+        let mut attempts = 0;
+        let mut retries = Vec::new();
+
+        let error = confirm_guardian_release_after_discard_failure(
+            || {
+                attempts += 1;
+                Err(format!("confirmation attempt {attempts} failed"))
+            },
+            |attempt, error| retries.push((attempt, error.to_string())),
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, MAX_GUARDIAN_CONFIRM_ATTEMPTS);
+        assert_eq!(retries.len(), MAX_GUARDIAN_CONFIRM_ATTEMPTS - 1);
+        assert_eq!(
+            error,
+            format!("confirmation attempt {MAX_GUARDIAN_CONFIRM_ATTEMPTS} failed")
+        );
     }
 }

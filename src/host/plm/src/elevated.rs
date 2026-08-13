@@ -2835,7 +2835,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_confirms_guardian_exit_even_after_session_is_disarmed() {
+    fn cancel_confirms_guardian_exit_and_flushes_pending_abandonment_report() {
         let mut child = std::process::Command::new("cmd.exe")
             .args(["/d", "/c", "ping.exe -n 2 127.0.0.1 >nul"])
             .spawn()
@@ -2853,12 +2853,13 @@ mod tests {
             pipe: None,
             process: OwnedHandle(handle),
             disarmed: true,
-            abandonment_report_pending: false,
+            abandonment_report_pending: true,
         };
 
         session.cancel().unwrap();
 
         assert!(child.try_wait().unwrap().is_some());
+        assert!(!session.abandonment_report_pending);
     }
 
     #[test]

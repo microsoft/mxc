@@ -94,6 +94,12 @@ pub trait GuardedCaptureFactory: Send + Sync {
     fn start(&self, owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String>;
 }
 
+pub(crate) fn release_after_termination_failure(
+    mut session: Box<dyn GuardedCaptureSession>,
+) -> Result<(), String> {
+    session.discard()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +174,55 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.contains("owner pid"));
+    }
+
+    #[test]
+    fn release_waits_for_discard_contract_completion() {
+        struct BlockingSession {
+            entered: std::sync::mpsc::Sender<()>,
+            release: std::sync::mpsc::Receiver<()>,
+        }
+
+        impl GuardedCaptureSession for BlockingSession {
+            fn attach_process_tree(
+                &mut self,
+                _job_handle: usize,
+                _root_process_handle: usize,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn discard(&mut self) -> Result<(), String> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                Err("discard failed after guardian release".to_string())
+            }
+
+            fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+                unreachable!()
+            }
+        }
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = release_after_termination_failure(Box::new(BlockingSession {
+                entered: entered_tx,
+                release: release_rx,
+            }));
+            done_tx.send(result).unwrap();
+        });
+
+        entered_rx.recv().unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            done_rx.recv().unwrap().unwrap_err(),
+            "discard failed after guardian release"
+        );
+        thread.join().unwrap();
     }
 }

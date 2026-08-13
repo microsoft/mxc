@@ -1695,13 +1695,13 @@ impl AppContainerSandboxProcess {
     }
 
     fn release_guarded_capture_after_termination_failure(&mut self) {
-        let Some(mut session) = self.capture_session.take() else {
+        let Some(session) = self.capture_session.take() else {
             return;
         };
         // The trait contract keeps this call blocked until the elevated
         // guardian has released its duplicate job handle, even when discard
         // itself fails. Only then may Drop return and release enforcement.
-        if let Err(error) = session.discard() {
+        if let Err(error) = crate::guarded_capture::release_after_termination_failure(session) {
             capture_output::write_stderr_line_best_effort(format_args!(
                 "failed to discard guarded WPR capture after sandbox termination failure: {error}"
             ));
