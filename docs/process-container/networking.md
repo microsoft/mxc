@@ -83,8 +83,8 @@ The OS sets this configuration per BaseContainer, and the WinHTTP stack uses it 
 does not use the BaseContainer's configuration.
 
 MXC also sets the standard proxy environment variables for libraries that use cooperative proxying. Direct internet
-traffic that bypasses the proxy is blocked. Other private-network traffic remains available because model 2 requires
-the bidirectional private-network capability.
+traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
+the configured loopback proxy address and port and blocks direct public and private destinations.
 
 Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. The proxy identity path determines whether
 `ingress.hostLoopback` remains denied or is explicitly allowed. Direct egress allow and deny rules do not apply when
