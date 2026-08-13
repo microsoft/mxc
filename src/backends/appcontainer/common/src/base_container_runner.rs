@@ -69,8 +69,9 @@ use wxc_common::log_symbols::{
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsOutput, ContainerPolicy, ExecutionRequest, FailurePhase, NetworkEnforcementMode,
-    NetworkPolicy, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainerPolicy, ExecutionRequest,
+    FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, SandboxOutputMetadata,
+    ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -101,6 +102,7 @@ fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
         for ch in format!("{}={}", key, value).encode_utf16() {
             block.push(ch);
         }
+
         block.push(0);
     }
     block.push(0);
@@ -245,6 +247,20 @@ const PSEC_DENIED_PATHS_UNSUPPORTED_MSG: &str =
 const CREATE_PROCESS_IN_SANDBOX_API: &str = "Experimental_CreateProcessInSandbox";
 const CREATE_PROCESS_IN_SECURITY_ENVIRONMENT_API: &str =
     "CreateProcessW(PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT)";
+
+#[derive(Debug)]
+struct CaptureCleanupError {
+    output: CaptureDenialsOutput,
+    cleanup_message: String,
+}
+
+impl std::fmt::Display for CaptureCleanupError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.cleanup_message)
+    }
+}
+
+impl std::error::Error for CaptureCleanupError {}
 
 /// True when a Win32 error code signals the BaseContainer feature is not
 /// enabled on this build (symbol present, capability gated off).
@@ -1364,28 +1380,26 @@ impl BaseContainerRunner {
         }
 
         // Resolve two paths for the capture:
-        //   * `capture_etl_path` — an internal temp used only by native V2
-        //     capture. Guarded WPR analyzes its ETL while elevated and returns
-        //     only a bounded process-scoped result.
+        //   * `capture_etl_path` — a runner-managed `.etl` in a protected
+        //     per-run directory for native V2 capture. Guarded WPR analyzes
+        //     its ETL while elevated and returns only a bounded process-scoped
+        //     result.
         //   * `capture_output_path` — the JSON denials deliverable that consuming
         //     apps read: caller-specified via `captureDenials.outputPath` when
         //     provided, else a managed per-run temp `.json` file.
-        let (capture_etl_path, capture_output_path) =
-            if let Some(capture_config) = capture_denials.as_ref() {
-                (
-                    if use_process_security_environment {
-                        Some(managed_capture_output_path()?)
-                    } else {
-                        None
-                    },
-                    Some(
-                        unique_denials_output_path(capture_config.output_path.as_deref())
-                            .map_err(|e| ScriptResponse::error(&e))?,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
+        let mut managed_capture = if use_process_security_environment {
+            capture_denials
+                .as_ref()
+                .map(|config| managed_capture_output_path(config.retain_etl))
+                .transpose()?
+        } else {
+            None
+        };
+        let capture_output_path = capture_denials
+            .as_ref()
+            .map(|config| unique_denials_output_path(config.output_path.as_deref()))
+            .transpose()
+            .map_err(|error| ScriptResponse::error(&error))?;
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
@@ -2237,8 +2251,11 @@ impl BaseContainerRunner {
             capture_session,
             guarded_capture_session,
             security_environment,
-            capture_etl_path,
+            managed_capture: managed_capture.take(),
             capture_output_path,
+            retain_capture_etl: capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl),
         })
     }
 }
@@ -2275,12 +2292,13 @@ struct BaseChild {
     /// Non-capture PSEC environment retained until the child exits so policy
     /// enforcement outlives the process tree.
     security_environment: Option<ProcessSecurityEnvironment>,
-    /// Internal runner-managed temp `.etl` the broker seals into. Decoded
-    /// then deleted in `run_teardown`. `Some` iff `capture_session` is `Some`.
-    capture_etl_path: Option<PathBuf>,
+    /// Protected per-run ETL path and its cleanup guard.
+    managed_capture: Option<ManagedCapturePath>,
     /// Resolved JSON denials deliverable path (caller-specified or a managed
     /// per-run temp file). `Some` iff `capture_session` is `Some`.
     capture_output_path: Option<PathBuf>,
+    /// Whether the sealed ETL is retained after analysis.
+    retain_capture_etl: bool,
 }
 
 impl SandboxBackend for BaseContainerRunner {
@@ -2297,6 +2315,18 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
+        if !use_process_security_environment
+            && request
+                .policy
+                .capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl)
+        {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
+            });
+        }
         if capture_denials
             && !use_process_security_environment
             && self.guarded_capture_factory.is_none()
@@ -2437,10 +2467,12 @@ struct BaseContainerSandboxProcess {
     guarded_capture_session: Option<Box<dyn GuardedCaptureSession>>,
     /// Non-capture PSEC environment, closed after the child exits and is reaped.
     security_environment: Option<ProcessSecurityEnvironment>,
-    /// Internal runner-managed temp `.etl` the broker seals into.
-    capture_etl_path: Option<PathBuf>,
+    /// Protected per-run ETL path and its cleanup guard.
+    managed_capture: Option<ManagedCapturePath>,
     /// Resolved JSON denials deliverable path.
     capture_output_path: Option<PathBuf>,
+    /// Whether the sealed ETL is retained after analysis.
+    retain_capture_etl: bool,
     /// Exit code of the child, recorded by `wait` before teardown so the
     /// denials summary can carry it. `None` on the `Drop`/early-exit path.
     last_exit_code: Option<i32>,
@@ -2483,14 +2515,15 @@ impl BaseContainerSandboxProcess {
             capture_session: child.capture_session.take(),
             guarded_capture_session: child.guarded_capture_session.take(),
             security_environment: child.security_environment.take(),
-            capture_etl_path: child.capture_etl_path.take(),
+            managed_capture: child.managed_capture.take(),
             capture_output_path: child.capture_output_path.take(),
+            retain_capture_etl: child.retain_capture_etl,
             last_exit_code: None,
             output_metadata: None,
         }
     }
 
-    fn run_teardown(&mut self) -> std::io::Result<()> {
+    fn run_teardown(&mut self, allow_retention: bool) -> std::io::Result<()> {
         if let Some(result) = &self.teardown_result {
             return result.clone().map_err(std::io::Error::other);
         }
@@ -2498,47 +2531,141 @@ impl BaseContainerSandboxProcess {
 
         // Seal the learning-mode ETL trace now that the child has exited and
         // been reaped (both `wait` and `Drop` kill + reap before calling this).
-        // The ETL is an internal temp: seal it, decode it into the JSON denials
-        // deliverable that consuming apps read, delete the temp, and retain
-        // structured metadata for the caller. Any seal/decode/write failure is
-        // returned through `wait()`.
+        // Seal the ETL, decode it into the JSON denials deliverable, and either
+        // delete it or report its retained path according to the request. Any
+        // seal/decode/write failure is returned through `wait()`.
         let capture_result = if let Some(session) = self.capture_session.take() {
-            let etl_path = self.capture_etl_path.take();
-            let output_path = self.capture_output_path.take();
-            let exit_code = self.last_exit_code.unwrap_or(-1);
-            let result = match session.finish(etl_path.as_deref()) {
-                Ok(()) => match (&etl_path, &output_path) {
-                    (Some(etl), Some(output)) => {
-                        Self::decode_write_and_cleanup(&EtlDenialAnalyzer, etl, output, exit_code)
-                            .map(Some)
+            let managed_capture = self.managed_capture.take();
+            if !allow_retention {
+                let result = discard_abandoned_capture(session, managed_capture);
+                self.capture_output_path.take();
+                result.map(|_| None)
+            } else {
+                let etl_path = managed_capture
+                    .as_ref()
+                    .map(|capture| capture.etl_path.as_path());
+                let output_path = self.capture_output_path.take();
+                let exit_code = self.last_exit_code.unwrap_or(-1);
+                let retain_etl = allow_retention && self.retain_capture_etl;
+                let finish_result = session.finish(etl_path);
+                let (mut etl_path, mut etl_directory) = managed_capture
+                    .map(ManagedCapturePath::disarm)
+                    .map(|(path, directory)| (Some(path), Some(directory)))
+                    .unwrap_or((None, None));
+                let promotion_error = if finish_result.is_ok() && retain_etl {
+                    match (&etl_path, &etl_directory) {
+                        (Some(etl), Some(directory)) => {
+                            match promote_capture_for_retention(etl, directory) {
+                                Ok((retained_etl, retained_directory)) => {
+                                    etl_path = Some(retained_etl);
+                                    etl_directory = Some(retained_directory);
+                                    None
+                                }
+                                Err(error) => Some(error),
+                            }
+                        }
+                        _ => None,
                     }
-                    _ => combine_capture_and_cleanup_results(
-                        Err(std::io::Error::other(
-                            "captureDenials internal output paths were not initialized",
-                        )),
-                        etl_path
-                            .as_deref()
-                            .map(remove_internal_capture_file)
-                            .unwrap_or(Ok(())),
+                } else {
+                    None
+                };
+                let (capture_result, etl_was_sealed) = match finish_result {
+                    Ok(()) => (
+                        match (&etl_path, &output_path) {
+                            (Some(etl), Some(output)) => Self::decode_write_and_finalize(
+                                &EtlDenialAnalyzer,
+                                etl,
+                                etl_directory.as_deref(),
+                                output,
+                                exit_code,
+                                retain_etl,
+                            )
+                            .map(Some),
+                            _ => finalize_capture_result(
+                                Err(std::io::Error::other(
+                                    "captureDenials internal output paths were not initialized",
+                                )),
+                                etl_path.as_deref(),
+                                etl_directory.as_deref(),
+                                retain_etl,
+                            )
+                            .map(Some),
+                        },
+                        true,
                     ),
-                },
-                Err(error) => combine_capture_and_cleanup_results(
-                    Err(std::io::Error::other(format!(
-                        "captureDenials failed to finalize the denial capture: {error}"
-                    ))),
-                    etl_path
-                        .as_deref()
-                        .map(remove_internal_capture_file)
-                        .unwrap_or(Ok(())),
-                ),
-            };
-            if let Ok(Some(metadata)) = &result {
-                self.output_metadata = Some(SandboxOutputMetadata {
-                    capture_denials: Some(metadata.clone()),
-                });
+                    Err(error) => (
+                        finalize_capture_seal_failure(
+                            std::io::Error::other(format!(
+                                "captureDenials failed to finalize the denial capture: {error}"
+                            )),
+                            etl_path.as_deref(),
+                            etl_directory.as_deref(),
+                        )
+                        .map(Some),
+                        false,
+                    ),
+                };
+                let result = match (capture_result, promotion_error) {
+                    (Ok(Some(metadata)), Some(error)) => {
+                        self.output_metadata = Some(SandboxOutputMetadata {
+                            capture_denials: Some(metadata),
+                            capture_denials_error: Some(CaptureDenialsErrorOutput {
+                                message: error.to_string(),
+                                etl_path: etl_path
+                                    .as_deref()
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            }),
+                        });
+                        Err(error)
+                    }
+                    (Err(capture_error), Some(promotion_error)) => {
+                        let error = std::io::Error::other(format!(
+                            "{capture_error}; additionally {promotion_error}"
+                        ));
+                        if let Some(etl_path) = etl_path.as_deref() {
+                            self.output_metadata = Some(SandboxOutputMetadata {
+                                capture_denials: None,
+                                capture_denials_error: Some(CaptureDenialsErrorOutput {
+                                    message: error.to_string(),
+                                    etl_path: etl_path.to_string_lossy().into_owned(),
+                                }),
+                            });
+                        }
+                        Err(error)
+                    }
+                    (Ok(Some(metadata)), None) => {
+                        self.output_metadata = Some(SandboxOutputMetadata {
+                            capture_denials: Some(metadata.clone()),
+                            capture_denials_error: None,
+                        });
+                        Ok(Some(metadata))
+                    }
+                    (Err(error), None) => {
+                        if let Some(metadata) = capture_output_from_cleanup_error(&error) {
+                            self.output_metadata = Some(SandboxOutputMetadata {
+                                capture_denials: Some(metadata.clone()),
+                                capture_denials_error: None,
+                            });
+                        } else if retain_etl && etl_was_sealed {
+                            if let Some(etl_path) = etl_path.as_deref() {
+                                self.output_metadata = Some(SandboxOutputMetadata {
+                                    capture_denials: None,
+                                    capture_denials_error: Some(CaptureDenialsErrorOutput {
+                                        message: error.to_string(),
+                                        etl_path: etl_path.to_string_lossy().into_owned(),
+                                    }),
+                                });
+                            }
+                        }
+                        Err(error)
+                    }
+                    (Ok(None), promotion_error) => promotion_error.map_or(Ok(None), Err),
+                };
+                result
             }
-            result
         } else {
+            self.managed_capture.take();
             Ok(None)
         };
         let guarded_capture_result = if let Some(mut session) = self.guarded_capture_session.take()
@@ -2561,6 +2688,7 @@ impl BaseContainerSandboxProcess {
             if let Ok(metadata) = &result {
                 self.output_metadata = Some(SandboxOutputMetadata {
                     capture_denials: Some(metadata.clone()),
+                    capture_denials_error: None,
                 });
             }
             result.map(Some)
@@ -2636,19 +2764,126 @@ impl BaseContainerSandboxProcess {
         write_denials_document(analysis, exit_code, output_path)
     }
 
-    fn decode_write_and_cleanup(
+    fn decode_write_and_finalize(
         analyzer: &dyn DenialAnalyzer,
         etl_path: &Path,
+        etl_directory: Option<&Path>,
         output_path: &Path,
         exit_code: i32,
+        retain_etl: bool,
     ) -> std::io::Result<CaptureDenialsOutput> {
-        combine_capture_and_cleanup_results(
+        finalize_capture_result(
             Self::decode_and_write_denials(analyzer, etl_path, output_path, exit_code),
-            remove_internal_capture_file(etl_path),
+            Some(etl_path),
+            etl_directory,
+            retain_etl,
         )
     }
 }
 
+fn finalize_capture_result(
+    capture_result: std::io::Result<CaptureDenialsOutput>,
+    etl_path: Option<&Path>,
+    etl_directory: Option<&Path>,
+    retain_etl: bool,
+) -> std::io::Result<CaptureDenialsOutput> {
+    if retain_etl {
+        let Some(etl_path) = etl_path else {
+            return capture_result;
+        };
+        let retained_path = etl_path.to_string_lossy().into_owned();
+        return capture_result
+            .map(|mut output| {
+                output.etl_path = Some(retained_path);
+                output
+            })
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "{error}; retained ETL file at {}",
+                    etl_path.display()
+                ))
+            });
+    }
+
+    combine_capture_output_and_cleanup_results(
+        capture_result,
+        etl_path
+            .map(|path| remove_managed_capture_path(path, etl_directory))
+            .unwrap_or(Ok(())),
+    )
+}
+
+fn combine_capture_output_and_cleanup_results(
+    capture_result: std::io::Result<CaptureDenialsOutput>,
+    cleanup_result: std::io::Result<()>,
+) -> std::io::Result<CaptureDenialsOutput> {
+    match (capture_result, cleanup_result) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Ok(output), Err(cleanup_error)) => Err(std::io::Error::other(CaptureCleanupError {
+            output,
+            cleanup_message: cleanup_error.to_string(),
+        })),
+        (Err(capture_error), Ok(())) => Err(capture_error),
+        (Err(capture_error), Err(cleanup_error)) => Err(std::io::Error::other(format!(
+            "{capture_error}; additionally failed to clean up the internal ETL: {cleanup_error}"
+        ))),
+    }
+}
+
+fn capture_output_from_cleanup_error(error: &std::io::Error) -> Option<&CaptureDenialsOutput> {
+    error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<CaptureCleanupError>())
+        .map(|error| &error.output)
+}
+
+fn finalize_capture_seal_failure<T>(
+    capture_error: std::io::Error,
+    etl_path: Option<&Path>,
+    etl_directory: Option<&Path>,
+) -> std::io::Result<T> {
+    combine_capture_and_cleanup_results(
+        Err(capture_error),
+        etl_path
+            .map(|path| remove_managed_capture_path(path, etl_directory))
+            .unwrap_or(Ok(())),
+    )
+}
+
+fn discard_abandoned_capture(
+    session: Box<dyn CaptureSessionOps>,
+    managed_capture: Option<ManagedCapturePath>,
+) -> std::io::Result<()> {
+    let result = session.finish(None).map_err(|error| {
+        std::io::Error::other(format!(
+            "captureDenials failed to discard the abandoned denial capture: {error}"
+        ))
+    });
+    drop(managed_capture);
+    result
+}
+
+fn remove_managed_capture_path(path: &Path, directory: Option<&Path>) -> std::io::Result<()> {
+    let file_result = remove_internal_capture_file(path);
+    let directory_result = match directory {
+        Some(directory) => match std::fs::remove_dir(directory) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(std::io::Error::other(format!(
+                "captureDenials failed to remove internal ETL directory {}: {error}",
+                directory.display()
+            ))),
+        },
+        None => Ok(()),
+    };
+    match (file_result, directory_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(file_error), Err(directory_error)) => Err(std::io::Error::other(format!(
+            "{file_error}; additionally {directory_error}"
+        ))),
+    }
+}
 impl SandboxProcess for BaseContainerSandboxProcess {
     fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
         self.output_metadata.as_ref()
@@ -2742,7 +2977,7 @@ impl SandboxProcess for BaseContainerSandboxProcess {
         // Record the child's exit code so `run_teardown` can stamp it into the
         // denials summary. On a timeout / wait failure there is no exit code.
         self.last_exit_code = result.as_ref().ok().copied();
-        let teardown_result = self.run_teardown();
+        let teardown_result = self.run_teardown(true);
         combine_process_and_teardown_results(result, teardown_result)
     }
 }
@@ -2759,21 +2994,160 @@ impl Drop for BaseContainerSandboxProcess {
             self.discard_guarded_capture_after_termination_failure();
             return;
         }
-        if let Err(error) = self.run_teardown() {
-            write_stderr_line_best_effort(format_args!(
-                "captureDenials teardown failed during drop: {error}"
-            ));
+        // A dropped handle has no observer for output metadata, so retaining
+        // its ETL would leave a sensitive artifact with no discoverable owner.
+        // If wait already attempted teardown, it already reported any failure.
+        if self.teardown_result.is_none() {
+            if let Err(error) = self.run_teardown(false) {
+                write_stderr_line_best_effort(format_args!(
+                    "captureDenials teardown failed during drop: {error}"
+                ));
+            }
         }
     }
 }
 
-fn managed_capture_output_path() -> Result<PathBuf, ScriptResponse> {
-    let suffix =
-        crate::capture_output::random_capture_suffix().map_err(|e| ScriptResponse::error(&e))?;
-    Ok(std::env::temp_dir().join(format!(
-        "mxc_capture_denials_{}_{suffix}.etl",
-        std::process::id()
-    )))
+struct ManagedCapturePath {
+    directory: PathBuf,
+    etl_path: PathBuf,
+    armed: bool,
+}
+
+impl ManagedCapturePath {
+    fn disarm(mut self) -> (PathBuf, PathBuf) {
+        self.armed = false;
+        (
+            std::mem::take(&mut self.etl_path),
+            std::mem::take(&mut self.directory),
+        )
+    }
+}
+
+impl Drop for ManagedCapturePath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = remove_managed_capture_path(&self.etl_path, Some(&self.directory));
+        }
+    }
+}
+
+fn managed_capture_output_path(retain_etl: bool) -> Result<ManagedCapturePath, ScriptResponse> {
+    if !retain_etl {
+        return managed_capture_output_path_in(
+            &std::env::temp_dir(),
+            "mxc_capture_denials_",
+            false,
+        );
+    }
+
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .map(|profile| profile.join("AppData").join("Local"))
+        })
+        .ok_or_else(|| {
+            ScriptResponse::error(
+                "captureDenials could not resolve LOCALAPPDATA for protected ETL storage",
+            )
+        })?;
+    let root = local_app_data
+        .join("Microsoft")
+        .join("MXC")
+        .join("capture-denials")
+        .join("working");
+    managed_capture_output_path_in(&root, "", true)
+}
+
+fn promote_capture_for_retention(
+    etl_path: &Path,
+    directory: &Path,
+) -> std::io::Result<(PathBuf, PathBuf)> {
+    let working_root = directory
+        .parent()
+        .ok_or_else(|| std::io::Error::other("captureDenials working directory has no parent"))?;
+    let capture_root = working_root
+        .parent()
+        .ok_or_else(|| std::io::Error::other("captureDenials working root has no parent"))?;
+    let retained_root = capture_root.join("retained");
+    std::fs::create_dir_all(&retained_root)?;
+    wxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
+        .map_err(std::io::Error::other)?;
+    let directory_name = directory.file_name().ok_or_else(|| {
+        std::io::Error::other("captureDenials working directory has no file name")
+    })?;
+    let retained_directory = retained_root.join(directory_name);
+    std::fs::rename(directory, &retained_directory).map_err(|error| {
+        std::io::Error::other(format!(
+            "captureDenials failed to move sealed ETL into retained storage: {error}; retained ETL file remains at {}",
+            etl_path.display()
+        ))
+    })?;
+    Ok((
+        retained_directory.join(
+            etl_path
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("capture.etl")),
+        ),
+        retained_directory,
+    ))
+}
+
+fn managed_capture_output_path_in(
+    root: &Path,
+    directory_prefix: &str,
+    secure_root: bool,
+) -> Result<ManagedCapturePath, ScriptResponse> {
+    if secure_root {
+        std::fs::create_dir_all(root).map_err(|error| {
+            ScriptResponse::error(&format!(
+                "captureDenials failed to create ETL root {}: {error}",
+                root.display()
+            ))
+        })?;
+        wxc_common::filesystem_dacl::set_owner_only_dacl(root, true).map_err(|error| {
+            ScriptResponse::error(&format!(
+                "captureDenials failed to secure ETL root {}: {error}",
+                root.display()
+            ))
+        })?;
+    }
+
+    for _ in 0..8 {
+        let suffix = crate::capture_output::random_capture_suffix()
+            .map_err(|error| ScriptResponse::error(&error))?;
+        let directory = root.join(format!("{directory_prefix}{}_{suffix}", std::process::id()));
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {
+                if let Err(error) =
+                    wxc_common::filesystem_dacl::set_owner_only_dacl(&directory, true)
+                {
+                    let _ = std::fs::remove_dir(&directory);
+                    return Err(ScriptResponse::error(&format!(
+                        "captureDenials failed to secure ETL directory {}: {error}",
+                        directory.display()
+                    )));
+                }
+                return Ok(ManagedCapturePath {
+                    etl_path: directory.join("capture.etl"),
+                    directory,
+                    armed: true,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(ScriptResponse::error(&format!(
+                    "captureDenials failed to create ETL directory {}: {error}",
+                    directory.display()
+                )));
+            }
+        }
+    }
+
+    Err(ScriptResponse::error(
+        "captureDenials failed to allocate a unique protected ETL directory",
+    ))
 }
 
 /// Derive the AppContainer SID string from a container identity name.
@@ -2935,13 +3309,68 @@ mod tests {
 
     #[test]
     fn managed_capture_paths_are_unique_per_run() {
-        let first = managed_capture_output_path().expect("first path");
-        let second = managed_capture_output_path().expect("second path");
+        let parent = tempfile::tempdir().expect("temp parent");
+        let root = parent.path().join("capture-denials");
+        let first = managed_capture_output_path_in(&root, "", true).expect("first path");
+        let second = managed_capture_output_path_in(&root, "", true).expect("second path");
+        let first_directory = first.directory.clone();
+        let second_directory = second.directory.clone();
 
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), Some(std::env::temp_dir().as_path()));
-        assert_eq!(second.parent(), Some(std::env::temp_dir().as_path()));
-        assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("etl"));
+        assert_ne!(first.directory, second.directory);
+        assert_eq!(first.etl_path.parent(), Some(first.directory.as_path()));
+        assert_eq!(second.etl_path.parent(), Some(second.directory.as_path()));
+        assert_eq!(
+            first.etl_path.extension().and_then(|ext| ext.to_str()),
+            Some("etl")
+        );
+        assert!(wxc_common::filesystem_dacl::owner_is_self(&first.directory)
+            .expect("read managed directory owner"));
+        drop(first);
+        drop(second);
+        assert!(!first_directory.exists());
+        assert!(!second_directory.exists());
+    }
+
+    #[test]
+    fn retained_capture_moves_out_of_working_storage() {
+        let parent = tempfile::tempdir().expect("temp parent");
+        let working = parent.path().join("capture-denials").join("working");
+        let directory = working.join("1234_abcd");
+        std::fs::create_dir_all(&directory).expect("working directory");
+        let etl_path = directory.join("capture.etl");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+
+        let (retained_etl, retained_directory) =
+            promote_capture_for_retention(&etl_path, &directory).expect("promote capture");
+        let retained_root = parent.path().join("capture-denials").join("retained");
+
+        assert!(!directory.exists());
+        assert_eq!(retained_directory.parent(), Some(retained_root.as_path()));
+        assert_eq!(
+            std::fs::read(retained_etl).expect("read retained ETL"),
+            b"fake etl"
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_preserves_successful_capture_output() {
+        let output = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: "denials.json".to_string(),
+            exit_code: 0,
+            total_denials: 1,
+            denied_resources_truncated: false,
+            etl_path: None,
+        };
+
+        let error = combine_capture_output_and_cleanup_results(
+            Ok(output.clone()),
+            Err(std::io::Error::other("delete failed")),
+        )
+        .expect_err("cleanup failure should propagate");
+
+        assert_eq!(capture_output_from_cleanup_error(&error), Some(&output));
+        assert!(error.to_string().contains("delete failed"));
     }
 
     #[test]
@@ -3004,17 +3433,217 @@ mod tests {
             result: Err("simulated decode failure"),
         };
 
-        let error = BaseContainerSandboxProcess::decode_write_and_cleanup(
+        let error = BaseContainerSandboxProcess::decode_write_and_finalize(
             &analyzer,
             &etl_path,
+            None,
             &output_path,
             0,
+            false,
         )
         .expect_err("decode should fail");
 
         assert!(error.to_string().contains("simulated decode failure"));
         assert!(!etl_path.exists());
         assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn default_etl_cleanup_removes_file_after_success() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Ok(AnalysisResult::complete(Vec::new())),
+        };
+
+        let metadata = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            None,
+            &output_path,
+            0,
+            false,
+        )
+        .expect("decode should succeed");
+
+        assert!(metadata.etl_path.is_none());
+        assert!(!etl_path.exists());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn default_etl_cleanup_removes_managed_directory() {
+        let parent = tempfile::tempdir().expect("temp parent");
+        let directory = parent.path().join("managed");
+        std::fs::create_dir(&directory).expect("managed directory");
+        let etl_path = directory.join("capture.etl");
+        let output_path = parent.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Ok(AnalysisResult::complete(Vec::new())),
+        };
+
+        BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            Some(&directory),
+            &output_path,
+            0,
+            false,
+        )
+        .expect("decode should succeed");
+
+        assert!(!directory.exists());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn requested_etl_retention_reports_path_and_preserves_file() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Ok(AnalysisResult::complete(Vec::new())),
+        };
+
+        let metadata = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            None,
+            &output_path,
+            0,
+            true,
+        )
+        .expect("decode should succeed");
+
+        assert_eq!(
+            metadata.etl_path.as_deref(),
+            Some(etl_path.to_string_lossy().as_ref())
+        );
+        assert!(etl_path.exists());
+        assert!(output_path.exists());
+    }
+
+    #[test]
+    fn requested_etl_retention_preserves_file_when_analysis_fails() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let etl_path = directory.path().join("capture.etl");
+        let output_path = directory.path().join("denials.json");
+        std::fs::write(&etl_path, b"fake etl").expect("seed ETL");
+        let analyzer = FakeAnalyzer {
+            result: Err("simulated decode failure"),
+        };
+
+        let error = BaseContainerSandboxProcess::decode_write_and_finalize(
+            &analyzer,
+            &etl_path,
+            None,
+            &output_path,
+            0,
+            true,
+        )
+        .expect_err("decode should fail");
+
+        let message = error.to_string();
+        assert!(message.contains("simulated decode failure"));
+        assert!(message.contains("retained ETL file at"));
+        assert!(message.contains(&etl_path.to_string_lossy().into_owned()));
+        assert!(etl_path.exists());
+        assert!(!output_path.exists());
+    }
+
+    #[test]
+    fn requested_etl_retention_cleans_directory_when_seal_fails() {
+        let parent = tempfile::tempdir().expect("temp parent");
+        let directory = parent.path().join("managed");
+        std::fs::create_dir(&directory).expect("managed directory");
+        let etl_path = directory.join("capture.etl");
+
+        let error = finalize_capture_seal_failure::<CaptureDenialsOutput>(
+            std::io::Error::other("simulated seal failure"),
+            Some(&etl_path),
+            Some(&directory),
+        )
+        .expect_err("seal failure should propagate");
+
+        assert!(error.to_string().contains("simulated seal failure"));
+        assert!(!error.to_string().contains("retained ETL file at"));
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn abandoned_capture_discards_without_sealing_output() {
+        struct DiscardRecordingSession {
+            discarded: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl CaptureSessionOps for DiscardRecordingSession {
+            fn environment(&self) -> HANDLE {
+                HANDLE(std::ptr::dangling_mut())
+            }
+
+            fn finish(
+                self: Box<Self>,
+                output_path: Option<&Path>,
+            ) -> Result<(), learning_mode_windows::LearningModeError> {
+                self.discarded
+                    .store(output_path.is_none(), Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let parent = tempfile::tempdir().expect("temp parent");
+        let directory = parent.path().join("managed");
+        std::fs::create_dir(&directory).expect("managed directory");
+        let managed_capture = ManagedCapturePath {
+            etl_path: directory.join("capture.etl"),
+            directory: directory.clone(),
+            armed: true,
+        };
+        let discarded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        discard_abandoned_capture(
+            Box::new(DiscardRecordingSession {
+                discarded: Arc::clone(&discarded),
+            }),
+            Some(managed_capture),
+        )
+        .expect("discard capture");
+
+        assert!(discarded.load(Ordering::SeqCst));
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn successful_process_reports_capture_teardown_failure() {
+        let error =
+            combine_process_and_teardown_results(Ok(0), Err(std::io::Error::other("seal failed")))
+                .expect_err("capture failure must override successful process exit");
+
+        assert!(error.to_string().contains("seal failed"));
+    }
+
+    #[test]
+    fn wait_and_capture_failures_preserve_retained_etl_path() {
+        let error = combine_process_and_teardown_results(
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "script timed out after 1000ms",
+            )),
+            Err(std::io::Error::other(
+                r"decode failed; retained ETL file at C:\Temp\capture.etl",
+            )),
+        )
+        .expect_err("both failures should be reported");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let message = error.to_string();
+        assert!(message.contains("script timed out after 1000ms"));
+        assert!(message.contains("decode failed"));
+        assert!(message.contains(r"C:\Temp\capture.etl"));
     }
 
     #[test]
@@ -3920,5 +4549,28 @@ mod tests {
         assert_eq!(support.api_calls.load(Ordering::SeqCst), 0);
         assert_eq!(support.learning_mode_api_calls.load(Ordering::SeqCst), 0);
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn validate_runner_rejects_etl_retention_when_guarded_fallback_is_selected() {
+        let runner = BaseContainerRunner {
+            psec_usable_override: Some(false),
+            ..Default::default()
+        };
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("guarded capture must not expose its host-wide ETL");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
+        );
     }
 }

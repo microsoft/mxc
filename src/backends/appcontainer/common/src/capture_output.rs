@@ -50,6 +50,7 @@ pub fn write_denials_document(
         exit_code: pointer.exit_code,
         total_denials: pointer.total_denials,
         denied_resources_truncated: pointer.denied_resources_truncated,
+        etl_path: None,
     })
 }
 
@@ -182,10 +183,9 @@ pub fn combine_capture_and_cleanup_results<T>(
 /// and the guarded-WPR legacy-tier fallback so both surface capture failures
 /// through [`wxc_common::sandbox_process::SandboxProcess::wait`] identically.
 ///
-/// When *both* the wait and the teardown fail, the teardown error is logged
-/// best-effort (via [`write_stderr_line_best_effort`]) rather than dropped,
-/// and the original wait error is returned — a wait failure is almost always
-/// the more actionable one for the caller.
+/// When *both* the wait and teardown fail, the wait error kind is preserved
+/// while both messages are returned. This keeps retained-ETL paths and other
+/// capture recovery details discoverable.
 pub fn combine_process_and_teardown_results(
     process_result: std::io::Result<i32>,
     teardown_result: std::io::Result<()>,
@@ -194,12 +194,10 @@ pub fn combine_process_and_teardown_results(
         (Ok(exit_code), Ok(())) => Ok(exit_code),
         (Ok(_), Err(teardown_error)) => Err(teardown_error),
         (Err(wait_error), Ok(())) => Err(wait_error),
-        (Err(wait_error), Err(teardown_error)) => {
-            write_stderr_line_best_effort(format_args!(
-                "captureDenials teardown also failed after process wait failure: {teardown_error}"
-            ));
-            Err(wait_error)
-        }
+        (Err(wait_error), Err(teardown_error)) => Err(std::io::Error::new(
+            wait_error.kind(),
+            format!("{wait_error}; captureDenials teardown also failed: {teardown_error}"),
+        )),
     }
 }
 
@@ -365,5 +363,6 @@ mod tests {
         .expect_err("wait failure should still propagate");
 
         assert!(error.to_string().contains("wait failed"));
+        assert!(error.to_string().contains("teardown failed"));
     }
 }

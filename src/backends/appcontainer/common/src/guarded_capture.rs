@@ -25,6 +25,12 @@
 
 use learning_mode_core::AnalysisResult;
 
+/// Guarded WPR returns only bounded process-scoped analysis; its raw host-wide
+/// ETL cannot be exposed through caller-visible output.
+pub const RETAIN_ETL_UNSUPPORTED_MSG: &str =
+    "processContainer.captureDenials.retainEtl requires native PSEC/V2 capture; \
+     guarded-WPR fallback cannot return the raw host-wide ETL";
+
 /// A live guarded WPR capture session scoped to one sandboxed process tree.
 ///
 /// Implementations own the elevated PLM child connection. [`stop_analyzed`]

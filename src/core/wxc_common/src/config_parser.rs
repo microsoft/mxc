@@ -925,6 +925,7 @@ fn convert_wire_config(
             policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: cd.output_path,
+                retain_etl: cd.retain_etl.unwrap_or(false),
             });
         }
 
@@ -2633,8 +2634,23 @@ mod tests {
             .capture_denials
             .expect("captureDenials presence should enable capture");
         assert!(cd.output_path.is_none());
+        assert!(!cd.retain_etl);
         // Omitting `mode` defaults to the safe block behavior.
         assert_eq!(cd.mode, CaptureDenialsMode::Block);
+    }
+
+    #[test]
+    fn capture_denials_retain_etl_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"retainEtl": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert!(cd.retain_etl);
     }
 
     #[test]

@@ -40,7 +40,12 @@ catch (MxcException ex)
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for
 `captureDenials`, `OutputMetadata.CaptureDenials.OutputPath` identifies the
-generated JSON document and carries its summary.
+generated JSON document and carries its summary. When ETL retention is enabled,
+`OutputMetadata.CaptureDenials.EtlPath` identifies the retained trace. If
+capture finalization fails after retaining the trace,
+`OutputMetadata.CaptureDenialsError` carries both the failure and its path.
+After deleting a retained ETL, also remove its now-empty per-run parent
+directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
@@ -80,8 +85,10 @@ whole tree and may be called from another thread while `WaitAsync` is in flight.
 `WaitBlocking()` uses the native blocking wait and reports a policy timeout
 distinctly (but cannot be interrupted by a concurrent `Kill`). Dispose the
 process to release native resources (killing the child if still running).
-After a terminal wait, `MxcSandboxProcess.OutputMetadata` exposes the same
-structured feature outputs as `RunResult.OutputMetadata`.
+After a terminal wait, including one that reports a capture finalization
+failure, `MxcSandboxProcess.OutputMetadata` exposes the same structured feature
+outputs as `RunResult.OutputMetadata`. Disposing without waiting deletes an
+internal ETL even when retention was requested.
 
 ## Projects
 

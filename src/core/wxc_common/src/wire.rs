@@ -247,9 +247,19 @@ pub struct CaptureDenials {
     /// collide; the actual path is reported on stderr. When omitted, MXC
     /// writes it to a managed per-run temporary file and prints its path on
     /// stderr. The parent directory must already exist. (The intermediate ETL
-    /// trace is an internal, runner-managed temp file that is decoded then
-    /// deleted.)
+    /// trace is an internal, runner-managed file in a protected per-run
+    /// directory. Retained traces use
+    /// `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\retained`; non-retained
+    /// traces use the system temporary directory.)
     pub output_path: Option<String>,
+    /// Keep the sealed ETL trace after analysis and report its path in output
+    /// metadata. Defaults to `false`, which deletes the trace after analysis.
+    /// Retention requires a terminal wait; abandoning the process handle
+    /// deletes the internal trace. If post-seal analysis fails, the failure and
+    /// retained path are exposed through `captureDenialsError` output metadata.
+    /// Retained traces can contain sensitive resource paths and identifiers;
+    /// callers are responsible for deleting them.
+    pub retain_etl: Option<bool>,
 }
 
 /// How `captureDenials` handles each ungranted access check while recording it.

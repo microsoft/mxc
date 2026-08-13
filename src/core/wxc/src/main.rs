@@ -1440,6 +1440,7 @@ mod tests {
             request.policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: None,
+                retain_etl: false,
             });
 
             let error = validate_audit_request(&request)

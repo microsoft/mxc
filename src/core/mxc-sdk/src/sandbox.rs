@@ -7,7 +7,9 @@
 
 use std::io::{Read, Write};
 
-pub use wxc_common::models::{CaptureDenialsOutput, SandboxOutputMetadata};
+pub use wxc_common::models::{
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
+};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser as InnerCloser};
 
 /// The outcome of waiting on a [`Sandbox`] (see [`Sandbox::wait`]).
@@ -237,7 +239,9 @@ mod tests {
                     exit_code: 0,
                     total_denials: 2,
                     denied_resources_truncated: false,
+                    etl_path: None,
                 }),
+                capture_denials_error: None,
             }),
         }));
 

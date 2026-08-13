@@ -1470,6 +1470,17 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        if request
+            .policy
+            .capture_denials
+            .as_ref()
+            .is_some_and(|config| config.retain_etl)
+        {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
+            });
+        }
         if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -1669,6 +1680,7 @@ impl AppContainerSandboxProcess {
                 Ok(metadata) => {
                     self.output_metadata = Some(SandboxOutputMetadata {
                         capture_denials: Some(metadata),
+                        capture_denials_error: None,
                     });
                     Ok(())
                 }
@@ -2218,6 +2230,27 @@ mod tests {
             runner.validate(&request).is_ok(),
             "a runner explicitly configured with a guarded capture factory must accept \
              captureDenials"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_etl_retention_with_guarded_capture() {
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("guarded capture must not expose its host-wide ETL");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
         );
     }
 }

@@ -78,6 +78,7 @@ learning_mode_windows = { path = "backends/learning_mode/windows" }
 libc = "0.2"
 lxc_common = { path = "backends/lxc/common" }
 mxc_build_common = { path = "core/mxc_build_common" }
+mxc_config_contract = { path = "core/mxc_config_contract" }
 mxc_engine = { path = "core/mxc_engine" }
 mxc_pty = { path = "core/mxc_pty" }
 mxc-sdk = { path = "core/mxc-sdk" }
