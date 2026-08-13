@@ -83,32 +83,36 @@ Model 2 involves two separate processes:
 
 - **MXC client container:** the BaseContainer created by MXC, which runs the caller's workload and initiates HTTP/S
   connections to the proxy.
-- **Proxy process:** a caller-created process that is already running outside the MXC client container. It may run in an
-  AppContainer or without AppContainer isolation.
+- **Proxy process:** a caller-created process that is already running outside the MXC client container. It may be
+  packaged or unpackaged, with or without AppContainer isolation.
 
 | External proxy | `allowedProxyPeer` | MXC client policy | Proxy binding |
 |---|---|---|---|
-| AppContainer | Package family/profile | `default: "allow"`; `hostLoopback: "deny"` | Identity and endpoint |
-| Non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | Host loopback and endpoint |
+| Packaged proxy | PFN | `default: "allow"`; `hostLoopback: "deny"` | Identity and endpoint |
+| Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | Identity and endpoint |
+| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | Host loopback and endpoint |
 
-Both deployments use `ingress.default: "allow"` because ProcessContainer uses it as the capability gate for
+All deployments use `ingress.default: "allow"` because ProcessContainer uses it as the capability gate for
 `privateNetworkClientServer`. This is a Windows capability requirement, not a statement that the proxy connection
 enters the MXC client container; the client initiates that connection. The capability is bidirectional, so it also
 permits private-network server traffic.
 
-`ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes the AppContainer peer without opening general
-host-loopback access, so that path keeps `hostLoopback: "deny"`. A non-AppContainer proxy has no peer identity, so its
-endpoint requires `hostLoopback: "allow"`. That also permits the MXC client container to reach other host-loopback
-services and permits host-loopback clients to reach listeners in the MXC client container.
+`ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
+opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
+non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That also permits the MXC
+client container to reach other host-loopback services and permits host-loopback clients to reach listeners in the MXC
+client container.
 
-#### Contained AppContainer proxy
+#### Identity-scoped proxy
 
 Use the canonical [ProcessContainer schema 0.8 configuration](examples/0.8.0-schema.md), which shows
 `runtimeConfig.networkProxy`, `processContainer.network.allowedProxyPeer`, and their relationship in one place.
+Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
+the AppContainer profile name for an unpackaged AppContainer proxy.
 
-#### Non-AppContainer proxy
+#### Unpackaged non-AppContainer proxy
 
-Packaged and unpackaged non-AppContainer proxies omit the AppContainer peer identity:
+An unpackaged non-AppContainer proxy has no package family or AppContainer profile identity:
 
 ```jsonc
 {
@@ -127,10 +131,9 @@ Packaged and unpackaged non-AppContainer proxies omit the AppContainer peer iden
 ```
 
 MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
-AppContainer proxy. The difference is that MXC identifies the proxy only by the configured endpoint, not by an
-AppContainer identity, and enables bidirectional host-loopback access. This weaker option is intended primarily for
-development and debugging. Packaged deployments can own the port-scoped firewall rule in the package; unpackaged
-deployments require an installer- or administrator-owned rule.
+identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
+bidirectional host-loopback access. This weaker option is intended primarily for development and debugging and requires
+an installer- or administrator-owned firewall rule.
 
 #### HTTP client guidance
 
@@ -150,11 +153,11 @@ apply when `runtimeConfig.networkProxy` is present.
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.
 
-The two proxy identity paths are mutually exclusive. When
-`allowedProxyPeer` is present, MXC resolves the peer and grants the private-network capability selected by
-`ingress.default`. When it is omitted, MXC uses the configured proxy endpoint without binding that endpoint to an
-AppContainer identity and requires bidirectional host-loopback access. MXC configures the per-container WinHTTP proxy
-for either path.
+The identity-scoped and host-loopback paths are
+mutually exclusive. When `allowedProxyPeer` is present, MXC resolves the package family or AppContainer profile and
+grants the private-network capability selected by `ingress.default`. When it is omitted, MXC uses the configured proxy
+endpoint without peer identity binding and requires bidirectional host-loopback access. MXC configures the per-container
+WinHTTP proxy for either path.
 
 The caller must:
 
@@ -171,7 +174,7 @@ An AppContainer proxy is recommended. Supported deployment options are:
 |---|---|---|
 | Packaged AppContainer | Package family name | AppContainer isolation and package firewall rule |
 | Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
-| Packaged non-AppContainer | Omit | Host-loopback access and package firewall rule |
+| Packaged non-AppContainer | Package family name | Package identity and package firewall rule |
 | Unpackaged non-AppContainer | Omit | Host-loopback access and administrator firewall rule |
 
 The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
