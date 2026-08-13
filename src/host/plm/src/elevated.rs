@@ -1073,6 +1073,7 @@ pub struct GuardedSession {
     pipe: Option<std::fs::File>,
     process: OwnedHandle,
     disarmed: bool,
+    abandonment_report_pending: bool,
 }
 
 // SAFETY: `GuardedSession` only holds a Windows process HANDLE (via
@@ -1088,6 +1089,10 @@ impl std::fmt::Debug for GuardedSession {
             .debug_struct("GuardedSession")
             .field("connected", &self.pipe.is_some())
             .field("disarmed", &self.disarmed)
+            .field(
+                "abandonment_report_pending",
+                &self.abandonment_report_pending,
+            )
             .finish_non_exhaustive()
     }
 }
@@ -1132,15 +1137,17 @@ impl GuardedSession {
         if abandoned {
             self.pipe.take();
             self.disarmed = true;
+            self.abandonment_report_pending = true;
         }
         let exit_code = wait_for_child_termination(self.process.0, WAIT_TIMEOUT_DURATION).context(
             "guarded PLM session could not confirm guardian termination after abandoning WPR state",
         )?;
-        if abandoned {
+        if self.abandonment_report_pending {
             eprintln!(
                 "[plm] guarded session ended without an explicit stop (guardian exit code \
                  {exit_code}); the recovery marker was preserved and WPR state was left untouched"
             );
+            self.abandonment_report_pending = false;
         }
         Ok(())
     }
@@ -1396,6 +1403,7 @@ pub fn start_guarded_session_with_executable(
         pipe: Some(pipe),
         process,
         disarmed: false,
+        abandonment_report_pending: false,
     })
 }
 
@@ -2816,10 +2824,12 @@ mod tests {
                 pipe: None,
                 process: OwnedHandle(handle),
                 disarmed: false,
+                abandonment_report_pending: false,
             };
 
             session.cancel().unwrap();
             assert!(session.disarmed);
+            assert!(!session.abandonment_report_pending);
             assert_eq!(child.wait().unwrap().code(), Some(expected_exit_code));
         }
     }
@@ -2843,6 +2853,7 @@ mod tests {
             pipe: None,
             process: OwnedHandle(handle),
             disarmed: true,
+            abandonment_report_pending: false,
         };
 
         session.cancel().unwrap();

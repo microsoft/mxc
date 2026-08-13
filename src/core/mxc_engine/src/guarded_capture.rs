@@ -21,6 +21,26 @@ use windows::Win32::System::LibraryLoader::{
     GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 
+const GUARDIAN_CONFIRM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn confirm_guardian_release_after_discard_failure(
+    discard_error: String,
+    mut confirm_release: impl FnMut() -> Result<(), String>,
+    mut on_retry: impl FnMut(&str),
+) -> Result<(), String> {
+    loop {
+        match confirm_release() {
+            Ok(()) => {
+                return Err(format!(
+                    "guarded WPR discard failed: {discard_error}; guardian termination was \
+                     confirmed by the cleanup fallback"
+                ));
+            }
+            Err(error) => on_retry(&error),
+        }
+    }
+}
+
 /// Resolve `plm.exe` next to the module containing `mxc_engine`.
 ///
 /// This is the executor directory for `wxc-exec.exe` and the native runtime
@@ -86,22 +106,17 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
             Err(error) => error,
         };
 
-        loop {
-            match self.session.cancel() {
-                Ok(()) => {
-                    return Err(format!(
-                        "guarded WPR discard failed: {discard_error:#}; \
-                         guardian termination was confirmed after abandoning the session"
-                    ));
-                }
-                Err(error) => {
-                    eprintln!(
-                        "[mxc] guarded WPR guardian termination remains unconfirmed after \
-                         discard failure; sandbox enforcement is still active: {error:#}"
-                    );
-                }
-            }
-        }
+        confirm_guardian_release_after_discard_failure(
+            format!("{discard_error:#}"),
+            || self.session.cancel().map_err(|error| format!("{error:#}")),
+            |error| {
+                eprintln!(
+                    "[mxc] guarded WPR guardian termination remains unconfirmed after \
+                     discard failure; sandbox enforcement is still active: {error}"
+                );
+                std::thread::sleep(GUARDIAN_CONFIRM_RETRY_DELAY);
+            },
+        )
     }
 
     fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
@@ -194,5 +209,36 @@ mod tests {
         let module = module_containing_plm_resolver().expect("test module path should resolve");
         assert!(module.is_absolute());
         assert!(module.is_file());
+    }
+
+    #[test]
+    fn discard_failure_retries_with_backoff_until_release_is_confirmed() {
+        let mut attempts = 0;
+        let mut retries = Vec::new();
+
+        let error = confirm_guardian_release_after_discard_failure(
+            "discard protocol failed".to_string(),
+            || {
+                attempts += 1;
+                if attempts < 3 {
+                    Err(format!("confirmation attempt {attempts} failed"))
+                } else {
+                    Ok(())
+                }
+            },
+            |error| retries.push(error.to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(attempts, 3);
+        assert_eq!(
+            retries,
+            [
+                "confirmation attempt 1 failed",
+                "confirmation attempt 2 failed"
+            ]
+        );
+        assert!(error.contains("discard protocol failed"));
+        assert!(error.contains("guardian termination was confirmed"));
     }
 }
