@@ -8,7 +8,7 @@ use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
 fn rejects_unknown_root_field() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {"commandLine": "echo"},
             "unknownField": true
         }"#,
@@ -17,7 +17,7 @@ fn rejects_unknown_root_field() {
 
 #[test]
 fn rejects_duplicate_root_fields() {
-    let version = r#""version": "0.6.0-alpha""#;
+    let version = r#""version": "0.7.0-alpha""#;
     let process = r#""process": {"commandLine": "echo"}"#;
     let version_and_process = format!("{version}, {process}");
 
@@ -26,7 +26,7 @@ fn rejects_duplicate_root_fields() {
             (
                 "version",
                 process,
-                r#""version": "0.6.0-alpha", "version": "0.6.0-alpha""#,
+                r#""version": "0.7.0-alpha", "version": "0.7.0-alpha""#,
             ),
             (
                 "containerId",
@@ -85,7 +85,7 @@ fn rejects_duplicate_root_fields() {
 
 #[test]
 fn rejects_unknown_nested_fields() {
-    let version = r#""version": "0.6.0-alpha""#;
+    let version = r#""version": "0.7.0-alpha""#;
     let process = r#""process": {"commandLine": "echo"}"#;
     let version_and_process = format!("{version}, {process}");
 
@@ -145,7 +145,7 @@ fn rejects_unknown_nested_fields() {
 fn rejects_duplicate_nested_field() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {
                 "commandLine": "echo",
                 "commandLine": "echo again"
@@ -168,8 +168,8 @@ fn rejects_missing_version() {
 fn rejects_duplicate_version() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {"commandLine": "echo"}
         }"#,
     );
@@ -189,7 +189,7 @@ fn rejects_invalid_version() {
 fn rejects_non_exact_version() {
     assert_invalid(
         r#"{
-            "version": "0.6.0",
+            "version": "0.7.0",
             "process": {"commandLine": "echo"}
         }"#,
     );
@@ -220,7 +220,7 @@ fn rejects_null_version() {
 fn rejects_missing_process() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha"
+            "version": "0.7.0-alpha"
         }"#,
     );
 }
@@ -229,7 +229,7 @@ fn rejects_missing_process() {
 fn rejects_null_process() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": null
         }"#,
     );
@@ -239,7 +239,7 @@ fn rejects_null_process() {
 fn rejects_missing_process_command_line() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {}
         }"#,
     );
@@ -249,7 +249,7 @@ fn rejects_missing_process_command_line() {
 fn rejects_null_process_command_line() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {"commandLine": null}
         }"#,
     );
@@ -259,7 +259,7 @@ fn rejects_null_process_command_line() {
 fn rejects_empty_process_command_line() {
     assert_invalid(
         r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {"commandLine": ""}
         }"#,
     );
@@ -269,7 +269,8 @@ fn rejects_empty_process_command_line() {
 #[test]
 fn accepts_process_container() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
         "processContainer": {
             "ui": {
                 "isolation": "container"
@@ -284,7 +285,8 @@ fn accepts_process_container() {
 #[test]
 fn accepts_app_container_section_alias() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
         "appContainer": {
             "ui": {
                 "isolation": "container"
@@ -299,7 +301,7 @@ fn accepts_app_container_section_alias() {
 #[test]
 fn rejects_process_container_and_app_container_section_alias_together() {
     let json = r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "processContainer": {
                 "ui": {
                     "isolation": "container"
@@ -320,7 +322,7 @@ fn rejects_process_container_and_app_container_section_alias_together() {
 #[test]
 fn rejects_negative_process_timeout() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo",
             "timeout": -1
@@ -333,7 +335,7 @@ fn rejects_negative_process_timeout() {
 #[test]
 fn rejects_process_timeout_above_u32() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo",
             "timeout": 4294967296
@@ -346,7 +348,7 @@ fn rejects_process_timeout_above_u32() {
 #[test]
 fn rejects_non_string_process_env_items() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo",
             "env": ["A=1", 123]
@@ -359,7 +361,7 @@ fn rejects_non_string_process_env_items() {
 #[test]
 fn rejects_non_string_filesystem_readonly_path_items() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo"
         },
@@ -374,7 +376,7 @@ fn rejects_non_string_filesystem_readonly_path_items() {
 #[test]
 fn rejects_non_string_filesystem_readwrite_path_items() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo"
         },
@@ -389,7 +391,7 @@ fn rejects_non_string_filesystem_readwrite_path_items() {
 #[test]
 fn rejects_non_string_filesystem_denied_path_items() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo"
         },
@@ -404,7 +406,7 @@ fn rejects_non_string_filesystem_denied_path_items() {
 #[test]
 fn rejects_non_string_process_container_capabilities() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "processContainer": {
             "capabilities": [123]
         },
@@ -418,7 +420,8 @@ fn rejects_non_string_process_container_capabilities() {
 #[test]
 fn accepts_lxc() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
+        "containment": "lxc",
         "lxc": {
             "distribution": "ubuntu",
             "release": "20.04"
@@ -432,7 +435,7 @@ fn accepts_lxc() {
 #[test]
 fn rejects_lxc_missing_distribution() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "lxc": {
             "release": "20.04"
         },
@@ -445,7 +448,7 @@ fn rejects_lxc_missing_distribution() {
 #[test]
 fn rejects_lxc_missing_release() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "lxc": {
             "distribution": "ubuntu"
         },
@@ -458,7 +461,7 @@ fn rejects_lxc_missing_release() {
 #[test]
 fn rejects_lxc_null_distribution() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "lxc": {
             "distribution": null,
             "release": "20.04"
@@ -472,7 +475,7 @@ fn rejects_lxc_null_distribution() {
 #[test]
 fn rejects_lxc_null_release() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "lxc": {
             "distribution": "ubuntu",
             "release": null
@@ -487,7 +490,7 @@ fn rejects_lxc_null_release() {
 #[test]
 fn rejects_experimental_field() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {"commandLine": "echo"},
         "experimental": {
             "someField": true
@@ -507,7 +510,7 @@ fn rejects_state_aware_fields() {
     ] {
         let json = format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo"}},
                 {field}
             }}"#

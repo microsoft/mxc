@@ -9,14 +9,14 @@ string_enum! {
 /// The exact version marker accepted by this contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Version {
-    /// The published `0.6.0-alpha` contract.
-    V0_6_0Alpha => ["0.6.0-alpha"],
+    /// The published `0.7.0-alpha` contract.
+    V0_7_0Alpha => ["0.7.0-alpha"],
 }
 }
 
 #[rustfmt::skip]
 string_enum! {
-/// Stable containment selections available in `0.6.0-alpha`.
+/// Stable containment selections available in `0.7.0-alpha`.
 #[derive(Debug)]
 pub enum Containment {
     /// Select the host's native process-containment backend.
@@ -27,6 +27,8 @@ pub enum Containment {
     Lxc => ["lxc"],
     /// Select the Linux Bubblewrap backend.
     Bubblewrap => ["bubblewrap"],
+    /// Select the macOS Seatbelt backend.
+    Seatbelt => ["seatbelt", "macos_sandbox"],
 }
 }
 
@@ -173,10 +175,50 @@ pub struct Lxc {
     pub release: String,
 }
 
-/// A complete one-shot `0.6.0-alpha` configuration request.
+#[rustfmt::skip]
+string_enum! {
+/// Launch method for macOS Seatbelt config.
+#[derive(Debug)]
+pub enum LaunchMethod {
+    /// Launch the contained process directly through `exec`.
+    Exec => ["exec"],
+    /// Launch the contained application through macOS LaunchServices.
+    Open => ["open"],
+}
+}
+
+/// macOS Seatbelt configuration settings.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Seatbelt {
+    /// Optional override of the generated sandbox profile.
+    #[serde(default)]
+    pub profile_override: OptionalField<String>,
+    /// Whether GUI application access is allowed.
+    #[serde(default)]
+    pub gui_access: OptionalField<bool>,
+    /// Optional method used to launch the contained process.
+    #[serde(default)]
+    pub launch_method: OptionalField<LaunchMethod>,
+    /// Whether the contained process may allocate nested pseudo-terminals.
+    #[serde(default)]
+    pub nested_pty: OptionalField<bool>,
+    /// Whether macOS Keychain access is allowed.
+    #[serde(default)]
+    pub keychain_access: OptionalField<bool>,
+    /// Additional Mach service global names the process may resolve.
+    #[serde(default)]
+    pub extra_mach_lookups: OptionalField<Vec<String>>,
+}
+
+/// A complete one-shot `0.7.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
+    #[serde(rename = "$schema", default)]
+    pub schema: OptionalField<String>,
+    #[serde(rename = "_comment", default)]
+    pub comment: OptionalField<serde_json::Value>,
     /// The exact contract version marker.
     pub version: Version,
     /// Optional externally assigned container identifier.
@@ -203,11 +245,13 @@ pub struct Request {
     #[serde(default)]
     pub ui: OptionalField<Ui>,
     /// Optional ProcessContainer settings.
-    ///
     /// The legacy `appContainer` spelling is accepted as an alias.
     #[serde(alias = "appContainer", default)]
     pub process_container: OptionalField<ProcessContainer>,
     /// Optional LXC distribution settings.
     #[serde(default)]
     pub lxc: OptionalField<Lxc>,
+    /// Optional macOS Seatbelt configuration.
+    #[serde(alias = "macos_sandbox", default)]
+    pub seatbelt: OptionalField<Seatbelt>,
 }

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::common::{assert_invalid_cases, assert_valid};
-use mxc_config_contract::published::v0_6_0_alpha::Request;
+use mxc_config_contract::published::v0_7_0_alpha::Request;
 
 #[test]
 fn accepts_empty_optional_objects() {
@@ -12,12 +12,13 @@ fn accepts_empty_optional_objects() {
         r#""fallback": {}"#,
         r#""network": {}"#,
         r#""ui": {}"#,
-        r#""processContainer": {}"#,
-        r#""processContainer": {"ui": {}}"#,
+        r#""containment": "processcontainer", "processContainer": {}"#,
+        r#""containment": "processcontainer", "processContainer": {"ui": {}}"#,
+        r#""containment": "seatbelt", "seatbelt": {}"#,
     ] {
         let json = format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo"}},
                 {field}
             }}"#
@@ -30,7 +31,7 @@ fn accepts_empty_optional_objects() {
 #[test]
 fn accepts_empty_optional_array_for_process_env() {
     let json = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {"commandLine": "echo", "env": []}
     }"#;
 
@@ -45,11 +46,12 @@ fn accepts_empty_optional_arrays() {
         r#""filesystem": {"deniedPaths": []}"#,
         r#""network": {"allowedHosts": []}"#,
         r#""network": {"blockedHosts": []}"#,
-        r#""processContainer": {"capabilities": []}"#,
+        r#""containment": "processcontainer", "processContainer": {"capabilities": []}"#,
+        r#""containment": "seatbelt", "seatbelt": {"extraMachLookups": []}"#,
     ] {
         let json = format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo"}},
                 {field}
             }}"#
@@ -62,7 +64,7 @@ fn accepts_empty_optional_arrays() {
 #[test]
 fn accepts_absent_optional_fields() {
     let json = r#"{
-            "version": "0.6.0-alpha",
+            "version": "0.7.0-alpha",
             "process": {"commandLine": "echo"}
         }"#;
 
@@ -71,7 +73,7 @@ fn accepts_absent_optional_fields() {
 
 #[test]
 fn rejects_null_optional_fields() {
-    let version = r#""version": "0.6.0-alpha""#;
+    let version = r#""version": "0.7.0-alpha""#;
     let process = r#""process": {"commandLine": "echo"}"#;
     let version_and_process = format!("{version}, {process}");
 
@@ -119,6 +121,46 @@ fn rejects_null_optional_fields() {
                 r#""appContainer": null"#,
             ),
             ("lxc", version_and_process.as_str(), r#""lxc": null"#),
+            (
+                "macos_sandbox",
+                version_and_process.as_str(),
+                r#""macos_sandbox": null"#,
+            ),
+            (
+                "seatbelt",
+                version_and_process.as_str(),
+                r#""seatbelt": null"#,
+            ),
+            (
+                "seatbelt.profileOverride",
+                version_and_process.as_str(),
+                r#""seatbelt": {"profileOverride": null}"#,
+            ),
+            (
+                "seatbelt.guiAccess",
+                version_and_process.as_str(),
+                r#""seatbelt": {"guiAccess": null}"#,
+            ),
+            (
+                "seatbelt.launchMethod",
+                version_and_process.as_str(),
+                r#""seatbelt": {"launchMethod": null}"#,
+            ),
+            (
+                "seatbelt.nestedPty",
+                version_and_process.as_str(),
+                r#""seatbelt": {"nestedPty": null}"#,
+            ),
+            (
+                "seatbelt.keychainAccess",
+                version_and_process.as_str(),
+                r#""seatbelt": {"keychainAccess": null}"#,
+            ),
+            (
+                "seatbelt.extraMachLookups",
+                version_and_process.as_str(),
+                r#""seatbelt": {"extraMachLookups": null}"#,
+            ),
             (
                 "lifecycle.destroyOnExit",
                 version_and_process.as_str(),

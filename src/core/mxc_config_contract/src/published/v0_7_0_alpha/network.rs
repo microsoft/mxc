@@ -31,7 +31,7 @@ pub enum NetworkEnforcementMode {
 }
 }
 
-/// One of the proxy configurations accepted by the `0.6.0-alpha` contract.
+/// One of the proxy configurations accepted by the `0.7.0-alpha` contract.
 #[derive(Debug, serde::Deserialize)]
 pub enum NetworkProxy {
     /// Connect to an existing proxy on a non-zero localhost TCP port.

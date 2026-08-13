@@ -2,12 +2,12 @@
 // Licensed under the MIT License.
 
 use crate::wire;
-use mxc_config_contract::published::v0_6_0_alpha as contract;
+use mxc_config_contract::published::v0_7_0_alpha as contract;
 use mxc_config_contract::ContractVersion;
 
 fn convert_version(value: contract::Version) -> &'static str {
     match value {
-        contract::Version::V0_6_0Alpha => ContractVersion::V0_6_0Alpha.as_str(),
+        contract::Version::V0_7_0Alpha => ContractVersion::V0_7_0Alpha.as_str(),
     }
 }
 
@@ -17,6 +17,7 @@ fn convert_containment(value: contract::Containment) -> wire::Containment {
         contract::Containment::ProcessContainer => wire::Containment::ProcessContainer,
         contract::Containment::Lxc => wire::Containment::Lxc,
         contract::Containment::Bubblewrap => wire::Containment::Bubblewrap,
+        contract::Containment::Seatbelt => wire::Containment::Seatbelt,
     }
 }
 
@@ -204,8 +205,36 @@ fn convert_lxc(value: contract::Lxc) -> wire::Lxc {
     }
 }
 
+fn convert_launch_method(value: contract::LaunchMethod) -> wire::LaunchMethod {
+    match value {
+        contract::LaunchMethod::Exec => wire::LaunchMethod::Exec,
+        contract::LaunchMethod::Open => wire::LaunchMethod::Open,
+    }
+}
+
+fn convert_seatbelt(value: contract::Seatbelt) -> wire::Seatbelt {
+    let contract::Seatbelt {
+        profile_override,
+        gui_access,
+        launch_method,
+        nested_pty,
+        keychain_access,
+        extra_mach_lookups,
+    } = value;
+    wire::Seatbelt {
+        profile_override: profile_override.into_option(),
+        gui_access: gui_access.into_option(),
+        launch_method: launch_method.into_option().map(convert_launch_method),
+        nested_pty: nested_pty.into_option(),
+        keychain_access: keychain_access.into_option(),
+        extra_mach_lookups: extra_mach_lookups.into_option(),
+    }
+}
+
 pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
     let contract::Request {
+        schema,
+        comment,
         version,
         container_id,
         containment,
@@ -217,10 +246,11 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         lxc,
         process_container,
         ui,
+        seatbelt,
     } = request;
     wire::MxcConfig {
-        schema: None,
-        comment: None,
+        schema: schema.into_option(),
+        comment: comment.into_option(),
         version: Some(convert_version(version).to_owned()),
         phase: None,
         sandbox_id: None,
@@ -237,7 +267,7 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
         ui: ui.into_option().map(convert_ui),
-        seatbelt: None,
+        seatbelt: seatbelt.into_option().map(convert_seatbelt),
         experimental: None,
     }
 }
@@ -246,14 +276,14 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
 mod tests {
 
     const MINIMAL_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo hello"
         }
     }"#;
 
     const COMPLETE_PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "containerId": "container-id",
         "containment": "processcontainer",
         "lifecycle": {
@@ -304,7 +334,7 @@ mod tests {
     }"#;
 
     const COMPLETE_LXC_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "containerId": "container-id",
         "containment": "lxc",
         "lifecycle": {
@@ -326,7 +356,7 @@ mod tests {
         },
         "network": {
             "defaultPolicy": "allow",
-            "enforcementMode": "capabilities",
+            "enforcementMode": "firewall",
             "allowLocalNetwork": true,
             "allowedHosts": ["example.com"],
             "blockedHosts": ["blocked.com"]
@@ -342,8 +372,41 @@ mod tests {
         }
     }"#;
 
+    const COMPLETE_SEATBELT_REQUEST_JSON: &str = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": {
+            "commandLine": "echo hello",
+            "cwd": "/home/user",
+            "env": [
+                "VAR1=value1", "VAR2=value2"
+            ],
+            "timeout": 60
+        },
+        "filesystem": {
+            "readwritePaths": ["/path/to/readwrite"],
+            "readonlyPaths": ["/path/to/readonly"],
+            "deniedPaths": ["/path/to/denied"]
+        },
+        "network": {
+            "defaultPolicy": "allow",
+            "enforcementMode": "firewall",
+            "allowLocalNetwork": true,
+            "allowedHosts": ["example.com"],
+            "blockedHosts": ["blocked.com"]
+        },
+        "seatbelt": {
+            "profileOverride": "custom-profile.sb",
+            "guiAccess": true,
+            "launchMethod": "open",
+            "nestedPty": true,
+            "keychainAccess": true,
+            "extraMachLookups": ["com.example.service"]
+        }
+    }"#;
+
     const EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo hello"
         },
@@ -354,17 +417,34 @@ mod tests {
         "ui": {},
         "processContainer": {
             "ui": {}
-        }
+        },
+        "seatbelt": {}
     }"#;
 
     const APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
-        "version": "0.6.0-alpha",
+        "version": "0.7.0-alpha",
         "process": {
             "commandLine": "echo hello"
         },
         "appContainer": {
             "leastPrivilege": true,
             "capabilities": ["internetClient"]
+        }
+    }"#;
+
+    const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": {
+            "commandLine": "echo hello"
+        },
+        "macos_sandbox": {
+            "profileOverride": "custom-profile.sb",
+            "guiAccess": true,
+            "launchMethod": "open",
+            "nestedPty": true,
+            "keychainAccess": true,
+            "extraMachLookups": ["com.example.service"]
         }
     }"#;
 
@@ -422,6 +502,14 @@ mod tests {
             input: "bubblewrap",
             expected: "bubblewrap",
         },
+        ContainmentCase {
+            input: "seatbelt",
+            expected: "seatbelt",
+        },
+        ContainmentCase {
+            input: "macos_sandbox",
+            expected: "seatbelt",
+        },
     ];
 
     const DEFAULT_NETWORK_POLICY_CASES: &[&str] = &["allow", "block"];
@@ -433,10 +521,22 @@ mod tests {
     const PROCESS_CONTAINER_UI_ISOLATION_CASES: &[&str] =
         &["container", "desktop", "handles", "atoms"];
 
+    const SEATBELT_LAUNCH_METHOD_CASES: &[&str] = &["exec", "open"];
+
+    fn request_with_comment(comment: &str) -> String {
+        format!(
+            r#"{{
+                "version": "0.7.0-alpha",
+                "_comment": {comment},
+                "process": {{"commandLine": "echo hello"}}
+            }}"#
+        )
+    }
+
     fn request_with_proxy(proxy_json: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "network": {{"proxy": {proxy_json}}}
             }}"#
@@ -446,7 +546,7 @@ mod tests {
     fn request_with_containment(containment: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "containment": "{containment}",
                 "process": {{"commandLine": "echo hello"}}
             }}"#
@@ -456,7 +556,7 @@ mod tests {
     fn request_with_default_network_policy(default_policy: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "network": {{"defaultPolicy": "{default_policy}"}}
             }}"#
@@ -466,7 +566,7 @@ mod tests {
     fn request_with_network_enforcement_mode(enforcement_mode: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "network": {{"enforcementMode": "{enforcement_mode}"}}
             }}"#
@@ -476,7 +576,7 @@ mod tests {
     fn request_with_ui_clipboard(clipboard: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "ui": {{"clipboard": "{clipboard}"}}
             }}"#
@@ -486,9 +586,19 @@ mod tests {
     fn request_with_process_container_ui_isolation(isolation: &str) -> String {
         format!(
             r#"{{
-                "version": "0.6.0-alpha",
+                "version": "0.7.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "processContainer": {{"ui": {{"isolation": "{isolation}"}}}}
+            }}"#
+        )
+    }
+
+    fn request_with_seatbelt_launch_method(launch_method: &str) -> String {
+        format!(
+            r#"{{
+                "version": "0.7.0-alpha",
+                "process": {{"commandLine": "echo hello"}},
+                "seatbelt": {{"launchMethod": "{launch_method}"}}
             }}"#
         )
     }
@@ -502,7 +612,7 @@ mod tests {
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
+        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert!(wire.correlation_vector.is_none());
@@ -535,7 +645,7 @@ mod tests {
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
+        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert!(wire.correlation_vector.is_none());
@@ -638,7 +748,7 @@ mod tests {
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
-        assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
+        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
         assert!(wire.correlation_vector.is_none());
@@ -682,7 +792,7 @@ mod tests {
         ));
         assert!(matches!(
             network.enforcement_mode,
-            Some(super::wire::NetworkEnforcement::Capabilities)
+            Some(super::wire::NetworkEnforcement::Firewall)
         ));
         assert_eq!(network.allow_local_network, Some(true));
         assert_eq!(network.allowed_hosts.unwrap().as_slice(), &["example.com"]);
@@ -700,6 +810,80 @@ mod tests {
         let lxc = wire.lxc.expect("lxc should be populated");
         assert_eq!(lxc.distribution.as_deref(), Some("ubuntu"));
         assert_eq!(lxc.release.as_deref(), Some("20.04"));
+    }
+
+    #[test]
+    fn complete_seatbelt_request_maps_expected_wire_fields() {
+        let json = COMPLETE_SEATBELT_REQUEST_JSON;
+
+        let request: super::contract::Request = serde_json::from_str(json).unwrap();
+        let wire = super::into_wire(request);
+
+        assert!(wire.schema.is_none());
+        assert!(wire.comment.is_none());
+        assert_eq!(wire.version, Some("0.7.0-alpha".to_string()));
+        assert!(wire.phase.is_none());
+        assert!(wire.sandbox_id.is_none());
+        assert!(wire.correlation_vector.is_none());
+        assert!(wire.container_id.is_none());
+        assert!(matches!(
+            wire.containment,
+            Some(super::wire::Containment::Seatbelt)
+        ));
+
+        let process = wire.process.expect("process should be populated");
+        assert_eq!(process.command_line.as_deref(), Some("echo hello"));
+        assert_eq!(process.cwd.as_deref(), Some("/home/user"));
+        assert_eq!(
+            process.env.unwrap().as_slice(),
+            &["VAR1=value1", "VAR2=value2"]
+        );
+        assert_eq!(process.timeout, Some(60));
+
+        let filesystem = wire.filesystem.expect("filesystem should be populated");
+        assert_eq!(
+            filesystem.readwrite_paths.unwrap().as_slice(),
+            &["/path/to/readwrite"]
+        );
+        assert_eq!(
+            filesystem.readonly_paths.unwrap().as_slice(),
+            &["/path/to/readonly"]
+        );
+        assert_eq!(
+            filesystem.denied_paths.unwrap().as_slice(),
+            &["/path/to/denied"]
+        );
+
+        let network = wire.network.expect("network should be populated");
+        assert!(matches!(
+            network.default_policy,
+            Some(super::wire::NetworkPolicy::Allow)
+        ));
+        assert_eq!(network.allow_local_network, Some(true));
+        assert!(matches!(
+            network.enforcement_mode,
+            Some(super::wire::NetworkEnforcement::Firewall)
+        ));
+        assert_eq!(network.allowed_hosts.unwrap().as_slice(), &["example.com"]);
+        assert_eq!(network.blocked_hosts.unwrap().as_slice(), &["blocked.com"]);
+        assert!(network.proxy.is_none());
+
+        let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
+        assert_eq!(
+            seatbelt.profile_override.as_deref(),
+            Some("custom-profile.sb")
+        );
+        assert_eq!(seatbelt.gui_access, Some(true));
+        assert!(matches!(
+            seatbelt.launch_method,
+            Some(super::wire::LaunchMethod::Open)
+        ));
+        assert_eq!(seatbelt.nested_pty, Some(true));
+        assert_eq!(seatbelt.keychain_access, Some(true));
+        assert_eq!(
+            seatbelt.extra_mach_lookups.unwrap().as_slice(),
+            &["com.example.service"]
+        );
     }
 
     #[test]
@@ -748,6 +932,87 @@ mod tests {
         assert!(process_container_ui.desktop_system_control.is_none());
         assert!(process_container_ui.system_settings.is_none());
         assert!(process_container_ui.ime.is_none());
+    }
+
+    #[test]
+    fn annotations_map_expected_wire_fields() {
+        let json = r#"{
+            "$schema": "https://example.com/schema.json",
+            "_comment": "This is a comment",
+            "version": "0.7.0-alpha",
+            "process": {"commandLine": "echo hello"}
+        }"#;
+
+        let request: super::contract::Request = serde_json::from_str(json).unwrap();
+        let wire = super::into_wire(request);
+
+        assert_eq!(
+            wire.schema.as_deref(),
+            Some("https://example.com/schema.json")
+        );
+
+        assert_eq!(
+            wire.comment.as_ref(),
+            Some(&serde_json::json!("This is a comment"))
+        );
+    }
+
+    #[test]
+    fn comment_values_map_expected_wire_fields() {
+        struct CommentCase {
+            json: &'static str,
+            expected: serde_json::Value,
+        }
+
+        let cases: &[CommentCase] = &[
+            CommentCase {
+                json: r#""plain comment""#,
+                expected: serde_json::json!("plain comment"),
+            },
+            CommentCase {
+                json: r#"{"purpose":"test","enabled":true}"#,
+                expected: serde_json::json!({
+                    "purpose": "test",
+                    "enabled": true
+                }),
+            },
+            CommentCase {
+                json: r#"["first", 2, false]"#,
+                expected: serde_json::json!(["first", 2, false]),
+            },
+            CommentCase {
+                json: "42",
+                expected: serde_json::json!(42),
+            },
+            CommentCase {
+                json: "true",
+                expected: serde_json::json!(true),
+            },
+        ];
+
+        for case in cases {
+            let json = request_with_comment(case.json);
+
+            let request: super::contract::Request = serde_json::from_str(&json).unwrap();
+            let wire = super::into_wire(request);
+
+            assert_eq!(
+                wire.comment.as_ref(),
+                Some(&case.expected),
+                "comment value did not match expected for input: {}",
+                case.json
+            );
+        }
+    }
+
+    #[test]
+    fn null_comment_maps_expected_wire_field() {
+        let json = request_with_comment("null");
+
+        let request: super::contract::Request = serde_json::from_str(&json).unwrap();
+        let wire = super::into_wire(request);
+
+        assert_eq!(wire.comment.as_ref(), Some(&serde_json::Value::Null));
     }
 
     #[test]
@@ -851,6 +1116,23 @@ mod tests {
                 serde_json::json!(process_container_ui_isolation)
             );
         }
+
+        for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
+            let json = request_with_seatbelt_launch_method(launch_method);
+            let request: super::contract::Request = serde_json::from_str(&json).unwrap();
+            let wire = super::into_wire(request);
+
+            assert_eq!(
+                serde_json::to_value(
+                    wire.seatbelt
+                        .unwrap()
+                        .launch_method
+                        .expect("launchMethod should be populated")
+                )
+                .unwrap(),
+                serde_json::json!(launch_method)
+            );
+        }
     }
 
     #[test]
@@ -870,6 +1152,30 @@ mod tests {
         assert!(process_container.learning_mode.is_none());
         assert!(process_container.capture_denials.is_none());
         assert!(process_container.ui.is_none());
+    }
+
+    #[test]
+    fn macos_sandbox_section_alias_maps_expected_wire_fields() {
+        let request: super::contract::Request =
+            serde_json::from_str(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON).unwrap();
+        let wire = super::into_wire(request);
+        let seatbelt = wire.seatbelt.expect("macos_sandbox should map to seatbelt");
+
+        assert_eq!(
+            seatbelt.profile_override.as_deref(),
+            Some("custom-profile.sb")
+        );
+        assert_eq!(seatbelt.gui_access, Some(true));
+        assert!(matches!(
+            seatbelt.launch_method,
+            Some(super::wire::LaunchMethod::Open)
+        ));
+        assert_eq!(seatbelt.nested_pty, Some(true));
+        assert_eq!(seatbelt.keychain_access, Some(true));
+        assert_eq!(
+            seatbelt.extra_mach_lookups.unwrap().as_slice(),
+            &["com.example.service"]
+        );
     }
 
     fn assert_matches_current_wire_deserialization(json: &str) {
@@ -898,6 +1204,12 @@ mod tests {
     #[test]
     fn complete_lxc_request_matches_current_wire_deserialization() {
         let json = COMPLETE_LXC_REQUEST_JSON;
+        assert_matches_current_wire_deserialization(json);
+    }
+
+    #[test]
+    fn complete_seatbelt_request_matches_current_wire_deserialization() {
+        let json = COMPLETE_SEATBELT_REQUEST_JSON;
         assert_matches_current_wire_deserialization(json);
     }
 
@@ -940,10 +1252,32 @@ mod tests {
             let json = request_with_process_container_ui_isolation(isolation);
             assert_matches_current_wire_deserialization(&json);
         }
+
+        for launch_method in SEATBELT_LAUNCH_METHOD_CASES {
+            let json = request_with_seatbelt_launch_method(launch_method);
+            assert_matches_current_wire_deserialization(&json);
+        }
     }
 
     #[test]
     fn app_container_section_alias_matches_current_wire_deserialization() {
         assert_matches_current_wire_deserialization(APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON);
+    }
+
+    #[test]
+    fn macos_sandbox_section_alias_matches_current_wire_deserialization() {
+        assert_matches_current_wire_deserialization(MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON);
+    }
+
+    #[test]
+    fn annotations_match_current_wire_deserialization() {
+        let json = r#"{
+                "$schema": "https://example.com/schema.json",
+                "_comment": "This is a comment",
+                "version": "0.7.0-alpha",
+                "process": {"commandLine": "echo hello"}
+            }"#;
+
+        assert_matches_current_wire_deserialization(json);
     }
 }
