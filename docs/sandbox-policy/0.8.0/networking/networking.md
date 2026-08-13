@@ -53,8 +53,17 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
 - **Protocol:** HTTP and HTTPS only
 - **Destination:** Localhost proxy only (e.g., 127.0.0.1, ::1)
 - **Ports:** Any port within the 1 – 65535 range.
-- **Routing mechanism:** This applies to HTTP(S) only, never to other protocols. The sandbox's outbound is restricted so the only reachable destination is the loopback proxy port. Cooperating clients are pointed at the proxy through `HTTP_PROXY`/`HTTPS_PROXY` on Linux and macOS. Windows uses both per-AppContainer WinHTTP configuration and proxy environment variables for non-WinHTTP clients. A client that ignores the proxy cannot reach the internet directly on an enforcing model-2 path because the egress restriction drops everything except the localhost proxy port. In model 1, such a client may instead egress directly, subject to the IP/CIDR/port/protocol rules.
-- **What is NOT routed:** Non-HTTP traffic (raw TCP/UDP sockets, SSH, custom protocols, QUIC, WebRTC, etc.) is never redirected to the proxy. In model 2, direct internet traffic is blocked. On ProcessContainer, private-network traffic follows `ingress.default` because AppContainer exposes one bidirectional private-network capability. In model 1, non-HTTP traffic is subject to the IP/CIDR/port/protocol rules. Transparently routing this traffic through the proxy is a gap that requires further design and is out of scope for GA.
+- **Routing mechanism:** This applies to HTTP(S) only, never to other protocols. The sandbox's outbound is restricted so
+  the only reachable destination is the loopback proxy port. Cooperating clients are pointed at the proxy through
+  `HTTP_PROXY`/`HTTPS_PROXY` on Linux and macOS. Windows uses both per-AppContainer WinHTTP configuration and proxy
+  environment variables for non-WinHTTP clients. A client that ignores the proxy cannot reach the internet directly
+  on an enforcing model-2 path because the egress restriction drops everything except the localhost proxy port. In
+  model 1, such a client may instead egress directly, subject to the IP/CIDR/port/protocol rules.
+- **What is NOT routed:** Non-HTTP traffic (raw TCP/UDP sockets, SSH, custom protocols, QUIC, WebRTC, etc.) is never
+  redirected to the proxy. In model 2, direct internet traffic is blocked. On ProcessContainer, private-network
+  traffic follows `ingress.default` because AppContainer exposes one bidirectional private-network capability. In
+  model 1, non-HTTP traffic is subject to the IP/CIDR/port/protocol rules. Transparently routing this traffic through
+  the proxy is a gap that requires further design and is out of scope for GA.
 
 **Direct outbound path (model 1 only):**
 
@@ -175,7 +184,10 @@ The omitted `network` block uses deny defaults. When `runtimeConfig.networkProxy
 not apply because egressible HTTP(S) traffic is forwarded to the proxy. Without runtime proxy configuration, the deny
 defaults form model 3. Backend-specific proxy reachability requirements are documented below.
 
-This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps an explicit deny list and a per-direction default, which are a deliberate extension over pure Kubernetes NetworkPolicy (allow-only with `ipBlock.except`) to give an auditable default and block-precedence.
+This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on
+Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps
+an explicit deny list and a per-direction default, which are a deliberate extension over pure Kubernetes NetworkPolicy
+(allow-only with `ipBlock.except`) to give an auditable default and block-precedence.
 
 Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not shown in the minimal example above):
 
@@ -411,4 +423,9 @@ Model 2 permits only the proxy endpoint.
 - **DNS domain filtering:** The IP/CIDR schema cannot distinguish hostnames that resolve to the same IP. Domain allow/deny requires either deeper platform support or the proxy inspecting the CONNECT/request host plus blocking direct DNS egress (see D3).
 - **Inter-container networking:** Containers cannot communicate with each other (except Windows process containers).
 - **macOS direct-egress models:** Seatbelt cannot filter arbitrary remote destinations, so model 1 (direct egress under IP/CIDR/port/protocol rules) is not available on macOS; macOS supports model 2 (proxy-only).
-- **Proxy arbitrary network traffic:** GA MXC configures proxies for HTTP/S traffic only. On Windows, only clients that use the WinHTTP stack or correctly query the platform proxy configuration are proxied. Many libraries on all 3 platforms (Windows/Linux/macOS) use proxy environment variables as their configuration mechanism. On Linux and macOS these are the standard way to apply proxy configurations; however, it is advisory only and not a full RFC standard. As far as MXC is concerned, libraries/apps that honor them will use the proxy, while libraries/apps that ignore them will not have their traffic directed to the proxy and instead have their egress blocked.
+- **Proxy arbitrary network traffic:** GA MXC configures proxies for HTTP/S traffic only. On Windows, only clients that
+  use the WinHTTP stack or correctly query the platform proxy configuration are proxied. Many libraries on all three
+  platforms use proxy environment variables as their configuration mechanism. On Linux and macOS these are the
+  standard way to apply proxy configurations; however, it is advisory only and not a full RFC standard. Libraries and
+  applications that honor them use the proxy; those that ignore them do not have their traffic directed to the proxy
+  and instead have their egress blocked.
