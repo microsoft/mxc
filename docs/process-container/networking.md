@@ -86,14 +86,18 @@ Model 2 involves two separate processes:
 - **Proxy process:** a caller-created process that is already running outside the MXC client container. It may be
   packaged or unpackaged, with or without AppContainer isolation.
 
+MXC must reject a `runtimeConfig.networkProxy` endpoint that is not loopback. The caller must configure the proxy to
+bind only the exact loopback address and port supplied to MXC.
+
 | External proxy | `allowedProxyPeer` | MXC client policy | Additional proxy identity |
 |---|---|---|---|
-| Packaged proxy | PFN | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
+| Packaged proxy | Package Family Name | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
 | Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
 | Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
 
 All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
-common WFP endpoint enforcement.
+common WFP endpoint enforcement. The packaged row covers both AppContainer and non-AppContainer proxies because their
+client policy and package identity are the same; the enforcement table below separates their additional protections.
 
 `ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
 opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
@@ -167,7 +171,8 @@ The caller must:
 #### Proxy identity and firewall authorization
 
 The WFP loopback-address-and-port restriction described above applies to every row. The table compares the additional
-OS enforcement provided for the external proxy. A packaged AppContainer proxy provides the best enforcement.
+OS enforcement provided for the external proxy. A packaged AppContainer proxy provides the best enforcement. The two
+middle rows provide different protections and are not ordered relative to each other.
 
 | Proxy deployment | `allowedProxyPeer` | Additional OS enforcement |
 |---|---|---|
@@ -180,7 +185,8 @@ The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
 declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
-requires its installer or administrator to own an equivalent rule scoped to the proxy executable and configured port.
+requires its installer or administrator to own an equivalent rule scoped to the AppContainer profile SID, proxy
+executable, and configured port.
 See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
