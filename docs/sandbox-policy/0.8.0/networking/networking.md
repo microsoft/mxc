@@ -392,9 +392,11 @@ Model 2 permits only the proxy endpoint.
 
 - **Windows Sandbox:** Guest-side firewall only, with hardcoded rules. In GA for development/testing scenarios where network isolation is not critical.
 - **Isolation Session:** No network filtering or denial is possible — outbound is open and a process inside can listen
-  on a localhost-reachable port. Its current schema 0.7 implementation requires the unrestricted-network
-  acknowledgment (`network.defaultPolicy=allow` + `network.allowLocalNetwork=true`) and rejects every other
-  network/proxy policy. In GA for process isolation only (identity, lifecycle).
+  on a localhost-reachable port. Schema 0.7 requires the unrestricted-network acknowledgment
+  (`network.defaultPolicy=allow` + `network.allowLocalNetwork=true`). Schema 0.8 has the same behavior and accepts only
+  the equivalent unrestricted posture: `egress.default=allow`, `ingress.default=allow`, and
+  `ingress.hostLoopback=allow`, with no egress rules or runtime proxy. Every other network/proxy policy is rejected.
+  In GA for process isolation only (identity, lifecycle).
 - **Hyperlight, Nanvix:** Not in this GA scope doc. Additional follow up is needed to confirm their capabilities and whether they align with this doc.
 
 ## Gaps and limitations
