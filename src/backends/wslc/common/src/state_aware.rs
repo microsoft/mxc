@@ -19,7 +19,7 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    null_pipe_handle, DeprovisionResult, ExecHandle, ProvisionResult, StartResult,
+    null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 use wxc_common::wire::WslcProvisionPhase;
@@ -137,6 +137,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        _consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         // Cooperative proxy: inject HTTP(S)_PROXY (and scrub caller-supplied
         // proxy vars). `exec_proxy_url` yields the routable URL only when the

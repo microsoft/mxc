@@ -47,6 +47,7 @@ export function getSdkBinDir(): string {
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
+  'plm.exe',
   'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
@@ -70,8 +71,6 @@ export const EXPECTED_MACOS_BINARIES = [
 const OPTIONAL_BINARIES = [
   'wslcsdk.dll',          // Only built with --with-wslc
   'wxc-wslc-daemon.exe',  // Only built with --with-wslc
-  'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
-                   // only when the plm crate is included in the build.
 ];
 
 // Combined list of all known binaries across platforms. The npm package

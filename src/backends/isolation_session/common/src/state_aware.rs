@@ -13,7 +13,8 @@ use serde::Serialize;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
 
 use windows::Win32::Foundation::HANDLE;
@@ -222,6 +223,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        _consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =

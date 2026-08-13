@@ -18,7 +18,8 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::process_util::resolve_sibling_binary;
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
 
 use windows::Win32::Foundation::HANDLE;
@@ -755,6 +756,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        _consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         extract_token(sandbox_id)?;
 
@@ -1273,7 +1275,12 @@ mod tests {
     fn exec_without_live_daemon_is_not_started() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         // With no daemon holding the sandbox, exec reports NotStarted rather
         // than running anything.
@@ -1284,7 +1291,12 @@ mod tests {
     fn exec_rejects_malformed_id_first() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("iso:abc", &ExecutionRequest::default(), None)
+            .exec(
+                "iso:abc",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
@@ -1496,7 +1508,12 @@ mod tests {
         let _g = StateAwareRootGuard::new();
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:cccc3333", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:cccc3333",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::NotStarted);
     }

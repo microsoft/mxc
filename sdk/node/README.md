@@ -433,7 +433,8 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 - [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
 - [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
 - [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
-- [`docs/sandbox-policy/v1/policy.md`](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/v1/policy.md) — policy specification
+- [Sandbox policy 0.7.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.7.0/policy.md)
+  — policy specification
 - Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
 
 ---

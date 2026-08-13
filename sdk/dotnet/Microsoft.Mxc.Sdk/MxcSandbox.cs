@@ -84,6 +84,8 @@ public static class MxcSandbox
                         Stderr = PtrToString(result.stderr_utf8) ?? string.Empty,
                         OutputMetadata = DeserializeOutputMetadata(
                             PtrToString(result.output_metadata_json_utf8)),
+                        Warnings = DeserializeWarnings(
+                            PtrToString(result.warnings_json_utf8)),
                     };
                 }
                 finally
@@ -162,4 +164,9 @@ public static class MxcSandbox
         string.IsNullOrEmpty(json)
             ? null
             : JsonSerializer.Deserialize<SandboxOutputMetadata>(json);
+
+    private static IReadOnlyList<string> DeserializeWarnings(string? json) =>
+        string.IsNullOrEmpty(json)
+            ? Array.Empty<string>()
+            : JsonSerializer.Deserialize<string[]>(json) ?? Array.Empty<string>();
 }

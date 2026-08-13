@@ -269,7 +269,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/examples.md](docs/examples.md) | Annotated configuration examples |
 | [docs/host-prep.md](docs/host-prep.md) | Windows host preparation (`wxc-host-prep.exe`) |
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
-| [docs/sandbox-policy/v1/policy.md](docs/sandbox-policy/v1/policy.md) | Sandbox policy v1 specification |
+| [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
