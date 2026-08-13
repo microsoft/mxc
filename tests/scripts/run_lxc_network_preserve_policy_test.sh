@@ -29,6 +29,9 @@ fail() {
     exit 1
 }
 
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
+
 [ "$(id -u)" -eq 0 ] || skip "requires root for iptables/ip6tables and LXC."
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
@@ -65,19 +68,6 @@ trap cleanup EXIT
 # Guards against a stale container from an earlier failed run being mistaken
 # for this run's work.
 lxc-destroy -n "$CONTAINER" -f >/dev/null 2>&1 || true
-
-derive_chain_name() {
-    CHAIN_NAME="$(sed -n 's/^.*Creating iptables\/ip6tables chain: \([^ ]*\).*$/\1/p' <<<"$1" | head -n 1)"
-    if [ -z "$CHAIN_NAME" ]; then
-        fail "no chain creation was logged, so the chain name could not be determined."
-    fi
-    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
-        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
-    fi
-    if [ "${#CHAIN_NAME}" -gt 28 ]; then
-        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
-    fi
-}
 
 echo "Running LXC preserved-policy test..."
 

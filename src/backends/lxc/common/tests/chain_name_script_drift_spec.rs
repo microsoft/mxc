@@ -83,29 +83,22 @@ fn network_scripts() -> Vec<(String, String)> {
     scripts
 }
 
-/// The `sed` program `mxc_chains` uses to enumerate MXC-owned chains.
-///
-/// Legitimate because it names the prefix and matches whatever follows, rather
-/// than claiming to know a specific digest.
-const MXC_CHAIN_SED_PROGRAM: &str = r"s/^-N \(MXC-.*\)$/\1/p";
-
-/// Every `MXC-<something>` on a line that is not one of the two legitimate
-/// idioms: the pinned shape check and the chain-enumerating `sed` program.
+/// Every `MXC-<something>` on a line of a network script.
 ///
 /// A hard-coded chain name is vacuous wherever it appears, not only in an
 /// assignment: `assert_no_forward_reference "MXC-CLI-LXC-Net-Deny"` names a
 /// chain that can never exist, and so asserts nothing about the real one.
+///
+/// The legitimate idioms -- the shape check and the chain-enumerating `sed`
+/// program -- live in `lib/chain_name.sh`, which this never scans, so there is
+/// nothing here to exempt.
 fn illegal_mxc_literals(line: &str) -> Vec<String> {
     if line.trim_start().starts_with('#') {
         return Vec::new();
     }
 
-    let stripped = line
-        .replace(DOCUMENTED_SHAPE_ERE, " ")
-        .replace(MXC_CHAIN_SED_PROGRAM, " ");
-
     let mut found = Vec::new();
-    let mut search = stripped.as_str();
+    let mut search = line;
     while let Some(at) = search.find("MXC-") {
         search = &search[at + "MXC-".len()..];
         let tail: String = search
@@ -142,16 +135,34 @@ fn no_network_script_names_a_specific_chain() {
     );
 }
 
-/// The one shape every script checks its derived chain name against.
+/// The chain shape [`matches_documented_shape`] models.
 ///
-/// Pinned here because the check is copy-pasted into each script: nothing in
-/// bash ties those copies to each other or to `chain_name_for`, so a change to
-/// the hash width would leave five stale patterns behind. The test below
-/// hand-rolls this exact pattern's semantics, so changing the constant means
-/// updating `matches_documented_shape` in the same edit.
-const DOCUMENTED_SHAPE_ERE: &str = "^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$";
+/// Not a second copy of the scripts' check: the scripts apply exactly one
+/// pattern, in `lib/chain_name.sh`, and the test below reads it from there.
+/// This is the tripwire that fires when that pattern changes and the
+/// hand-rolled recognizer no longer models it.
+const MODELED_SHAPE_ERE: &str = "^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$";
 
-/// Recognizer for [`DOCUMENTED_SHAPE_ERE`], hand-rolled to keep this suite free
+/// The chain shape the scripts actually check, read from the shared helper.
+fn helper_shape_ere() -> String {
+    let path = scripts_dir().join("lib").join("chain_name.sh");
+    let body = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+
+    for line in body.lines() {
+        if let Some(rest) = line.strip_prefix("MXC_CHAIN_NAME_ERE=") {
+            return rest.trim().trim_matches('\'').to_string();
+        }
+    }
+
+    panic!(
+        "{} no longer defines MXC_CHAIN_NAME_ERE, so the shape the scripts \
+         check could not be found and this guard verified nothing",
+        path.display()
+    );
+}
+
+/// Recognizer for [`MODELED_SHAPE_ERE`], hand-rolled to keep this suite free
 /// of a regex dependency, matching the convention in `chain_name_spec.rs`.
 ///
 /// The 16-character base32 hash is a fixed-width suffix, so the separator (when
@@ -184,66 +195,16 @@ fn matches_documented_shape(chain: &str) -> bool {
             .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-'))
 }
 
-/// Every `grep -Eq '<pattern>'` shape check found in the network scripts, as
-/// (script name, line number, pattern).
-///
-/// A commented-out check that still mentions the pattern would satisfy the
-/// guard below while validating nothing, so only a pattern actually applied to
-/// the derived name counts. The cost is deliberate coupling to the scripts'
-/// exact idiom: if the idiom changes this finds no checks at all, and the guard
-/// fails loudly rather than going quietly green.
-fn shape_patterns() -> Vec<(String, usize, String)> {
-    let mut found = Vec::new();
-    for (name, body) in network_scripts() {
-        for (index, line) in body.lines().enumerate() {
-            if line.trim_start().starts_with('#')
-                || !line.contains("grep -Eq")
-                || !line.contains("<<<\"$CHAIN_NAME\"")
-            {
-                continue;
-            }
-            let Some(open) = line.find('\'') else {
-                continue;
-            };
-            let Some(close) = line[open + 1..].find('\'') else {
-                continue;
-            };
-            let pattern = &line[open + 1..open + 1 + close];
-            found.push((name.clone(), index + 1, pattern.to_string()));
-        }
-    }
-    found
-}
-
 #[test]
-fn every_script_checks_the_same_documented_shape() {
-    let patterns = shape_patterns();
-
-    assert!(
-        !patterns.is_empty(),
-        "no chain-shape check found in any network script -- either the scripts \
-         stopped validating the derived name, or this guard stopped finding the \
-         check and is now verifying nothing"
+fn the_shape_the_scripts_check_accepts_the_names_the_code_produces() {
+    assert_eq!(
+        helper_shape_ere(),
+        MODELED_SHAPE_ERE,
+        "the shared helper's chain-shape pattern changed, so the recognizer in \
+         this file no longer models what bash applies and the check below \
+         proves nothing about the scripts. Update both together."
     );
 
-    let mismatched: Vec<String> = patterns
-        .iter()
-        .filter(|(_, _, pattern)| pattern != DOCUMENTED_SHAPE_ERE)
-        .map(|(name, line, pattern)| format!("{name}:{line} uses '{pattern}'"))
-        .collect();
-
-    assert!(
-        mismatched.is_empty(),
-        "the chain-shape check is copy-pasted into each script, so every copy \
-         must stay identical to the pinned shape '{DOCUMENTED_SHAPE_ERE}'. A \
-         copy that drifts either rejects a valid name and fails the suite for \
-         the wrong reason, or accepts a malformed one. Offenders:\n  {}",
-        mismatched.join("\n  ")
-    );
-}
-
-#[test]
-fn the_pinned_shape_accepts_the_names_the_code_actually_produces() {
     // Representative of what the scripts feed it: ordinary names, names whose
     // slug is exhausted or absent, and a name long enough to be truncated.
     for input in [
@@ -257,30 +218,9 @@ fn the_pinned_shape_accepts_the_names_the_code_actually_produces() {
         let chain = chain_name_for(input);
         assert!(
             matches_documented_shape(&chain),
-            "chain_name_for({input:?}) produced '{chain}', which the shape \
-             pinned in every network script would reject. The scripts would \
-             fail on a correct name, so the pinned shape is stale."
-        );
-    }
-}
-
-#[test]
-fn a_script_that_derives_a_name_also_validates_its_shape() {
-    let patterns = shape_patterns();
-
-    for (name, body) in network_scripts() {
-        // A script that never derives a name has nothing to validate. One that
-        // does is about to feed that name to `iptables -S` and to a FORWARD
-        // grep, so an unvalidated parse failure would hand those assertions a
-        // malformed string instead of failing here.
-        if !body.contains("derive_chain_name") {
-            continue;
-        }
-        assert!(
-            patterns.iter().any(|(script, _, _)| script == &name),
-            "{name} derives a chain name but never checks its shape, so a \
-             mis-parse reaches the chain assertions instead of failing loudly. \
-             Add the pinned shape check '{DOCUMENTED_SHAPE_ERE}'."
+            "chain_name_for({input:?}) produced '{chain}', which the shape the \
+             network scripts check would reject. The scripts would fail on a \
+             correct name, so the shared pattern is stale."
         );
     }
 }

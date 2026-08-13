@@ -48,15 +48,8 @@ fail() {
     exit 1
 }
 
-# List the MXC-owned chains a tool currently holds. The chain name is derived
-# from a digest of the container name, so a hard-coded literal names a chain
-# that cannot exist: `iptables -S <that name>` always fails, the cleanup check
-# below reads that failure as "the chain is gone", and the assertion passes
-# without inspecting anything. Matching the MXC- prefix stays correct across
-# naming changes.
-mxc_chains() {
-    "$1" -S 2>/dev/null | sed -n 's/^-N \(MXC-.*\)$/\1/p' | sort
-}
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
 
 # Compared against a snapshot taken before the run, so chains left behind by an
 # earlier failed run are not blamed on this one.
@@ -97,23 +90,6 @@ assert_firewall_chain_cleaned_up() {
 assert_no_forward_reference() {
     if iptables -S FORWARD 2>/dev/null | grep -Fq -- "$1"; then
         fail "a FORWARD rule still references chain '$1' after teardown."
-    fi
-}
-
-# The chain name is a digest of the container name, so it is read back from this
-# run's own debug output rather than hard-coded. Every assertion that names a
-# chain depends on this having succeeded, so an unparsed name fails the test
-# here instead of silently reducing those assertions to no-ops.
-derive_chain_name() {
-    CHAIN_NAME="$(sed -n 's/^.*Creating iptables\/ip6tables chain: \([^ ]*\).*$/\1/p' <<<"$1" | head -n 1)"
-    if [ -z "$CHAIN_NAME" ]; then
-        fail "no chain creation was logged, so the chain name could not be determined."
-    fi
-    if ! grep -Eq '^MXC-([A-Za-z0-9_-]{1,7}-)?[a-z2-7]{16}$' <<<"$CHAIN_NAME"; then
-        fail "chain name '$CHAIN_NAME' does not match the documented MXC-<slug>-<hash> shape."
-    fi
-    if [ "${#CHAIN_NAME}" -gt 28 ]; then
-        fail "chain name '$CHAIN_NAME' exceeds the 28-character iptables ceiling."
     fi
 }
 
