@@ -43,7 +43,9 @@ use crate::capture_output::{
     remove_internal_capture_file, unique_denials_output_path, write_denials_document,
     write_stderr_line_best_effort,
 };
-use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
+use crate::guarded_capture::{
+    transferred_trace_error_metadata, GuardedCaptureFactory, GuardedCaptureSession,
+};
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
@@ -2705,6 +2707,7 @@ impl BaseContainerSandboxProcess {
                 Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
                 None => session.stop_analyzed(),
             };
+            let etl_was_transferred = etl_path.is_some() && stop_result.is_ok();
             let result = stop_result
                 .map_err(|error| {
                     std::io::Error::other(format!(
@@ -2716,8 +2719,9 @@ impl BaseContainerSandboxProcess {
                         std::io::Error::other("captureDenials output path was not initialized")
                     })?;
                     write_denials_document(analysis, exit_code, &output_path).map(|mut metadata| {
-                        metadata.etl_path =
-                            etl_path.map(|path| path.to_string_lossy().into_owned());
+                        metadata.etl_path = etl_path
+                            .as_ref()
+                            .map(|path| path.to_string_lossy().into_owned());
                         metadata
                     })
                 });
@@ -2726,6 +2730,12 @@ impl BaseContainerSandboxProcess {
                     capture_denials: Some(metadata.clone()),
                     capture_denials_error: None,
                 });
+            } else if let Err(error) = &result {
+                self.output_metadata = transferred_trace_error_metadata(
+                    error,
+                    etl_path.as_deref(),
+                    etl_was_transferred,
+                );
             }
             result.map(Some)
         } else {

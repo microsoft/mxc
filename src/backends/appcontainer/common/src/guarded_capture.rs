@@ -24,6 +24,7 @@
 //! guarded capture silently.
 
 use learning_mode_core::AnalysisResult;
+use wxc_common::models::{CaptureDenialsErrorOutput, SandboxOutputMetadata};
 
 /// Error returned when an injected guarded-capture implementation cannot
 /// transfer retained ETL requested by the caller.
@@ -111,6 +112,21 @@ pub(crate) fn release_after_termination_failure(
     mut session: Box<dyn GuardedCaptureSession>,
 ) -> Result<(), String> {
     session.discard()
+}
+
+pub(crate) fn transferred_trace_error_metadata(
+    error: &std::io::Error,
+    etl_path: Option<&std::path::Path>,
+    etl_was_transferred: bool,
+) -> Option<SandboxOutputMetadata> {
+    let etl_path = etl_path.filter(|_| etl_was_transferred)?;
+    Some(SandboxOutputMetadata {
+        capture_denials: None,
+        capture_denials_error: Some(CaptureDenialsErrorOutput {
+            message: error.to_string(),
+            etl_path: etl_path.to_string_lossy().into_owned(),
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -226,6 +242,13 @@ mod tests {
             fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
                 unreachable!()
             }
+
+            fn stop_analyzed_with_trace(
+                &mut self,
+                _trace_destination: &std::path::Path,
+            ) -> Result<AnalysisResult, String> {
+                unreachable!()
+            }
         }
 
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -249,5 +272,20 @@ mod tests {
             "discard failed after guardian release"
         );
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn transferred_trace_failure_metadata_requires_a_persisted_path() {
+        let error = std::io::Error::other("JSON write failed");
+        let path = std::path::Path::new(r"C:\capture\denials.etl");
+
+        assert!(
+            transferred_trace_error_metadata(&error, Some(path), false).is_none(),
+            "an untransferred trace must not be advertised"
+        );
+        let metadata = transferred_trace_error_metadata(&error, Some(path), true).unwrap();
+        let failure = metadata.capture_denials_error.unwrap();
+        assert_eq!(failure.message, "JSON write failed");
+        assert_eq!(failure.etl_path, path.to_string_lossy());
     }
 }

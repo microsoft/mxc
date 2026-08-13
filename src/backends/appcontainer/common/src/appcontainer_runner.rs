@@ -32,7 +32,9 @@ use windows::Win32::System::Threading::{
 use windows_core::{PCWSTR, PWSTR};
 
 use crate::capture_output;
-use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
+use crate::guarded_capture::{
+    transferred_trace_error_metadata, GuardedCaptureFactory, GuardedCaptureSession,
+};
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
@@ -1709,13 +1711,15 @@ impl AppContainerSandboxProcess {
                 Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
                 None => session.stop_analyzed(),
             };
+            let etl_was_transferred = etl_path.is_some() && capture_result.is_ok();
             let capture_result = match capture_result {
                 Ok(analysis) => match output_path {
                     Some(output_path) => {
                         capture_output::write_denials_document(analysis, exit_code, &output_path)
                             .map(|mut metadata| {
-                                metadata.etl_path =
-                                    etl_path.map(|path| path.to_string_lossy().into_owned());
+                                metadata.etl_path = etl_path
+                                    .as_ref()
+                                    .map(|path| path.to_string_lossy().into_owned());
                                 metadata
                             })
                     }
@@ -1735,7 +1739,14 @@ impl AppContainerSandboxProcess {
                     });
                     Ok(())
                 }
-                Err(error) => Err(error),
+                Err(error) => {
+                    self.output_metadata = transferred_trace_error_metadata(
+                        &error,
+                        etl_path.as_deref(),
+                        etl_was_transferred,
+                    );
+                    Err(error)
+                }
             }
         } else {
             Ok(())
@@ -2282,6 +2293,13 @@ mod tests {
                 .unwrap()
                 .push("stop_analyzed".to_string());
             Ok(AnalysisResult::complete(Vec::new()))
+        }
+
+        fn stop_analyzed_with_trace(
+            &mut self,
+            _trace_destination: &std::path::Path,
+        ) -> Result<AnalysisResult, String> {
+            unreachable!()
         }
     }
 

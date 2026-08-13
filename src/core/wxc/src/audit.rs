@@ -100,6 +100,8 @@ pub fn finalize(
     ensure_destination_available(&source_denials, &final_denials)?;
     move_new_file(&source_etl, &final_etl)?;
     move_new_file(&source_denials, &final_denials)?;
+    capture.output_path = final_denials.to_string_lossy().into_owned();
+    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
 
     plm::stop::postprocess_denials(
@@ -116,8 +118,6 @@ pub fn finalize(
     )
     .map_err(|error| format!("failed to generate audit compatibility artifacts: {error:#}"))?;
 
-    capture.output_path = final_denials.to_string_lossy().into_owned();
-    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
     Ok(())
 }
 
@@ -274,6 +274,44 @@ mod tests {
             capture.etl_path.as_deref().map(Path::new),
             Some(log_dir.join("trace.etl").as_path())
         );
+    }
+
+    #[test]
+    fn finalize_updates_metadata_before_postprocessing_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: Some(directory.path().join("missing-policy.json")),
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("audit compatibility artifacts"));
+        let capture = response
+            .output_metadata
+            .as_ref()
+            .unwrap()
+            .capture_denials
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            Path::new(&capture.output_path),
+            log_dir.join("denials.json")
+        );
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(log_dir.join("trace.etl").as_path())
+        );
+        assert!(log_dir.join("denials.json").is_file());
+        assert!(log_dir.join("trace.etl").is_file());
     }
 
     #[test]
