@@ -216,15 +216,24 @@ pub trait StatefulSandboxBackend {
     /// own stdio, where a pseudo-console is legitimate and stderr may therefore
     /// arrive merged into stdout.
     ///
-    /// # Not yet honored
+    /// # Honored by one backend so far
     ///
     /// The above states what an implementation must satisfy to be driven
-    /// through the streaming entry points; it is **not** a description of
-    /// current behaviour. No in-tree backend honors `Library` yet: each relays
-    /// internally and returns null handles, and IsolationSession still probes
-    /// the host console whatever the caller asked for. Until a backend surfaces
-    /// real handles, the streaming path yields a process with no streams, so
-    /// treat these backends as executor-path only.
+    /// through the streaming entry points. It is not yet a description of every
+    /// backend's behaviour:
+    ///
+    /// - **IsolationSession** honors both variants. Under `Library` it starts
+    ///   the process without waiting, hands back its real pipe handles, a waiter
+    ///   that blocks on exit and a terminator that kills, and does not touch the
+    ///   host console. Under `Executor` it relays internally and returns null
+    ///   handles.
+    /// - **Windows Sandbox** and **WSLc** relay internally and return null
+    ///   handles whatever the caller asked for, so for those two the streaming
+    ///   path still yields a process with no streams — treat them as
+    ///   executor-path only.
+    ///
+    /// Reaching any of this from an in-process caller additionally requires the
+    /// experimental opt-in, which the state-aware entry points do not yet expose.
     fn exec(
         &mut self,
         sandbox_id: &str,
