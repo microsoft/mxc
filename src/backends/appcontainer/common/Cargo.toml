@@ -24,6 +24,7 @@ windows = { workspace = true }
 windows-core = { workspace = true }
 flatbuffers = { workspace = true }
 sandbox_spec = { workspace = true }
+process_security_environment_spec = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }
 learning_mode_windows = { workspace = true }

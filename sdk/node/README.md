@@ -200,7 +200,7 @@ console.log(result.stdout);
 | `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
-| `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/initial-bringup-plan.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/initial-bringup-plan.md) |
+| `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -243,8 +243,12 @@ import {
 // Every call takes a single options object (3rd arg). Experimental backends
 // must pass `experimental: true`; relay `correlationVector` on every phase
 // after provision so telemetry shares one base prefix.
+// isolation_session provision requires the unrestricted-network acknowledgment:
+// the container's network cannot be filtered or denied, so you must opt in.
 const { sandboxId, correlationVector } = await provisionSandbox(
-  'isolation_session', undefined, { experimental: true },
+  'isolation_session',
+  { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
+  { experimental: true },
 );
 const opts = { experimental: true, correlationVector };
 
@@ -260,6 +264,30 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 > **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
+
+**Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first; when the failure came from an underlying platform API, the error also carries discrete diagnostic fields rather than a prose blob:
+
+```typescript
+import { MxcError } from '@microsoft/mxc-sdk';
+
+try {
+  await startSandbox(sandboxId, {}, { experimental: true });
+} catch (err) {
+  if (err instanceof MxcError) {
+    if (err.code === 'stale_id') { /* the sandbox is gone -- re-provision */ }
+    console.error(err.message);      // bare, human-readable
+    console.error(err.operation);    // e.g. 'IsoSessionOps.StartSessionAsync'
+    console.error(err.nativeCode);   // e.g. '0x80070490'
+    console.error(err.remediation);  // the API's own fix-it hint, when it supplies one
+  }
+}
+```
+
+`operation`, `nativeCode` and `remediation` are optional and travel together: `nativeCode` and `remediation` never appear without `operation`. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
+
+These three are currently populated only by **IsolationSession state-aware** operations. Windows Sandbox has no semantic error channel to derive them from, and the one-shot surface folds the same detail into `message` instead, so they are uniformly absent there — always treat them as optional.
+
+Branch program logic on `code`, which is a closed, versioned union. The *values* of `operation` and `nativeCode` are best-effort diagnostics derived from the underlying platform API and may change without a version bump — use them for telemetry, logging and diagnosis rather than control flow.
 
 Full design and API: [`docs/state-aware-lifecycle/`](https://github.com/microsoft/mxc/tree/main/docs/state-aware-lifecycle/).
 
@@ -370,7 +398,10 @@ spawnSandbox(script, policy, options?, workingDirectory?, containerName?, env?) 
 spawnSandboxAsync(script, policy, ...) → Promise<{ stdout, stderr, exitCode }>
 
 // State-aware lifecycle (currently `isolation_session` and `windows_sandbox` — both Windows-only)
-provisionSandbox(containment, config?, options?) → Promise<ProvisionResult>
+// `config` on provisionSandbox is required for backends whose provision config
+// has a required member (isolation_session: the network acknowledgment) and
+// optional otherwise (windows_sandbox).
+provisionSandbox(containment, config, options?)  → Promise<ProvisionResult>
 startSandbox(sandboxId, config?, options?)       → Promise<StartResult>
 execInSandbox(sandboxId, config, options?)       → IPty             // streaming
 execInSandboxAsync(sandboxId, config, options?)  → Promise<ExecResult>
@@ -387,7 +418,8 @@ getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 UiCapabilitySupport
 
 // Errors (typed wire-format errors from wxc-exec)
-ErrorCode, MxcError, mxcErrorFromCode(code)
+ErrorCode, MxcError, MxcErrorFields
+mxcErrorFromCode(code, message, details?)   → MxcError
 ```
 
 Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.

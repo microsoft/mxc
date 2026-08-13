@@ -219,11 +219,18 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// provider manifests registered on the machine).
 #[cfg(test)]
 fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
-    dedup_to_resources(
-        events
-            .iter()
-            .filter_map(|e| extract_denial(&e.parts, e.pid, e.filetime)),
-    )
+    let mut raws = Vec::new();
+    for event in events {
+        if let Some(raw) = extract_denial(&event.parts, event.pid, event.filetime) {
+            raws.push(raw);
+        }
+        raws.extend(crate::capability_dacl::extract_denials(
+            &event.parts,
+            event.pid,
+            event.filetime,
+        ));
+    }
+    dedup_to_resources(raws)
 }
 
 /// Streams every decoded event in the ETL to `visitor` for schema discovery
@@ -409,6 +416,13 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
             CollectionMode::Analyze => {
                 if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
                 {
+                    acc.add_raw_denial(raw);
+                }
+                for raw in crate::capability_dacl::extract_denials(
+                    &parts,
+                    header.ProcessId,
+                    header.TimeStamp as u64,
+                ) {
                     acc.add_raw_denial(raw);
                 }
             }
@@ -646,16 +660,18 @@ mod tests {
     // module/extractor docs); a live ETW/TDH read isn't used because it
     // needs the provider manifests registered on the machine.
 
-    fn event(event_id: u16, pid: u32, filetime: u64, kv: &[(&str, &str)]) -> CollectedEvent {
+    fn event_with_provider(
+        provider: windows::core::GUID,
+        event_id: u16,
+        pid: u32,
+        filetime: u64,
+        kv: &[(&str, &str)],
+    ) -> CollectedEvent {
         CollectedEvent {
             pid,
             filetime,
             parts: DecodedEventParts {
-                provider: if event_id == 4907 {
-                    crate::extractors::PRIVACY_LEARNING_MODE_PROVIDER
-                } else {
-                    crate::extractors::KERNEL_GENERAL_PROVIDER
-                },
+                provider,
                 event_id,
                 props: kv
                     .iter()
@@ -665,13 +681,38 @@ mod tests {
         }
     }
 
+    fn kernel_event(event_id: u16, pid: u32, filetime: u64, kv: &[(&str, &str)]) -> CollectedEvent {
+        event_with_provider(
+            crate::extractors::KERNEL_GENERAL_PROVIDER,
+            event_id,
+            pid,
+            filetime,
+            kv,
+        )
+    }
+
+    fn permissive_event(
+        event_id: u16,
+        pid: u32,
+        filetime: u64,
+        kv: &[(&str, &str)],
+    ) -> CollectedEvent {
+        event_with_provider(
+            crate::extractors::PRIVACY_LEARNING_MODE_PROVIDER,
+            event_id,
+            pid,
+            filetime,
+            kv,
+        )
+    }
+
     /// Mirrors the real `Mode="Normal"` (`block`) capture: file/registry
     /// access checks as event 14 plus a compact capability denial as event 28.
     #[test]
     fn block_shape_decodes_and_classifies() {
         let events = vec![
             // File write (DELETE | FILE_READ_DATA -> Write), \??\ prefix.
-            event(
+            kernel_event(
                 14,
                 5480,
                 10,
@@ -683,7 +724,7 @@ mod tests {
                 ],
             ),
             // Registry read (KEY_READ 0x20019 -> Read) stays kernel-form.
-            event(
+            kernel_event(
                 14,
                 6860,
                 11,
@@ -695,7 +736,7 @@ mod tests {
                 ],
             ),
             // Capability denial (event 28) with a decoded identifier.
-            event(
+            kernel_event(
                 28,
                 0,
                 12,
@@ -706,10 +747,11 @@ mod tests {
                     ("PackageSid", "S-1-15-3-1"),
                 ],
             ),
+            kernel_event(27, 5480, 13, &[("Category", "2"), ("Detail", "4")]),
         ];
 
         let out = resources_from_events(&events).denials;
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 4);
 
         assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].resource_type, ResourceType::File);
@@ -724,15 +766,21 @@ mod tests {
         assert_eq!(out[2].resource_type, ResourceType::Capability);
         assert_eq!(out[2].access_type, AccessType::Unknown);
         assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
+
+        assert_eq!(out[3].resource, "WriteClipboard");
+        assert_eq!(out[3].resource_type, ResourceType::Ui);
+        assert_eq!(out[3].access_type, AccessType::Unknown);
     }
 
     /// Mirrors the real `Mode="Permissive"` (`allow`) capture: the same
     /// file/registry checks plus a capability check folded into an
     /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
     #[test]
-    fn allow_shape_omits_unidentified_capability_event() {
+    fn allow_shape_recovers_capability_from_dacl() {
+        // DWORD-padded allow ACE carrying S-1-15-3-1 (internetClient).
+        let dacl = "hex:000000000000000001000000010200000000000F0300000001000000";
         let events = vec![
-            event(
+            permissive_event(
                 14,
                 2292,
                 20,
@@ -744,7 +792,7 @@ mod tests {
                 ],
             ),
             // Empty ObjectType == brokered-capability check.
-            event(
+            permissive_event(
                 14,
                 5900,
                 21,
@@ -753,20 +801,29 @@ mod tests {
                     ("ObjectType", "\"\""),
                     ("ObjectName", "\"\""),
                     ("AccessMask", "0x1"),
+                    ("Dacl", dacl),
                 ],
             ),
+            // UI violations continue to come from Kernel-General while the
+            // permissive provider supplies the access-check stream.
+            kernel_event(27, 2292, 22, &[("Category", "1"), ("Detail", "0")]),
         ];
 
         let out = resources_from_events(&events).denials;
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 3);
         assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].access_type, AccessType::Write);
+        assert_eq!(out[1].resource, "internetClient");
+        assert_eq!(out[1].resource_type, ResourceType::Capability);
+        assert_eq!(out[1].pid, 5900);
+        assert_eq!(out[2].resource, "ConvertToGui");
+        assert_eq!(out[2].resource_type, ResourceType::Ui);
     }
 
     #[test]
     fn unidentified_capability_events_are_omitted() {
         let events = vec![
-            event(
+            kernel_event(
                 14,
                 1,
                 1,
@@ -776,8 +833,8 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             ),
-            event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "true")]),
-            event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
+            kernel_event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "true")]),
+            kernel_event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
         ];
         assert!(resources_from_events(&events).denials.is_empty());
     }
@@ -787,10 +844,34 @@ mod tests {
     #[test]
     fn non_actionable_events_are_dropped() {
         let events = vec![
-            event(14, 1, 1, &[("ObjectType", "\"Section\"")]),
-            event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
-            event(9999, 1, 3, &[("Foo", "\"bar\"")]),
+            kernel_event(14, 1, 1, &[("ObjectType", "\"Section\"")]),
+            kernel_event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
+            kernel_event(9999, 1, 3, &[("Foo", "\"bar\"")]),
         ];
+        assert!(resources_from_events(&events).denials.is_empty());
+    }
+
+    #[test]
+    fn provider_event_vocabulary_is_enforced_in_composition() {
+        let events = vec![
+            permissive_event(
+                28,
+                0,
+                1,
+                &[("Denied", "true"), ("PackageSid", "S-1-15-3-1")],
+            ),
+            kernel_event(
+                4907,
+                1,
+                2,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\wrong-provider.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+        ];
+
         assert!(resources_from_events(&events).denials.is_empty());
     }
 }

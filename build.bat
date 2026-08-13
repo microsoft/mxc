@@ -140,6 +140,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             )
         )
         if "%WITH_WSLC%"=="1" (
+            if exist "!BIN_DIR!\wxc-wslc-daemon.exe" (
+                copy /Y "!BIN_DIR!\wxc-wslc-daemon.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
+                echo   Copied !SDK_ARCH!\wxc-wslc-daemon.exe
+            )
             if exist "!BIN_DIR!\wslcsdk.dll" (
                 copy /Y "!BIN_DIR!\wslcsdk.dll" "sdk\node\bin\!SDK_ARCH!\" >nul
                 echo   Copied !SDK_ARCH!\wslcsdk.dll
@@ -154,6 +158,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
         copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
         echo   Copied !RID!\native\mxc_ffi.dll
+        if exist "!BIN_DIR!\plm.exe" (
+            copy /Y "!BIN_DIR!\plm.exe" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+            echo   Copied !RID!\native\plm.exe
+        )
     )
 )
 

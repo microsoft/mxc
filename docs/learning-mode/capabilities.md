@@ -118,9 +118,33 @@ surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
 > **Host requirement.** `captureDenials` requires a feature-enabled Windows
-> build exposing the BaseContainer security-environment and Learning Mode APIs.
-> It is not supported by the AppContainer fallback tiers; unsupported hosts
-> return `backend_unavailable`.
+> build exposing the complete official V2 API set:
+> `StartLearningModeTrace`, `StopLearningModeTrace`,
+> `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
+> `QueryProcessSecurityEnvironmentSupport`, and
+> `CloseProcessSecurityEnvironment`. It is not supported by the AppContainer
+> fallback tiers; unsupported hosts return `backend_unavailable`.
+>
+> Internal validation confirmed that build `26657.1002` exposes only the
+> incompatible earlier contract and is rejected, while build `26663.1000`
+> exposes the complete V2 contract. These are validation points, not a public
+> Windows release-floor commitment; callers should rely on the runtime probe.
+>
+> `captureDenials` cannot be combined with `processContainer.leastPrivilege`;
+> the Windows process security-environment API used for capture does not expose
+> an LPAC token option, so MXC rejects that combination rather than silently
+> weakening the requested policy.
+>
+> `captureDenials` also cannot currently be combined with `network.proxy`.
+> The V2 process security-environment proxy contract requires a separate proxy
+> AppContainer peer identity; MXC rejects the combination until that peer is
+> provisioned by the capture launch path.
+>
+> `filesystem.deniedPaths` requires
+> `QueryProcessSecurityEnvironmentSupport` to advertise
+> `PSE_SUPPORT_FS_DENY`. When the bit is absent, capture fails as
+> `backend_unavailable`; it cannot fall back to AppContainer or host-DACL
+> enforcement.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.

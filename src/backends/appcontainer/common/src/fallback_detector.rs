@@ -7,7 +7,8 @@
 //! runtime probes, produces a [`TierDecision`]. Tiers are described in
 //! `docs/proposals/downlevel_support/basecontainer-fallback-plan-v2.md`:
 //!
-//! 1. **Tier 1 — BaseContainer** (`Experimental_CreateProcessInSandbox`)
+//! 1. **Tier 1 — BaseContainer** (PSEC preferred whenever available, with
+//!    transitional `Experimental_CreateProcessInSandbox` fallback)
 //! 2. **Tier 2 — AppContainer + BFS** (`bfscfg.exe`-driven filesystem policy)
 //! 3. **Tier 3 — AppContainer + DACL** (host-side DACL ACE augmentation)
 //!
@@ -20,27 +21,57 @@ use std::sync::OnceLock;
 
 use wxc_common::models::ContainerPolicy;
 
-/// Selected isolation tier. The variant order corresponds to descending
-/// security strength.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationTier {
-    /// Tier 1 — `Experimental_CreateProcessInSandbox` from `processmodel.dll`.
-    BaseContainer,
-    /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
-    AppContainerBfs,
-    /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
-    AppContainerDacl,
+/// Declares [`IsolationTier`] together with its variant↔string mapping in one
+/// place, so [`ALL`](IsolationTier::ALL), [`as_str`](IsolationTier::as_str), and
+/// the [`FromStr`] impl are all generated from the same tier list and cannot
+/// drift. Adding a tier is a single line in the invocation below; the compiler
+/// then forces `as_str`, `from_str`, and `ALL` to cover it.
+macro_rules! isolation_tiers {
+    ($($(#[$variant_doc:meta])* $variant:ident => $name:literal),+ $(,)?) => {
+        /// Selected isolation tier. The variant order corresponds to descending
+        /// security strength.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum IsolationTier {
+            $($(#[$variant_doc])* $variant,)+
+        }
+
+        impl IsolationTier {
+            /// Every tier, ordered strongest-first (matching the variant order).
+            pub const ALL: [IsolationTier; [$(isolation_tiers!(@count $variant)),+].len()] =
+                [$(IsolationTier::$variant),+];
+
+            /// Stable kebab-case identifier for serialization.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(IsolationTier::$variant => $name,)+
+                }
+            }
+        }
+
+        impl std::str::FromStr for IsolationTier {
+            type Err = ();
+
+            /// Inverse of [`as_str`](Self::as_str). Generated from the same tier
+            /// list via an exhaustive match, so the two directions cannot drift.
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($name => Ok(IsolationTier::$variant),)+
+                    _ => Err(()),
+                }
+            }
+        }
+    };
+    // Counts each variant as one array element so `ALL`'s length tracks the list.
+    (@count $variant:ident) => { () };
 }
 
-impl IsolationTier {
-    /// Stable kebab-case identifier for serialization.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            IsolationTier::BaseContainer => "base-container",
-            IsolationTier::AppContainerBfs => "appcontainer-bfs",
-            IsolationTier::AppContainerDacl => "appcontainer-dacl",
-        }
-    }
+isolation_tiers! {
+    /// Tier 1 — a supported BaseContainer contract from `processmodel.dll`.
+    BaseContainer => "base-container",
+    /// Tier 2 — AppContainer + `bfscfg.exe` BFS filesystem policy.
+    AppContainerBfs => "appcontainer-bfs",
+    /// Tier 3 — AppContainer + DACL-based filesystem policy on host paths.
+    AppContainerDacl => "appcontainer-dacl",
 }
 
 /// Outcome of [`detect`]: the chosen tier plus any operator-visible warnings
@@ -135,6 +166,23 @@ pub fn detect(
     policy: &ContainerPolicy,
     prefer_base_container: bool,
 ) -> Result<TierDecision, FallbackError> {
+    detect_with_base_container_capabilities(
+        policy,
+        prefer_base_container,
+        is_base_container_usable(),
+        base_container_supports_deny_paths(),
+    )
+}
+
+/// Variant of [`detect`] for callers that have already selected which
+/// BaseContainer contract applies to a request and probed that contract's
+/// capabilities.
+pub(crate) fn detect_with_base_container_capabilities(
+    policy: &ContainerPolicy,
+    prefer_base_container: bool,
+    base_container_usable: bool,
+    base_container_supports_deny_paths: bool,
+) -> Result<TierDecision, FallbackError> {
     let denied = !policy.denied_paths.is_empty();
     let has_fs_policy =
         !policy.readwrite_paths.is_empty() || !policy.readonly_paths.is_empty() || denied;
@@ -155,7 +203,7 @@ pub fn detect(
     // the tests silently no-op'd).
     #[cfg(test)]
     if let Ok(forced) = std::env::var("MXC_FORCE_TIER") {
-        if let Some(tier) = parse_force_tier(&forced) {
+        if let Ok(tier) = forced.parse::<IsolationTier>() {
             return forced_decision(tier, policy, denied);
         }
     }
@@ -163,11 +211,11 @@ pub fn detect(
     let mut warnings: Vec<String> = Vec::new();
 
     // Tier 1 — BaseContainer
-    if prefer_base_container && is_base_container_usable() {
-        // Keep deny on Tier 1 only with native fs_deny support
-        // (SANDBOX_CAP_FS_DENY); T1 applies no host DACL, so otherwise
-        // fall through to a DACL-enforcing tier.
-        if !denied || base_container_supports_deny_paths() {
+    if prefer_base_container && base_container_usable {
+        // Keep deny on Tier 1 only with native deny-path support from the
+        // selected PSEC or SBOX contract. T1 applies no host DACL, so
+        // otherwise fall through to a DACL-enforcing tier.
+        if !denied || base_container_supports_deny_paths {
             return Ok(TierDecision {
                 tier: IsolationTier::BaseContainer,
                 needs_dacl_augmentation: false,
@@ -176,7 +224,8 @@ pub fn detect(
             });
         }
         warnings.push(
-            "BaseContainer usable but this OS does not advertise SANDBOX_CAP_FS_DENY; \
+            "BaseContainer usable but the selected OS contract does not advertise native \
+             deniedPaths support; \
              deniedPaths cannot be enforced natively at Tier 1 — falling back to AppContainer \
              for deniedPaths enforcement"
                 .to_string(),
@@ -413,16 +462,6 @@ fn check_write_dac_path(path: &Path) -> Result<(), FallbackError> {
             path: path.to_path_buf(),
             reason: e.to_string(),
         }),
-    }
-}
-
-#[cfg(test)]
-fn parse_force_tier(s: &str) -> Option<IsolationTier> {
-    match s {
-        "base-container" => Some(IsolationTier::BaseContainer),
-        "appcontainer-bfs" => Some(IsolationTier::AppContainerBfs),
-        "appcontainer-dacl" => Some(IsolationTier::AppContainerDacl),
-        _ => None,
     }
 }
 
@@ -686,7 +725,7 @@ mod tests {
     }
     #[test]
     fn empty_policy_t1_when_bc_present_and_preferred() {
-        let _g = ForceTierGuard::set("base-container");
+        let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let policy = empty_policy();
         let d = detect(&policy, true).expect("forced base-container should succeed");
         assert!(matches!(d.tier, IsolationTier::BaseContainer));
@@ -695,7 +734,7 @@ mod tests {
     }
     #[test]
     fn empty_policy_no_filesystem_t2_path() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let policy = empty_policy();
         let d = detect(&policy, true).expect("forced bfs should succeed");
         assert!(matches!(d.tier, IsolationTier::AppContainerBfs));
@@ -703,7 +742,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t1() {
-        let _g = ForceTierGuard::set("base-container");
+        let _g = ForceTierGuard::set_tier(IsolationTier::BaseContainer);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -713,7 +752,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t2() {
-        let _g = ForceTierGuard::set("appcontainer-bfs");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -723,7 +762,7 @@ mod tests {
     }
     #[test]
     fn denied_paths_disabled_blocks_t3() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = policy_with_denied();
         policy.fallback.allow_dacl_mutation = false;
         assert!(matches!(
@@ -785,7 +824,7 @@ mod tests {
         );
         assert!(d.needs_dacl_augmentation);
         assert!(
-            d.warnings.iter().any(|w| w.contains("SANDBOX_CAP_FS_DENY")),
+            d.warnings.iter().any(|w| w.contains("deniedPaths support")),
             "expected the capability-absent fall-through warning, got: {:?}",
             d.warnings
         );
@@ -800,19 +839,29 @@ mod tests {
         );
     }
     #[test]
+    fn tier_name_round_trips_through_from_str() {
+        // `FromStr` is derived from `as_str` via `ALL`, so every tier must
+        // round-trip and the set stays in sync automatically.
+        for tier in IsolationTier::ALL {
+            assert_eq!(tier.as_str().parse::<IsolationTier>(), Ok(tier));
+        }
+    }
+
+    #[test]
     fn force_tier_env_var_parses_all_three_values() {
-        assert!(matches!(
-            parse_force_tier("base-container"),
-            Some(IsolationTier::BaseContainer)
-        ));
-        assert!(matches!(
-            parse_force_tier("appcontainer-bfs"),
-            Some(IsolationTier::AppContainerBfs)
-        ));
-        assert!(matches!(
-            parse_force_tier("appcontainer-dacl"),
-            Some(IsolationTier::AppContainerDacl)
-        ));
+        assert_eq!(
+            "base-container".parse::<IsolationTier>(),
+            Ok(IsolationTier::BaseContainer)
+        );
+        assert_eq!(
+            "appcontainer-bfs".parse::<IsolationTier>(),
+            Ok(IsolationTier::AppContainerBfs)
+        );
+        assert_eq!(
+            "appcontainer-dacl".parse::<IsolationTier>(),
+            Ok(IsolationTier::AppContainerDacl)
+        );
+        assert!("not-a-real-tier".parse::<IsolationTier>().is_err());
     }
     #[test]
     fn force_tier_env_var_invalid_value_falls_through_to_real_probes() {
@@ -970,7 +1019,7 @@ mod tests {
     }
     #[test]
     fn compute_decision_with_force_tier_carries_warnings_empty() {
-        let _g = ForceTierGuard::set("appcontainer-dacl");
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = empty_policy();
         policy.fallback.allow_dacl_mutation = true;
         let d = detect(&policy, true).expect("forced dacl with allow_dacl_mutation=true");

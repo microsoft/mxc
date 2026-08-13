@@ -180,6 +180,9 @@ impl BubblewrapScriptRunner {
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
+        if let Some(warning) = bwrap_command::local_network_diagnostic(request, proxy.address()) {
+            let _ = writeln!(logger, "{}", warning);
+        }
         let args = bwrap_command::build_args_classified(request, proxy.address(), denied_files);
         let _ = writeln!(
             logger,

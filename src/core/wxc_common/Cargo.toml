@@ -26,7 +26,7 @@ uuid = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Globalization"] }
 windows-core = { workspace = true }
 widestring = { workspace = true }
 winreg = { workspace = true }

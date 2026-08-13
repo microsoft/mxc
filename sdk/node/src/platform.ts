@@ -56,14 +56,14 @@ function queryWindowsRegistry(key: string, valueName: string): string | null {
 
 /**
  * Result of querying the host's Windows build number, or `null` when the
- * registry values are missing or unparseable.
+ * registry value is missing or unparseable.
  */
-type WindowsBuild = { major: number; minor: number } | null;
+type WindowsBuild = { major: number } | null;
 
 /**
- * Default implementation that reads `CurrentBuild` / `UBR` from the
- * registry. Replaceable via {@link _setWindowsBuildQuery} in tests so we
- * can exercise the IsolationSession version gate deterministically.
+ * Default implementation that reads `CurrentBuild` from the registry.
+ * Replaceable via {@link _setWindowsBuildQuery} in tests so we can exercise
+ * the `processcontainer` build floor deterministically.
  */
 function defaultWindowsBuildQuery(): WindowsBuild {
   const registryPath = 'HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion';
@@ -75,12 +75,7 @@ function defaultWindowsBuildQuery(): WindowsBuild {
   if (isNaN(major)) {
     return null;
   }
-  // `UBR` is only needed for the IsolationSession minor-build gate, so an
-  // unreadable revision degrades to 0 rather than discarding `CurrentBuild` —
-  // otherwise a missing value would silently bypass the processcontainer
-  // build floor.
-  const minor = Number(queryWindowsRegistry(registryPath, 'UBR'));
-  return { major, minor: isNaN(minor) ? 0 : minor };
+  return { major };
 }
 
 let windowsBuildQuery: () => WindowsBuild = defaultWindowsBuildQuery;
@@ -99,24 +94,6 @@ export function _setWindowsBuildQuery(fn: (() => WindowsBuild) | null): void {
  * both in sync.
  */
 const MIN_PROCESSCONTAINER_BUILD = 26100;
-
-/**
- * Check whether the host supports the IsolationSession backend.
- * Requires Windows Insider Preview build 26300.8553 or later.
- *
- * No internal cache — `getPlatformSupport` memoizes the full result, and
- * registry reads are cheap relative to the rest of the probe.
- */
-function isIsoSessionSupported(): boolean {
-  const build = windowsBuildQuery();
-  if (!build) {
-    return false;
-  }
-
-  // Pin to the Windows Insider Preview build that introduced IsolationSession
-  // (26300.8553+). Other major builds are not yet supported.
-  return build.major === 26300 && build.minor >= 8553;
-}
 
 let windowsSandboxAvailableCache: boolean | undefined;
 
@@ -231,11 +208,12 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 }
 
 /**
- * Run the probe binary and merge its results into `support`. On any
- * failure (binary missing, timeout, malformed JSON, unknown tier), the
- * function silently leaves `support.isolationTier` and
- * `support.isolationWarnings` unset — callers see the same contract as
- * pre-Phase-5 SDKs.
+ * Run the probe binary and merge its results into `support`: the isolation
+ * tier, any warnings, portable UI capabilities, and — when the probe reports
+ * the isolation-session service available — the `isolation_session` method.
+ * On any failure (binary missing, timeout, malformed JSON), the function
+ * silently leaves those fields unset, so callers see the same contract as
+ * pre-probe SDKs.
  */
 function populateIsolationFromProbe(support: PlatformSupport): void {
   try {
@@ -255,6 +233,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
       if (facts && typeof facts === 'object') {
         if (isUiCapabilitySupport(facts.uiCapabilities)) {
           support.uiCapabilities = facts.uiCapabilities;
+        }
+        if (facts.isolationSessionAvailable === true) {
+          support.availableMethods.push('isolation_session');
         }
       }
     }
@@ -329,14 +310,16 @@ function computeSupport(): PlatformSupport {
   if (isWindowsSandboxAvailable()) {
     methods.push('windows_sandbox');
   }
-  if (isIsoSessionSupported()) {
-    methods.push('isolation_session');
-  }
   support.availableMethods = methods;
+  // Runs before the verdict below so `isolation_session`, which only the probe
+  // can report, is counted among the alternatives on a below-floor host.
+  populateIsolationFromProbe(support);
 
-  if (!methods.includes('processcontainer')) {
+  if (!support.availableMethods.includes('processcontainer')) {
     const alternatives =
-      methods.length > 0 ? ` (experimental backends available: ${methods.join(', ')})` : '';
+      support.availableMethods.length > 0
+        ? ` (experimental backends available: ${support.availableMethods.join(', ')})`
+        : '';
     support.reason =
       `Windows build ${build?.major} is below ${MIN_PROCESSCONTAINER_BUILD}, ` +
       `the minimum supported build (Windows 11 24H2)${alternatives}`;
@@ -344,7 +327,6 @@ function computeSupport(): PlatformSupport {
   }
 
   support.isSupported = true;
-  populateIsolationFromProbe(support);
   return support;
 }
 

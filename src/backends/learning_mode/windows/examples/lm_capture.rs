@@ -13,7 +13,8 @@
 //!    `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT` and launch `cmd.exe` with
 //!    `CreateProcessW`,
 //! 4. wait for it to exit,
-//! 5. [`CaptureSession::finish`] — seal the ETL to a temp path + close the environment,
+//! 5. [`CaptureSession::finish`] — stop and deliver the ETL, close the trace, then close
+//!    the environment,
 //! 6. assert the ETL file was produced (non-empty).
 //!
 //! Run on a feature-enabled Windows build (elevated):
@@ -40,13 +41,13 @@ fn main() {
 mod windows_impl {
     use std::path::PathBuf;
 
-    use flatbuffers::FlatBufferBuilder;
     use learning_mode_windows::{
         CaptureSession, LearningModeApi, SecurityEnvironmentApi, SecurityEnvironmentStartupInfo,
         PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE,
     };
-    use sandbox_spec::base_container_layout::{
-        finish_sandbox_spec_buffer, SandboxSpec, SandboxSpecArgs,
+    use process_security_environment_spec::process_security_environment_layout::{
+        finish_process_security_environment_buffer, ProcessSecurityEnvironment,
+        ProcessSecurityEnvironmentArgs, SchemaVersion,
     };
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows::Win32::System::Threading::{
@@ -55,26 +56,22 @@ mod windows_impl {
     };
     use windows_core::{PCWSTR, PWSTR};
 
-    /// Matches the schema version BaseContainer embeds in every spec payload.
-    const SANDBOX_SPEC_VERSION: &str = "0.1.0";
-
-    /// Build a minimal FlatBuffer `SandboxSpec` carrying the learning-mode capability.
+    /// Build a minimal PSEC 1.0 FlatBuffer carrying the learning-mode capability.
     fn build_sandbox_spec() -> Vec<u8> {
-        let mut builder = FlatBufferBuilder::with_capacity(256);
-        let version = builder.create_string(SANDBOX_SPEC_VERSION);
+        let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(256);
+        let version = SchemaVersion::new(1, 0);
         // `permissiveLearningMode` is the capability the SandboxEngine functest uses to
         // exercise the learning-mode trace; it reliably drives recorded events.
         let capabilities = builder.create_string("permissiveLearningMode");
-        let spec = SandboxSpec::create(
+        let spec = ProcessSecurityEnvironment::create(
             &mut builder,
-            &SandboxSpecArgs {
-                version: Some(version),
-                app_container: true,
+            &ProcessSecurityEnvironmentArgs {
+                version: Some(&version),
                 capabilities: Some(capabilities),
                 ..Default::default()
             },
         );
-        finish_sandbox_spec_buffer(&mut builder, spec);
+        finish_process_security_environment_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
     }
 
@@ -128,7 +125,7 @@ mod windows_impl {
             }
             Err(e) => {
                 eprintln!("launch failed: {e}");
-                // `session` drops here → trace discarded + environment closed.
+                // `session` drops here → trace closed/discarded + environment closed.
                 return 1;
             }
         };
@@ -139,7 +136,7 @@ mod windows_impl {
             eprintln!("CaptureSession::finish failed: {e}");
             return 1;
         }
-        println!("CaptureSession::finish OK — trace sealed, environment closed");
+        println!("CaptureSession::finish OK — trace delivered and closed, environment closed");
 
         match std::fs::metadata(&etl_path) {
             Ok(meta) => {

@@ -1,0 +1,16 @@
+{
+  "version": "0.6.0-alpha",
+  "containerId": "isolation-session-one-shot-lifecycle-rejected",
+  "containment": "isolation_session",
+  "network": {
+    "defaultPolicy": "allow",
+    "allowLocalNetwork": true
+  },
+  "lifecycle": {
+    "destroyOnExit": false
+  },
+  "process": {
+    "commandLine": "echo unreachable",
+    "timeout": 30000
+  }
+}

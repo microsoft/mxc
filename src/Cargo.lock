@@ -90,6 +90,7 @@ dependencies = [
  "getrandom 0.2.17",
  "learning_mode_core",
  "learning_mode_windows",
+ "process_security_environment_spec",
  "sandbox_spec",
  "serde",
  "serde_json",
@@ -1188,8 +1189,10 @@ dependencies = [
 name = "isolation_session_common"
 version = "0.7.0"
 dependencies = [
+ "base64",
  "isolation_session_bindings",
  "serde",
+ "serde_json",
  "windows",
  "windows-collections",
  "windows-core",
@@ -1281,7 +1284,7 @@ version = "0.7.0"
 dependencies = [
  "flatbuffers",
  "learning_mode_core",
- "sandbox_spec",
+ "process_security_environment_spec",
  "thiserror",
  "windows",
  "windows-core",
@@ -1394,6 +1397,7 @@ dependencies = [
  "nix",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "wxc_common",
 ]
@@ -1482,6 +1486,15 @@ name = "mxc_build_common"
 version = "0.7.0"
 dependencies = [
  "winresource",
+]
+
+[[package]]
+name = "mxc_config_contract"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -1734,9 +1747,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "embed-manifest",
+ "getrandom 0.2.17",
+ "learning_mode_core",
+ "learning_mode_windows",
  "mxc_build_common",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
  "windows",
@@ -1775,6 +1791,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "process_security_environment_spec"
+version = "0.7.0"
+dependencies = [
+ "flatbuffers",
 ]
 
 [[package]]
@@ -3105,10 +3128,14 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 name = "wslc_common"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "libloading",
+ "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tar",
  "tempfile",
+ "uuid",
  "windows",
  "wxc_common",
  "zip",
@@ -3249,6 +3276,22 @@ dependencies = [
  "mxc_build_common",
  "windows",
  "windows-core",
+ "wxc_common",
+]
+
+[[package]]
+name = "wxc_wslc_daemon"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "mxc_build_common",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
+ "windows",
+ "wslc_common",
  "wxc_common",
 ]
 

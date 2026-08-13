@@ -24,6 +24,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -685,27 +686,27 @@ fn spawn_error(error: &std::io::Error) -> String {
 
 /// Resolve the working directory for the sandboxed child.
 ///
-/// An explicit `working_directory` always wins. Otherwise — rather than
-/// inheriting the host process's cwd, which under the deny-by-default Seatbelt
-/// profile may be inaccessible and make `getcwd()` fail (leaking a
-/// "getcwd: ... Operation not permitted" line on the child's stderr) — we pick
-/// a directory the profile is guaranteed to allow: the first readwrite path,
-/// else the first readonly path, else `/` (always readable per the baseline).
+/// Delegates the precedence rule (explicit `working_directory`, else the first
+/// filesystem-policy grant that is an existing directory) to the shared
+/// [`ExecutionRequest::resolved_working_directory_with`], then layers the two
+/// Seatbelt-specific concerns on top:
+///
+/// * `~`/`~/…` policy paths are expanded exactly as the sandbox profile expands
+///   them — both when probing a candidate and in the returned value, so
+///   `Command::current_dir` never receives a literal `~` (which would fail).
+/// * When nothing is granted we fall back to `/`, which the baseline profile
+///   always allows, rather than inheriting the host process's cwd: under the
+///   deny-by-default profile that directory may be unreadable and make
+///   `getcwd()` fail, leaking a "getcwd: … Operation not permitted" line onto
+///   the child's stderr.
 fn resolve_working_directory(request: &ExecutionRequest) -> String {
-    if !request.working_directory.is_empty() {
-        return request.working_directory.clone();
+    let expand = |path: &str| {
+        crate::profile_builder::expand_tilde(path).unwrap_or_else(|_| path.to_string())
+    };
+    match request.resolved_working_directory_with(|path| Path::new(&expand(path)).is_dir()) {
+        Some(resolved) => expand(resolved.path),
+        None => "/".to_string(),
     }
-    let default = request
-        .policy
-        .readwrite_paths
-        .first()
-        .or_else(|| request.policy.readonly_paths.first())
-        .cloned()
-        .unwrap_or_else(|| "/".to_string());
-    // The default may be a `~`/`~/…` policy path; expand it exactly as the
-    // sandbox profile does so `Command::current_dir` never gets a literal `~`
-    // (which would fail). Fall back to the unexpanded value if `HOME` is unset.
-    crate::profile_builder::expand_tilde(&default).unwrap_or(default)
 }
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared

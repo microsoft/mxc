@@ -12,7 +12,14 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASSED=0
 FAILED=0
+SKIPPED=0
 FAILURES=""
+SKIPS=""
+
+# Exit status a child test uses to report an honest skip (missing prerequisite
+# such as no root, no ip6tables, or an unbuilt binary). Matches the GNU
+# Automake convention. A skip must never be counted as a pass.
+SKIP_EXIT=77
 
 # Check for Windows line endings in test scripts
 check_line_endings() {
@@ -29,9 +36,18 @@ run_test() {
     local name="$1"
     local script="$2"
     echo "=== $name ==="
-    if bash "$script"; then
+    # Do not let a nonzero exit abort the runner; classify it instead.
+    set +e
+    bash "$script"
+    local status=$?
+    set -e
+    if [ "$status" -eq 0 ]; then
         echo "PASS: $name"
         PASSED=$((PASSED + 1))
+    elif [ "$status" -eq "$SKIP_EXIT" ]; then
+        echo "SKIP: $name"
+        SKIPPED=$((SKIPPED + 1))
+        SKIPS="$SKIPS\n  - $name"
     else
         echo "FAIL: $name"
         FAILED=$((FAILED + 1))
@@ -46,11 +62,23 @@ run_test "LXC Object Validation" "$SCRIPT_DIR/run_lxc_object_test.sh"
 run_test "LXC Most-Specific Path" "$SCRIPT_DIR/run_lxc_most_specific_test.sh"
 run_test "LXC Denied Masking" "$SCRIPT_DIR/run_lxc_denied_masking_test.sh"
 run_test "LXC Network" "$SCRIPT_DIR/run_lxc_network_test.sh"
+run_test "LXC Network IPv6+CIDR" "$SCRIPT_DIR/run_lxc_network_ipv6_cidr_test.sh"
+run_test "LXC Network Invalid CIDR" "$SCRIPT_DIR/run_lxc_network_invalid_cidr_test.sh"
+run_test "LXC Network Dual-Stack Hostname" "$SCRIPT_DIR/run_lxc_network_dualstack_test.sh"
+run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 
 echo "================================"
-echo "Results: $PASSED passed, $FAILED failed"
+echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped"
+if [ "$SKIPPED" -gt 0 ]; then
+    echo -e "Skipped (prerequisite missing, not run):$SKIPS"
+fi
+# A suite that ran nothing must not look green. Make an all-skip (or empty) run
+# visibly distinct from a real pass.
+if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+    echo "WARNING: no tests actually executed; every test was skipped."
+fi
 if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"
     exit 1

@@ -328,50 +328,59 @@ describe('findWxcExecutable failure modes', () => {
   });
 });
 
-// IsolationSession availability is gated on Windows Insider Preview build
-// 26300.8553+. These tests stub the build-query seam so the gate can be
-// exercised deterministically without depending on the host's actual build.
+// IsolationSession availability is now reported by the native probe
+// (`wxc-exec --probe` -> probes.isolationSessionAvailable). These tests stub
+// the probe runner so the gate can be exercised deterministically without
+// depending on the host's actual build.
 describe('isolation_session availability gate', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
+    // Pin the host build above the `processcontainer` floor so these assertions
+    // exercise the probe alone, not whatever build the CI runner happens to be.
+    _setWindowsBuildQuery(() => ({ major: 26100 }));
   });
 
   afterEach(() => {
+    _setProbeRunner(null);
     _setWindowsBuildQuery(null);
     _resetPlatformSupportCache();
   });
 
-  it('omits isolation_session when minor build is below 8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8552 }));
+  it('includes isolation_session when the probe reports it available', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { isolationSessionAvailable: true } }),
+    );
     const support = getPlatformSupport();
     assert.ok(support.isSupported, 'Windows is supported regardless of iso gate');
+    assert.ok(
+      support.availableMethods.includes('isolation_session'),
+      `expected isolation_session present, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits isolation_session when the probe reports it unavailable', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { isolationSessionAvailable: false } }),
+    );
+    const support = getPlatformSupport();
     assert.ok(
       !support.availableMethods.includes('isolation_session'),
       `expected isolation_session absent, got: ${support.availableMethods.join(',')}`,
     );
   });
 
-  it('includes isolation_session when build is exactly 26300.8553', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 8553 }));
-    const support = getPlatformSupport();
-    assert.ok(support.availableMethods.includes('isolation_session'));
-  });
-
-  it('includes isolation_session when minor is newer (26300.9999)', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26300, minor: 9999 }));
-    const support = getPlatformSupport();
-    assert.ok(support.availableMethods.includes('isolation_session'));
-  });
-
-  it('omits isolation_session when major is newer than 26300 (gate is pinned to the Insider Preview)', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => ({ major: 26400, minor: 0 }));
+  it('omits isolation_session when the probes block omits the field', { skip: !isWindows }, () => {
+    _setProbeRunner(() => JSON.stringify({ tier: 'base-container', probes: {} }));
     const support = getPlatformSupport();
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('omits isolation_session when the registry query returns null', { skip: !isWindows }, () => {
-    _setWindowsBuildQuery(() => null);
+  it('omits isolation_session when the probe fails', { skip: !isWindows }, () => {
+    _setProbeRunner(() => {
+      throw new Error('probe failed');
+    });
     const support = getPlatformSupport();
+    assert.ok(support.isSupported, 'Windows support is independent of the probe');
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
@@ -388,6 +397,7 @@ describe('processcontainer build gate', () => {
 
   afterEach(() => {
     _setWindowsBuildQuery(null);
+    _setProbeRunner(null);
     _resetPlatformSupportCache();
   });
 
@@ -395,7 +405,7 @@ describe('processcontainer build gate', () => {
     // 19045 = Windows 10 22H2, 22000 = Windows 11 21H2, 22631 = 23H2.
     for (const major of [19045, 22000, 22631, 26099]) {
       _resetPlatformSupportCache();
-      _setWindowsBuildQuery(() => ({ major, minor: 0 }));
+      _setWindowsBuildQuery(() => ({ major }));
       const support = getPlatformSupport();
       assert.ok(!support.isSupported, `build ${major} should be unsupported`);
       assert.ok(
@@ -403,17 +413,13 @@ describe('processcontainer build gate', () => {
         `build ${major} must not offer processcontainer`,
       );
       assert.match(support.reason ?? '', new RegExp(`${major}`));
-      // IsolationSession pins 26300 exactly, so it can never appear below the
-      // floor. Windows Sandbox has a lower floor and may still be listed, but
-      // it is experimental-only and must not make the host supported.
-      assert.ok(!support.availableMethods.includes('isolation_session'));
     }
   });
 
   it('reports supported at or above build 26100', { skip: !isWindows }, () => {
     for (const major of [26100, 26200, 26600]) {
       _resetPlatformSupportCache();
-      _setWindowsBuildQuery(() => ({ major, minor: 0 }));
+      _setWindowsBuildQuery(() => ({ major }));
       const support = getPlatformSupport();
       assert.ok(support.isSupported, `build ${major} should be supported`);
       assert.ok(support.availableMethods.includes('processcontainer'));
@@ -427,6 +433,30 @@ describe('processcontainer build gate', () => {
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
     assert.ok(support.availableMethods.includes('processcontainer'));
+  });
+
+  it(
+    'reports processcontainer on a supported build regardless of the probe',
+    { skip: !isWindows },
+    () => {
+      // Isolation-session availability is orthogonal to the build gate.
+      _setWindowsBuildQuery(() => ({ major: 26100 }));
+      _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
+      const support = getPlatformSupport();
+      assert.ok(support.isSupported);
+      assert.ok(support.availableMethods.includes('processcontainer'));
+    },
+  );
+
+  // A below-floor host can still run the experimental backends, and the reason
+  // must say so rather than reading as a flat "unsupported host".
+  it('lists probe-reported backends as alternatives below the floor', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 22631 }));
+    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: true } }));
+    const support = getPlatformSupport();
+    assert.ok(!support.isSupported);
+    assert.ok(support.availableMethods.includes('isolation_session'));
+    assert.match(support.reason ?? '', /experimental backends available: .*isolation_session/);
   });
 });
 
