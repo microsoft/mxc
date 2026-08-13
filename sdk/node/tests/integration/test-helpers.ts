@@ -262,6 +262,12 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
           });
           return result.sandboxId;
         }
+        case 'wslc': {
+          const result = await provisionSandbox('wslc', undefined, {
+            experimental: true,
+          });
+          return result.sandboxId;
+        }
         default: {
           const unhandled: never = backend;
           throw new Error(`probeStateAwareRuntime: unhandled backend ${String(unhandled)}`);

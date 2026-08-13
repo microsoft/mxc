@@ -11,9 +11,10 @@ import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
 // WSLc's state-aware surface shipped at a later schema version than the
-// isolation_session default above. It is intentionally NOT gate-locked to the
-// canonical `stateAware` constant (which tracks isolation_session): the two
-// backends were promoted independently. See `DEFAULT_STATE_AWARE_VERSION`.
+// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
+// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
+// backends were promoted independently, so WSLc carries its own later default.
+// See `DEFAULT_STATE_AWARE_VERSION`.
 export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
 
 // Wire-format cross-cutting fields that live at the envelope's top level.
@@ -39,13 +40,26 @@ const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> 
   wslc: WSLC_STATE_AWARE_VERSION,
 };
 
-// Mapping from a sandboxId's leading prefix segment to the wire-format
-// backend key. Extended as more state-aware backends opt in.
-export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
-  [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
-  [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
-  [WSLC_ID_PREFIX]: 'wslc',
+// Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
+// string>` so adding a backend to the union without registering a prefix here
+// is a compile error — the same exhaustiveness guarantee the config, metadata,
+// and default-version registries carry. Without it a new backend would compile
+// with no prefix and fail every non-provision call at runtime with
+// `malformed_id`.
+export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
+  isolation_session: ISOLATION_SESSION_ID_PREFIX,
+  windows_sandbox: WINDOWS_SANDBOX_ID_PREFIX,
+  wslc: WSLC_ID_PREFIX,
 };
+
+// Reverse lookup (prefix → backend), derived from the exhaustive map above so
+// the two can never drift. Used to route a sandboxId's leading prefix segment
+// to its wire-format backend key.
+export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = Object.fromEntries(
+  (Object.entries(BACKEND_TO_PREFIX) as [StateAwareContainmentBackend, string][]).map(
+    ([backend, prefix]) => [prefix, backend],
+  ),
+);
 
 /**
  * Resolves the wire-format backend key for a sandbox id by reading its
