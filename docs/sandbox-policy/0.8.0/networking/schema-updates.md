@@ -128,6 +128,14 @@ internet access. On ProcessContainer, `ingress.default: "allow"` grants the bidi
 but deny-default `egress` still blocks outbound public and private destinations unless an allow rule or the configured
 proxy path applies.
 
+Backend-specific migration can require an additional acknowledgment without changing the shared field mapping:
+
+- Seatbelt cannot separate host loopback from other local inbound traffic, so `ingress.hostLoopback` must equal
+  `ingress.default`; a differing pair is rejected.
+- Isolation Session cannot enforce any network restriction. A schema 0.7 unrestricted acknowledgment migrates to
+  `egress.default: "allow"`, `ingress.default: "allow"`, and `ingress.hostLoopback: "allow"`, with no egress rules or
+  runtime proxy. Every other schema 0.8 network posture is rejected.
+
 ## Backend-specific schema 0.8 configuration
 
 | Backend | Configuration |

@@ -27,7 +27,8 @@ The examples below use the proposed schema 0.8 network shape.
 
 Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
 requires `ingress.default: "allow"` before the container can communicate with private-network addresses. Enabling it
-also permits private-network server traffic. `egress` rules still govern outbound public and private destinations;
+also permits private-network server traffic. `ingress.default` gates whether the capability exists; `egress` then
+narrows the outbound public and private destinations reachable through the granted capabilities.
 `ingress.hostLoopback` remains the separate host-loopback control.
 
 | Egress default | Ingress default | AppContainer capabilities | Result |
@@ -69,7 +70,7 @@ This matrix covers the direction defaults without explicit internet egress rules
 | Client capability | `privateNetworkClientServer`, enabled by `ingress.default: "allow"` |
 | Proxy capabilities | `privateNetworkClientServer`; also `internetClient` for external destinations |
 | Network policy | `egress.default: "deny"` and `ingress.default: "allow"` |
-| Enforcement | WFP permits only the configured loopback proxy endpoint; private network is bidirectional |
+| Enforcement | Capability is bidirectional; WFP permits client egress only to the configured proxy endpoint |
 
 This is a ProcessContainer-specific mapping. Callers that need a private-network proxy or any other private-network
 communication must set `ingress.default` to `"allow"` and accept that Windows enables both private-network client and
@@ -86,9 +87,10 @@ MXC also sets the standard proxy environment variables for libraries that use co
 traffic that bypasses the proxy is blocked. On an enforcing BaseContainer path, per-container WFP permits egress only to
 the configured loopback proxy address and port and blocks direct public and private destinations.
 
-Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. The proxy identity path determines whether
-`ingress.hostLoopback` remains denied or is explicitly allowed. Direct egress allow and deny rules do not apply when
-`runtimeConfig.networkProxy` is present.
+Model 2 requires `egress.default: "deny"` and `ingress.default: "allow"`. When `allowedProxyPeer` names a package or
+AppContainer profile, MXC authorizes only that peer and `ingress.hostLoopback` remains denied. An identity-less host
+proxy omits `allowedProxyPeer` and requires `ingress.hostLoopback: "allow"`. Direct egress allow and deny rules do not
+apply when `runtimeConfig.networkProxy` is present.
 
 The proxy endpoint is runtime metadata, not shared network policy. MXC configures the per-container WinHTTP proxy,
 applies WFP endpoint scoping, and grants the private-network capability selected by `ingress.default`.

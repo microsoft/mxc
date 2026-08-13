@@ -91,6 +91,8 @@ Ingress has two allow/deny controls and no rule arrays:
 The specific `hostLoopback` value overrides `default` for the host-loopback
 path. For example, `default: deny` with `hostLoopback: allow` permits
 bidirectional host-loopback connectivity while denying other inbound traffic.
+A backend that cannot enforce both directions must reject `hostLoopback: allow`
+rather than accept it with partial enforcement.
 
 **Scope:**
 
@@ -184,6 +186,9 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 | `ports[].protocol` | tcp / udp / icmp / any | `any` matches all protocols. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
+
+`icmp` expands by destination address family. A rule containing IPv4 and IPv6 peers produces both ICMPv4 and ICMPv6
+filters; a rule without `to` also produces both.
 
 Ingress has no CIDR peers or port rules. `ingress.default` and
 `ingress.hostLoopback` are the complete GA ingress surface.
@@ -384,7 +389,7 @@ Model 2 permits only the proxy endpoint.
 | Proxy routing (HTTP/S) | `HTTP_PROXY`/`HTTPS_PROXY` set to the loopback proxy; cooperating clients route there. | A minority of clients ignore the variables; their traffic is dropped by the egress restriction, not bypassed. |
 | IP/CIDR / port / protocol allow-lists | Not supported. | |
 | Per-sandbox scoping | Seatbelt profile per sandbox-exec invocation | |
-| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`; differing `default` and `hostLoopback` values are unsupported. |
+| Inbound | Seatbelt `network-inbound (local ip)` rule | Preserves current `allowLocalNetwork` behavior through `ingress.default`; differing `default` and `hostLoopback` values are rejected with `policy_validation`. |
 | DNS | Direct outbound DNS to an external resolver is blocked (egress confined to the proxy port); cooperating clients pass hostnames to the proxy, which resolves them. All others would be blocked. | |
 | Bypass resistance | Medium. Egress is profile-restricted to the proxy port, so raw-socket and direct-DNS attempts are denied. Weaker than a separate network namespace (Seatbelt shares the host network stack) and depends on a correct profile. | |
 
