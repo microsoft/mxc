@@ -86,11 +86,15 @@ Model 2 involves two separate processes:
 - **Proxy process:** a caller-created process that is already running outside the MXC client container. It may be
   packaged or unpackaged, with or without AppContainer isolation.
 
-| External proxy | `allowedProxyPeer` | MXC client policy | Proxy binding |
+| External proxy | `allowedProxyPeer` | MXC client policy | Additional proxy identity |
 |---|---|---|---|
-| Packaged proxy | PFN | `default: "allow"`; `hostLoopback: "deny"` | Identity and endpoint |
-| Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | Identity and endpoint |
-| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | Host loopback and endpoint |
+| Packaged proxy | PFN | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
+| Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
+| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
+
+Regardless of proxy type, an enforcing BaseContainer path applies per-container WFP rules that permit the MXC client
+container to connect only to the configured loopback address and port. `allowedProxyPeer` adds proxy identity binding
+on top of that common endpoint enforcement.
 
 All deployments use `ingress.default: "allow"` because ProcessContainer uses it as the capability gate for
 `privateNetworkClientServer`. This is a Windows capability requirement, not a statement that the proxy connection
@@ -132,10 +136,9 @@ An unpackaged non-AppContainer proxy has no package family or AppContainer profi
 
 MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
 identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
-bidirectional host-loopback access. This is the lowest-enforcement deployment option. On an enforcing BaseContainer
-path, WFP still restricts the MXC client container's egress to the configured loopback address and port, but Windows
-cannot verify which host process owns that endpoint. It is intended primarily for development and debugging and
-requires an installer- or administrator-owned firewall rule.
+bidirectional host-loopback access. This is the lowest-enforcement deployment option because common WFP endpoint
+scoping remains, but Windows cannot verify which host process owns that endpoint. It is intended primarily for
+development and debugging and requires an installer- or administrator-owned firewall rule.
 
 #### HTTP client guidance
 
@@ -170,14 +173,15 @@ The caller must:
 
 #### Proxy identity and firewall authorization
 
-An AppContainer proxy is recommended. Supported deployment options are:
+The WFP loopback-address-and-port restriction described above applies to every row. The table compares the additional
+OS enforcement provided for the external proxy. A packaged AppContainer proxy provides the best enforcement.
 
-| Proxy deployment | `allowedProxyPeer` | Enforcement |
+| Proxy deployment | `allowedProxyPeer` | Additional OS enforcement |
 |---|---|---|
-| Packaged AppContainer | Package family name | AppContainer isolation and package firewall rule |
+| Packaged AppContainer | Package family name | **Best:** AppContainer isolation, package identity, package firewall |
 | Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
-| Packaged non-AppContainer | Package family name | Package identity and package firewall rule |
-| Unpackaged non-AppContainer | Omit | Endpoint-only WFP and administrator firewall rule |
+| Packaged non-AppContainer | Package family name | Package identity and package firewall; no AppContainer isolation |
+| Unpackaged non-AppContainer | Omit | **Least:** no proxy identity or isolation; administrator firewall |
 
 The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
