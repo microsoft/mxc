@@ -85,12 +85,12 @@ Ingress has two allow/deny controls and no rule arrays:
 
 - `ingress.default` controls LAN/private-network inbound traffic where the
   backend supports it.
-- `ingress.hostLoopback` controls inbound connections originating from the host loopback path and targeting a listener
-  in the container.
+- `ingress.hostLoopback` controls host-loopback connectivity in both directions: container-to-host and
+  host-to-container.
 
 The specific `hostLoopback` value overrides `default` for the host-loopback
 path. For example, `default: deny` with `hostLoopback: allow` permits
-host-loopback connectivity while denying other inbound traffic.
+bidirectional host-loopback connectivity while denying other inbound traffic.
 
 **Scope:**
 
@@ -98,12 +98,13 @@ host-loopback connectivity while denying other inbound traffic.
   Seatbelt cannot separate it from host loopback
 - Container-originated private-network traffic: controlled by `egress` on backends that cleanly separate
   private-network ingress from egress; backend-specific limitations are documented below
-- Host-loopback-to-container traffic: controlled by `ingress.hostLoopback`
+- Container-to-host-loopback and host-loopback-to-container traffic: controlled by `ingress.hostLoopback`
 - LAN/private-network inbound: controlled by `ingress.default`, where supported
 - WAN inbound: not enabled by the GA policy
 
 **Use cases for `ingress.hostLoopback: allow`:**
 
+- Caller-provided services or proxies listening on host loopback and accessed from the container
 - MCP servers in SSE/WebSocket mode (server listens on a port for client connections from host)
 - Language server daemons (e.g., TypeScript language server) accessed from host IDE
 - Local dev servers (e.g., npm run dev on port 3000) accessed from host browser
@@ -205,26 +206,31 @@ Backend-specific docs identify temporary compatibility behaviors whose
 enforcement is intentionally coarser. Outside those documented exceptions, a
 backend rejects configurations it cannot enforce.
 
-### D2: Inbound and host-loopback are blocked by default
+### D2: Inbound and host-loopback connectivity are blocked by default
 
 **Decision:** GA defines outbound configuration and inbound control.
 `ingress.default: deny` blocks LAN/private-network inbound traffic, and
-`ingress.hostLoopback: deny` separately blocks host-loopback-to-container
-connectivity. The host-loopback value overrides `default` for that path.
+`ingress.hostLoopback: deny` separately blocks host-loopback connectivity in both directions. The host-loopback value
+overrides `default` for that path.
 Intra-container loopback is allowed on backends with private loopback.
 Seatbelt has the caveat described below.
 
-**Why inbound is blocked by default:**
+**Why inbound and host-loopback connectivity are blocked by default:**
 
-- **Attack surface:** Allowing host-to-container inbound means the sandbox can run servers accessible from the host. For agentic workloads, this creates a risk of command-and-control servers, exfiltration channels, or lateral movement vectors.
-- **Opt-in model:** Customer scenarios that need host-to-container inbound (MCP servers in SSE/WebSocket mode accessed from host, language server daemons accessed from host IDE) must explicitly set `ingress.hostLoopback: allow`.
+- **Attack surface:** Host-loopback access can expose host services to contained code and container listeners to the
+  host. For agentic workloads, either direction can create command-and-control, exfiltration, or lateral-movement paths.
+- **Opt-in model:** Customers must explicitly set `ingress.hostLoopback: allow` when either direction is required.
 - **GA enforcement:** Windows process containers use loopback exemption rules
-  scoped to the AppContainer SID, and WSLc/LXC/Bubblewrap use iptables INPUT.
+  scoped to the AppContainer SID. WSLc/LXC/Bubblewrap require paired routing
+  and filtering for both directions across their private network namespaces.
   Seatbelt maps `ingress.default` to its existing
   `(allow network-inbound (local ip))` behavior but cannot enforce an
   independent `hostLoopback` posture.
 
-**Seatbelt caveat:** On Seatbelt there is no private loopback, so a profile that blocks host-to-container ingress (`ingress.hostLoopback: deny`) also blocks the sandbox from binding loopback listeners at all, breaking intra-sandbox loopback servers. For intra-sandbox IPC on macOS, Unix-domain sockets in a sandbox-private path rather than TCP loopback could be used. That said, Unix-domain sockets come with their own security questions and should be outlined in a separate macOS doc if necessary.
+**Seatbelt caveat:** On Seatbelt there is no private loopback, so `ingress.hostLoopback: deny` also blocks
+intra-sandbox TCP loopback, breaking loopback servers used by processes in the same sandbox. For intra-sandbox IPC on
+macOS, Unix-domain sockets in a sandbox-private path rather than TCP loopback could be used. That said, Unix-domain
+sockets come with their own security questions and should be outlined in a separate macOS doc if necessary.
 
 **Elevation caveat:** Installing these filters (WFP on Windows, iptables on the Linux backends) generally requires elevation. Elevating on every sandbox launch is out of the question, so MXC applies them through a privileged broker/service rather than from the unelevated launch path. A per-platform, per-technology elevation story must be defined in a separate MXC elevation design doc and is a prerequisite for this enforcement.
 
@@ -352,14 +358,15 @@ egress allow-list.
 | Default-deny | VM-level network policy API | |
 | Proxy (HTTP/S only) | Proxy variables plus VM-level allow for the translated endpoint | Direct bypass is blocked |
 | Per-container scoping | VM and container identity | |
-| Inbound | VM-level policy applies `ingress.default` and `ingress.hostLoopback` | |
+| Inbound and host loopback | VM-level policy applies `ingress.default` and bidirectional `ingress.hostLoopback` | |
 | DNS | DNS queries follow same IP/CIDR allow/block rules as other traffic. No domain-based filtering. | If DNS resolver IP is blocked, DNS fails. If allowed, sandbox can resolve any domain. **For HTTP(S) via the proxy, DNS resolution happens in the proxy.** |
 | Bypass resistance | Medium. Depends on VM-level enforcement and correct per-container scoping. | |
 
 ### LXC and Bubblewrap: GA enforcement
 
-LXC and Bubblewrap use iptables/nftables on the container network path. Their INPUT policy applies both
-`ingress.default` and `ingress.hostLoopback`; model 2 permits only the proxy endpoint.
+LXC and Bubblewrap use iptables/nftables on the container network path. Their INPUT policy applies `ingress.default`
+and the host-to-container half of `ingress.hostLoopback`; routing and output policy enforce its container-to-host half.
+Model 2 permits only the proxy endpoint.
 
 ### macOS (Seatbelt): GA enforcement
 

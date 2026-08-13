@@ -15,7 +15,7 @@ the shared policy.
 | DNS names in `allowedHosts` or `blockedHosts` | No GA equivalent | Schema 0.8 accepts only IP/CIDR rules |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
 | `allowLocalNetwork` | `ingress.default` | Capability gate; outbound follows `egress` |
-| No equivalent | `ingress.hostLoopback` | New host-loopback inbound control |
+| No equivalent | `ingress.hostLoopback` | New bidirectional host-loopback connectivity control |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
 | `proxy.url` with a remote or non-loopback URL | No GA equivalent | Schema 0.8 accepts only loopback proxy URLs |

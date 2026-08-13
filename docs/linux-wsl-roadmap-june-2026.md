@@ -33,6 +33,9 @@ Each item is prioritized within its backend and tagged with an effort tier.
 Proxy endpoints are runtime data supplied separately through `runtimeConfig.networkProxy`; there is no caller-selected
 egress mode.
 
+`ingress.hostLoopback` is bidirectional. The N2 roadmap details often focus on the host-to-container half because it
+needs INPUT and port-forwarding work; GA also requires the corresponding container-to-host-loopback path.
+
 **Naming:** the backend is "Bubblewrap" (used in headers and proper nouns like the `BubblewrapConfig` type or `Container-Bubblewrap` label); **Bwrap** is used as the short reference in tables and cross-cutting themes.
 
 File:line citations reference paths under `src/backends/<backend>/...` and `src/core/...`.
@@ -85,7 +88,9 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 13 | **(N1) Default-deny outbound** | 🟡 Actionable | Already in place: iptables FORWARD hook with default DROP when firewall mode + veth detected. New work: ensure hook is always applied; fail-fast if veth not found rather than silently skipping. | M |
 | 14 | **(N2) Inbound control (`hostLoopback`)** | 🟡 Actionable | `allowLocalNetwork` is parsed but silently ignored. New work: enforce ingress in the container's **network-namespace INPUT** chain (via `nsenter -t <init-pid> -n iptables -I INPUT`) with a default **DROP** for new inbound — this protects the container IP from direct veth/LAN ingress, honoring the GA prohibition on host/LAN inbound. `-i lo` ACCEPT covers **intra-container** loopback only; `ESTABLISHED,RELATED` ACCEPT. **A bare `NEW -j ACCEPT` is wrong** — it would also accept connections to the container IP over the veth (LAN-style ingress). `hostLoopback: "allow"` per GA means host **loopback only** (`127.0.0.1`/`::1`) → sandbox listener, which the netns can't receive directly (host loopback isn't routed into it). It requires a **host-side loopback-bound DNAT/forward** (host `127.0.0.1:port` → container `ip:port`, à la WSLC portMappings); the INPUT chain then allows `NEW` **only** for that forwarded path and DROPs everything else. Supersedes the earlier host-side FORWARD-on-veth idea (dead for host→container-direct packets: the dest is the container's own IP, so they traverse container INPUT, not host FORWARD). **Dual-stack:** `iptables` filters IPv4 only, so a parallel `ip6tables` (or `nftables`) INPUT chain is required for the `::1` half of `hostLoopback` — otherwise IPv6 inbound bypasses the default DROP. This shares the IPv6 tooling gap tracked in **item #19**; N2 depends on that IPv6 path landing. | M |
 
-> **Example (N2).** An MCP server listens on port 3000 inside the sandbox. With `ingress.hostLoopback: "deny"` (default), the host cannot reach it. With `"allow"`, the host can connect via `127.0.0.1:3000`. Today: no enforcement — inbound is uncontrolled.
+> **Example (N2).** With `ingress.hostLoopback: "deny"` (default), the host cannot reach an MCP server in the container
+> and the container cannot reach a service on host loopback. With `"allow"`, both directions are enabled. Today:
+> neither direction is fully enforced.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -293,7 +298,8 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 |---|---|---|---|---|
 | 16 | **(N2) Inbound control (`hostLoopback`)** | 🟠 With SDK dep | No inbound filtering primitive. VM-level API would provide inbound control. | M |
 
-> **Example (N2).** N2 governs the inbound direction (host → sandbox): can the Windows host reach a service the container is listening on? GA field is `ingress.hostLoopback` (legacy: `allowLocalNetwork`).
+> **Example (N2).** `ingress.hostLoopback` is bidirectional. The port-mapping support below covers the
+> host-to-container half. Container-to-host-loopback access also requires VM-level routing and policy support.
 >
 > **✅ Supported today — explicit per-port forward.** The container runs in the NAT'd WSL2 VM, so by default the host can't reach arbitrary container ports (incidental default-deny). [PR #530](https://github.com/microsoft/mxc/pull/530) adds the per-port primitive via `WslcSetContainerSettingsPortMappings` (`wsl_container_runner.rs:975+`) — an explicit `hostLoopback: "allow"` for one TCP port:
 >
