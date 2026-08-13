@@ -686,6 +686,109 @@ try {
     }
 }
 
+# ---------------- Lifecycle C2: port mappings at provision ----------------
+
+# Connect to a TCP port on the Windows host and return the bytes the peer sends
+# on connect (ASCII), or $null if no listener answers within the retry budget.
+# Used to prove a provision-time portMapping actually wires host->container NAT.
+function Get-TcpResponse {
+    param(
+        [string]$HostName,
+        [int]$Port,
+        [int]$Retries = 15,
+        [int]$DelayMs = 1000
+    )
+    for ($i = 0; $i -lt $Retries; $i++) {
+        $client = $null
+        try {
+            $client = [System.Net.Sockets.TcpClient]::new()
+            $iar = $client.BeginConnect($HostName, $Port, $null, $null)
+            if (-not $iar.AsyncWaitHandle.WaitOne(2000)) { throw "connect timeout" }
+            $client.EndConnect($iar)
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 3000
+            $buf = New-Object byte[] 256
+            $n = $stream.Read($buf, 0, $buf.Length)
+            if ($n -gt 0) {
+                return [System.Text.Encoding]::ASCII.GetString($buf, 0, $n)
+            }
+        } catch {
+            Start-Sleep -Milliseconds $DelayMs
+        } finally {
+            if ($client) { $client.Close() }
+        }
+    }
+    return $null
+}
+
+# Provisions with experimental.wslc.provision.portMappings and drives a real
+# functional port round-trip: a detached listener in the container answers on
+# containerPort 80, and the harness connects through the mapped Windows host
+# port 18080 and asserts the payload. This regresses #824 — an implementation
+# that silently drops portMappings leaves nothing listening on 18080, so the
+# host connect fails. The listener script is base64-piped to `sh` to keep the
+# argv-split commandLine free of nested quotes.
+$script:portSandboxId = $null
+$portDeprovisionedOk = $false
+try {
+    $portProvisionedOk = Run-StateAwareTest "C2: provision (port mappings)" {
+        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_ports.json'
+        $envObj = Assert-ResultEnvelope $r "port-mapped provision"
+        if ($envObj) { $script:portSandboxId = [string]$envObj.result.sandboxId }
+    }
+
+    $portStartedOk = $false
+    if ($portProvisionedOk) {
+        $portStartedOk = Run-StateAwareTest "C2: start" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapped start"
+        }
+    }
+
+    $portListenerOk = $false
+    if ($portStartedOk) {
+        $portListenerOk = Run-StateAwareTest "C2: exec starts detached listener on container port 80" {
+            $listenerScript = @'
+setsid sh -c 'while true; do printf MXC_PORTMAP_OK | nc -l -p 80 || sleep 1; done' </dev/null >/dev/null 2>&1 &
+sleep 1
+echo LISTENER_UP
+'@
+            $listenerB64 = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($listenerScript))
+            $listenerCmd = "sh -c 'echo $listenerB64 | base64 -d | sh'"
+            $req = @{ phase = 'exec'; sandboxId = $script:portSandboxId; process = @{ commandLine = $listenerCmd; timeout = 30000 } }
+            $r = Invoke-StateAware -Request $req
+            Assert-True ($r.ExitCode -eq 0) "listener-start exec exit code = 0"
+            Assert-True ($r.Stdout -match 'LISTENER_UP') "listener reported ready ($($r.Stdout.Trim()))"
+        }
+    }
+
+    if ($portListenerOk) {
+        Run-StateAwareTest "C2: port forward round-trip (windows 18080 -> container 80)" {
+            $payload = Get-TcpResponse -HostName '127.0.0.1' -Port 18080
+            Assert-True ($payload -eq 'MXC_PORTMAP_OK') `
+                "host port 18080 forwards to the container listener (got '$payload')"
+        } | Out-Null
+    }
+
+    if ($portProvisionedOk) {
+        Run-StateAwareTest "C2: stop" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapped stop"
+        } | Out-Null
+        $portDeprovPassed = Run-StateAwareTest "C2: deprovision" {
+            $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:portSandboxId
+            $null = Assert-ResultEnvelope $r "port-mapped deprovision"
+        }
+        if ($portDeprovPassed) { $portDeprovisionedOk = $true }
+    }
+} finally {
+    if ($null -ne $script:portSandboxId -and -not $portDeprovisionedOk) {
+        Write-Host ""
+        Write-Host "[cleanup] best-effort deprovision of $script:portSandboxId" -ForegroundColor DarkGray
+        try { $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:portSandboxId } catch { }
+    }
+}
+
 # ---------------- Lifecycle D: validation rejections ----------------
 
 # Validation runs before any daemon call, so these never provision a real

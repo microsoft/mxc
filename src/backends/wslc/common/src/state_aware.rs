@@ -27,8 +27,8 @@ use wxc_common::wire::WslcProvisionPhase;
 use crate::container_steps::OutStream;
 use crate::daemon_client::{DaemonClient, DaemonError};
 use crate::daemon_protocol::{
-    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, ProvisionConfig, StartConfig, StopConfig,
-    VolumeMount,
+    DeprovisionConfig, ErrKind, ExecConfig, NetworkMode, PortMapping, ProvisionConfig, StartConfig,
+    StopConfig, VolumeMount,
 };
 use crate::policy::{
     exec_proxy_url, validate_exec_policy, validate_post_provision_policy, validate_provision_policy,
@@ -316,6 +316,7 @@ fn build_provision_config(
         .as_ref()
         .and_then(|c| c.image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
+    let port_mappings = map_provision_port_mappings(config.as_ref())?;
     let image_tar_path = config.and_then(|c| c.image_tar_path);
 
     // WSLc provision-time filesystem-policy gate (D6 normalization → D3
@@ -344,7 +345,45 @@ fn build_provision_config(
         image_tar_path,
         volumes,
         network,
+        port_mappings,
     })
+}
+
+/// Map + validate the provision phase's port mappings (wire → daemon). Mirrors
+/// the one-shot parser: `windowsPort` / `containerPort` must be > 0, and a
+/// duplicate `windowsPort` is rejected. Only TCP is representable — the wire
+/// model rejects `udp` at deserialize — so no protocol is carried through.
+fn map_provision_port_mappings(
+    config: Option<&WslcProvisionPhase>,
+) -> Result<Vec<PortMapping>, MxcError> {
+    let Some(mappings) = config.and_then(|c| c.port_mappings.as_ref()) else {
+        return Ok(Vec::new());
+    };
+    let mut converted = Vec::with_capacity(mappings.len());
+    let mut seen = std::collections::HashSet::new();
+    for (idx, m) in mappings.iter().enumerate() {
+        if m.windows_port == 0 {
+            return Err(MxcError::policy_validation(format!(
+                "experimental.wslc.provision.portMappings[{idx}]: 'windowsPort' must be > 0"
+            )));
+        }
+        if m.container_port == 0 {
+            return Err(MxcError::policy_validation(format!(
+                "experimental.wslc.provision.portMappings[{idx}]: 'containerPort' must be > 0"
+            )));
+        }
+        if !seen.insert(m.windows_port) {
+            return Err(MxcError::policy_validation(format!(
+                "experimental.wslc.provision.portMappings: duplicate windowsPort {}",
+                m.windows_port
+            )));
+        }
+        converted.push(PortMapping {
+            windows_port: m.windows_port,
+            container_port: m.container_port,
+        });
+    }
+    Ok(converted)
 }
 
 /// State-aware adapter over the shared WSLc provision policy gate
@@ -412,6 +451,7 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use wxc_common::models::ContainerPolicy;
+    use wxc_common::wire::{PortMapping as WirePortMapping, TransportProtocol};
 
     #[test]
     fn backend_key_matches_wire_format() {
@@ -497,6 +537,7 @@ mod tests {
         let phase = WslcProvisionPhase {
             image: Some("custom/image:tag".to_string()),
             image_tar_path: Some("C:\\images\\custom.tar".to_string()),
+            port_mappings: None,
         };
         let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
         assert_eq!(cfg.image, "custom/image:tag");
@@ -504,6 +545,82 @@ mod tests {
             cfg.image_tar_path.as_deref(),
             Some("C:\\images\\custom.tar")
         );
+        assert!(cfg.port_mappings.is_empty());
+    }
+
+    #[test]
+    fn build_provision_config_forwards_port_mappings() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8443,
+                    container_port: 443,
+                    protocol: Some(TransportProtocol::Tcp),
+                },
+            ]),
+        };
+        let cfg = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap();
+        assert_eq!(cfg.port_mappings.len(), 2);
+        assert_eq!(cfg.port_mappings[0].windows_port, 8080);
+        assert_eq!(cfg.port_mappings[0].container_port, 80);
+        assert_eq!(cfg.port_mappings[1].windows_port, 8443);
+        assert_eq!(cfg.port_mappings[1].container_port, 443);
+    }
+
+    #[test]
+    fn build_provision_config_rejects_duplicate_windows_port() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 8080,
+                    protocol: None,
+                },
+            ]),
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("duplicate windowsPort"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn build_provision_config_rejects_zero_port() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 0,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        let err = build_provision_config(&ExecutionRequest::default(), Some(phase)).unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("windowsPort"), "got: {}", err.message);
     }
 
     #[test]
@@ -511,6 +628,7 @@ mod tests {
         let cfg = build_provision_config(&ExecutionRequest::default(), None).unwrap();
         assert_eq!(cfg.image, DEFAULT_IMAGE);
         assert!(cfg.image_tar_path.is_none());
+        assert!(cfg.port_mappings.is_empty());
     }
 
     #[test]
