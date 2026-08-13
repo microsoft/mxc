@@ -204,41 +204,51 @@ fn convert_lxc(value: contract::Lxc) -> wire::Lxc {
     }
 }
 
-pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
-    let contract::Request {
-        version,
-        container_id,
-        containment,
-        lifecycle,
-        process,
-        filesystem,
-        fallback,
-        network,
-        lxc,
-        process_container,
-        ui,
-    } = request;
-    wire::MxcConfig {
-        schema: None,
-        comment: None,
-        version: Some(convert_version(version).to_owned()),
-        phase: None,
-        sandbox_id: None,
-        correlation_vector: None,
-        container_id: container_id.into_option(),
-        containment: containment.into_option().map(convert_containment),
-        process: Some(convert_process(process)),
-        lifecycle: lifecycle.into_option().map(convert_lifecycle),
-        process_container: process_container
-            .into_option()
-            .map(convert_process_container),
-        lxc: lxc.into_option().map(convert_lxc),
-        filesystem: filesystem.into_option().map(convert_filesystem),
-        fallback: fallback.into_option().map(convert_fallback),
-        network: network.into_option().map(convert_network),
-        ui: ui.into_option().map(convert_ui),
-        seatbelt: None,
-        experimental: None,
+/// Adapts an exact `0.6.0-alpha` contract request to the current wire model.
+///
+/// Only the request root is exposed as a conversion trait. The per-section
+/// mappings above stay private free functions on purpose: trait impls are
+/// global, so a per-section `From` would collide the moment a later published
+/// contract re-exports an unchanged `0.6.0-alpha` type, and it would publish
+/// every contract section type through this crate's public API. A request root
+/// is guaranteed to differ per contract version, so this impl cannot collide.
+impl From<contract::Request> for wire::MxcConfig {
+    fn from(request: contract::Request) -> Self {
+        let contract::Request {
+            version,
+            container_id,
+            containment,
+            lifecycle,
+            process,
+            filesystem,
+            fallback,
+            network,
+            lxc,
+            process_container,
+            ui,
+        } = request;
+        Self {
+            schema: None,
+            comment: None,
+            version: Some(convert_version(version).to_owned()),
+            phase: None,
+            sandbox_id: None,
+            correlation_vector: None,
+            container_id: container_id.into_option(),
+            containment: containment.into_option().map(convert_containment),
+            process: Some(convert_process(process)),
+            lifecycle: lifecycle.into_option().map(convert_lifecycle),
+            process_container: process_container
+                .into_option()
+                .map(convert_process_container),
+            lxc: lxc.into_option().map(convert_lxc),
+            filesystem: filesystem.into_option().map(convert_filesystem),
+            fallback: fallback.into_option().map(convert_fallback),
+            network: network.into_option().map(convert_network),
+            ui: ui.into_option().map(convert_ui),
+            seatbelt: None,
+            experimental: None,
+        }
     }
 }
 
@@ -498,7 +508,7 @@ mod tests {
         let json = MINIMAL_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire: super::wire::MxcConfig = request.into();
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
@@ -531,7 +541,7 @@ mod tests {
         let json = COMPLETE_PROCESS_CONTAINER_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire: super::wire::MxcConfig = request.into();
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
@@ -634,7 +644,7 @@ mod tests {
         let json = COMPLETE_LXC_REQUEST_JSON;
 
         let request: super::contract::Request = serde_json::from_str(json).unwrap();
-        let wire = super::into_wire(request);
+        let wire: super::wire::MxcConfig = request.into();
 
         assert!(wire.schema.is_none());
         assert!(wire.comment.is_none());
@@ -706,7 +716,7 @@ mod tests {
     fn empty_optional_sections_map_to_present_empty_wire_sections() {
         let request: super::contract::Request =
             serde_json::from_str(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire: super::wire::MxcConfig = request.into();
 
         let lifecycle = wire.lifecycle.expect("lifecycle should be populated");
         assert!(lifecycle.destroy_on_exit.is_none());
@@ -756,7 +766,7 @@ mod tests {
             let json = request_with_proxy(case.json);
 
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
             let proxy = wire
                 .network
                 .expect("network should be populated")
@@ -774,7 +784,7 @@ mod tests {
         for case in CONTAINMENT_CASES {
             let json = request_with_containment(case.input);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
 
             assert_eq!(
                 serde_json::to_value(wire.containment.unwrap()).unwrap(),
@@ -785,7 +795,7 @@ mod tests {
         for default_network_policy in DEFAULT_NETWORK_POLICY_CASES {
             let json = request_with_default_network_policy(default_network_policy);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
 
             assert_eq!(
                 serde_json::to_value(
@@ -802,7 +812,7 @@ mod tests {
         for network_enforcement_mode in NETWORK_ENFORCEMENT_MODE_CASES {
             let json = request_with_network_enforcement_mode(network_enforcement_mode);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
 
             assert_eq!(
                 serde_json::to_value(
@@ -819,7 +829,7 @@ mod tests {
         for ui_clipboard in UI_CLIPBOARD_CASES {
             let json = request_with_ui_clipboard(ui_clipboard);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
 
             assert_eq!(
                 serde_json::to_value(
@@ -836,7 +846,7 @@ mod tests {
         for process_container_ui_isolation in PROCESS_CONTAINER_UI_ISOLATION_CASES {
             let json = request_with_process_container_ui_isolation(process_container_ui_isolation);
             let request: super::contract::Request = serde_json::from_str(&json).unwrap();
-            let wire = super::into_wire(request);
+            let wire: super::wire::MxcConfig = request.into();
 
             assert_eq!(
                 serde_json::to_value(
@@ -857,7 +867,7 @@ mod tests {
     fn app_container_field_alias_maps_expected_wire_fields() {
         let request: super::contract::Request =
             serde_json::from_str(APP_CONTAINER_FIELD_ALIAS_REQUEST_JSON).unwrap();
-        let wire = super::into_wire(request);
+        let wire: super::wire::MxcConfig = request.into();
         let process_container = wire
             .process_container
             .expect("appContainer should map to process_container");
@@ -875,7 +885,7 @@ mod tests {
     fn assert_matches_current_wire_deserialization(json: &str) {
         let current: super::wire::MxcConfig = crate::config_deserialize::from_str(json).unwrap();
         let contract: super::contract::Request = serde_json::from_str(json).unwrap();
-        let adapted = super::into_wire(contract);
+        let adapted: super::wire::MxcConfig = contract.into();
 
         assert_eq!(
             serde_json::to_value(adapted).unwrap(),
