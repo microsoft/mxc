@@ -10,8 +10,9 @@ the shared policy.
 |---|---|---|
 | `defaultPolicy: "allow"` | `egress.default: "allow"` | Same outbound posture |
 | `defaultPolicy: "block"` | `egress.default: "deny"` | `block` is renamed `deny` |
-| `allowedHosts` | `egress.allow[].to[].cidr` | 0.8 uses IP/CIDR only and can scope by port/protocol |
-| `blockedHosts` | `egress.deny[].to[].cidr` | 0.8 uses IP/CIDR only and deny overrides allow |
+| IP/CIDR entries in `allowedHosts` | `egress.allow[].to[].cidr` | Can scope by port/protocol |
+| IP/CIDR entries in `blockedHosts` | `egress.deny[].to[].cidr` | Deny overrides allow |
+| DNS names in `allowedHosts` or `blockedHosts` | No GA equivalent | Schema 0.8 accepts only IP/CIDR rules |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
 | `allowLocalNetwork` | `ingress.default` | Capability gate; outbound follows `egress` |
 | No equivalent | `ingress.hostLoopback` | New host-loopback inbound control |
@@ -26,10 +27,10 @@ On backends that cleanly separate private-network ingress from egress, `egress` 
 destinations, but private-network traffic additionally requires `ingress.default: "allow"` to grant Windows'
 bidirectional `privateNetworkClientServer` capability.
 
-`allowLocalNetwork` still maps only to `ingress.default`; it must not change `egress.default`. On ProcessContainer this
-grants the capability required for private-network traffic, but outbound private destinations remain subject to
-`egress`. A caller migrating deny-default policy must add explicit private CIDR allow rules for any required outbound
-private access.
+This table maps the immutable 0.7 wire fields. In schema 0.7, `allowLocalNetwork` expresses inbound bind/listen
+permission and is honored by Seatbelt; ProcessContainer capabilities are separate. It maps only to
+`ingress.default` and must not change `egress.default`. Under schema 0.8, ProcessContainer uses that ingress value as
+the capability gate for private-network traffic, while outbound private destinations remain subject to `egress`.
 
 ## Direct egress
 

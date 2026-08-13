@@ -92,8 +92,8 @@ traffic that bypasses the proxy is blocked. Other private-network traffic remain
 the bidirectional private-network capability.
 
 Model 2 requires `egress.default: "deny"`, `ingress.default: "allow"`, and `ingress.hostLoopback: "deny"`. The
-private-network allow is required for the AppContainer proxy path and is bidirectional. Proxy mode cannot contain
-direct egress allow or deny rules.
+private-network allow is required for the AppContainer proxy path and is bidirectional. Direct egress allow and deny
+rules do not apply in proxy mode.
 
 The proxy endpoint is runtime metadata, not shared network policy. MXC resolves `allowedProxyPeer`, configures the
 per-container WinHTTP proxy, and grants the private-network capability selected by `ingress.default`.
@@ -163,6 +163,10 @@ containment required by the request, just as it accounts for filesystem containm
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
 downlevel weakening. Proxy-configured requests receive cooperative routing through environment variables; this
 compatibility behavior is not model 2 enforcement.
+
+Outside that documented proxy compatibility path, the AppContainer fallback is selected only when its capability
+mapping preserves the request. Explicit egress rules, and private-network egress restrictions that require WFP, fail
+with a typed unsupported-policy error when no BaseContainer contract can enforce them.
 
 ## 3. WFP enforcement
 

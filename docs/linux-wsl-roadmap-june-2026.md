@@ -349,12 +349,14 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > {
 >   "network": {
 >     "egress": {
->       "mode": "direct",
 >       "default": "allow",
 >       "allow": [ { "to": [{ "cidr": "0.0.0.0/0" }] } ],
 >       "deny":  [ { "to": [{ "cidr": "203.0.113.0/24" }] } ]
 >     },
->     "ingress": { "hostLoopback": "deny" }
+>     "ingress": {
+>       "default": "deny",
+>       "hostLoopback": "deny"
+>     }
 >   }
 > }
 > ```
@@ -418,14 +420,16 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > {
 >   "network": {
 >     "egress": {
->       "mode": "direct",
 >       "default": "deny",
 >       "allow": [
 >         { "to": [{ "cidr": "140.82.112.0/20" }], "ports": [{ "protocol": "tcp", "port": 443 }] }
 >       ],
 >       "deny": []
 >     },
->     "ingress": { "hostLoopback": "deny" }
+>     "ingress": {
+>       "default": "deny",
+>       "hostLoopback": "deny"
+>     }
 >   }
 > }
 > ```
