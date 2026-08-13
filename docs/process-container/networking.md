@@ -187,7 +187,8 @@ The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
 declaration shown in the [schema 0.8 examples](examples/0.8.0-schema.md); its application entry uses
 `uap10:RuntimeBehavior="packagedClassicApp"` with `uap10:TrustLevel="appContainer"`. An unpackaged AppContainer proxy
-requires its installer or administrator to own an equivalent rule scoped to the proxy executable and configured port. See
+requires its installer or administrator to own an equivalent rule scoped to the proxy executable and configured port.
+See
 [CreateAppContainerProfile](https://learn.microsoft.com/windows/win32/api/userenv/nf-userenv-createappcontainerprofile)
 for unpackaged profile creation.
 
