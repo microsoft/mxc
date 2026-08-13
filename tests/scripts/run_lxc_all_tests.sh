@@ -71,6 +71,9 @@ run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precede
 run_test "LXC Network Proxy" "$SCRIPT_DIR/run_lxc_network_proxy_test.sh"
 run_test "LXC Network Proxy Hostname (off-host)" "$SCRIPT_DIR/run_lxc_network_proxy_hostname_test.sh"
 run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
+run_test "LXC Network Proxy Reuse" "$SCRIPT_DIR/run_lxc_network_proxy_reuse_test.sh"
+run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_policy_test.sh"
+run_test "LXC Network Bridge Fail-Closed" "$SCRIPT_DIR/run_lxc_network_bridge_fail_closed_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 

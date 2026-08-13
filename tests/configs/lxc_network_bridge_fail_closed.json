@@ -1,0 +1,21 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Net-FailClosed",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"echo MXC_SCRIPT_RAN\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [],
+    "blockedHosts": []
+  }
+}
