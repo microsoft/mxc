@@ -95,7 +95,7 @@ mostly nothing needs to:
 ## How versions are determined
 
 All crates declare `version.workspace = true` in their own `Cargo.toml`, so the
-single `version` field in `src/Cargo.toml` (currently `0.7.0`) is the version
+single `version` field in `src/Cargo.toml` is the version
 that ships. The pipeline does not set or override the version — it packages
 whatever `src/Cargo.toml` contains at the tagged commit. To release a new
 version:

@@ -8,7 +8,7 @@ description = "NanVix micro-VM runner used by the MXC execution engine."
 
 [dependencies]
 mxc-alpha-wxc-common = { workspace = true, features = ["microvm"] }
-mxc-alpha-nanvix-common = { path = "../common", version = "0.7.0" }
+mxc-alpha-nanvix-common = { path = "../common", version = "0.7.1" }
 uuid = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
