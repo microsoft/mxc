@@ -132,8 +132,10 @@ An unpackaged non-AppContainer proxy has no package family or AppContainer profi
 
 MXC grants the client container `privateNetworkClientServer` through `ingress.default: "allow"`, just as it does for an
 identity-scoped proxy. The difference is that MXC identifies this proxy only by the configured endpoint and enables
-bidirectional host-loopback access. This weaker option is intended primarily for development and debugging and requires
-an installer- or administrator-owned firewall rule.
+bidirectional host-loopback access. This is the lowest-enforcement deployment option. On an enforcing BaseContainer
+path, WFP still restricts the MXC client container's egress to the configured loopback address and port, but Windows
+cannot verify which host process owns that endpoint. It is intended primarily for development and debugging and
+requires an installer- or administrator-owned firewall rule.
 
 #### HTTP client guidance
 
@@ -175,7 +177,7 @@ An AppContainer proxy is recommended. Supported deployment options are:
 | Packaged AppContainer | Package family name | AppContainer isolation and package firewall rule |
 | Unpackaged AppContainer | AppContainer profile name | AppContainer isolation and administrator firewall rule |
 | Packaged non-AppContainer | Package family name | Package identity and package firewall rule |
-| Unpackaged non-AppContainer | Omit | Host-loopback access and administrator firewall rule |
+| Unpackaged non-AppContainer | Omit | Endpoint-only WFP and administrator firewall rule |
 
 The scoped peer rule and `privateNetworkClientServer` do not bypass Windows
 Firewall's block-inbound-to-non-allowed-apps policy. A packaged AppContainer proxy uses the package-owned firewall
