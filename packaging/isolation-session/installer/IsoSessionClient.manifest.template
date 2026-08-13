@@ -57,50 +57,80 @@
 
     <!-- Proxy stub CLSID — interface marshaling -->
     <comClass
-        clsid="{20A5CDEF-405F-456F-82B4-87050A919E5C}"
+        clsid="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}"
         threadingModel="Both"
         description="IsoSessionProxyStub ($(MonthId), $(Arch))" />
 
     <!-- Interface proxy entries (bind IIDs to the proxy stub) -->
     <comInterfaceProxyStub
-        iid="{F1C3C112-2B26-4095-A31C-6F110C14B229}"
+        iid="{BE6C975A-BFED-4338-BC4D-600CF83614CE}"
         name="IComSessionClient"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{B5C6D7E8-1F2A-4B3C-E4D5-8C9D0E1F2A3B}"
+        iid="{AAB45130-236A-4A0D-8BA4-FE68A79B7A85}"
         name="IComSessionProxyConnection"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{D1C2E3F4-7B8A-4D9E-A0F1-4E5F6A7B8C9D}"
+        iid="{DD8D5731-929C-4C56-B178-1408054EB70F}"
         name="IComSessionWorkerProcess"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{936EF0BB-31C0-4517-8B14-5179B1893EE3}"
+        iid="{9A7B80F0-7644-47BB-B884-5B0A4331E517}"
         name="IComSessionOperationCallback"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{0DBC36F5-07AC-4848-8A45-1A5740C8113B}"
+        iid="{E3B33D6A-572A-4515-8113-BB66BC6730B4}"
         name="IComSessionProvisionCallback"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{8A007D3E-6697-4CA8-B677-7ABE5F6ACF5B}"
+        iid="{9946C1AC-7F31-4BB6-8AD2-59D75FC490A2}"
         name="IComSessionProxyCallback"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{C4AF7CC6-5F2C-413B-9C90-D1106DC2202B}"
+        iid="{63711C2F-7030-4C37-8363-EC9F78EA8B7F}"
+        name="IComSessionProxySessionCallback"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{3A088D05-29B4-4A53-BC5C-5BEA8E6A6231}"
         name="IComSessionRegistrationCallback"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
     <comInterfaceProxyStub
-        iid="{4D347EF6-CF1D-4F8B-B434-23166F4C6CBC}"
+        iid="{FA560CC0-DC0B-4E83-ABD1-D4E0DAA145EC}"
         name="IComSessionWorkerProcessCallback"
-        proxyStubClsid32="{20A5CDEF-405F-456F-82B4-87050A919E5C}" />
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{E7E5FBD4-4258-4A79-9FC3-24FC40C59531}"
+        name="IComSessionUtilityLogonCallback"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{291CAFAA-73F3-4912-9579-4DCC4B09E502}"
+        name="IComSessionUtilityLogonConnection"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{0F4D3D19-5A11-4C65-A777-7DA7E1810290}"
+        name="IComTaskWatcherCallback"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{3F44A898-9856-46E1-B029-4A5FACE5ABA1}"
+        name="IComStationWatcherCallback"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
+
+    <comInterfaceProxyStub
+        iid="{FB202185-9A56-4849-BFD1-47E324A9F8AA}"
+        name="IComSubordinateCallback"
+        proxyStubClsid32="{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}" />
 
   </file>
 

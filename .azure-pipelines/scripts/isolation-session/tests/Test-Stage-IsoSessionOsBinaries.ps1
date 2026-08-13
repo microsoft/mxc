@@ -11,6 +11,7 @@ try {
     New-Item -ItemType Directory -Path $dropRoot | Out-Null
     $required = @(
         'IsoSessionServer.dll',
+        'IsoSessionCore.dll',
         'IsoSessionClient.dll',
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
@@ -20,7 +21,15 @@ try {
         'windows.ai.isolationsession.preview.winmd'
     )
     foreach ($name in $required) {
-        [System.IO.File]::WriteAllText((Join-Path $dropRoot $name), "test-$name")
+        $content = if ($name -eq 'IsoSessionClient.dll') {
+            "SOFTWARE\Microsoft\IsoSession ClientClsid IsolationSession_"
+        } else {
+            "test-$name"
+        }
+        [System.IO.File]::WriteAllText(
+            (Join-Path $dropRoot $name),
+            $content,
+            [System.Text.Encoding]::Unicode)
     }
 
     & $script `
@@ -65,6 +74,31 @@ try {
     }
     if (-not $failed) {
         throw 'Staging unexpectedly succeeded with a required binary missing.'
+    }
+
+    [System.IO.File]::WriteAllText(
+        (Join-Path $dropRoot 'IsoSessionCli.exe'),
+        'test-IsoSessionCli.exe',
+        [System.Text.Encoding]::Unicode)
+    [System.IO.File]::WriteAllText(
+        (Join-Path $dropRoot 'IsoSessionClient.dll'),
+        'legacy-client-without-monthly-routing',
+        [System.Text.Encoding]::Unicode)
+    $failed = $false
+    try {
+        & $script `
+            -DropRoot $dropRoot `
+            -OutDir (Join-Path $testRoot 'legacy-client') `
+            -ArchTag x64 `
+            -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
+            -DropName 'wdg/test/amd64fre/BIN/test' `
+            -Flavor amd64fre
+    }
+    catch {
+        $failed = $_.Exception.Message -match 'does not support monthly side-by-side routing'
+    }
+    if (-not $failed) {
+        throw 'Staging did not reject a client binary without monthly routing support.'
     }
 
     Write-Host 'IsoSession OS binary staging tests passed.'

@@ -34,6 +34,7 @@ if (-not (Test-Path -LiteralPath $DropRoot -PathType Container)) {
 
 $requiredBinaries = @(
     'IsoSessionServer.dll',
+    'IsoSessionCore.dll',
     'IsoSessionClient.dll',
     'IsoSessionApp.dll',
     'IsoSessionProxyStub.dll',
@@ -67,6 +68,25 @@ $missing = @(
     })
 if ($missing.Count -gt 0) {
     throw "OS drop is missing required IsoSession files: $($missing -join ', ')."
+}
+
+$clientBinary = $foundByName['isosessionclient.dll']
+$clientBinaryText = [System.Text.Encoding]::Unicode.GetString(
+    [System.IO.File]::ReadAllBytes($clientBinary.FullName))
+$monthlyRoutingMarkers = @(
+    'SOFTWARE\Microsoft\IsoSession',
+    'ClientClsid',
+    'IsolationSession_'
+)
+$missingRoutingMarkers = @(
+    $monthlyRoutingMarkers | Where-Object {
+        -not $clientBinaryText.Contains($_)
+    })
+if ($missingRoutingMarkers.Count -gt 0) {
+    throw (
+        "IsoSessionClient.dll from BuildGuid $BuildGuid does not support monthly " +
+        "side-by-side routing. Missing markers: $($missingRoutingMarkers -join ', '). " +
+        'Select a newer OS BuildGuid that includes MonthlyInstanceConfig support.')
 }
 
 $stageDir = Join-Path $OutDir "bin\$ArchTag"

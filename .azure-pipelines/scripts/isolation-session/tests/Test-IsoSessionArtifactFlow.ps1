@@ -125,12 +125,21 @@ try {
 
         foreach ($name in @(
             'IsoSessionServer.dll',
+            'IsoSessionCore.dll',
             'IsoSessionClient.dll',
             'IsoSessionApp.dll',
             'IsoSessionProxyStub.dll',
             'IsolationProxy.exe',
             'IsoSessionCli.exe')) {
-            Set-Content -LiteralPath (Join-Path $dropRoot $name) -Value "$arch-$name" -Encoding UTF8
+            $content = if ($name -eq 'IsoSessionClient.dll') {
+                "SOFTWARE\Microsoft\IsoSession ClientClsid IsolationSession_"
+            } else {
+                "$arch-$name"
+            }
+            [System.IO.File]::WriteAllText(
+                (Join-Path $dropRoot $name),
+                $content,
+                [System.Text.Encoding]::Unicode)
         }
         Set-Content -LiteralPath (Join-Path $dropRoot 'windows.ai.isolationsession.winmd') -Value $primaryWinmdContent -Encoding UTF8
         Set-Content -LiteralPath (Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd') -Value $previewWinmdContent -Encoding UTF8

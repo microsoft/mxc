@@ -36,13 +36,22 @@ if ($verb -eq 'get') {
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
     foreach ($name in @(
         'IsoSessionServer.dll',
+        'IsoSessionCore.dll',
         'IsoSessionClient.dll',
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
         'IsolationProxy.exe',
         'IsoSessionCli.exe'
     )) {
-        Set-Content -LiteralPath (Join-Path $destination $name) -Value $name
+        $content = if ($name -eq 'IsoSessionClient.dll') {
+            "SOFTWARE\Microsoft\IsoSession ClientClsid IsolationSession_"
+        } else {
+            $name
+        }
+        [System.IO.File]::WriteAllText(
+            (Join-Path $destination $name),
+            $content,
+            [System.Text.Encoding]::Unicode)
     }
     exit 0
 }
@@ -61,7 +70,7 @@ exit 9
     if ($manifest.dropName -ne 'wdg/test/arm64fre/BIN/newest') {
         throw "Resolver did not select the newest finalized drop: $($manifest.dropName)"
     }
-    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 6) {
+    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 7) {
         throw 'Download manifest did not contain the expected ARM64 payload.'
     }
     if (@($manifest.files | Where-Object { $_.kind -ne 'binary' }).Count -ne 0) {

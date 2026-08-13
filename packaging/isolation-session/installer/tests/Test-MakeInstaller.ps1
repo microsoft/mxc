@@ -125,6 +125,61 @@ try {
     Remove-Item -Recurse -Force $missingBundleOut -ErrorAction SilentlyContinue
 }
 
+Write-Host "`n=== Build-matched COM proxy registration ===" -ForegroundColor Cyan
+
+$installerAuthoring = Get-Content (Join-Path $installerDir 'IsoSession.wxs') -Raw
+$clientManifestTemplate =
+    Get-Content (Join-Path $installerDir 'IsoSessionClient.manifest.template') -Raw
+Assert-True (
+    $installerAuthoring.Contains('Source="$(var.BinDir)\IsoSessionCore.dll"')
+) 'MSI installs IsoSessionCore.dll required by IsoSessionServer.dll'
+Assert-True (
+    $installerAuthoring.Contains('<ComponentRef Id="Comp_IsoSessionCore" />')
+) 'MSI includes IsoSessionCore.dll in the Complete feature'
+
+$expectedComGuids = [ordered]@{
+    CLSID_IsoSessionProxyStub = '{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}'
+    IComSessionClient = '{BE6C975A-BFED-4338-BC4D-600CF83614CE}'
+    IComSessionOperationCallback = '{9A7B80F0-7644-47BB-B884-5B0A4331E517}'
+    IComSessionProvisionCallback = '{E3B33D6A-572A-4515-8113-BB66BC6730B4}'
+    IComSessionProxyCallback = '{9946C1AC-7F31-4BB6-8AD2-59D75FC490A2}'
+    IComSessionProxyConnection = '{AAB45130-236A-4A0D-8BA4-FE68A79B7A85}'
+    IComSessionProxySessionCallback = '{63711C2F-7030-4C37-8363-EC9F78EA8B7F}'
+    IComSessionRegistrationCallback = '{3A088D05-29B4-4A53-BC5C-5BEA8E6A6231}'
+    IComSessionUtilityLogonCallback = '{E7E5FBD4-4258-4A79-9FC3-24FC40C59531}'
+    IComSessionUtilityLogonConnection = '{291CAFAA-73F3-4912-9579-4DCC4B09E502}'
+    IComSessionWorkerProcess = '{DD8D5731-929C-4C56-B178-1408054EB70F}'
+    IComSessionWorkerProcessCallback = '{FA560CC0-DC0B-4E83-ABD1-D4E0DAA145EC}'
+    IComStationWatcherCallback = '{3F44A898-9856-46E1-B029-4A5FACE5ABA1}'
+    IComSubordinateCallback = '{FB202185-9A56-4849-BFD1-47E324A9F8AA}'
+    IComTaskWatcherCallback = '{0F4D3D19-5A11-4C65-A777-7DA7E1810290}'
+}
+
+foreach ($entry in $expectedComGuids.GetEnumerator()) {
+    Assert-True (
+        $installerAuthoring.Contains($entry.Value)
+    ) "MSI registers current $($entry.Key) GUID $($entry.Value)"
+    Assert-True (
+        $clientManifestTemplate.Contains($entry.Value)
+    ) "Client manifest registers current $($entry.Key) GUID $($entry.Value)"
+}
+
+$obsoleteComGuids = @(
+    '{20A5CDEF-405F-456F-82B4-87050A919E5C}',
+    '{F1C3C112-2B26-4095-A31C-6F110C14B229}',
+    '{B5C6D7E8-1F2A-4B3C-E4D5-8C9D0E1F2A3B}',
+    '{35E7D920-F286-4405-8EA1-CF05CF3260C3}',
+    '{D7909DBE-ED35-4F61-BD85-D6C7F5D9A9B8}'
+)
+foreach ($guid in $obsoleteComGuids) {
+    Assert-True (
+        -not $installerAuthoring.Contains($guid)
+    ) "MSI excludes obsolete COM GUID $guid"
+    Assert-True (
+        -not $clientManifestTemplate.Contains($guid)
+    ) "Client manifest excludes obsolete COM GUID $guid"
+}
+
 Write-Host "`n=== MonthId-based deterministic runtime identities ===" -ForegroundColor Cyan
 
 $genOutDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mkinst-guid-" + [Guid]::NewGuid())
