@@ -81,9 +81,27 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
     }
 
     fn discard(&mut self) -> Result<(), String> {
-        self.session
-            .discard()
-            .map_err(|e| format!("guarded WPR discard failed: {e:#}"))
+        let discard_error = match self.session.discard() {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+        loop {
+            match self.session.cancel() {
+                Ok(()) => {
+                    return Err(format!(
+                        "guarded WPR discard failed: {discard_error:#}; \
+                         guardian termination was confirmed after abandoning the session"
+                    ));
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[mxc] guarded WPR guardian termination remains unconfirmed after \
+                         discard failure; sandbox enforcement is still active: {error:#}"
+                    );
+                }
+            }
+        }
     }
 
     fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {

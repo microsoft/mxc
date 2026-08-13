@@ -51,7 +51,13 @@ pub trait GuardedCaptureSession: Send {
     ) -> Result<(), String>;
 
     /// Stops the owned WPR trace and securely discards its raw ETL without
-    /// analysis. Used when job attachment or sandbox launch fails.
+    /// analysis. Used when job attachment, sandbox launch, or sandbox
+    /// termination fails.
+    ///
+    /// This method must not return, on either success or error, until the
+    /// elevated guardian has terminated and released every duplicated sandbox
+    /// handle. Runners rely on that guarantee before allowing firewall,
+    /// filesystem, and DACL enforcement guards to drop.
     fn discard(&mut self) -> Result<(), String>;
 
     /// Stops the guarded capture and analyzes it against exact process

@@ -2715,10 +2715,13 @@ impl BaseContainerSandboxProcess {
         result.map_err(std::io::Error::other)
     }
 
-    fn discard_guarded_capture_after_termination_failure(&mut self) {
+    fn release_guarded_capture_after_termination_failure(&mut self) {
         let Some(mut session) = self.guarded_capture_session.take() else {
             return;
         };
+        // The trait contract keeps this call blocked until the elevated
+        // guardian has released its duplicate job handle, even when discard
+        // itself fails. Only then may Drop return and release enforcement.
         if let Err(error) = session.discard() {
             write_stderr_line_best_effort(format_args!(
                 "failed to discard guarded WPR capture after sandbox termination failure: {error}"
@@ -2991,7 +2994,7 @@ impl Drop for BaseContainerSandboxProcess {
             write_stderr_line_best_effort(format_args!(
                 "failed to terminate sandbox process tree during drop: {error}"
             ));
-            self.discard_guarded_capture_after_termination_failure();
+            self.release_guarded_capture_after_termination_failure();
             return;
         }
         // A dropped handle has no observer for output metadata, so retaining

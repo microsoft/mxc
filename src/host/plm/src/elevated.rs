@@ -1128,18 +1128,20 @@ impl GuardedSession {
     }
 
     pub fn cancel(&mut self) -> Result<()> {
-        if self.disarmed {
-            return Ok(());
+        let abandoned = !self.disarmed;
+        if abandoned {
+            self.pipe.take();
+            self.disarmed = true;
         }
-        self.pipe.take();
-        self.disarmed = true;
         let exit_code = wait_for_child_termination(self.process.0, WAIT_TIMEOUT_DURATION).context(
             "guarded PLM session could not confirm guardian termination after abandoning WPR state",
         )?;
-        eprintln!(
-            "[plm] guarded session ended without an explicit stop (guardian exit code \
-             {exit_code}); the recovery marker was preserved and WPR state was left untouched"
-        );
+        if abandoned {
+            eprintln!(
+                "[plm] guarded session ended without an explicit stop (guardian exit code \
+                 {exit_code}); the recovery marker was preserved and WPR state was left untouched"
+            );
+        }
         Ok(())
     }
 
@@ -2820,6 +2822,32 @@ mod tests {
             assert!(session.disarmed);
             assert_eq!(child.wait().unwrap().code(), Some(expected_exit_code));
         }
+    }
+
+    #[test]
+    fn cancel_confirms_guardian_exit_even_after_session_is_disarmed() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "ping.exe -n 2 127.0.0.1 >nul"])
+            .spawn()
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                child.id(),
+            )
+        }
+        .unwrap();
+        let mut session = GuardedSession {
+            pipe: None,
+            process: OwnedHandle(handle),
+            disarmed: true,
+        };
+
+        session.cancel().unwrap();
+
+        assert!(child.try_wait().unwrap().is_some());
     }
 
     #[test]
