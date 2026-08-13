@@ -300,6 +300,22 @@ proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
 per-process WinHTTP-style OS proxy policy, so unlike Windows the proxy is
 cooperative rather than kernel-enforced.
 
+#### Schema 0.8 network shape (`egress` / `ingress` / `runtimeConfig.networkProxy`)
+
+Starting at config `"version": "0.8.0-alpha"` or newer, Seatbelt also accepts
+the schema-0.8 network shape described in
+[`docs/sandbox-policy/0.8.0/networking/`](../sandbox-policy/0.8.0/networking/networking.md).
+A config must use either this shape or the legacy fields above, never both —
+mixing the two is rejected during validation. Other containment backends do
+not accept this shape yet.
+
+| Field | Behavior |
+|---|---|
+| `network.egress.default` | `"allow"` / absent-then-`"deny"` maps to the same profile generation as legacy `defaultPolicy: "allow"` / `"block"`. |
+| `network.egress.allow` / `network.egress.deny` | **Rejected** if non-empty — Seatbelt has no destination-filtering primitive (no CIDR/port/protocol allow-lists), so only the blanket `default` posture can be expressed. |
+| `network.ingress.default` / `network.ingress.hostLoopback` | Map together to the same `(allow network-inbound (local ip))` rule as legacy `allowLocalNetwork`. Seatbelt has no private loopback, so it cannot enforce a host-loopback posture independent of the general local-network posture: `hostLoopback` must equal `default`, or the config is **rejected**. |
+| `runtimeConfig.networkProxy` | Replaces `network.proxy.localhost` / loopback `network.proxy.url`. Must be an `http`/`https` URL with a `localhost` / `127.0.0.1` / `[::1]` host and an explicit port — a non-loopback host is **rejected** (the schema-0.8 GA design requires the runtime proxy endpoint to be loopback-only). |
+
 ### UI policy
 
 | Policy | Generated rule |

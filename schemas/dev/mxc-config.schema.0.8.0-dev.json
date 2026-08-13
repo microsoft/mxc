@@ -5,6 +5,14 @@
   "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
   "additionalProperties": false,
   "definitions": {
+    "AccessPolicy": {
+      "description": "Allow/deny toggle used by the schema-0.8 `egress`/`ingress` sections. Distinct from the legacy `NetworkPolicy` (`allow`/`block`) — the 0.8 vocabulary renames `block` to `deny`.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
     "BaseProcessUi": {
       "additionalProperties": false,
       "description": "BaseProcessContainer UI isolation settings.",
@@ -187,6 +195,95 @@
         }
       ]
     },
+    "Egress": {
+      "additionalProperties": false,
+      "description": "Outbound network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.",
+      "properties": {
+        "allow": {
+          "description": "Explicit outbound allow rules.",
+          "items": {
+            "$ref": "#/definitions/EgressRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default outbound policy when no `allow`/`deny` rule matches."
+        },
+        "deny": {
+          "description": "Explicit outbound deny rules. A deny match overrides an allow match.",
+          "items": {
+            "$ref": "#/definitions/EgressRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EgressPeer": {
+      "additionalProperties": false,
+      "description": "A single destination peer expressed as a CIDR.",
+      "properties": {
+        "cidr": {
+          "description": "IPv4/IPv6 CIDR, or `0.0.0.0/0` / `::/0` for any. IP/CIDR literals only — DNS names are rejected at validation time.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "except": {
+          "description": "CIDR exclusions within `cidr` (Kubernetes `ipBlock.except` style).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "EgressRule": {
+      "additionalProperties": false,
+      "description": "One outbound allow/deny rule: destinations (`to`) and, optionally, the ports/protocols the rule is scoped to.",
+      "properties": {
+        "ports": {
+          "description": "Destination ports/protocols. Omit to match all ports/protocols.",
+          "items": {
+            "$ref": "#/definitions/PortRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Destination peers. Omit to match any destination.",
+          "items": {
+            "$ref": "#/definitions/EgressPeer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
@@ -306,6 +403,35 @@
             "array",
             "null"
           ]
+        }
+      },
+      "type": "object"
+    },
+    "Ingress": {
+      "additionalProperties": false,
+      "description": "Inbound / host-loopback network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default policy for LAN/private-network inbound traffic, where the backend supports it."
+        },
+        "hostLoopback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AccessPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Host-loopback connectivity, in both directions (container-to-host and host-to-container). Overrides `default` for the host-loopback path."
         }
       },
       "type": "object"
@@ -443,6 +569,17 @@
           ],
           "description": "Default outbound policy when no host rule matches."
         },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Egress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Outbound (egress) policy. Schema 0.8+. This is the replacement for `defaultPolicy`/`enforcementMode`/`allowedHosts`/`blockedHosts`: a config uses either the legacy fields above or `egress`/`ingress` (and `runtimeConfig.networkProxy`), never both."
+        },
         "enforcementMode": {
           "anyOf": [
             {
@@ -453,6 +590,17 @@
             }
           ],
           "description": "How the policy is enforced."
+        },
+        "ingress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Ingress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inbound / host-loopback policy. Schema 0.8+. The replacement for `allowLocalNetwork`; see `egress` for the mutual-exclusion rule."
         },
         "proxy": {
           "anyOf": [
@@ -544,6 +692,40 @@
         "containerPort",
         "windowsPort"
       ],
+      "type": "object"
+    },
+    "PortRule": {
+      "additionalProperties": false,
+      "description": "A destination port/protocol rule.",
+      "properties": {
+        "endPort": {
+          "description": "End of a port range (Kubernetes `endPort` style); requires `port`.",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Destination port. Omit `ports` entirely to match all ports/protocols.",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Protocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Protocol to match. `any` matches all protocols."
+        }
+      },
       "type": "object"
     },
     "Process": {
@@ -638,6 +820,16 @@
       },
       "type": "object"
     },
+    "Protocol": {
+      "description": "Transport protocol for a `PortRule`.",
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp",
+        "any"
+      ],
+      "type": "string"
+    },
     "Proxy": {
       "additionalProperties": false,
       "description": "Proxy configuration. Exactly one variant applies.",
@@ -660,6 +852,20 @@
         },
         "url": {
           "description": "Proxy URL (parsed into host:port).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+).",
+      "properties": {
+        "networkProxy": {
+          "description": "Loopback HTTP(S) proxy endpoint, e.g. `\"http://127.0.0.1:8080\"`. Must be `http`/`https` with a host of `localhost`, `127.0.0.1`, or `[::1]` and an explicit port; this is the schema-0.8 replacement for the legacy `network.proxy.localhost`/`network.proxy.url`.",
           "type": [
             "string",
             "null"
@@ -1061,6 +1267,17 @@
         }
       ],
       "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
+    },
+    "runtimeConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RuntimeConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+). Currently carries only the loopback network proxy endpoint; see `network.egress`/`network.ingress`."
     },
     "sandboxId": {
       "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",

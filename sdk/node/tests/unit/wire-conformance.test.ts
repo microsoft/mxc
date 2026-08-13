@@ -192,7 +192,11 @@ type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConf
 type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
-type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+// `network.egress`/`network.ingress` are the schema-0.8 outbound/inbound
+// policy shape; the one-shot `NetworkConfig` does not expose them yet.
+type _NetworkWireKeys = AssertTrue<
+  Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, 'egress' | 'ingress'>
+>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 // `wslc.provision` is the state-aware-only nested provision-phase config; the
@@ -214,13 +218,14 @@ type _SeatbeltWireKeys = AssertTrue<
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
 // (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`,
-// `correlationVector` — see `state-aware-types.ts`), and `fallback` (AppContainer
-// DACL-mutation policy not surfaced through the one-shot policy API). Any OTHER
-// new root wire field fails.
+// `correlationVector` — see `state-aware-types.ts`), `fallback` (AppContainer
+// DACL-mutation policy not surfaced through the one-shot policy API), and
+// `runtimeConfig` (the schema-0.8 `networkProxy` runtime-data block, currently
+// not yet exposed through the one-shot policy API). Any OTHER new root wire field fails.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback'
+    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback' | 'runtimeConfig'
   >
 >;
 

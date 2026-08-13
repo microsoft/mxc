@@ -16,6 +16,11 @@
  *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
  */
 /**
+ * Allow/deny toggle used by the schema-0.8 `egress`/`ingress` sections. Distinct from the legacy `NetworkPolicy` (`allow`/`block`) — the 0.8 vocabulary renames `block` to `deny`.
+ */
+export type AccessPolicy = "allow" | "deny";
+
+/**
  * BaseProcessContainer UI isolation settings.
  */
 export interface BaseProcessUi {
@@ -69,6 +74,52 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
  * Containment backend (abstract intent or concrete backend).
  */
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
+
+/**
+ * Outbound network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.
+ */
+export interface Egress {
+  /**
+   * Explicit outbound allow rules.
+   */
+  allow?: EgressRule[] | null;
+  /**
+   * Default outbound policy when no `allow`/`deny` rule matches.
+   */
+  default?: AccessPolicy | null;
+  /**
+   * Explicit outbound deny rules. A deny match overrides an allow match.
+   */
+  deny?: EgressRule[] | null;
+}
+
+/**
+ * A single destination peer expressed as a CIDR.
+ */
+export interface EgressPeer {
+  /**
+   * IPv4/IPv6 CIDR, or `0.0.0.0/0` / `::/0` for any. IP/CIDR literals only — DNS names are rejected at validation time.
+   */
+  cidr?: string | null;
+  /**
+   * CIDR exclusions within `cidr` (Kubernetes `ipBlock.except` style).
+   */
+  except?: string[] | null;
+}
+
+/**
+ * One outbound allow/deny rule: destinations (`to`) and, optionally, the ports/protocols the rule is scoped to.
+ */
+export interface EgressRule {
+  /**
+   * Destination ports/protocols. Omit to match all ports/protocols.
+   */
+  ports?: PortRule[] | null;
+  /**
+   * Destination peers. Omit to match any destination.
+   */
+  to?: EgressPeer[] | null;
+}
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
@@ -127,6 +178,20 @@ export interface Filesystem {
    * Paths the process can read and write.
    */
   readwritePaths?: string[] | null;
+}
+
+/**
+ * Inbound / host-loopback network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.
+ */
+export interface Ingress {
+  /**
+   * Default policy for LAN/private-network inbound traffic, where the backend supports it.
+   */
+  default?: AccessPolicy | null;
+  /**
+   * Host-loopback connectivity, in both directions (container-to-host and host-to-container). Overrides `default` for the host-loopback path.
+   */
+  hostLoopback?: AccessPolicy | null;
 }
 
 /**
@@ -207,9 +272,17 @@ export interface Network {
    */
   defaultPolicy?: NetworkPolicy | null;
   /**
+   * Outbound (egress) policy. Schema 0.8+. This is the replacement for `defaultPolicy`/`enforcementMode`/`allowedHosts`/`blockedHosts`: a config uses either the legacy fields above or `egress`/`ingress` (and `runtimeConfig.networkProxy`), never both.
+   */
+  egress?: Egress | null;
+  /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
+  /**
+   * Inbound / host-loopback policy. Schema 0.8+. The replacement for `allowLocalNetwork`; see `egress` for the mutual-exclusion rule.
+   */
+  ingress?: Ingress | null;
   /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
@@ -248,6 +321,24 @@ export interface PortMapping {
    */
   windowsPort: number;
   [k: string]: unknown;
+}
+
+/**
+ * A destination port/protocol rule.
+ */
+export interface PortRule {
+  /**
+   * End of a port range (Kubernetes `endPort` style); requires `port`.
+   */
+  endPort?: number | null;
+  /**
+   * Destination port. Omit `ports` entirely to match all ports/protocols.
+   */
+  port?: number | null;
+  /**
+   * Protocol to match. `any` matches all protocols.
+   */
+  protocol?: Protocol | null;
 }
 
 /**
@@ -299,6 +390,11 @@ export interface ProcessContainer {
 }
 
 /**
+ * Transport protocol for a `PortRule`.
+ */
+export type Protocol = "tcp" | "udp" | "icmp" | "any";
+
+/**
  * Proxy configuration. Exactly one variant applies.
  */
 export interface Proxy {
@@ -314,6 +410,16 @@ export interface Proxy {
    * Proxy URL (parsed into host:port).
    */
   url?: string | null;
+}
+
+/**
+ * Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+).
+ */
+export interface RuntimeConfig {
+  /**
+   * Loopback HTTP(S) proxy endpoint, e.g. `"http://127.0.0.1:8080"`. Must be `http`/`https` with a host of `localhost`, `127.0.0.1`, or `[::1]` and an explicit port; this is the schema-0.8 replacement for the legacy `network.proxy.localhost`/`network.proxy.url`.
+   */
+  networkProxy?: string | null;
 }
 
 /**
@@ -535,6 +641,10 @@ export interface MXCConfiguration {
    * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
+  /**
+   * Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+). Currently carries only the loopback network proxy endpoint; see `network.egress`/`network.ingress`.
+   */
+  runtimeConfig?: RuntimeConfig | null;
   /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */

@@ -113,8 +113,26 @@ pub struct MxcConfig {
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
 
+    /// Runtime data passed to MXC that is not part of the sandbox policy
+    /// (schema 0.8+). Currently carries only the loopback network proxy
+    /// endpoint; see `network.egress`/`network.ingress`.
+    pub runtime_config: Option<RuntimeConfig>,
+
     /// Experimental features. Only honored when `--experimental` is passed.
     pub experimental: Option<Experimental>,
+}
+
+/// Runtime data passed to MXC that is not part of the sandbox policy
+/// (schema 0.8+).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// Loopback HTTP(S) proxy endpoint, e.g. `"http://127.0.0.1:8080"`.
+    /// Must be `http`/`https` with a host of `localhost`, `127.0.0.1`, or
+    /// `[::1]` and an explicit port; this is the schema-0.8 replacement for
+    /// the legacy `network.proxy.localhost`/`network.proxy.url`.
+    pub network_proxy: Option<String>,
 }
 
 /// State-aware lifecycle phase.
@@ -363,6 +381,101 @@ pub struct Network {
     pub blocked_hosts: Option<Vec<String>>,
     /// Proxy configuration (one of localhost / builtinTestServer / url).
     pub proxy: Option<Proxy>,
+    /// Outbound (egress) policy. Schema 0.8+. This is the replacement for
+    /// `defaultPolicy`/`enforcementMode`/`allowedHosts`/`blockedHosts`: a
+    /// config uses either the legacy fields above or `egress`/`ingress`
+    /// (and `runtimeConfig.networkProxy`), never both.
+    pub egress: Option<Egress>,
+    /// Inbound / host-loopback policy. Schema 0.8+. The replacement for
+    /// `allowLocalNetwork`; see `egress` for the mutual-exclusion rule.
+    pub ingress: Option<Ingress>,
+}
+
+/// Outbound network policy (schema 0.8+). See
+/// `docs/sandbox-policy/0.8.0/networking/networking.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Egress {
+    /// Default outbound policy when no `allow`/`deny` rule matches.
+    pub default: Option<AccessPolicy>,
+    /// Explicit outbound allow rules.
+    pub allow: Option<Vec<EgressRule>>,
+    /// Explicit outbound deny rules. A deny match overrides an allow match.
+    pub deny: Option<Vec<EgressRule>>,
+}
+
+/// One outbound allow/deny rule: destinations (`to`) and, optionally, the
+/// ports/protocols the rule is scoped to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressRule {
+    /// Destination peers. Omit to match any destination.
+    pub to: Option<Vec<EgressPeer>>,
+    /// Destination ports/protocols. Omit to match all ports/protocols.
+    pub ports: Option<Vec<PortRule>>,
+}
+
+/// A single destination peer expressed as a CIDR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EgressPeer {
+    /// IPv4/IPv6 CIDR, or `0.0.0.0/0` / `::/0` for any. IP/CIDR literals
+    /// only — DNS names are rejected at validation time.
+    pub cidr: Option<String>,
+    /// CIDR exclusions within `cidr` (Kubernetes `ipBlock.except` style).
+    pub except: Option<Vec<String>>,
+}
+
+/// A destination port/protocol rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PortRule {
+    /// Protocol to match. `any` matches all protocols.
+    pub protocol: Option<Protocol>,
+    /// Destination port. Omit `ports` entirely to match all ports/protocols.
+    pub port: Option<u16>,
+    /// End of a port range (Kubernetes `endPort` style); requires `port`.
+    pub end_port: Option<u16>,
+}
+
+/// Transport protocol for a `PortRule`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+/// Inbound / host-loopback network policy (schema 0.8+). See
+/// `docs/sandbox-policy/0.8.0/networking/networking.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Ingress {
+    /// Default policy for LAN/private-network inbound traffic, where the
+    /// backend supports it.
+    pub default: Option<AccessPolicy>,
+    /// Host-loopback connectivity, in both directions (container-to-host and
+    /// host-to-container). Overrides `default` for the host-loopback path.
+    pub host_loopback: Option<AccessPolicy>,
+}
+
+/// Allow/deny toggle used by the schema-0.8 `egress`/`ingress` sections.
+/// Distinct from the legacy `NetworkPolicy` (`allow`/`block`) — the 0.8
+/// vocabulary renames `block` to `deny`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum AccessPolicy {
+    Allow,
+    Deny,
 }
 
 /// Default network policy.

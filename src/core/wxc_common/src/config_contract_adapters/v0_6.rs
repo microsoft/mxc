@@ -105,6 +105,9 @@ fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
         proxy: proxy.into_option().map(convert_proxy),
+        // The 0.6 contract predates the schema-0.8 egress/ingress shape.
+        egress: None,
+        ingress: None,
     }
 }
 
@@ -238,6 +241,8 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         network: network.into_option().map(convert_network),
         ui: ui.into_option().map(convert_ui),
         seatbelt: None,
+        // The 0.6 contract predates schema-0.8 `runtimeConfig`.
+        runtime_config: None,
         experimental: None,
     }
 }

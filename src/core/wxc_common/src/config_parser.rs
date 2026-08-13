@@ -334,6 +334,23 @@ fn validate_schema_version(version: &str) -> Result<(), WxcError> {
     Ok(())
 }
 
+/// The schema version (major.minor) that introduced `network.egress` /
+/// `network.ingress` / `runtimeConfig.networkProxy`, replacing the legacy
+/// `defaultPolicy`/`enforcementMode`/`allowedHosts`/`blockedHosts`/`proxy`
+/// shape (see `docs/sandbox-policy/0.8.0/networking/schema-updates.md`).
+const NETWORK_SCHEMA_V2_MIN_VERSION: (u64, u64) = (0, 8);
+
+/// True when `version` parses to at least `major.minor` (major.minor only,
+/// matching `validate_schema_version`). An absent or unparseable version is
+/// always `false` — new schema surface must be explicitly opted into by
+/// declaring a `version` at or above the introducing release, so older or
+/// version-less configs keep getting the legacy shape they were written for.
+fn schema_version_at_least(version: &str, min: (u64, u64)) -> bool {
+    semver::Version::parse(version)
+        .map(|v| (v.major, v.minor) >= min)
+        .unwrap_or(false)
+}
+
 fn validate_filesystem_paths(policy: &ContainerPolicy) -> Result<(), WxcError> {
     validate_paths(&policy.readonly_paths)?;
     validate_paths(&policy.readwrite_paths)?;
@@ -530,6 +547,48 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     Err(WxcError::ConfigParse(
         "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
     ))
+}
+
+/// Parse `runtimeConfig.networkProxy` (schema 0.8+). Unlike the legacy
+/// `network.proxy.url`, this field is loopback-only for GA: the doc's model-2
+/// example restricts it to `http(s)://localhost|127.0.0.1|[::1]:<port>` (see
+/// `docs/sandbox-policy/0.8.0/networking/networking.md`).
+fn parse_runtime_network_proxy(url_str: &str) -> Result<ProxyConfig, WxcError> {
+    let parsed = url::Url::parse(url_str).map_err(|e| {
+        WxcError::ConfigParse(format!("runtimeConfig.networkProxy is invalid: {e}"))
+    })?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        let redacted = crate::proxy_env::redact_proxy_url(url_str);
+        return Err(WxcError::ConfigParse(format!(
+            "runtimeConfig.networkProxy must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+        )));
+    }
+
+    let host = parsed.host_str().ok_or_else(|| {
+        WxcError::ConfigParse(format!(
+            "runtimeConfig.networkProxy must include a host (e.g., http://localhost:8080), got: {url_str}"
+        ))
+    })?;
+    if !matches!(host, "127.0.0.1" | "::1" | "localhost") {
+        let redacted = crate::proxy_env::redact_proxy_url(url_str);
+        return Err(WxcError::ConfigParse(format!(
+            "runtimeConfig.networkProxy must be a loopback address \
+             (localhost, 127.0.0.1, or [::1]), got: {redacted}"
+        )));
+    }
+    let host = host.to_string();
+    let port = parsed.port().ok_or_else(|| {
+        WxcError::ConfigParse(format!(
+            "runtimeConfig.networkProxy must include a port (e.g., http://localhost:8080), got: {url_str}"
+        ))
+    })?;
+
+    Ok(ProxyConfig {
+        address: Some(ProxyAddress::from_url(url_str, host, port)),
+        builtin_test_server: false,
+    })
 }
 
 fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
@@ -972,6 +1031,59 @@ fn convert_wire_config(
     // explicit default-valued one (the domain `default_network_policy` defaults
     // to `Block` either way).
     policy.network_specified = cfg.network.is_some();
+
+    // Schema 0.8 replaces the legacy `defaultPolicy`/`enforcementMode`/
+    // `allowedHosts`/`blockedHosts`/`proxy` shape with `network.egress` /
+    // `network.ingress` / `runtimeConfig.networkProxy` (see
+    // docs/sandbox-policy/0.8.0/networking/schema-updates.md). A config uses
+    // one shape or the other, never both, and the new shape requires
+    // declaring a version that has actually introduced it.
+    let legacy_network_fields_present = cfg.network.as_ref().is_some_and(|net| {
+        net.default_policy.is_some()
+            || net.enforcement_mode.is_some()
+            || net.allow_local_network.is_some()
+            || net.allowed_hosts.is_some()
+            || net.blocked_hosts.is_some()
+            || net.proxy.is_some()
+    });
+    let new_network_shape_present = cfg
+        .network
+        .as_ref()
+        .is_some_and(|net| net.egress.is_some() || net.ingress.is_some())
+        || cfg
+            .runtime_config
+            .as_ref()
+            .is_some_and(|rc| rc.network_proxy.is_some());
+
+    if new_network_shape_present {
+        if legacy_network_fields_present {
+            let msg = "network.egress/network.ingress/runtimeConfig.networkProxy cannot be \
+                       combined with the legacy 'defaultPolicy', 'enforcementMode', \
+                       'allowedHosts', 'blockedHosts', or 'network.proxy' fields in the same \
+                       config. Use one network policy shape or the other.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+        if !schema_version_at_least(&schema_version, NETWORK_SCHEMA_V2_MIN_VERSION) {
+            let msg = format!(
+                "network.egress, network.ingress, and runtimeConfig.networkProxy require a \
+                 config 'version' of {}.{} or newer (got '{}'). Use the legacy \
+                 'defaultPolicy'/'allowedHosts'/'blockedHosts'/'proxy' fields for older \
+                 versions.",
+                NETWORK_SCHEMA_V2_MIN_VERSION.0, NETWORK_SCHEMA_V2_MIN_VERSION.1, schema_version
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+        if containment != ContainmentBackend::Seatbelt {
+            let msg = "network.egress, network.ingress, and runtimeConfig.networkProxy are \
+                       only implemented for the 'seatbelt' containment backend today; other \
+                       backends still use the legacy network fields.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+    }
+
     if let Some(net) = cfg.network {
         // Presence of any network *mode* field (everything except `proxy`), so
         // post-provision phases can reject an immutable-posture change by
@@ -980,7 +1092,9 @@ fn convert_wire_config(
             || net.enforcement_mode.is_some()
             || net.allow_local_network.is_some()
             || net.allowed_hosts.is_some()
-            || net.blocked_hosts.is_some();
+            || net.blocked_hosts.is_some()
+            || net.egress.is_some()
+            || net.ingress.is_some();
         if let Some(proxy) = net.proxy {
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
@@ -1035,6 +1149,52 @@ fn convert_wire_config(
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
+        }
+
+        // Schema 0.8 egress/ingress. Only reached when containment ==
+        // Seatbelt: the mutual-exclusion/version/backend gate above already
+        // rejected every other combination.
+        if let Some(egress) = net.egress {
+            // Seatbelt has no destination-filtering primitive: it can only
+            // deny everything or allow everything (routed through a loopback
+            // proxy), never a CIDR/port/protocol allow-list (connectivity
+            // model 1). Reject any populated rule array rather than silently
+            // degrading it, matching the legacy allowedHosts/blockedHosts
+            // guards elsewhere in this backend.
+            if egress.allow.as_ref().is_some_and(|v| !v.is_empty())
+                || egress.deny.as_ref().is_some_and(|v| !v.is_empty())
+            {
+                let msg = "Seatbelt: network.egress.allow/deny rules are not supported. \
+                           Seatbelt cannot filter outbound traffic by CIDR/port/protocol; \
+                           express the desired posture with 'egress.default' alone (allow or deny) or \
+                           route cooperating clients through 'runtimeConfig.networkProxy'.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+            policy.default_network_policy = match egress.default {
+                Some(wire::AccessPolicy::Allow) => NetworkPolicy::Allow,
+                Some(wire::AccessPolicy::Deny) | None => NetworkPolicy::Block,
+            };
+        }
+
+        if let Some(ingress) = net.ingress {
+            // Seatbelt shares the host network stack and has no private
+            // loopback, so it cannot enforce a host-loopback posture that
+            // differs from the general local-network posture (see
+            // docs/sandbox-policy/0.8.0/networking/networking.md, D2's
+            // Seatbelt caveat). Absent values default to `deny`, matching the
+            // legacy `allowLocalNetwork` default of `false`.
+            let default = ingress.default.unwrap_or(wire::AccessPolicy::Deny);
+            let host_loopback = ingress.host_loopback.unwrap_or(wire::AccessPolicy::Deny);
+            if default != host_loopback {
+                let msg = "Seatbelt: network.ingress.hostLoopback must equal \
+                           network.ingress.default. Seatbelt has no private loopback, so it \
+                           cannot enforce an independent host-loopback posture from the \
+                           general local-network inbound posture.";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+            policy.allow_local_network = default == wire::AccessPolicy::Allow;
         }
 
         // WSLc routes egress through the cooperative proxy but does not forward
@@ -1190,6 +1350,18 @@ fn convert_wire_config(
                  of all clients, remove network.proxy so --unshare-net applies; for \
                  host-list enforcement, add allowedHosts (cooperative tools only).",
             );
+        }
+    }
+
+    // Runtime config section (schema 0.8+). `runtimeConfig.networkProxy` is
+    // sibling data to `network`, not nested under it, so it must be handled
+    // independently of whether `cfg.network`/`egress`/`ingress` were present
+    // (the doc's proxy-only model-2 example omits `network` entirely).
+    if let Some(runtime_config) = cfg.runtime_config {
+        if let Some(url) = runtime_config.network_proxy {
+            // The mutual-exclusion/version/backend gate above already
+            // confirmed containment == Seatbelt whenever this field is set.
+            policy.network_proxy = parse_runtime_network_proxy(&url)?;
         }
     }
 
@@ -2958,6 +3130,346 @@ mod tests {
                 version
             );
         }
+    }
+
+    // ---- Schema 0.8 network.egress / network.ingress / runtimeConfig.networkProxy ----
+
+    #[test]
+    fn network_v2_egress_default_allow_maps_to_allow_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+    }
+
+    #[test]
+    fn network_v2_egress_default_deny_maps_to_block_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "deny"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn network_v2_egress_absent_default_maps_to_block_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn network_v2_egress_allow_rules_rejected_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow", "allow": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.egress.allow/deny rules are not supported"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_egress_deny_rules_rejected_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"deny": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.egress.allow/deny rules are not supported"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_ingress_default_allow_maps_to_allow_local_network_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"ingress": {"default": "allow", "hostLoopback": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_v2_ingress_default_deny_maps_to_no_allow_local_network_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"ingress": {"default": "deny", "hostLoopback": "deny"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn network_v2_ingress_mismatched_host_loopback_rejected_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"ingress": {"default": "allow", "hostLoopback": "deny"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.ingress.hostLoopback must equal network.ingress.default"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_runtime_config_loopback_proxy_accepted_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn network_v2_runtime_config_remote_proxy_rejected_for_seatbelt() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "runtimeConfig": {"networkProxy": "http://proxy.example.com:8080"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must be a loopback address"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_fields_before_0_8_are_rejected() {
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("require a config 'version' of 0.8 or newer"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_fields_without_declared_version_are_rejected() {
+        let json = r#"{
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("require a config 'version' of 0.8 or newer"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_fields_rejected_for_non_seatbelt_backend() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("only implemented for the 'seatbelt' containment backend"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_egress_mixed_with_legacy_fields_is_rejected() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block", "egress": {"default": "allow"}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("cannot be combined with the legacy"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_runtime_config_mixed_with_legacy_proxy_is_rejected() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"builtinTestServer": true}},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("cannot be combined with the legacy"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_equivalent_to_legacy_shape_for_seatbelt() {
+        // A legacy-shape config and its schema-0.8 equivalent must produce the
+        // same domain policy fields, proving the Seatbelt backend itself
+        // needs no changes for the migration.
+        let legacy_json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": true,
+                "proxy": {"url": "http://127.0.0.1:9000"}
+            }
+        }"#;
+        let v2_json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "egress": {"default": "allow"},
+                "ingress": {"default": "allow", "hostLoopback": "allow"}
+            },
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:9000"}
+        }"#;
+
+        let mut legacy_logger = test_logger();
+        let legacy_req = load_request(
+            &base64_encode(legacy_json.as_bytes()),
+            &mut legacy_logger,
+            true,
+        )
+        .unwrap();
+
+        let mut v2_logger = test_logger();
+        let v2_req =
+            load_request(&base64_encode(v2_json.as_bytes()), &mut v2_logger, true).unwrap();
+
+        assert_eq!(
+            legacy_req.policy.default_network_policy,
+            v2_req.policy.default_network_policy
+        );
+        assert_eq!(
+            legacy_req.policy.allow_local_network,
+            v2_req.policy.allow_local_network
+        );
+        assert_eq!(
+            legacy_req.policy.network_proxy.is_enabled(),
+            v2_req.policy.network_proxy.is_enabled()
+        );
+        assert_eq!(
+            legacy_req
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|a| a.port()),
+            v2_req
+                .policy
+                .network_proxy
+                .address
+                .as_ref()
+                .map(|a| a.port())
+        );
     }
 
     #[test]
