@@ -141,63 +141,94 @@ jobs:
           Write-Host "alpha prefix guard passed: all $($crates.Count) crates carry the $prefix prefix"
         displayName: "TEMP: Verify every crate carries the mxc-alpha- prefix"
 
-      - ${{ each crate in parameters.crateOrder }}:
-          # ESRP uploads a folder, so each crate gets a clean one to itself.
-          - pwsh: |
-              $ErrorActionPreference = 'Stop'
-              if (Test-Path '$(esrpDir)') { Remove-Item -Recurse -Force '$(esrpDir)' }
-              New-Item -ItemType Directory -Force -Path '$(esrpDir)' | Out-Null
-              $found = @(Get-ChildItem -Path '$(cratesDir)' -Filter '${{ crate }}-*.crate' -File)
-              if ($found.Count -ne 1) { throw "expected exactly one .crate for ${{ crate }}, found $($found.Count)" }
-              Copy-Item $found[0].FullName -Destination '$(esrpDir)'
-              Write-Host "staged $($found[0].Name)"
-            displayName: "Stage ${{ crate }} for ESRP"
+      # BULK PUBLISH EXPERIMENT: one ESRP release for all 21 crates at once.
+      # The per-crate path is preserved below, commented out.
+      - ${{ if parameters.dryRun }}:
+        - pwsh: |
+            Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping bulk ESRP publish."
+          displayName: "DRY RUN: skip bulk publish"
+      - ${{ else }}:
+        - task: EsrpRelease@12
+          displayName: "Publish all crates to crates.io (bulk)"
+          # One release covers the whole closure, so the per-crate cap is far
+          # too small.
+          timeoutInMinutes: 90
+          inputs:
+            connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+            usemanagedidentity: false
+            keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+            authcertname: ${{ parameters.ESRPInfo.authCertName }}
+            signcertname: ${{ parameters.ESRPInfo.signCertName }}
+            clientid: ${{ parameters.ESRPInfo.clientId }}
+            intent: 'PackageDistribution'
+            contenttype: 'Rust'
+            contentsource: 'Folder'
+            folderlocation: $(cratesDir)
+            owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+            approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+            waitforreleasecompletion: true
+            serviceendpointurl: 'https://api.esrp.microsoft.com'
+            mainpublisher: 'ESRPRELPACMAN'
+            domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
 
-          # Redundant: the stage condition in 1ES.Release.Crates.yml already
-          # skips this job on a dry run.  Kept so that deleting that condition
-          # still cannot publish.
-          - ${{ if parameters.dryRun }}:
-            - pwsh: |
-                Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping ESRP publish for ${{ crate }} (staged .crate only)."
-              displayName: "DRY RUN: skip publish ${{ crate }}"
-          - ${{ else }}:
-            # The wait leads each publish rather than trailing it, so it also
-            # covers the first crate.  The rate-limit budget is shared across
-            # Microsoft and may already be spent when the job starts, which is
-            # a trailing wait's blind spot.  Leading also drops the pointless
-            # wait after the last crate.
-            #
-            # Azure DevOps has no built-in wait for an agent job: Delay is the
-            # only delay task and declares runsOn: Server.  Hence a script.
-            - pwsh: |
-                $ErrorActionPreference = 'Stop'
-                $delay = ${{ parameters.publishDelaySeconds }}
-                if ($delay -gt 0) { Start-Sleep -Seconds $delay }
-                Write-Host "waited $delay s before ${{ crate }}"
-              displayName: "Wait before ${{ crate }}"
-
-            - task: EsrpRelease@12
-              displayName: "Publish ${{ crate }} to crates.io"
-              # A release that never completes would otherwise sit here until
-              # the whole job is killed, losing the rest of the closure to a
-              # timeout that names no crate.  Capping the task instead fails
-              # this crate, and the job stops before publishing anything that
-              # would depend on it.
-              timeoutInMinutes: ${{ parameters.esrpTimeoutMinutes }}
-              inputs:
-                connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
-                usemanagedidentity: false
-                keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
-                authcertname: ${{ parameters.ESRPInfo.authCertName }}
-                signcertname: ${{ parameters.ESRPInfo.signCertName }}
-                clientid: ${{ parameters.ESRPInfo.clientId }}
-                intent: 'PackageDistribution'
-                contenttype: 'Rust'
-                contentsource: 'Folder'
-                folderlocation: $(esrpDir)
-                owners: ${{ parameters.ESRPInfo.OwnersEmail }}
-                approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
-                waitforreleasecompletion: true
-                serviceendpointurl: 'https://api.esrp.microsoft.com'
-                mainpublisher: 'ESRPRELPACMAN'
-                domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
+      # --- ORIGINAL PER-CRATE PUBLISH (uncomment to restore) ---
+      # - ${{ each crate in parameters.crateOrder }}:
+      #     # ESRP uploads a folder, so each crate gets a clean one to itself.
+      #     - pwsh: |
+      #         $ErrorActionPreference = 'Stop'
+      #         if (Test-Path '$(esrpDir)') { Remove-Item -Recurse -Force '$(esrpDir)' }
+      #         New-Item -ItemType Directory -Force -Path '$(esrpDir)' | Out-Null
+      #         $found = @(Get-ChildItem -Path '$(cratesDir)' -Filter '${{ crate }}-*.crate' -File)
+      #         if ($found.Count -ne 1) { throw "expected exactly one .crate for ${{ crate }}, found $($found.Count)" }
+      #         Copy-Item $found[0].FullName -Destination '$(esrpDir)'
+      #         Write-Host "staged $($found[0].Name)"
+      #       displayName: "Stage ${{ crate }} for ESRP"
+      #
+      #     # Redundant: the stage condition in 1ES.Release.Crates.yml already
+      #     # skips this job on a dry run.  Kept so that deleting that condition
+      #     # still cannot publish.
+      #     - ${{ if parameters.dryRun }}:
+      #       - pwsh: |
+      #           Write-Host "##vso[task.logissue type=warning]DRY RUN: skipping ESRP publish for ${{ crate }} (staged .crate only)."
+      #         displayName: "DRY RUN: skip publish ${{ crate }}"
+      #     - ${{ else }}:
+      #       # The wait leads each publish rather than trailing it, so it also
+      #       # covers the first crate.  The rate-limit budget is shared across
+      #       # Microsoft and may already be spent when the job starts, which is
+      #       # a trailing wait's blind spot.  Leading also drops the pointless
+      #       # wait after the last crate.
+      #       #
+      #       # Azure DevOps has no built-in wait for an agent job: Delay is the
+      #       # only delay task and declares runsOn: Server.  Hence a script.
+      #       - pwsh: |
+      #           $ErrorActionPreference = 'Stop'
+      #           $delay = ${{ parameters.publishDelaySeconds }}
+      #           if ($delay -gt 0) { Start-Sleep -Seconds $delay }
+      #           Write-Host "waited $delay s before ${{ crate }}"
+      #         displayName: "Wait before ${{ crate }}"
+      #
+      #       - task: EsrpRelease@12
+      #         displayName: "Publish ${{ crate }} to crates.io"
+      #         # A release that never completes would otherwise sit here until
+      #         # the whole job is killed, losing the rest of the closure to a
+      #         # timeout that names no crate.  Capping the task instead fails
+      #         # this crate, and the job stops before publishing anything that
+      #         # would depend on it.
+      #         timeoutInMinutes: ${{ parameters.esrpTimeoutMinutes }}
+      #         inputs:
+      #           connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
+      #           usemanagedidentity: false
+      #           keyvaultname: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      #           authcertname: ${{ parameters.ESRPInfo.authCertName }}
+      #           signcertname: ${{ parameters.ESRPInfo.signCertName }}
+      #           clientid: ${{ parameters.ESRPInfo.clientId }}
+      #           intent: 'PackageDistribution'
+      #           contenttype: 'Rust'
+      #           contentsource: 'Folder'
+      #           folderlocation: $(esrpDir)
+      #           owners: ${{ parameters.ESRPInfo.OwnersEmail }}
+      #           approvers: ${{ parameters.ESRPInfo.ApproversEmail }}
+      #           waitforreleasecompletion: true
+      #           serviceendpointurl: 'https://api.esrp.microsoft.com'
+      #           mainpublisher: 'ESRPRELPACMAN'
+      #           domaintenantid: ${{ parameters.ESRPInfo.tenantId }}
