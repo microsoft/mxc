@@ -91,16 +91,33 @@ impl FirewallRuleArgs {
 /// never inspects it; it only hands it back to [`NetworkIptablesManager::force_cleanup`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CreatedResources {
-    v4_chain: bool,
-    v6_chain: bool,
-    v4_hook: bool,
-    v6_hook: bool,
-    v4_physdev_hook: bool,
-    v6_physdev_hook: bool,
-    v4_return: bool,
-    v6_return: bool,
-    v4_physdev_return: bool,
-    v6_physdev_return: bool,
+    v4: FamilyResources,
+    v6: FamilyResources,
+}
+
+/// What one address family's apply installed, and therefore owes a teardown.
+///
+/// The two families are symmetric in every path that reads this, so they are
+/// the same type rather than parallel fields with a `v4_`/`v6_` prefix. That
+/// symmetry is what lets setup, rollback, and teardown be written once.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FamilyResources {
+    chain: bool,
+    hook: bool,
+    physdev_hook: bool,
+    return_rule: bool,
+    physdev_return: bool,
+}
+
+impl FamilyResources {
+    fn is_empty(&self) -> bool {
+        !self.chain && !self.hook && !self.physdev_hook && !self.return_rule && !self.physdev_return
+    }
+
+    /// Whether a FORWARD hook survived teardown and still references the chain.
+    fn hooks_remain(&self) -> bool {
+        self.hook || self.physdev_hook
+    }
 }
 
 /// Flush and delete the chain, reporting whether it is still owned afterward.
@@ -139,16 +156,7 @@ impl CreatedResources {
     /// compiled on every target so Windows and macOS CI still type-check it.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_empty(&self) -> bool {
-        !self.v4_chain
-            && !self.v6_chain
-            && !self.v4_hook
-            && !self.v6_hook
-            && !self.v4_physdev_hook
-            && !self.v6_physdev_hook
-            && !self.v4_return
-            && !self.v6_return
-            && !self.v4_physdev_return
-            && !self.v6_physdev_return
+        self.v4.is_empty() && self.v6.is_empty()
     }
 
     /// Test-only constructor so `signal_cleanup`'s tests can build a
@@ -158,16 +166,16 @@ impl CreatedResources {
     #[cfg(test)]
     pub(crate) fn for_test(v4_chain: bool, v6_chain: bool, v4_hook: bool, v6_hook: bool) -> Self {
         Self {
-            v4_chain,
-            v6_chain,
-            v4_hook,
-            v6_hook,
-            v4_physdev_hook: false,
-            v6_physdev_hook: false,
-            v4_return: false,
-            v6_return: false,
-            v4_physdev_return: false,
-            v6_physdev_return: false,
+            v4: FamilyResources {
+                chain: v4_chain,
+                hook: v4_hook,
+                ..Default::default()
+            },
+            v6: FamilyResources {
+                chain: v6_chain,
+                hook: v6_hook,
+                ..Default::default()
+            },
         }
     }
 
@@ -175,18 +183,15 @@ impl CreatedResources {
     /// one of them.
     #[cfg(test)]
     pub(crate) fn for_test_all() -> Self {
-        Self {
-            v4_chain: true,
-            v6_chain: true,
-            v4_hook: true,
-            v6_hook: true,
-            v4_physdev_hook: true,
-            v6_physdev_hook: true,
-            v4_return: true,
-            v6_return: true,
-            v4_physdev_return: true,
-            v6_physdev_return: true,
-        }
+        let all = FamilyResources {
+            chain: true,
+            hook: true,
+            physdev_hook: true,
+            return_rule: true,
+            physdev_return: true,
+        };
+
+        Self { v4: all, v6: all }
     }
 }
 
@@ -985,6 +990,35 @@ impl NetworkIptablesManager {
         )
     }
 
+    /// Cap on how many resolved proxy addresses the chain will open.
+    ///
+    /// A round-robin or CDN answer is unbounded, and every address becomes its
+    /// own ACCEPT rule and its own `iptables` process on the container-start
+    /// path. Trimming fails closed, and the pinned address is always the first
+    /// one, so the container can still reach the proxy it was pinned to.
+    const MAX_PROXY_ENDPOINTS: usize = 16;
+
+    /// Trim a resolved proxy answer to the addresses the chain will accept.
+    fn bound_proxy_addresses<'a>(
+        host: &str,
+        addresses: &'a [String],
+        logger: &mut Logger,
+    ) -> &'a [String] {
+        if addresses.len() <= Self::MAX_PROXY_ENDPOINTS {
+            return addresses;
+        }
+
+        logger.log_line(&format!(
+            "Warning: proxy host '{}' resolved to {} addresses; opening the first {} only. \
+             The container is pinned to the first, so it still reaches the proxy.",
+            host,
+            addresses.len(),
+            Self::MAX_PROXY_ENDPOINTS
+        ));
+
+        &addresses[..Self::MAX_PROXY_ENDPOINTS]
+    }
+
     /// Resolve the policy's proxy into the destinations the chain will allow,
     /// and the hosts-file pin the container needs to agree with them.
     ///
@@ -1037,22 +1071,22 @@ impl NetworkIptablesManager {
             ));
         }
 
-        let endpoints: Vec<ProxyEndpoint> = resolved
-            .ipv4
-            .iter()
-            .map(|ip| {
-                logger.log_line(&format!(
-                    "Allowing network proxy egress: {}:{} ({})",
-                    address.host(),
-                    address.port(),
-                    ip
-                ));
-                ProxyEndpoint {
-                    ip: ip.clone(),
-                    port: address.port(),
-                }
-            })
-            .collect();
+        let endpoints: Vec<ProxyEndpoint> =
+            Self::bound_proxy_addresses(address.host(), &resolved.ipv4, logger)
+                .iter()
+                .map(|ip| {
+                    logger.log_line(&format!(
+                        "Allowing network proxy egress: {}:{} ({})",
+                        address.host(),
+                        address.port(),
+                        ip
+                    ));
+                    ProxyEndpoint {
+                        ip: ip.clone(),
+                        port: address.port(),
+                    }
+                })
+                .collect();
 
         let pin = Self::build_proxy_host_pin(address, &endpoints[0].ip, logger)?;
         Ok((endpoints, pin))
@@ -1758,11 +1792,11 @@ impl NetworkIptablesManager {
         // Create custom chains, recording each family as created so rollback
         // removes only the chains this attempt installed.
         Self::run_iptables(&["-N", &self.chain_name], logger)?;
-        created.v4_chain = true;
+        created.v4.chain = true;
         Self::publish_created(created);
         if ipv6_enabled {
             Self::run_ip6tables(&["-N", &self.chain_name], logger)?;
-            created.v6_chain = true;
+            created.v6.chain = true;
             Self::publish_created(created);
         }
 
@@ -1880,192 +1914,30 @@ impl NetworkIptablesManager {
             }
             let chain_name = self.chain_name.clone();
 
-            // On a bridged veth the physdev rule is the only one that can
-            // match, and it can only match while br_netfilter is delivering
-            // bridged packets to iptables. Without that, both rules install
-            // cleanly and neither ever fires, which is the exact failure this
-            // change exists to remove: a chain that looks enforced and is not.
-            if bridged && !Self::bridge_netfilter_active(BRIDGE_NF_CALL_IPTABLES) {
-                return Err(format!(
-                    "Container veth {} is enslaved to a bridge but bridged packets are not \
-                     delivered to iptables ({} is absent or 0), so chain {} could never be \
-                     reached from FORWARD. Refusing to report success for an unenforceable \
-                     policy.",
-                    iface, BRIDGE_NF_CALL_IPTABLES, chain_name
-                ));
-            }
-
-            Self::install_claimed_hook(
+            Self::install_family_hooks(
                 created,
-                |created, claimed| created.v4_hook = claimed,
-                |logger| {
-                    Self::run_iptables_rule_args(
-                        &[Self::build_forward_hook_iface_rule_args(
-                            "-I",
-                            iface,
-                            &chain_name,
-                        )],
-                        logger,
-                    )
-                },
-                |logger| {
-                    let _ = Self::run_iptables_rule_args(
-                        &[Self::build_forward_hook_iface_rule_args(
-                            "-D",
-                            iface,
-                            &chain_name,
-                        )],
-                        logger,
-                    );
-                },
+                |created| &mut created.v4,
+                Self::run_iptables_rule_args,
+                "iptables",
+                BRIDGE_NF_CALL_IPTABLES,
+                iface,
+                &chain_name,
+                bridged,
                 logger,
             )?;
 
-            let physdev_installed = Self::install_claimed_hook(
-                created,
-                |created, claimed| created.v4_physdev_hook = claimed,
-                |logger| {
-                    Self::install_physdev_hook(
-                        Self::run_iptables_rule_args,
-                        iface,
-                        &chain_name,
-                        bridged,
-                        "iptables",
-                        logger,
-                    )
-                },
-                |logger| {
-                    let _ = Self::run_iptables_rule_args(
-                        &[Self::build_forward_hook_physdev_rule_args(
-                            "-D",
-                            iface,
-                            &chain_name,
-                        )],
-                        logger,
-                    );
-                },
-                logger,
-            )?;
-            created.v4_physdev_hook = physdev_installed;
-            Self::publish_created(created);
-
-            // Claimed before insertion for the same reason the hooks are: a
-            // fatal signal between the call and the record would leave the
-            // rule installed and absent from the cleanup snapshot.
-            created.v4_return = true;
-            created.v4_physdev_return = true;
-            Self::publish_created(created);
-            created.v4_return = Self::install_return_rule(
-                Self::run_iptables_rule_args,
-                Self::build_forward_return_iface_rule_args("-I", iface),
-                "interface",
-                iface,
-                "iptables",
-                logger,
-            );
-            created.v4_physdev_return = Self::install_return_rule(
-                Self::run_iptables_rule_args,
-                Self::build_forward_return_physdev_rule_args("-I", iface),
-                "physdev",
-                iface,
-                "iptables",
-                logger,
-            );
-            Self::publish_created(created);
-            logger.log_line(&format!(
-                "FORWARD hook installed on {} for chain {} (iptables).",
-                iface, chain_name
-            ));
             if ipv6_enabled {
-                if bridged && !Self::bridge_netfilter_active(BRIDGE_NF_CALL_IP6TABLES) {
-                    return Err(format!(
-                        "Container veth {} is enslaved to a bridge but bridged packets are not \
-                         delivered to ip6tables ({} is absent or 0), so chain {} could never be \
-                         reached from FORWARD for IPv6. Refusing to report success for an \
-                         unenforceable policy.",
-                        iface, BRIDGE_NF_CALL_IP6TABLES, chain_name
-                    ));
-                }
-
-                Self::install_claimed_hook(
+                Self::install_family_hooks(
                     created,
-                    |created, claimed| created.v6_hook = claimed,
-                    |logger| {
-                        Self::run_ip6tables_rule_args(
-                            &[Self::build_forward_hook_iface_rule_args(
-                                "-I",
-                                iface,
-                                &chain_name,
-                            )],
-                            logger,
-                        )
-                    },
-                    |logger| {
-                        let _ = Self::run_ip6tables_rule_args(
-                            &[Self::build_forward_hook_iface_rule_args(
-                                "-D",
-                                iface,
-                                &chain_name,
-                            )],
-                            logger,
-                        );
-                    },
+                    |created| &mut created.v6,
+                    Self::run_ip6tables_rule_args,
+                    "ip6tables",
+                    BRIDGE_NF_CALL_IP6TABLES,
+                    iface,
+                    &chain_name,
+                    bridged,
                     logger,
                 )?;
-
-                let physdev_installed = Self::install_claimed_hook(
-                    created,
-                    |created, claimed| created.v6_physdev_hook = claimed,
-                    |logger| {
-                        Self::install_physdev_hook(
-                            Self::run_ip6tables_rule_args,
-                            iface,
-                            &chain_name,
-                            bridged,
-                            "ip6tables",
-                            logger,
-                        )
-                    },
-                    |logger| {
-                        let _ = Self::run_ip6tables_rule_args(
-                            &[Self::build_forward_hook_physdev_rule_args(
-                                "-D",
-                                iface,
-                                &chain_name,
-                            )],
-                            logger,
-                        );
-                    },
-                    logger,
-                )?;
-                created.v6_physdev_hook = physdev_installed;
-                Self::publish_created(created);
-
-                created.v6_return = true;
-                created.v6_physdev_return = true;
-                Self::publish_created(created);
-                created.v6_return = Self::install_return_rule(
-                    Self::run_ip6tables_rule_args,
-                    Self::build_forward_return_iface_rule_args("-I", iface),
-                    "interface",
-                    iface,
-                    "ip6tables",
-                    logger,
-                );
-                created.v6_physdev_return = Self::install_return_rule(
-                    Self::run_ip6tables_rule_args,
-                    Self::build_forward_return_physdev_rule_args("-I", iface),
-                    "physdev",
-                    iface,
-                    "ip6tables",
-                    logger,
-                );
-                Self::publish_created(created);
-
-                logger.log_line(&format!(
-                    "FORWARD hook installed on {} for chain {} (ip6tables).",
-                    iface, chain_name
-                ));
             }
         } else {
             // Without a veth interface there is nothing to hook the chain to,
@@ -2133,6 +2005,115 @@ impl NetworkIptablesManager {
         crate::signal_cleanup::set_active_created(*created);
     }
 
+    /// Install one family's FORWARD hooks and return-path rules, recording
+    /// ownership as each one lands.
+    ///
+    /// The families differ only in the tool that programs them, the sysctl
+    /// that governs bridged delivery, and which half of `created` they own.
+    /// Sharing one body is what stops a fix reaching one family and silently
+    /// missing the other.
+    #[allow(clippy::too_many_arguments)]
+    fn install_family_hooks(
+        created: &mut CreatedResources,
+        family: fn(&mut CreatedResources) -> &mut FamilyResources,
+        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
+        tool: &str,
+        bridge_nf_path: &str,
+        iface: &str,
+        chain_name: &str,
+        bridged: bool,
+        logger: &mut Logger,
+    ) -> Result<(), String> {
+        // On a bridged veth the physdev rule is the only one that can match,
+        // and it can only match while br_netfilter is delivering bridged
+        // packets to the filter tables. Without that, both rules install
+        // cleanly and neither ever fires, which is the exact failure this
+        // change exists to remove: a chain that looks enforced and is not.
+        if bridged && !Self::bridge_netfilter_active(bridge_nf_path) {
+            return Err(format!(
+                "Container veth {} is enslaved to a bridge but bridged packets are not \
+                 delivered to {} ({} is absent or 0), so chain {} could never be reached \
+                 from FORWARD. Refusing to report success for an unenforceable policy.",
+                iface, tool, bridge_nf_path, chain_name
+            ));
+        }
+
+        Self::install_claimed_hook(
+            created,
+            |created, claimed| family(created).hook = claimed,
+            |logger| {
+                run(
+                    &[Self::build_forward_hook_iface_rule_args(
+                        "-I", iface, chain_name,
+                    )],
+                    logger,
+                )
+            },
+            |logger| {
+                let _ = run(
+                    &[Self::build_forward_hook_iface_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                );
+            },
+            logger,
+        )?;
+
+        let physdev_installed = Self::install_claimed_hook(
+            created,
+            |created, claimed| family(created).physdev_hook = claimed,
+            |logger| Self::install_physdev_hook(run, iface, chain_name, bridged, tool, logger),
+            |logger| {
+                let _ = run(
+                    &[Self::build_forward_hook_physdev_rule_args(
+                        "-D", iface, chain_name,
+                    )],
+                    logger,
+                );
+            },
+            logger,
+        )?;
+        family(created).physdev_hook = physdev_installed;
+        Self::publish_created(created);
+
+        // Claimed before insertion for the same reason the hooks are: a fatal
+        // signal between the call and the record would leave the rule
+        // installed and absent from the cleanup snapshot.
+        let claimed = family(created);
+        claimed.return_rule = true;
+        claimed.physdev_return = true;
+        Self::publish_created(created);
+
+        let return_installed = Self::install_return_rule(
+            run,
+            Self::build_forward_return_iface_rule_args("-I", iface),
+            "interface",
+            iface,
+            tool,
+            logger,
+        );
+        let physdev_return_installed = Self::install_return_rule(
+            run,
+            Self::build_forward_return_physdev_rule_args("-I", iface),
+            "physdev",
+            iface,
+            tool,
+            logger,
+        );
+        let installed = family(created);
+        installed.return_rule = return_installed;
+        installed.physdev_return = physdev_return_installed;
+        Self::publish_created(created);
+
+        logger.log_line(&format!(
+            "FORWARD hook installed on {} for chain {} ({}).",
+            iface, chain_name, tool
+        ));
+
+        Ok(())
+    }
+
     /// Claim a FORWARD hook, install it, and hand the claim back if the install
     /// reports that it never landed.
     ///
@@ -2158,7 +2139,7 @@ impl NetworkIptablesManager {
     /// the release safe whichever way the ambiguity fell.
     fn install_claimed_hook<T>(
         created: &mut CreatedResources,
-        claim: fn(&mut CreatedResources, bool),
+        mut claim: impl FnMut(&mut CreatedResources, bool),
         install: impl FnOnce(&mut Logger) -> Result<T, String>,
         undo: impl FnOnce(&mut Logger),
         logger: &mut Logger,
@@ -2203,92 +2184,22 @@ impl NetworkIptablesManager {
         // of `-i`, or the interface rule standing in for the physdev one --
         // finds nothing and leaks the hook.
         if let Some(iface) = veth_interface {
-            if created.v4_hook
-                && Self::run_iptables_rule_args(
-                    &[Self::build_forward_hook_iface_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v4_hook = false;
-            }
-            if created.v4_physdev_hook
-                && Self::run_iptables_rule_args(
-                    &[Self::build_forward_hook_physdev_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v4_physdev_hook = false;
-            }
-            if created.v6_hook
-                && Self::run_ip6tables_rule_args(
-                    &[Self::build_forward_hook_iface_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v6_hook = false;
-            }
-            if created.v6_physdev_hook
-                && Self::run_ip6tables_rule_args(
-                    &[Self::build_forward_hook_physdev_rule_args(
-                        "-D", iface, chain_name,
-                    )],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v6_physdev_hook = false;
-            }
-
-            // The return-path rules jump to ACCEPT rather than to the chain,
-            // so unlike the hooks above they hold no reference to it and do
-            // not gate the delete below. They are still this attempt's to
-            // remove: left behind, they would accept established traffic for
-            // a veth name the kernel may later hand to a different container.
-            if created.v4_return
-                && Self::run_iptables_rule_args(
-                    &[Self::build_forward_return_iface_rule_args("-D", iface)],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v4_return = false;
-            }
-            if created.v4_physdev_return
-                && Self::run_iptables_rule_args(
-                    &[Self::build_forward_return_physdev_rule_args("-D", iface)],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v4_physdev_return = false;
-            }
-            if created.v6_return
-                && Self::run_ip6tables_rule_args(
-                    &[Self::build_forward_return_iface_rule_args("-D", iface)],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v6_return = false;
-            }
-            if created.v6_physdev_return
-                && Self::run_ip6tables_rule_args(
-                    &[Self::build_forward_return_physdev_rule_args("-D", iface)],
-                    logger,
-                )
-                .is_ok()
-            {
-                residual.v6_physdev_return = false;
-            }
+            Self::teardown_family_forward(
+                Self::run_iptables_rule_args,
+                chain_name,
+                iface,
+                &created.v4,
+                &mut residual.v4,
+                logger,
+            );
+            Self::teardown_family_forward(
+                Self::run_ip6tables_rule_args,
+                chain_name,
+                iface,
+                &created.v6,
+                &mut residual.v6,
+                logger,
+            );
         }
 
         // Flush and delete only the chains this attempt created, and only once
@@ -2297,18 +2208,18 @@ impl NetworkIptablesManager {
         // cleared when it succeeds. Either surviving hook still references the
         // chain, so both gate the delete. The gate is per family because the
         // two chains live in different tables and are referenced independently.
-        residual.v4_chain = teardown_chain(
-            created.v4_chain,
-            residual.v4_hook || residual.v4_physdev_hook,
+        residual.v4.chain = teardown_chain(
+            created.v4.chain,
+            residual.v4.hooks_remain(),
             logger,
             |logger| {
                 let _ = Self::run_iptables(&["-F", chain_name], logger);
             },
             |logger| Self::run_iptables(&["-X", chain_name], logger).is_ok(),
         );
-        residual.v6_chain = teardown_chain(
-            created.v6_chain,
-            residual.v6_hook || residual.v6_physdev_hook,
+        residual.v6.chain = teardown_chain(
+            created.v6.chain,
+            residual.v6.hooks_remain(),
             logger,
             |logger| {
                 let _ = Self::run_ip6tables(&["-F", chain_name], logger);
@@ -2318,6 +2229,64 @@ impl NetworkIptablesManager {
 
         Self::publish_created(&residual);
         residual
+    }
+
+    /// Remove one family's FORWARD rules, clearing ownership only where the
+    /// removal succeeded.
+    fn teardown_family_forward(
+        run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
+        chain_name: &str,
+        iface: &str,
+        created: &FamilyResources,
+        residual: &mut FamilyResources,
+        logger: &mut Logger,
+    ) {
+        if created.hook
+            && run(
+                &[Self::build_forward_hook_iface_rule_args(
+                    "-D", iface, chain_name,
+                )],
+                logger,
+            )
+            .is_ok()
+        {
+            residual.hook = false;
+        }
+        if created.physdev_hook
+            && run(
+                &[Self::build_forward_hook_physdev_rule_args(
+                    "-D", iface, chain_name,
+                )],
+                logger,
+            )
+            .is_ok()
+        {
+            residual.physdev_hook = false;
+        }
+
+        // The return-path rules jump to ACCEPT rather than to the chain, so
+        // unlike the hooks above they hold no reference to it and do not gate
+        // the delete. They are still this attempt's to remove: left behind,
+        // they would accept established traffic for a veth name the kernel may
+        // later hand to a different container.
+        if created.return_rule
+            && run(
+                &[Self::build_forward_return_iface_rule_args("-D", iface)],
+                logger,
+            )
+            .is_ok()
+        {
+            residual.return_rule = false;
+        }
+        if created.physdev_return
+            && run(
+                &[Self::build_forward_return_physdev_rule_args("-D", iface)],
+                logger,
+            )
+            .is_ok()
+        {
+            residual.physdev_return = false;
+        }
     }
 
     /// Remove all iptables/ip6tables rules created by this manager.
@@ -3740,21 +3709,6 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_deny_under_a_blocking_default_stays_a_warning_with_no_allow() {
-        // With nothing to ACCEPT ahead of it, the closing DROP genuinely covers
-        // whatever the missing rule would have covered, so this must keep
-        // working rather than become a new hard failure.
-        let policy = ContainerPolicy {
-            default_network_policy: NetworkPolicy::Block,
-            ..policy_with_hosts(&[], &[UNRESOLVABLE_HOST])
-        };
-        let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
-            .expect("an unresolvable deny with no allow rules is covered by the closing DROP");
-    }
-
-    #[test]
     fn an_unresolvable_allow_does_not_arm_the_deny_precedence_failure() {
         // An allow that resolved to nothing programs no ACCEPT, so it cannot
         // preempt the closing DROP and must not be counted as one that did.
@@ -4612,19 +4566,31 @@ mod tests {
         // reassign, so a later container would inherit it.
         for created in [
             CreatedResources {
-                v4_return: true,
+                v4: FamilyResources {
+                    return_rule: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             CreatedResources {
-                v6_return: true,
+                v6: FamilyResources {
+                    return_rule: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             CreatedResources {
-                v4_physdev_return: true,
+                v4: FamilyResources {
+                    physdev_return: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             CreatedResources {
-                v6_physdev_return: true,
+                v6: FamilyResources {
+                    physdev_return: true,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         ] {

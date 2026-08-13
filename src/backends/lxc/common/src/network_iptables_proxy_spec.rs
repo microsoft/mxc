@@ -516,3 +516,56 @@ fn a_policy_without_a_proxy_resolves_to_no_endpoints() {
     assert!(endpoints.is_empty());
     assert!(pin.is_none());
 }
+
+#[test]
+fn a_proxy_answer_larger_than_the_cap_contributes_no_more_than_the_cap() {
+    let addresses: Vec<String> = (0..40).map(|n| format!("203.0.113.{n}")).collect();
+    let mut logger = Logger::new(Mode::Buffer);
+
+    let accepted =
+        NetworkIptablesManager::bound_proxy_addresses("proxy.invalid", &addresses, &mut logger);
+
+    assert_eq!(
+        accepted.len(),
+        NetworkIptablesManager::MAX_PROXY_ENDPOINTS,
+        "a 40-address answer must not become 40 ACCEPT rules and 40 iptables \
+         processes on the container-start path; actual count: {}",
+        accepted.len()
+    );
+
+    // The hosts-file pin is built from the first address, so trimming must
+    // never drop the one address the container is pinned to.
+    assert_eq!(
+        accepted.first().map(String::as_str),
+        Some("203.0.113.0"),
+        "the pinned address must survive the bound; actual: {:?}",
+        accepted.first()
+    );
+
+    let buffer = logger.get_buffer();
+    assert!(
+        buffer.contains("proxy.invalid") && buffer.contains("40"),
+        "a trimmed answer must say which host was trimmed and from what size; \
+         actual buffer: {buffer:?}"
+    );
+}
+
+#[test]
+fn a_proxy_answer_within_the_cap_is_left_alone() {
+    let addresses: Vec<String> = (0..3).map(|n| format!("203.0.113.{n}")).collect();
+    let mut logger = Logger::new(Mode::Buffer);
+
+    let accepted =
+        NetworkIptablesManager::bound_proxy_addresses("proxy.invalid", &addresses, &mut logger);
+
+    assert_eq!(
+        accepted,
+        addresses.as_slice(),
+        "an answer within the cap must reach the chain intact"
+    );
+    assert!(
+        logger.get_buffer().is_empty(),
+        "an untrimmed answer must not warn; actual buffer: {:?}",
+        logger.get_buffer()
+    );
+}
