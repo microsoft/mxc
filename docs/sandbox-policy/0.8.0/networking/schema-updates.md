@@ -22,9 +22,9 @@ the shared policy.
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
 On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
-`ingress` governs traffic entering the container. ProcessContainer maps `egress` to internet-bound traffic and maps
-`ingress.default` to Windows' `privateNetworkClientServer` capability, which enables private-network communication in
-both directions.
+`ingress` governs traffic entering the container. ProcessContainer maps `egress` to traffic sent to public addresses
+and maps `ingress.default` to Windows' `privateNetworkClientServer` capability, which enables private-network
+communication in both directions.
 
 `allowLocalNetwork` still maps only to `ingress.default`. This preserves existing ProcessContainer private-network
 behavior while allowing backends with clean private-network separation to enforce independent outbound and inbound
@@ -123,7 +123,7 @@ migrates to deny-default egress with allowed private/LAN inbound:
 
 On backends that cleanly separate private-network ingress from egress, this does not grant outbound private-network or
 internet access. On ProcessContainer, `ingress.default: "allow"` preserves the legacy `allowLocalNetwork` behavior by
-granting bidirectional private-network communication, while internet-bound egress remains denied.
+granting bidirectional private-network communication, while traffic to public addresses remains denied.
 
 ## Backend-specific schema 0.8 configuration
 

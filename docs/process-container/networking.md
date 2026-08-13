@@ -14,9 +14,9 @@ On ProcessContainer paths with OS-scoped enforcement, each container gets two en
 container SID and applied with no UAC prompt per launch. The AppContainer compatibility behavior is documented in
 section 2 and is not equivalent to these guarantees.
 
-- **WFP internet filters:** block internet-bound traffic by default, then allow or block specific public destinations
-  by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over an allow. The
-  rules apply only to this container.
+- **WFP internet filters:** block traffic to public addresses by default, then allow or block specific public
+  destinations by IP address or range, protocol, and port for both IPv4 and IPv6. An explicit block always wins over
+  an allow. The rules apply only to this container.
 - **Per-container WinHTTP HTTP/S proxy:** points WinHTTP-stack clients (e.g., the WinHTTP/Chromium stack) at a
   caller-provided loopback proxy container. MXC also sets `HTTP_PROXY`, `HTTPS_PROXY`, and their lowercase variants to
   the loopback endpoint for runtimes that use proxy environment variables rather than WinHTTP. `NO_PROXY` is a bypass
@@ -26,9 +26,9 @@ section 2 and is not equivalent to these guarantees.
 The examples below use the proposed schema 0.8 network shape.
 
 Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
-maps `ingress.default: "allow"` to private-network communication in both directions. `egress` controls internet-bound
-traffic and does not independently narrow private-network client connections. `ingress.hostLoopback` remains the
-separate host-loopback control.
+maps `ingress.default: "allow"` to private-network communication in both directions. `egress` controls traffic to
+public addresses and does not independently narrow private-network client connections. `ingress.hostLoopback` remains
+the separate host-loopback control.
 
 | Egress default | Ingress default | AppContainer capabilities | Result |
 |---|---|---|---|
@@ -74,7 +74,7 @@ This matrix covers the direction defaults without explicit internet egress rules
 
 This is a ProcessContainer-specific mapping. Callers that need a private-network proxy or any other private-network
 communication must set `ingress.default` to `"allow"` and accept that Windows enables both private-network client and
-server behavior. WFP continues to enforce the separate internet-bound `egress` policy.
+server behavior. WFP continues to enforce the separate `egress` policy for public addresses.
 
 #### Contained AppContainer proxy
 
@@ -155,7 +155,8 @@ usable process-creation contract through runtime probing.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
 probe succeed. Fall back temporarily to the legacy SBOX contract through CPIS when PSEC is unavailable, then to
-AppContainer when neither BaseContainer contract is usable.
+AppContainer when neither BaseContainer contract is usable. The MXC probe must account for the process network
+containment required by the request, just as it accounts for filesystem containment support.
 
 **Downlevel behavior:** When neither PSEC nor CPIS is available, MXC uses the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
@@ -163,26 +164,12 @@ AppContainer when neither BaseContainer contract is usable.
 downlevel weakening. Proxy-configured requests receive cooperative routing through environment variables; this
 compatibility behavior is not model 2 enforcement.
 
-### 2.1 Fail loud on version skew: never silently downgrade
-
-PSEC and CPIS contract support vary between Windows builds as the network-policy surface grows. Runtime probing selects
-the contract, but MXC must not silently weaken the requested policy. The documented downlevel cooperative proxy path
-is the explicit compatibility exception and is not model 2 enforcement.
-The documented `privateNetworkClientServer` direction coupling is the ProcessContainer capability model, not a
-version-skew downgrade.
-
-- The private-network capability coupling is the documented ProcessContainer policy mapping.
-- Downlevel cooperative proxy routing must not be described as exact model-2 enforcement.
-- Outside those documented exceptions, follow the PSEC, SBOX-through-CPIS, and AppContainer
-  fallback order only when the next path preserves the requested semantics.
-  Reject the launch with a typed error when no available path can do so.
-
 ## 3. WFP enforcement
 
-The BaseContainer contracts apply internet-bound WFP filters in the OS's elevated context and own their lifetime.
+The BaseContainer contracts apply WFP filters for public addresses in the OS's elevated context and own their lifetime.
 Downlevel WFP installation, elevation, and cleanup are future work and are not part of the initial schema 0.8
 downlevel support.
 
-`internetClient` and WFP implement the internet-bound `egress` policy. `privateNetworkClientServer` is a separate,
-intentionally bidirectional Windows capability selected through `ingress.default`. ProcessContainer cannot represent
-independent private-network outbound and inbound controls.
+`internetClient` and WFP implement the `egress` policy for public addresses. `privateNetworkClientServer` is a
+separate, intentionally bidirectional Windows capability selected through `ingress.default`. ProcessContainer cannot
+represent independent private-network outbound and inbound controls.

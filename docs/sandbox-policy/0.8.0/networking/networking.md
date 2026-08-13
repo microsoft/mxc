@@ -278,8 +278,8 @@ What is and is not routed through the proxy is described under Outbound Traffic 
 
 Backends that cleanly separate private-network ingress from egress apply both directions independently. Windows
 AppContainer exposes `privateNetworkClientServer` as one bidirectional capability, so ProcessContainer requires
-`ingress.default: "allow"` for private-network access in either direction and applies `egress` to internet-bound
-traffic.
+`ingress.default: "allow"` for private-network access in either direction and applies `egress` to traffic sent to
+public addresses.
 
 ### D8: Delegation from the invoking user
 
