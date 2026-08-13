@@ -95,8 +95,8 @@ Schema 0.8 moves the endpoint to runtime metadata:
 }
 ```
 
-The omitted 0.8 `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, direct egress rules
-do not apply because egressible HTTP(S) traffic is forwarded to the proxy.
+The omitted 0.8 `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, cooperating HTTP(S)
+clients are configured to use the proxy; clients that ignore the proxy settings are blocked from direct egress.
 
 For example, this legacy policy:
 

@@ -180,9 +180,10 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 }
 ```
 
-The omitted `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, direct egress rules do
-not apply because egressible HTTP(S) traffic is forwarded to the proxy. Without runtime proxy configuration, the deny
-defaults form model 3. Backend-specific proxy reachability requirements are documented below.
+The omitted `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, cooperating HTTP(S)
+clients are configured to use the proxy; clients that ignore the proxy settings are blocked from direct egress.
+Without runtime proxy configuration, the deny defaults form model 3. Backend-specific proxy reachability requirements
+are documented below.
 
 This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on
 Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps
