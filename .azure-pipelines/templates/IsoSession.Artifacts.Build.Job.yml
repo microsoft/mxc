@@ -40,6 +40,7 @@ jobs:
     payloadDirectory: $(workDirectory)/payload
     payloadBinDirectory: $(payloadDirectory)/bin/${{ parameters.archTag }}
     installerOutputDirectory: $(workDirectory)/installer
+    burnSigningDirectory: $(workDirectory)/burn-signing
     artifactDirectory: $(Build.SourcesDirectory)/out/isosession/${{ parameters.archTag }}
     artifactName: isosession-installers-${{ parameters.archTag }}
 
@@ -236,8 +237,97 @@ jobs:
       }
     displayName: Build installer EXE with signed MSI
 
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $packagesRoot = if ($env:NUGET_PACKAGES) {
+          $env:NUGET_PACKAGES
+      } else {
+          Join-Path $env:USERPROFILE '.nuget\packages'
+      }
+      $wixExe = Join-Path $packagesRoot 'wixtoolset.sdk\5.0.2\tools\net472\x64\wix.exe'
+      if (-not (Test-Path -LiteralPath $wixExe -PathType Leaf)) {
+          throw "WiX executable not found at '$wixExe'."
+      }
+
+      $month = '${{ parameters.monthId }}'.Replace('.', '_')
+      $bundlePath = Join-Path '$(installerOutputDirectory)' `
+          "IsoSessionSetup_${month}_${{ parameters.archTag }}.exe"
+      $enginePath = Join-Path '$(burnSigningDirectory)' `
+          "IsoSessionBurnEngine_${{ parameters.archTag }}.exe"
+      New-Item -ItemType Directory -Force -Path '$(burnSigningDirectory)' | Out-Null
+
+      & $wixExe burn detach $bundlePath -engine $enginePath
+      if ($LASTEXITCODE -ne 0) {
+          throw "Detaching the Burn engine failed with exit code $LASTEXITCODE."
+      }
+    displayName: Detach Burn engine for signing
+
   - task: EsrpCodeSigning@5
-    displayName: Test sign installer EXE
+    displayName: Test sign Burn engine
+    inputs:
+      ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
+      AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
+      AppRegistrationTenantId: ${{ parameters.ESRPInfo.tenantId }}
+      AuthAKVName: ${{ parameters.ESRPInfo.azureKeyVaultName }}
+      AuthCertName: ${{ parameters.ESRPInfo.authCertName }}
+      AuthSignCertName: ${{ parameters.ESRPInfo.signCertName }}
+      FolderPath: $(burnSigningDirectory)
+      Pattern: '**/*.exe'
+      UseMinimatch: true
+      signConfigType: inlineSignParams
+      inlineOperation: >-
+        [
+          {
+            "KeyCode": "CP-230072",
+            "OperationCode": "SigntoolSign",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {
+              "OpusName": "Microsoft",
+              "OpusInfo": "https://www.microsoft.com",
+              "FileDigest": "/fd SHA256",
+              "PageHash": "/NPH",
+              "TimeStamp": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+            }
+          },
+          {
+            "KeyCode": "CP-230012",
+            "OperationCode": "SigntoolVerify",
+            "ToolName": "sign",
+            "ToolVersion": "1.0",
+            "Parameters": {}
+          }
+        ]
+
+  - powershell: |
+      $ErrorActionPreference = 'Stop'
+      $packagesRoot = if ($env:NUGET_PACKAGES) {
+          $env:NUGET_PACKAGES
+      } else {
+          Join-Path $env:USERPROFILE '.nuget\packages'
+      }
+      $wixExe = Join-Path $packagesRoot 'wixtoolset.sdk\5.0.2\tools\net472\x64\wix.exe'
+      if (-not (Test-Path -LiteralPath $wixExe -PathType Leaf)) {
+          throw "WiX executable not found at '$wixExe'."
+      }
+
+      $month = '${{ parameters.monthId }}'.Replace('.', '_')
+      $bundlePath = Join-Path '$(installerOutputDirectory)' `
+          "IsoSessionSetup_${month}_${{ parameters.archTag }}.exe"
+      $enginePath = Join-Path '$(burnSigningDirectory)' `
+          "IsoSessionBurnEngine_${{ parameters.archTag }}.exe"
+      $reattachedPath = Join-Path '$(burnSigningDirectory)' `
+          "IsoSessionSetup_${month}_${{ parameters.archTag }}.exe"
+
+      & $wixExe burn reattach $bundlePath -engine $enginePath -o $reattachedPath
+      if ($LASTEXITCODE -ne 0) {
+          throw "Reattaching the signed Burn engine failed with exit code $LASTEXITCODE."
+      }
+      Move-Item -LiteralPath $reattachedPath -Destination $bundlePath -Force
+    displayName: Reattach signed Burn engine
+
+  - task: EsrpCodeSigning@5
+    displayName: Test sign complete installer EXE
     inputs:
       ConnectedServiceName: ${{ parameters.ESRPInfo.serviceName }}
       AppRegistrationClientId: ${{ parameters.ESRPInfo.clientId }}
@@ -280,6 +370,8 @@ jobs:
               Where-Object { $_.Extension -in @('.dll', '.exe') }
           Get-ChildItem -LiteralPath '$(installerOutputDirectory)' -File |
               Where-Object { $_.Extension -in @('.msi', '.exe') }
+          Get-ChildItem -LiteralPath '$(burnSigningDirectory)' -File |
+              Where-Object { $_.Name -like 'IsoSessionBurnEngine_*.exe' }
       )
       $verification = foreach ($file in $signedFiles) {
           $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName

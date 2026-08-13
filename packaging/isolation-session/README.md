@@ -7,7 +7,8 @@ The payload binaries are not built in this repository. The pipeline resolves a
 Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the six
 required IsolationSession binaries, and then:
 
-1. builds and signs x64 and ARM64 MSI/EXE outputs in parallel;
+1. builds and signs x64 and ARM64 MSI/EXE outputs in parallel, including the
+   detached Burn engine and the complete bootstrapper EXE;
 2. records per-architecture provenance and a shared release contract; and
 3. publishes separate x64 and ARM64 installer artifacts.
 
