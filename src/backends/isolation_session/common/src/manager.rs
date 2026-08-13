@@ -199,13 +199,17 @@ impl IsolationSessionManager {
         check_result(&result, op::START_SESSION, StalePromotion::Eligible)
     }
 
-    /// Step 3: Create a process inside the started isolation session.
-    /// Output is streamed live to wxc-exec's stdio via internal relay
-    /// threads; only the exit code is returned to the caller.
-    pub(super) fn create_process(
+    /// Step 3a: Start a process inside the started isolation session, and
+    /// return it **without waiting**.
+    ///
+    /// Split out of [`Self::create_process`] so the caller chooses how the
+    /// streams are consumed: the executor path bridges them with its own relay
+    /// threads and blocks (see `create_process`), while an in-process SDK
+    /// caller takes the raw handles and drives them itself.
+    pub(super) fn start_process(
         &self,
         options: &ProcessOptions,
-    ) -> Result<i32, IsolationSessionError> {
+    ) -> Result<StartedProcess, IsolationSessionError> {
         let proc_options = build_iso_process_options(options)?;
 
         let async_op = self
@@ -239,6 +243,49 @@ impl IsolationSessionManager {
             .Process()
             .map_err(|e| transport_err(op::RUN_PROCESS, "get Process failed", &e))?;
 
+        // A getter that errors is a backend failure, not an absent stream:
+        // propagate it rather than coercing to 0, which downstream treats as
+        // "no handle" and silently skips the corresponding stdio relay. A
+        // genuinely returned 0 still means absent and is preserved.
+        let stdout = process
+            .OutputHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get OutputHandle failed", &e))?;
+        let stderr = process
+            .ErrorHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get ErrorHandle failed", &e))?;
+        let stdin = process
+            .InputHandle()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "get InputHandle failed", &e))?;
+
+        Ok(StartedProcess {
+            process,
+            stdout,
+            stderr,
+            stdin,
+        })
+    }
+
+    /// Step 3: Create a process inside the started isolation session and run it
+    /// to completion. Output is streamed live to wxc-exec's stdio via internal
+    /// relay threads; only the exit code is returned to the caller.
+    ///
+    /// This is the **executor** path. An in-process caller that wants the
+    /// streams itself uses [`Self::start_process`] instead.
+    pub(super) fn create_process(
+        &self,
+        options: &ProcessOptions,
+    ) -> Result<i32, IsolationSessionError> {
+        // `StartedProcess` deliberately has no close-on-drop: this path hands
+        // the raw handle values to relay threads it may abandon, so an early
+        // return must leave them open (see "Handle validity" below). The
+        // handles are released exactly once, by the explicit `process.Close()`
+        // at the point in the normal sequence where that is safe.
+        let started = self.start_process(options)?;
+        let process = &started.process;
+        let stdout_handle_val = started.stdout;
+        let stderr_handle_val = started.stderr;
+        let stdin_handle_val = started.stdin;
+
         // Three pipe relay threads bridge wxc-exec's stdio with the pipe
         // handles owned by `IsoSessionProcess`, crossing the desktop-session
         // boundary that kernel console-handle inheritance cannot.
@@ -260,20 +307,17 @@ impl IsolationSessionManager {
         // leaves it reading memory it owns, not a dead frame. We still join on
         // the normal path (INFINITE for stdout/stderr, bounded for stdin) so
         // all output is drained before the call returns.
-        // A getter that errors is a backend failure, not an absent stream:
-        // propagate it rather than coercing to 0, which downstream treats as
-        // "no handle" and silently skips the corresponding stdio relay. A
-        // genuinely returned 0 still means absent and is preserved.
-        let stdout_handle_val = process
-            .OutputHandle()
-            .map_err(|e| transport_err(op::RUN_PROCESS, "get OutputHandle failed", &e))?;
-        let stderr_handle_val = process
-            .ErrorHandle()
-            .map_err(|e| transport_err(op::RUN_PROCESS, "get ErrorHandle failed", &e))?;
-        let stdin_handle_val = process
-            .InputHandle()
-            .map_err(|e| transport_err(op::RUN_PROCESS, "get InputHandle failed", &e))?;
-
+        //
+        // Handle validity is a separate question from param memory and does not
+        // follow from it. An abandoned relay goes on reading and writing the raw
+        // handle values it was given, so those must stay open for as long as it
+        // might run — and nothing joins it, so that is until wxc-exec exits.
+        // Every `?` from the stderr-relay spawn onward can therefore return with
+        // a relay still live, and closing the handles on the way out would leave
+        // it operating on a value the OS is free to recycle. Leaking them on
+        // those paths is the deliberate choice, and is why `StartedProcess`
+        // itself does not close on drop; the streaming consumer, which has no
+        // relays and no other teardown point, opts in via `ClosingProcess`.
         let wxc_stdout = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) }
             .map_err(|e| lifecycle_err(format!("GetStdHandle(stdout) failed: {}", e)))?;
         let wxc_stderr = unsafe { GetStdHandle(STD_ERROR_HANDLE) }
@@ -420,7 +464,7 @@ impl IsolationSessionManager {
             .WaitForExit(options.timeout_ms)
             .map_err(|e| transport_err(op::RUN_PROCESS, "WaitForExit failed", &e))?;
 
-        let exit_code = wait_with_graceful_shutdown(&process)?;
+        let exit_code = wait_with_graceful_shutdown(process)?;
 
         // Signal the stdin relay to exit. Effective for waitable (console)
         // handles; for pipe handles the bounded wait below expires and we
@@ -477,6 +521,147 @@ impl IsolationSessionManager {
         check_result(&result, op::REMOVE_USER, StalePromotion::Eligible)
     }
 }
+
+/// A process started inside an isolation session but **not yet awaited**.
+///
+/// Separating start from wait is what makes streaming possible: the executor
+/// path hands these handles to its own relay threads and blocks, while an
+/// in-process SDK caller takes them and drives them itself.
+///
+/// **Handle ownership stays here.** The three pipe handles belong to the
+/// `IsoSessionProcess` and are released by its `Close()`; a consumer duplicates
+/// them and must never close the originals. A `0` means the stream is genuinely
+/// absent, not that a getter failed — `start_process` propagates getter errors
+/// rather than coercing them.
+pub(super) struct StartedProcess {
+    pub(super) process: IsoSessionProcess,
+    pub(super) stdout: u64,
+    pub(super) stderr: u64,
+    pub(super) stdin: u64,
+}
+
+impl StartedProcess {
+    /// Block until the process exits and yield its exit code, escalating
+    /// through the graceful-shutdown ladder if it outlives `timeout_ms`.
+    ///
+    /// The *instruction sequence* is the one the executor path runs inline, but
+    /// the ladder's first two tiers are **inert for a consumer that holds
+    /// duplicates of the pipe handles**, so do not read this as executor-
+    /// equivalent behaviour:
+    ///
+    /// - Tier 1 closes the backend's stdin write end, but a pipe reaches EOF
+    ///   only when *every* write end is closed. A streaming adapter duplicates
+    ///   that handle, so tier 1 alone does not produce EOF — the child sees one
+    ///   only once the caller has dropped its duplicate too.
+    /// - Tier 2 (`SendCtrlClose`) is ConPTY-only and returns `E_NOTIMPL`
+    ///   otherwise, and a library consumer never allocates one.
+    ///
+    /// For a consumer still holding that duplicate, the ladder therefore
+    /// degrades to the full 5s + 3s stall followed by tier 3's hard terminate.
+    /// Making tier 1 work unconditionally needs an owned or transferable stdin
+    /// on the handle type, which is tracked separately.
+    pub(super) fn wait(&self, timeout_ms: u32) -> Result<i32, IsolationSessionError> {
+        // `WaitForExit` is a Win32 `WaitForSingleObject` on a kernel handle —
+        // no COM round-trip. On timeout it returns -1; the ladder below then
+        // decides what to do about a process that is still running.
+        let _ = self
+            .process
+            .WaitForExit(timeout_ms)
+            .map_err(|e| transport_err(op::RUN_PROCESS, "WaitForExit failed", &e))?;
+        wait_with_graceful_shutdown(&self.process)
+    }
+
+    /// Kill the process now, reporting whether the kill request was *accepted*.
+    ///
+    /// Deliberately **not** the graceful ladder [`Self::wait`] uses. That ladder
+    /// gives a well-behaved child up to eight seconds to notice a closed stdin
+    /// or a Ctrl-Close, which is right for a shutdown and wrong for a caller who
+    /// asked to terminate: `SandboxProcess::kill` promises to kill, and a
+    /// cancellation path that takes eight seconds to act reads as a hang.
+    ///
+    /// The post-kill wait is **bounded**. `WaitForExit(0)` means INFINITE here,
+    /// so waiting on the assumption that `Terminate` succeeded would wedge this
+    /// call forever if it ever failed against a live process.
+    ///
+    /// That bound covers *this call only*, and does not make teardown as a whole
+    /// bounded. The streaming adapter's `Drop` runs the terminator and then
+    /// joins the waiter thread unconditionally, and a process that survives the
+    /// kill can park that thread by either of two routes — so supplying a
+    /// timeout does not bound it:
+    ///
+    /// - With no timeout, the waiter is still sitting in its leading
+    ///   `WaitForExit(timeout_ms)`, which is INFINITE for `0`.
+    /// - With a timeout, that call returns and the waiter proceeds into
+    ///   [`wait_with_graceful_shutdown`], which ends in `Terminate` followed by
+    ///   `WaitForExit(0)` — INFINITE again.
+    ///
+    /// Neither route is *certain* to stall: the ladder's tier 3 is a fresh
+    /// `Terminate` that may land where this one did not, and its tier 1 ends a
+    /// child that exits on stdin EOF, once the caller has dropped its own
+    /// duplicate of the write end. The narrow claim is only that nothing in this
+    /// function bounds that wait — so if the process does survive, it is the
+    /// join that waits, not this call.
+    ///
+    /// **What this does not tell you.** The bounded wait's result is discarded,
+    /// so a `Terminate` the platform accepted but that left the process running
+    /// still yields `Ok(())`. Surfacing that needs somewhere to surface it to:
+    /// `ExecHandle::terminator` is an infallible `FnOnce()`, so even the `Err`
+    /// this *does* return is dropped at that boundary. Making the path fallible
+    /// end to end is tracked separately.
+    pub(super) fn terminate(&self) -> Result<(), IsolationSessionError> {
+        self.process
+            .Terminate()
+            .map_err(|e| transport_err(op::RUN_PROCESS, "Terminate failed", &e))?;
+        // Bounded rather than INFINITE so a `Terminate` that was accepted but
+        // never took effect cannot park the caller inside this function. The
+        // result is discarded because there is nowhere to report it; see the
+        // note above, which also covers why this does not bound teardown.
+        let _ = self.process.WaitForExit(TERMINATE_WAIT_MS);
+        Ok(())
+    }
+}
+
+/// A [`StartedProcess`] that releases the session process's pipe handles when
+/// it goes out of scope.
+///
+/// Close-on-drop is **opt-in per consumer** rather than a property of
+/// [`StartedProcess`] itself, because the two consumers need opposite things:
+///
+/// - The streaming consumer has no other teardown point — it hands the handles
+///   to an in-process caller and never returns to this crate — so without this
+///   a long-lived host would leak three handles per exec, and that host is
+///   exactly who the streaming path exists for.
+/// - [`IsolationSessionManager::create_process`] must **not** close on the way
+///   out. It gives the raw handle values to relay threads it may abandon on an
+///   early return, so closing would leave a live thread operating on a value
+///   the OS is free to recycle. It closes explicitly instead, at the one point
+///   in its sequence where every relay has been joined or abandoned on purpose.
+pub(super) struct ClosingProcess(StartedProcess);
+
+impl ClosingProcess {
+    pub(super) fn new(started: StartedProcess) -> Self {
+        Self(started)
+    }
+}
+
+impl std::ops::Deref for ClosingProcess {
+    type Target = StartedProcess;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for ClosingProcess {
+    fn drop(&mut self) {
+        let _ = self.0.process.Close();
+    }
+}
+
+/// How long [`StartedProcess::terminate`] waits for a kill to land before
+/// reporting success anyway. Bounded so a failed `Terminate` cannot wedge that
+/// call; generous enough that a normal kill is observed synchronously.
+const TERMINATE_WAIT_MS: u32 = 5_000;
 
 /// Three-tier graceful shutdown for an `IsoSessionProcess` that's still
 /// running after `WaitForExit(timeout_ms)` returns. Tier 1: close stdin —
