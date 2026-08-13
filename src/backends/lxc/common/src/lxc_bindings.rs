@@ -824,66 +824,29 @@ mod tests {
     // asserted, not just an intermediate bool.
 
     #[test]
-    fn proxy_disabled_with_empty_request_env_emits_clear_env_in_attach_args() {
-        // Regression: before the fix, apply_proxy_env returned false for an
-        // empty env slice, so force_clear_env was false, env was empty, both
-        // disjuncts of `force_clear_env || !env.is_empty()` were false, and
-        // --clear-env was never added.  lxc-attach then inherited the full MXC
-        // host process environment — including HTTP_PROXY, HTTPS_PROXY, and
-        // any credentials or tokens present on CI agents.
-        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
-        let mut env: Vec<String> = vec![];
-        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
-        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
-        assert!(
-            args.iter().any(|a| a == "--clear-env"),
-            "proxy disabled + empty env must emit --clear-env to prevent host \
-             environment leak; got {args:?}"
-        );
-    }
-
-    #[test]
-    fn proxy_disabled_non_proxy_env_emits_clear_env_and_preserves_non_proxy_vars() {
-        // Non-proxy vars survive the scrub; --clear-env is emitted.
-        // This was already correct before the fix (non-empty env triggered
-        // --clear-env via the !env.is_empty() arm) — this test guards against
-        // regressing that direction.
-        use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
-        let mut env = vec!["PATH=/usr/bin".to_string()];
-        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
-        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
-        assert!(
-            args.iter().any(|a| a == "--clear-env"),
-            "proxy disabled + non-proxy env must emit --clear-env; got {args:?}"
-        );
-        assert!(
-            args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
-            "PATH must survive the proxy scrub; got {args:?}"
-        );
-    }
-
-    #[test]
-    fn proxy_disabled_http_proxy_env_is_removed_and_clear_env_emitted() {
-        // A caller-supplied HTTP_PROXY must be scrubbed AND --clear-env emitted
-        // so the sandbox cannot reach an egress path the policy never authorized.
+    fn proxy_disabled_keeps_caller_proxy_env_and_still_clears_inherited_env() {
+        // With no MXC proxy there is no egress path of ours for a caller's own
+        // proxy variable to bypass, and the firewall chain -- not an
+        // environment variable -- is what enforces the policy either way.
         use wxc_common::{models::ProxyConfig, proxy_env::apply_proxy_env};
         let mut env = vec![
-            "HTTP_PROXY=http://attacker.example:9999".to_string(),
+            "HTTP_PROXY=http://caller-proxy.example:9999".to_string(),
             "PATH=/usr/bin".to_string(),
         ];
-        let force_clear = apply_proxy_env(&mut env, &ProxyConfig::default());
-        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        apply_proxy_env(&mut env, &ProxyConfig::default());
+        let args = build_attach_args_with_env_control(&env, "", "cmd", true);
         assert!(
             args.iter().any(|a| a == "--clear-env"),
-            "proxy disabled + HTTP_PROXY must emit --clear-env; got {args:?}"
+            "the host environment must still be cleared; got {args:?}"
         );
         assert!(
-            !args.iter().any(|a| a.contains("attacker.example")),
-            "HTTP_PROXY value must not appear in args; got {args:?}"
+            args.iter()
+                .any(|a| a == "--set-var=HTTP_PROXY=http://caller-proxy.example:9999"),
+            "a caller's own proxy variable must reach the container; got {args:?}"
         );
         assert!(
             args.iter().any(|a| a == "--set-var=PATH=/usr/bin"),
-            "PATH must survive the proxy scrub; got {args:?}"
+            "PATH must survive; got {args:?}"
         );
     }
 
@@ -898,8 +861,8 @@ mod tests {
             builtin_test_server: false,
         };
         let mut env = vec!["PATH=/usr/bin".to_string()];
-        let force_clear = apply_proxy_env(&mut env, &proxy);
-        let args = build_attach_args_with_env_control(&env, "", "cmd", force_clear);
+        apply_proxy_env(&mut env, &proxy);
+        let args = build_attach_args_with_env_control(&env, "", "cmd", true);
         assert!(
             args.iter().any(|a| a == "--clear-env"),
             "proxy enabled must emit --clear-env; got {args:?}"

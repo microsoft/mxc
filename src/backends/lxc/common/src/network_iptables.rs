@@ -170,6 +170,24 @@ impl CreatedResources {
             v6_physdev_return: false,
         }
     }
+
+    /// Every field published, for tests that must notice a teardown skipping
+    /// one of them.
+    #[cfg(test)]
+    pub(crate) fn for_test_all() -> Self {
+        Self {
+            v4_chain: true,
+            v6_chain: true,
+            v4_hook: true,
+            v6_hook: true,
+            v4_physdev_hook: true,
+            v6_physdev_hook: true,
+            v4_return: true,
+            v6_return: true,
+            v4_physdev_return: true,
+            v6_physdev_return: true,
+        }
+    }
 }
 
 /// Three-way classification of whether `ip6tables` can be used on this host.
@@ -221,6 +239,8 @@ pub struct NetworkIptablesManager {
     chain_name: String,
     /// Whether rules have been applied.
     rules_applied: bool,
+    /// Whether the caller asked for this policy to outlive the run.
+    preserve_policy: bool,
     /// The container's veth interface name on the host.
     veth_interface: Option<String>,
     /// Whether a caller that never supplies a veth is expected rather than
@@ -338,6 +358,7 @@ impl NetworkIptablesManager {
         Self {
             chain_name: chain_name_for(container_name),
             rules_applied: false,
+            preserve_policy: false,
             veth_interface: None,
             veth_scoping_optional: false,
             #[cfg(test)]
@@ -355,6 +376,12 @@ impl NetworkIptablesManager {
     /// Whether rules have been applied and need cleanup.
     pub fn rules_applied(&self) -> bool {
         self.rules_applied
+    }
+
+    /// Leave the chain and its FORWARD hooks installed when this manager is
+    /// dropped.
+    pub fn set_preserve_policy(&mut self, preserve: bool) {
+        self.preserve_policy = preserve;
     }
 
     /// The hosts-file pin a proxied container must be given before it runs, or
@@ -943,10 +970,7 @@ impl NetworkIptablesManager {
     /// no IPv4 endpoint, and a proxied chain with no endpoints is a deny-all
     /// container whose proxy was discarded.
     fn host_is_ipv6_literal(host: &str) -> bool {
-        let candidate = host
-            .strip_prefix('[')
-            .and_then(|h| h.strip_suffix(']'))
-            .unwrap_or(host);
+        let candidate = wxc_common::models::unbracket_host(host);
         matches!(candidate.parse::<IpAddr>(), Ok(IpAddr::V6(_)))
     }
 
@@ -1703,6 +1727,18 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
+        // A blocked destination stays reachable through the proxy, which MXC
+        // does not configure, so programming the rest would report success for
+        // a control that is not in effect.
+        if !proxy_endpoints.is_empty() && !policy.blocked_hosts.is_empty() {
+            return Err(
+                "network.proxy cannot be combined with blockedHosts: the proxy can fetch a \
+                 blocked destination on the container's behalf, so the block list would not \
+                 be enforced"
+                    .to_string(),
+            );
+        }
+
         // Probe ip6tables once. Skip the v6 chain when the kernel has no
         // active IPv6 (nothing to filter), but fail closed when IPv6 is live
         // and ip6tables is missing or broken rather than silently leaving
@@ -1748,19 +1784,18 @@ impl NetworkIptablesManager {
             // let flows opened before the chain existed keep running straight
             // through the deny-all posture.
             //
-            // The allow and block lists are not programmed either: every
-            // destination other than the proxy is denied by the closing DROP,
-            // so a block entry is redundant, and an allow entry naming
-            // anything but the proxy contradicts the model.
+            // The allow list is not programmed either: an entry naming
+            // anything but the proxy contradicts the model, and one naming the
+            // proxy is already covered. A block list never reaches here.
             let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
             Self::run_iptables_rule_args(&proxy_rules, logger)?;
             for rule in &proxy_rules {
                 logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
             }
-            if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+            if !policy.allowed_hosts.is_empty() {
                 logger.log_line(
-                    "Warning: network.proxy is configured, so allowedHosts and blockedHosts \
-                     are not programmed; the container may reach the proxy and nothing else.",
+                    "Warning: network.proxy is configured, so allowedHosts is not programmed; \
+                     the container may reach the proxy and nothing else.",
                 );
             }
             if ipv6_enabled {
@@ -2351,7 +2386,7 @@ impl NetworkIptablesManager {
 
 impl Drop for NetworkIptablesManager {
     fn drop(&mut self) {
-        if self.rules_applied {
+        if self.rules_applied && !self.preserve_policy {
             let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
             let _ = self.remove_firewall_rules(&mut logger);
         }
@@ -2690,6 +2725,47 @@ mod tests {
             flush_and_delete("iptables", "racer-that-won"),
             "only the published chain may be flushed and deleted, and only it"
         );
+    }
+
+    #[test]
+    fn a_signal_removes_every_resource_the_run_published() {
+        // The ownership record grew physdev and return fields, but every other
+        // force_cleanup test constructs the original chain-and-hook shape, so a
+        // teardown that skipped one of the newer fields would leak a rule into
+        // FORWARD and still pass the suite.
+        let fake = test_firewall::install();
+        let mut logger = Logger::new(Mode::Buffer);
+
+        NetworkIptablesManager::force_cleanup(
+            "all-resources",
+            Some("mxcv-all"),
+            CreatedResources::for_test_all(),
+            &mut logger,
+        );
+
+        let chain = chain_name_for("all-resources");
+        let issued: Vec<String> = fake.issued().iter().map(|c| c.join(" ")).collect();
+
+        for tool in ["iptables", "ip6tables"] {
+            let deletes = issued
+                .iter()
+                .filter(|c| c.starts_with(&format!("{tool} -D FORWARD")))
+                .count();
+            assert_eq!(
+                deletes, 4,
+                "{tool} published an interface hook, a physdev hook, a return \
+                 rule and a physdev return rule, so all four must be deleted; \
+                 issued: {issued:?}"
+            );
+            assert!(
+                issued.contains(&format!("{tool} -F {chain}")),
+                "{tool} must flush the chain it published, issued: {issued:?}"
+            );
+            assert!(
+                issued.contains(&format!("{tool} -X {chain}")),
+                "{tool} must delete the chain it published, issued: {issued:?}"
+            );
+        }
     }
 
     #[test]

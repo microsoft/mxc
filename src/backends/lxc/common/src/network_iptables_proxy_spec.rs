@@ -285,14 +285,12 @@ fn proxy_mode_emits_no_base_exemptions() {
     }
 }
 
-// Under "the proxy and nothing else" a blocked host is already denied by the
-// closing DROP, and an allowed host contradicts the model. Programming
-// either would widen the posture the proxy defines.
+// Under "the proxy and nothing else" an allowed host contradicts the model,
+// so programming it would widen the posture the proxy defines.
 #[test]
-fn proxy_mode_programs_neither_the_allow_list_nor_the_block_list() {
+fn proxy_mode_does_not_program_the_allow_list() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
     policy.allowed_hosts = vec!["10.1.1.1".to_string()];
-    policy.blocked_hosts = vec!["10.2.2.2".to_string()];
 
     let (manager, issued, result) = apply_and_collect("proxy-nolists", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
@@ -305,10 +303,29 @@ fn proxy_mode_programs_neither_the_allow_list_nor_the_block_list() {
 
     for rule in rules {
         assert!(
-            !has_pair(rule, "-d", "10.1.1.1") && !has_pair(rule, "-d", "10.2.2.2"),
-            "a proxied chain must ignore the host lists; actual: {rule:?}"
+            !has_pair(rule, "-d", "10.1.1.1"),
+            "a proxied chain must ignore the allow list; actual: {rule:?}"
         );
     }
+}
+
+// A blocked destination is still reachable by asking the permitted proxy to
+// fetch it, and MXC never forwards the list to that proxy. Accepting the
+// combination reports success for a control that is not in effect, which is
+// the same failure the bridge-netfilter gate already refuses.
+#[test]
+fn a_proxy_combined_with_a_block_list_is_refused() {
+    let mut policy = policy_with_proxy("10.9.8.7", 3128);
+    policy.blocked_hosts = vec!["10.2.2.2".to_string()];
+
+    let (_manager, _issued, result) = apply_and_collect("proxy-blocked", &policy);
+
+    let message =
+        result.expect_err("a policy whose block list cannot be enforced must be refused");
+    assert!(
+        message.contains("blockedHosts"),
+        "the refusal must name the setting that cannot be enforced, got: {message}"
+    );
 }
 
 // The proxy endpoint is IPv4, so nothing authorizes IPv6 egress. The v6

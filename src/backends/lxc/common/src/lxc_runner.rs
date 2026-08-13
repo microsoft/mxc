@@ -25,6 +25,10 @@ use crate::signal_cleanup;
 /// distribution's.
 const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 
+/// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
+/// builtins and must never inherit the script's own timeout budget.
+const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
@@ -245,6 +249,7 @@ impl LxcScriptRunner {
 
         // Configure network rules
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
+        fw_manager.set_preserve_policy(!self.cleanup_policy);
 
         // Try to discover the container's veth interface for scoped rules
         if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
@@ -273,13 +278,10 @@ impl LxcScriptRunner {
             }
         }
 
-        // Pin the proxy hostname to the address the firewall just authorized.
-        //
-        // A proxied chain opens no port 53, so the container has no resolver to
-        // find its proxy with, and even with one it could pick an address the
-        // chain does not allow. Failing here is fatal rather than a warning:
-        // without the pin the proxy is unreachable, so the script would run
-        // against a container that can reach nothing.
+        let mut pinned = false;
+
+        // A proxied chain opens no port 53, so without this the container has
+        // no resolver to find its proxy with.
         if let Some(pin) = fw_manager.proxy_host_pin() {
             let command = Self::build_hosts_pin_command(&pin.hosts_line());
             let _ = writeln!(
@@ -288,20 +290,23 @@ impl LxcScriptRunner {
                 pin.hostname(),
                 pin.ip()
             );
-            let pin_outcome = container.attach_run(&command, "/", &[], true, None);
+            let pin_outcome =
+                container.attach_run(&command, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT));
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
-                // The exit code is the whole report. `attach_run` streams the
-                // child's output straight to the caller's terminal and hands
-                // back empty strings, so appending its stderr here would end
-                // every one of these messages with a colon and nothing after
-                // it -- a promise of a reason that cannot be kept.
+
+                // `attach_run` streams the child's output and returns empty
+                // strings, so the exit code is the whole report.
                 Ok((code, _, _)) => Some(Self::hosts_command_failure("writing", code)),
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = pin_error {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
+                } else {
+                    // A reused container this run will not destroy would
+                    // otherwise be left running with a policy it cannot use.
+                    let _ = container.stop();
                 }
                 return ScriptResponse::error(&format!(
                     "Failed to pin the network proxy host inside the container: {}. \
@@ -309,33 +314,7 @@ impl LxcScriptRunner {
                     reason
                 ));
             }
-        } else if !container_created {
-            // This run pins nothing, but a container it did not create may
-            // still carry a pin from an earlier one. Leaving it would let a
-            // hostname resolve to the address a previous policy authorized
-            // while this policy is written against whatever it resolves to
-            // now, so a deny could be programmed for one address and evaded at
-            // another. Removing it is therefore part of applying the policy,
-            // and failing to remove it is a failure to apply the policy.
-            let unpin = Self::build_hosts_unpin_command();
-            let unpin_error = match container.attach_run(&unpin, "/", &[], true, None) {
-                Ok((0, _, _)) => None,
-                // Reports the exit code alone, for the reason given on the
-                // pinning path above.
-                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
-                Err(e) => Some(e.to_string()),
-            };
-            if let Some(reason) = unpin_error {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error(&format!(
-                    "Failed to clear a previous run's proxy host pin from the container: {}. \
-                     A stale pin can redirect a hostname this policy resolved separately, \
-                     so the script was not run.",
-                    reason
-                ));
-            }
+            pinned = true;
         }
 
         // Execute the script using lxc-attach (container is already running).
@@ -348,17 +327,17 @@ impl LxcScriptRunner {
         let _ = writeln!(logger, "Executing script inside container...");
         let mut exec_env = request.env.clone();
         // Scrub every inherited proxy variable and, when the policy carries a
-        // proxy, point HTTP(S)_PROXY at it. The returned flag is what makes the
-        // scrub effective: with an empty env `lxc-attach` would otherwise fall
-        // back to keep-env mode and inherit the MXC host process environment,
-        // proxy variables and credentials included.
-        let force_clear_env =
-            wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
+        // proxy, point HTTP(S)_PROXY at it.
+        wxc_common::proxy_env::apply_proxy_env(&mut exec_env, &request.policy.network_proxy);
+
+        // Always clear, including for an empty env: otherwise `lxc-attach`
+        // falls back to keep-env mode and inherits the MXC host process
+        // environment, proxy variables and credentials included.
         let result = container.attach_run(
             &request.script_code,
             &request.working_directory,
             &exec_env,
-            force_clear_env,
+            true,
             timeout,
         );
 
@@ -372,6 +351,28 @@ impl LxcScriptRunner {
             },
             Err(e) => ScriptResponse::error(&format!("Execution failed: {}", e)),
         };
+
+        // The pin names an address only this run's chain authorized, so it
+        // must not outlive that chain.
+        if pinned && self.cleanup_policy {
+            let unpin = Self::build_hosts_unpin_command();
+            let unpin_error =
+                match container.attach_run(&unpin, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT)) {
+                    Ok((0, _, _)) => None,
+                    Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
+                    Err(e) => Some(e.to_string()),
+                };
+
+            // The script has already run, so a failure here cannot change its
+            // result and must not replace it.
+            if let Some(reason) = unpin_error {
+                let _ = writeln!(
+                    logger,
+                    "Warning: failed to clear the proxy host pin: {}",
+                    reason
+                );
+            }
+        }
 
         // Cleanup: remove network rules
         if fw_manager.rules_applied() && self.cleanup_policy {
