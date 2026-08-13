@@ -96,14 +96,15 @@ bind only the exact loopback address and port supplied to MXC.
 | Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
 
 All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
-common WFP endpoint enforcement. The packaged row covers both AppContainer and non-AppContainer proxies because their
+common WFP endpoint enforcement. The proxy endpoint is the loopback address and port in
+`runtimeConfig.networkProxy`. The packaged row covers both AppContainer and non-AppContainer proxies because their
 client policy and package identity are the same; the enforcement table below separates their additional protections.
 
 `ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
 opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
-non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That also permits the MXC
-client container to reach other host-loopback services and permits host-loopback clients to reach listeners in the MXC
-client container.
+non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That authorizes both
+host-loopback directions, but Model 2 WFP still restricts client-container egress to the configured proxy endpoint.
+Host-loopback clients can reach listeners in the MXC client container.
 
 #### Identity-scoped proxy
 
