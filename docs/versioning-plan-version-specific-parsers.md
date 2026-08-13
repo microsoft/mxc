@@ -1,6 +1,7 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan; Phase 1 implemented by PR #807
+Status: implementation plan; Phase 1 merged in PR #807, Phase 2 merged in
+PR #816, and Phase 3 is under review in PR #835
 
 Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 (2026-08-10)
@@ -32,6 +33,32 @@ Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
 - Introduce another development version as part of the initial parser
   conversion. `0.9.0-dev` is selected when `0.8.0-alpha` is published;
   `1.0.0` remains a later milestone.
+
+## Contract reconstruction policy
+
+The published schema defines each version's canonical field set and spellings.
+The exact Rust contract additionally preserves an undocumented parser spelling
+only when it was an explicit, lossless compatibility alias at that version:
+
+1. The parser names the spelling in a Serde alias or dedicated match arm.
+2. It maps to one canonical field or value without weakening validation.
+3. It has a deprecation diagnostic or focused regression test.
+4. It does not expose experimental or later-version functionality.
+
+The compatibility matrix is:
+
+| Versions | Compatibility spelling | Canonical spelling |
+| --- | --- | --- |
+| `0.6`, `0.7`, `0.8` | containment `appcontainer` | `processcontainer` |
+| `0.6`, `0.7`, `0.8` | top-level `appContainer` | `processContainer` |
+| `0.7`, `0.8` | containment `macos_sandbox` | `seatbelt` |
+| `0.7`, `0.8` | top-level `macos_sandbox` | `seatbelt` |
+
+`$schema` and `_comment` are normal declared fields beginning in `0.7`; their
+incidental acceptance by the open `0.6` rolling parser does not backport them
+into the exact `0.6` contract. Arbitrary unknown fields, parse-and-ignore
+behavior, missing versions, experimental fields on published contracts, and
+`experimental.macos_sandbox` after Seatbelt promotion are not preserved.
 
 ## Design note under discussion: experimental fields in published contracts
 
@@ -192,6 +219,21 @@ ExecutionRequest / ParsedStateAwareRequest
 The request is deserialized directly from its source text. It is not converted
 to `serde_json::Value` before structural validation.
 
+### Entry-point-dependent command requirements
+
+The published `Request` types represent complete JSON requests and retain the
+schema requirement for `process.commandLine`. The existing CLI policy mode that
+supplies the command separately remains supported, but it is an entry-point
+concern rather than a relaxation of the published contract.
+
+Before exact dispatch is enabled, the loader must provide an entry-point-aware,
+typed path for `LoadOptions::allow_missing_command` that combines the CLI
+command with the versioned policy before normal semantic validation. A
+dedicated versioned policy root is acceptable; falling back to the rolling
+version-insensitive parser is not. Phase 8 shadow dispatch must cover this path,
+and Phase 10 cannot enable exact dispatch until its behavior matches the current
+CLI override flow.
+
 ## Work plan
 
 ### Phase 1: Add the contract crate and exact version probe
@@ -276,13 +318,24 @@ every internal field. Do not use a catch-all `..`.
 Add wire-equivalence tests proving that representative `0.6` requests adapt to
 the same `wire::MxcConfig` produced by the current deserializer.
 
-### Phase 4: Add `0.7.0-alpha`
+### Phase 4: Add the `0.7.0-alpha` contract and adapter
 
 Create an independent self-contained module rather than sharing field-bearing
 types.
 
 The `0.7` contract adds the documented differences from `0.6`, including
 annotations and the stable Seatbelt surface.
+
+Add:
+
+```text
+src/core/wxc_common/src/config_contract_adapters/v0_7.rs
+```
+
+The adapter exhaustively maps `published::v0_7_0_alpha::Request` into the
+current wire model, including annotations, stable Seatbelt configuration, and
+version-specific compatibility aliases. Add expected-wire and current-wire
+equivalence tests for representative `0.7` requests.
 
 Add cross-version fixtures proving that fields and values are accepted only by
 the versions that define them.
@@ -291,7 +344,7 @@ The historical `0.6` and `0.7` schema files remain byte-for-byte unchanged.
 Document the bootstrap tightening where the typed contracts require an exact
 version and reject unknown fields more consistently than those advisory files.
 
-### Phase 5: Add the closed `0.8.0-alpha` development contract
+### Phase 5: Add the closed `0.8.0-alpha` development contract and adapters
 
 Separate the mutable development contract into:
 
@@ -310,6 +363,15 @@ dev/
     deprovision.rs
 ```
 
+Add mutable development adapters outside the contract crate:
+
+```text
+src/core/wxc_common/src/config_contract_adapters/v0_8/
+  mod.rs
+  one_shot.rs
+  state_aware.rs
+```
+
 The one-shot development request contains the stable candidate surface plus a
 recursively closed one-shot experimental structure.
 
@@ -321,7 +383,62 @@ concrete request type.
 This typed path replaces permissive experimental acceptance and eventually
 removes the need to mask the experimental source block before base parsing.
 
-### Phase 6: Add shadow exact-contract dispatch
+The adapters exhaustively map the one-shot request and each phase-specific
+state-aware request into the existing one-shot and state-aware normalization
+models. Add expected-wire and current-wire equivalence tests for representative
+stable, experimental, and phase-specific development requests.
+
+### Phase 6: Add versioned development-schema codegen
+
+Add the schema-generation foundation needed to evolve the closed development
+contract safely:
+
+- optional Schemars support on the contract crate
+- custom schema implementations for contract primitives where derive output is
+  insufficient
+- `mxc_schema_gen schema --version 0.8.0-alpha`
+- versioned TypeScript wire-oracle generation
+- drift checks proving generated development artifacts match the Rust contract
+
+This phase generates development artifacts only; it does not publish or freeze
+`0.8.0-alpha`. It must land before substantial development-contract changes so
+those changes update the Rust contract, JSON Schema, and TypeScript oracle
+together.
+
+### Phase 7: Reintroduce the GA network contract on the development version
+
+Redo the work originally attempted by PR #676 and reverted by PR #707, but
+apply it through the version-specific contract stack rather than replacing one
+rolling wire shape in place.
+
+The `0.8.0-alpha` development contract adds:
+
+- `network.egress` and `network.ingress`
+- `NetworkEgress`, rule, destination, port, protocol, and ingress policy types
+- destination `except` ranges and inclusive `endPort`
+- `tcp`, `udp`, `icmp`, and `any` protocol values
+- `processContainer.network.allowedPeers`
+- the GA runtime location for network proxy configuration
+
+The phase must be end-to-end and leave the tree green. It includes the
+development contract, adapters from the legacy `0.6`/`0.7` network shapes,
+canonical runtime models, semantic validation, backend enforcement, Rust and
+TypeScript SDK surfaces, generated artifacts, fixtures, and applicable unit,
+integration, and E2E tests. Do not merge a schema-only change that intentionally
+breaks the parser, codegen, SDK, or test gates.
+
+The published `0.6` and `0.7` contracts retain their immutable legacy network
+syntax. Their adapters normalize legacy fields into the canonical GA runtime
+model. Migrations must not silently drop DNS host rules, enforcement choices,
+local-network intent, or proxy configuration; each legacy behavior must be
+translated, rejected with a specific migration error, or retained through a
+documented compatibility representation.
+
+The GA fields are available only in the `0.8.0-alpha` development contract.
+This phase occurs before shadow dispatch so all later parity and corpus work
+targets the final development network shape.
+
+### Phase 8: Add shadow exact-contract dispatch
 
 Add a private exact-contract path in `config_parser` while retaining the current
 path as authoritative.
@@ -335,22 +452,30 @@ For matching inputs:
 
 Semantic-equivalence tests belong here, where both complete parsing paths
 exist. For valid inputs, Phase 3's wire-equivalence tests establish that the
-same deterministic wire-to-runtime conversion receives the same value; Phase 6
+same deterministic wire-to-runtime conversion receives the same value; Phase 8
 adds end-to-end coverage for runtime results, acceptance differences, and
 diagnostic behavior.
 
 Explicitly classify known expected incompatibilities, especially configs that
 declare `0.6.0-alpha` while carrying experimental fields.
 
-### Phase 7: Migrate producers and the config corpus
+### Phase 9: Migrate producers and the config corpus
 
-Current base-commit inventory:
+Do not rely on the original base-commit counts; the corpus changes frequently.
+Regenerate and check in an inventory report at the start of this phase,
+covering configs, examples, SDK producers, state-aware envelopes, and schema
+references.
 
-- 23 experimental configs declaring `0.6.0-alpha`
-- 6 experimental configs declaring `0.8.0-alpha`
-- 5 unversioned experimental configs
-- 50 unversioned stable configs
-- 1 config declaring retired `0.3.0-alpha`
+The most recent focused audit (2026-08-11, `tests/configs` plus
+`tests/examples`) found:
+
+- 97 configs declaring `0.6.0-alpha`: 54 conformed to the exact stable
+  contract, while 43 used experimental or later-version surfaces
+- 55 unversioned configs: none conformed after temporary `0.6.0-alpha`
+  injection; they were experimental, state-aware, or annotation-bearing
+
+These counts are evidence that migration is required, not a frozen Phase 9
+input.
 
 Experimental and state-aware configs move to `0.8.0-alpha`. Stable configs are
 classified and assigned an exact published version.
@@ -360,7 +485,7 @@ State-aware producers must stop hard-coding `0.6.0-alpha`.
 
 This step is primarily mechanical and is suitable for delegation.
 
-### Phase 8: Enable exact dispatch
+### Phase 10: Enable exact dispatch
 
 Replace the major/minor range check with exact registry dispatch.
 
@@ -375,18 +500,17 @@ fallback to the latest version.
 After parity tests pass, remove the direct version-insensitive wire
 deserialization path.
 
-### Phase 9: Add versioned codegen, publication, and freeze checks
+### Phase 11: Add publication and freeze checks
 
-Extend `mxc_schema_gen` with commands such as:
+Extend `mxc_schema_gen` with the publication command:
 
 ```text
-mxc_schema_gen schema --version 0.8.0-alpha
 mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-dev
 ```
 
-Generate versioned JSON Schemas, TypeScript wire-oracle types, and version
-constants. Publication copies only the development stable-candidate request;
-experimental and state-aware types never enter a published contract.
+Publication copies only the development stable-candidate request;
+experimental and state-aware types never enter a published contract. Generate
+the lifecycle registry and version constants from the publication metadata.
 
 Add CI checks that published Rust modules, stable generated schemas, registry
 identities, and recorded digests cannot be modified or deleted. Reuse
@@ -397,7 +521,7 @@ logic once all consumers use the generated registry.
 
 Do not extend the existing rolling-version synchronization gate to treat its
 current min/stable/dev constants as the exact-contract registry. Exact contracts
-are registered deliberately as their Rust modules are implemented; Phase 9
+are registered deliberately as their Rust modules are implemented; Phase 11
 replaces the old synchronization mechanism with generated registry metadata.
 
 ## Suggested ownership
@@ -618,7 +742,9 @@ serde.workspace = true
 serde_json.workspace = true
 ```
 
-Schemars is deferred until Phase 2, when the first contract type exists.
+Schemars is deferred until Phase 6, when versioned schema generation consumes
+the contract types. Earlier phases validate deserialization behavior directly
+and do not add schema-generation dependencies without a consumer.
 
 ### Public API
 
