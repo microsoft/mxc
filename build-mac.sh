@@ -125,11 +125,14 @@ copy_binary_for_target() {
     mkdir -p "$bin_dir"
 
     local src="$SRC_DIR/target/$triple/$BUILD_TYPE/mxc-exec-mac"
+    local build_type_file="$bin_dir/mxc-exec-mac.build-type"
     if [ -f "$src" ]; then
         cp "$src" "$bin_dir/mxc-exec-mac"
         chmod +x "$bin_dir/mxc-exec-mac"
+        printf '%s\n' "$BUILD_TYPE" > "$build_type_file"
         echo "Copied $src -> $bin_dir/mxc-exec-mac"
     else
+        rm -f "$build_type_file"
         echo "Warning: $src not found, skipping copy"
     fi
 

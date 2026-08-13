@@ -55,12 +55,17 @@ jobs:
         run: cargo test --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
 
+      - name: Record build type
+        run: printf 'release\n' >
+             src/target/aarch64-apple-darwin/release/mxc-exec-mac.build-type
+
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mxc-binaries-aarch64-apple-darwin
           path: |
             src/target/aarch64-apple-darwin/release/mxc-exec-mac
+            src/target/aarch64-apple-darwin/release/mxc-exec-mac.build-type
             src/target/aarch64-apple-darwin/release/unix-test-proxy
           if-no-files-found: error
           retention-days: 1

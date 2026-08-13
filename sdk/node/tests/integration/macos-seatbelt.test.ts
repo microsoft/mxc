@@ -13,9 +13,23 @@ import {
   debugSpawnOptions,
   NETWORK_TEST_URL,
   createTempDir,
+  getSeatbeltBuildType,
+  spawnFromConfigAsync,
 } from './test-helpers.js';
 
 const seatbeltSpawnOptions = { ...debugSpawnOptions, experimental: true };
+const seatbeltBuildType = os.platform() === 'darwin'
+  ? getSeatbeltBuildType()
+  : undefined;
+const unknownBuildTypeReason = seatbeltBuildType === undefined
+  ? 'Seatbelt build type is unknown; run build-mac.sh or set MXC_SEATBELT_BUILD_TYPE'
+  : undefined;
+const releaseBuildSkipReason = seatbeltBuildType === 'release'
+  ? undefined
+  : unknownBuildTypeReason ?? 'Requires a release mxc-exec-mac build';
+const debugBuildSkipReason = seatbeltBuildType === 'debug'
+  ? undefined
+  : unknownBuildTypeReason ?? 'Requires a debug mxc-exec-mac build';
 
 // Seatbelt requires at least schema 0.5.0; the corpus floor is now 0.6.0-alpha.
 const schemaVersion = '0.6.0-alpha';
@@ -240,23 +254,36 @@ describe('macOS Seatbelt Container', {
     );
   });
 
-  it('should apply profile override from seatbelt config', { timeout: 30_000 }, async () => {
-    // Build a config with a custom seatbelt profile that allows everything
+  it('should reject profile override in release builds', {
+    timeout: 30_000,
+    skip: releaseBuildSkipReason,
+  }, async () => {
+    const config = sdk.createConfigFromPolicy({ version: schemaVersion });
+    config.process = { commandLine: "echo 'profile override must not run'" };
+    config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
+    config.containerId = 'seatbelt-profile-override';
+
+    const result = await spawnFromConfigAsync(config, seatbeltSpawnOptions);
+    assert.notStrictEqual(result.exitCode, 0, 'release builds must reject profileOverride');
+    assert.ok(
+      result.stdout.includes('seatbelt.profileOverride') &&
+        result.stdout.includes('dev-only') &&
+        result.stdout.includes('not accepted'),
+      `Expected profileOverride rejection, got: ${result.stdout}`,
+    );
+    assert.ok(!result.stdout.includes('profile override must not run'));
+  });
+
+  it('should apply profile override in debug builds', {
+    timeout: 30_000,
+    skip: debugBuildSkipReason,
+  }, async () => {
     const config = sdk.createConfigFromPolicy({ version: schemaVersion });
     config.process = { commandLine: "echo 'profile override works'" };
     config.seatbelt = { profileOverride: '(version 1)\n(allow default)' };
     config.containerId = 'seatbelt-profile-override';
 
-    const result = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
-      const ptyProcess = sdk.spawnSandboxFromConfig(config, seatbeltSpawnOptions);
-      let stdout = '';
-      const timer = setTimeout(() => reject(new Error('Test timed out waiting for onExit')), 25_000);
-      ptyProcess.onData((data: string) => { stdout += data; });
-      ptyProcess.onExit((event: { exitCode: number }) => {
-        clearTimeout(timer);
-        resolve({ exitCode: event.exitCode, stdout });
-      });
-    });
+    const result = await spawnFromConfigAsync(config, seatbeltSpawnOptions);
     assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stdout}`);
     assert.ok(result.stdout.includes('profile override works'));
   });

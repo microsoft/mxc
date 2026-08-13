@@ -7,6 +7,12 @@ For development, the dev schema at
 [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](../schemas/dev/mxc-config.schema.0.8.0-dev.json)
 includes experimental features and may change without notice.
 
+Released stable schemas are immutable and describe the config shape accepted
+when they shipped. Schema validation does not guarantee that every field remains
+available in every build: for example, stable schemas still describe
+`seatbelt.profileOverride`, but release builds now reject configs that set this
+dev-only escape hatch.
+
 Editors that support JSON Schema will provide autocomplete and validation when
 you add a `"$schema"` reference to your config file. Use the stable schema for
 production configs and the dev schema when working on experimental features:
@@ -103,7 +109,7 @@ production configs and the dev schema when working on experimental features:
             ]
         },
         "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
+            "profileOverride": null,       // Dev-only escape hatch (rejected by release builds)
             "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
