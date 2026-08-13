@@ -87,19 +87,8 @@ jobs:
             pwsh: true
             workingDirectory: $(Build.SourcesDirectory)
 
-        # TEMPORARY ALPHA GUARD -- DELETE THIS STEP BEFORE PRODUCTION.
-        #
-        # Runs on every leg and on every run, including a dry run.  The
-        # publish stage is skipped when dryRun is true, so a guard living
-        # only in that stage would let a dry run package 21 wrongly named
-        # crates, publish the artifact, and report success -- a green
-        # pipeline over names that must never ship.  Failing here stops the
-        # whole pipeline instead, and no artifact is produced at all.
-        #
-        # The same check is repeated inline in Publish.CratesIo.Job.yml
-        # rather than calling this script, because 1ES forbids checkout in a
-        # release job, so the publish job has no copy of the repo to run it
-        # from.  That duplication is deliberate, not an oversight.
+        # One-off guard against packaging non-alpha crates.  Here rather than
+        # only in the publish stage, which a dry run skips.
         - task: PowerShell@2
           displayName: "TEMP: Verify every crate starts with mxc-alpha-"
           inputs:

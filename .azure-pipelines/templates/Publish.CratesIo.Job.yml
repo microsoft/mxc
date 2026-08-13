@@ -110,49 +110,8 @@ jobs:
       cratesDir: $(Pipeline.Workspace)/crates
       esrpDir: $(Pipeline.Workspace)/esrp-one
     steps:
-      # TEMPORARY ALPHA GUARD -- DELETE THIS STEP BEFORE PRODUCTION.
-      #
-      # Fails the job before the first upload if any .crate in the artifact
-      # does not carry the mxc-alpha- prefix, so an artifact built from a
-      # pre-rename commit cannot reach crates.io.
-      #
-      # The hazard is not hypothetical.  Every branch that still carries a
-      # live EsrpRelease task was cut before the rename and names the crates
-      # mxc-sdk, mxc_telemetry, wslc_common, and so on.  Publishing one of
-      # those is unrecoverable: crates.io does not allow a name or a version
-      # to be deleted or reused, so the wrong name cannot be corrected
-      # afterwards and cannot be republished under the right one.  That is
-      # why this is a precondition rather than a post-publish assertion.
-      #
-      # This checks the artifact rather than the crateOrder list because the
-      # artifact is what actually gets uploaded.  A file present here but
-      # absent from crateOrder is never staged, yet its presence still means
-      # the packaging job ran against the wrong commit, which is exactly the
-      # state worth failing on.
-      #
-      # The test is an exact, literal, case-sensitive prefix match on
-      # mxc-alpha- and nothing else.  mxc_alpha_ with underscores does NOT
-      # satisfy it, even though crates.io treats the two spellings as the
-      # same name.  As of this commit all 21 crates in the closure declare
-      # the hyphenated form, so a rejection here means the artifact was built
-      # from a commit that predates that rename.  Any single wrong name fails
-      # this step, which fails the job, the stage, and the pipeline, and
-      # nothing is published.
-      #
-      # This logic is also in scripts/ci/Assert-CratePrefix.ps1, which the
-      # packaging stage runs.  It is repeated inline here rather than called,
-      # because 1ES forbids checkout in a release job, so this job has no
-      # copy of the repo to run the script from.  The duplication is
-      # deliberate: the packaging guard stops a bad build early and on dry
-      # runs, and this one is the last check before the first upload.  Delete
-      # both together.
-      #
-      # WHY IT GOES AWAY: it encodes the alpha naming scheme, which is a
-      # property of this pre-release period and not of the release process.
-      # Once the crates graduate to their production names this step starts
-      # rejecting every correct name, so it must be deleted in the same
-      # change that renames them -- not disabled, and not parameterized into
-      # something that looks permanent.
+      # One-off guard against uploading non-alpha crates.  Inlined from
+      # scripts/ci/Assert-CratePrefix.ps1 because 1ES forbids checkout here.
       - pwsh: |
           $ErrorActionPreference = 'Stop'
 
@@ -165,8 +124,6 @@ jobs:
               throw "no .crate files found in $cratesDir -- the packaging artifact is missing or empty"
           }
 
-          # Ordinal, matching the comparison Get-CrateOrder.ps1 uses, so the
-          # result does not depend on the agent's culture.
           $rejected = @()
           foreach ($crate in $crates)
           {
