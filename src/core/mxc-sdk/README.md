@@ -53,10 +53,7 @@ On Windows, select `Containment::ProcessContainer` to add AppContainer-specific
 capabilities while retaining the cross-platform policy mapping:
 
 ```rust,no_run
-use mxc_sdk::{
-    build_request_with_containment, Containment, ProcessContainerSection,
-    SandboxPolicy,
-};
+use mxc_sdk::{build_request_with_containment, Containment, ProcessContainer, SandboxPolicy};
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
@@ -66,7 +63,7 @@ let policy = SandboxPolicy {
     timeout_ms: None,
     capture_denials: None,
 };
-let process_container = ProcessContainerSection {
+let process_container = ProcessContainer {
     capabilities: vec!["registryRead".to_string()],
     ..Default::default()
 };
@@ -78,10 +75,6 @@ let mut request = build_request_with_containment(
 request.set_script("reg query HKCU");
 # Ok::<(), mxc_sdk::Error>(())
 ```
-
-Network-derived capabilities such as `internetClient` are merged with the
-additional list. The resulting `processContainer` block is validated by the
-same canonical wire model and config parser used by `wxc-exec`.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env

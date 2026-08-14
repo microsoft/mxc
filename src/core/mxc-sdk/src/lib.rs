@@ -84,7 +84,7 @@
 //!
 //! ```no_run
 //! use mxc_sdk::{
-//!     build_request_with_containment, Containment, ProcessContainerSection, SandboxPolicy,
+//!     build_request_with_containment, Containment, ProcessContainer, SandboxPolicy,
 //! };
 //!
 //! # let policy = SandboxPolicy {
@@ -92,7 +92,7 @@
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! #     capture_denials: None,
 //! # };
-//! let process_container = ProcessContainerSection {
+//! let process_container = ProcessContainer {
 //!     capabilities: vec!["registryRead".to_string()],
 //!     ..Default::default()
 //! };
@@ -144,7 +144,7 @@ pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
     BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
-    ProcessContainerSection, SandboxPolicy, SandboxRequest, WslcSection,
+    ProcessContainer, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{
