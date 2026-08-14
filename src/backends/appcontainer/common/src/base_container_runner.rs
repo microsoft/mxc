@@ -3885,6 +3885,7 @@ mod tests {
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert_eq!(spec.capabilities(), Some("internetClient"));
         let network = spec.network_policy().expect("network_policy should be set");
         let egress = network.egress().expect("egress should be set");
         assert_eq!(
