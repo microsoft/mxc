@@ -28,8 +28,9 @@
 //! real pipe handles, and it closes its own ends when its process object drops.
 //! Under [`ExecConsumer::Executor`] it relays internally and returns null
 //! handles, and the other state-aware backends (Windows Sandbox, WSLc) return
-//! null handles on every path — in those cases the streams are simply absent
-//! here.
+//! null handles on every path. A handle with *all three* streams null is
+//! refused here rather than wrapped: it means the backend has not implemented
+//! the `Library` contract, and a stream-less `SandboxProcess` would hide that.
 //!
 //! Each readable duplicate is wrapped as a **cancellable** reader, so a read on
 //! it can be made to return EOF on demand. That is what lets
@@ -48,7 +49,7 @@ use std::thread::JoinHandle;
 
 use crate::mxc_error::MxcError;
 use crate::sandbox_process::{boxed_closer, cancel_and_join_discard, SandboxProcess, StreamCloser};
-use crate::state_aware_backend::{ExecHandle, PipeHandle};
+use crate::state_aware_backend::{ExecHandle, ExecOutcome, PipeHandle};
 
 /// The platform's closer for a cancellable read — fired to make an in-flight
 /// read on a not-taken stream return EOF, so its discard thread ends and can be
@@ -83,13 +84,18 @@ pub struct ExecSandboxProcess {
     /// The background thread running the handle's `waiter`. Taken and joined by
     /// the first [`wait`](SandboxProcess::wait) / successful
     /// [`try_wait`](SandboxProcess::try_wait).
-    waiter: Option<JoinHandle<Result<i32, MxcError>>>,
+    waiter: Option<JoinHandle<Result<ExecOutcome, MxcError>>>,
     /// Kills the process tree. Taken by the first [`kill`](SandboxProcess::kill)
     /// or by `Drop`.
-    terminator: Option<Box<dyn FnOnce() + Send>>,
-    /// Cached exit code once the waiter has been joined, so repeat waits are
-    /// idempotent.
-    exit: Option<i32>,
+    terminator: Option<Box<dyn FnOnce() -> Result<(), MxcError> + Send>>,
+    /// The waiter's outcome once joined, so repeat waits are idempotent. Holds
+    /// the outcome rather than a code because a timeout has no code.
+    exit: Option<ExecOutcome>,
+    /// Whether a termination request was **refused**. Recorded separately
+    /// because `terminator` is consumed on both outcomes, so its absence alone
+    /// cannot distinguish "killed" from "the kill was rejected" — and those
+    /// demand opposite behaviour in [`Drop`].
+    kill_refused: bool,
 }
 
 impl ExecSandboxProcess {
@@ -109,6 +115,39 @@ impl ExecSandboxProcess {
             waiter,
             terminator,
         } = handle;
+
+        // A handle with nothing on any stream is a backend that has not
+        // implemented the `Library` contract — it relayed internally and ran the
+        // workload to completion, which is the `Executor` shape. Wrapping it
+        // would hand the caller a `SandboxProcess` whose `take_stdout` is `None`
+        // and whose `wait` returns an exit code the backend already had, while
+        // the sandbox's output went wherever the backend chose — for the
+        // internally-relaying backends, the *host application's* own stdout.
+        //
+        // This is a **backstop, not the guard that matters**. The backends that
+        // cannot serve `Library` refuse it up front instead (see
+        // `unsupported_library_exec`), so reaching this branch means a backend
+        // returned an all-null handle for a `Library` exec anyway — hence the
+        // distinct wording, so the two are told apart in a log.
+        //
+        // **The process is not assumed to have finished.** The comment above
+        // describes the shape this usually means, not a guarantee: the
+        // IsolationSession `Library` path starts a process and passes through
+        // whatever handles the service gave it, so an all-zero set can name a
+        // process that is very much alive. Reaping is therefore conditional on
+        // the kill being accepted, exactly as on every other teardown path — a
+        // refused kill here would otherwise park construction forever, and the
+        // caller has no handle yet to interrupt it with.
+        if is_null_pipe(stdout) && is_null_pipe(stderr) && is_null_pipe(stdin) {
+            terminate_then_reap_if_safe(terminator, || {
+                let _ = waiter();
+            });
+            return Err(MxcError::backend_error(
+                "this backend returned no stdout, stderr or stdin for an in-process exec, \
+                 which means it relayed the output itself. It should have refused before \
+                 running the command; the command may have run",
+            ));
+        }
 
         let streams = wrap_cancellable_read_checked(stdout, "stdout").and_then(|out| {
             let err = wrap_cancellable_read_checked(stderr, "stderr")?;
@@ -131,8 +170,8 @@ impl ExecSandboxProcess {
     /// being terminated and then reaped.
     fn from_prepared_streams(
         streams: Result<PreparedStreams, MxcError>,
-        waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-        terminator: Box<dyn FnOnce() + Send>,
+        waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+        terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
     ) -> Result<Self, MxcError> {
         let PreparedStreams {
             stdout,
@@ -143,9 +182,13 @@ impl ExecSandboxProcess {
             Err(error) => {
                 // Terminating is a request, not a reaping: run the waiter so
                 // the backend's completion work happens and no zombie is left
-                // behind. Its outcome is discarded so the setup error survives.
-                terminator();
-                let _ = waiter();
+                // behind -- but only once the kill was accepted, since a
+                // refused kill can leave a waiter that never returns. Both
+                // outcomes are otherwise discarded so the setup error, which is
+                // the one the caller asked about, survives to be returned.
+                terminate_then_reap_if_safe(terminator, || {
+                    let _ = waiter();
+                });
                 return Err(error);
             }
         };
@@ -173,10 +216,16 @@ impl ExecSandboxProcess {
         let waiter_thread = match spawned {
             Ok(thread) => thread,
             Err(error) => {
-                terminator();
-                if let Some(waiter) = waiter_slot.lock().ok().and_then(|mut w| w.take()) {
-                    let _ = waiter();
-                }
+                // Discarded for the same reason as above: the spawn failure is
+                // what the caller needs to see. Reaped only if the kill was
+                // accepted -- the waiter is still in the slot precisely because
+                // no thread took it, so calling it here would run it inline on
+                // this thread and a refused kill would park us indefinitely.
+                terminate_then_reap_if_safe(terminator, || {
+                    if let Some(waiter) = waiter_slot.lock().ok().and_then(|mut w| w.take()) {
+                        let _ = waiter();
+                    }
+                });
                 return Err(MxcError::backend_error(format!(
                     "failed to start the exec waiter thread: {error}"
                 )));
@@ -192,24 +241,28 @@ impl ExecSandboxProcess {
             waiter: Some(waiter_thread),
             terminator: Some(terminator),
             exit: None,
+            kill_refused: false,
         })
     }
 
-    /// Join the waiter thread, caching and returning its exit code.
+    /// Join the waiter thread, caching and returning its outcome.
+    ///
+    /// The outcome is cached rather than the exit code, because a timeout has
+    /// no code to cache and repeat calls must still be idempotent.
     fn join_waiter(&mut self) -> std::io::Result<i32> {
-        if let Some(code) = self.exit {
-            return Ok(code);
+        if let Some(outcome) = self.exit {
+            return outcome_to_io(outcome);
         }
         let handle = self
             .waiter
             .take()
             .ok_or_else(|| std::io::Error::other("exec waiter already consumed"))?;
-        let code = handle
+        let outcome = handle
             .join()
             .map_err(|_| std::io::Error::other("exec waiter thread panicked"))?
             .map_err(|e: MxcError| std::io::Error::other(e.message))?;
-        self.exit = Some(code);
-        Ok(code)
+        self.exit = Some(outcome);
+        outcome_to_io(outcome)
     }
 
     /// Drain whatever output the caller did not take, concurrently with the
@@ -275,18 +328,55 @@ impl ExecSandboxProcess {
     /// discard did start — only stdout's can have, since stderr's failure is
     /// what brought us here. Returns the original error so the caller reports
     /// the cause rather than the cleanup.
+    ///
+    /// **The reap is conditional on the kill being accepted.** Joining after a
+    /// refused kill would reintroduce exactly the stall this function exists to
+    /// avoid — stuck inside `wait`, with the caller unable to reach `kill` —
+    /// only on the teardown path instead of the drain path. A refusal is
+    /// recorded so a later `Drop` makes the same choice.
     fn abort_after_drain_failure(
         &mut self,
         stdout_drain: Option<JoinHandle<()>>,
         error: std::io::Error,
     ) -> std::io::Error {
         if let Some(terminator) = self.terminator.take() {
-            terminator();
+            // Discarded: the drain-spawn failure is the error being returned.
+            let accepted = terminate_then_reap_if_safe(terminator, || {});
+            if accepted {
+                let _ = self.join_waiter();
+            } else {
+                self.kill_refused = true;
+            }
         }
-        let _ = self.join_waiter();
         cancel_and_join_discard(stdout_drain, &self.stdout_canceller);
         error
     }
+}
+
+/// Terminate an exec that is being abandoned, and reap it **only if that is
+/// safe**.
+///
+/// Every teardown path faces the same choice as [`Drop`](ExecSandboxProcess::drop):
+/// the backend's completion work should run, but waiting for it is only bounded
+/// once the process is actually dying. A terminator that reported a refusal
+/// leaves a process that may still be running, and a waiter with no deadline
+/// (`script_timeout` defaults to `0`, meaning INFINITE) then never returns — so
+/// reaping would block forever on a path the caller cannot interrupt.
+///
+/// Returns whether the kill was accepted, so a caller holding
+/// [`kill_refused`](ExecSandboxProcess::kill_refused) can record it.
+///
+/// Shared rather than repeated so the rule has one home. It was previously
+/// open-coded at three sites, each of which reaped unconditionally.
+fn terminate_then_reap_if_safe(
+    terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+    reap: impl FnOnce(),
+) -> bool {
+    let accepted = terminator().is_ok();
+    if accepted {
+        reap();
+    }
+    accepted
 }
 
 /// Split a prepared stream into the stream itself and its closer.
@@ -352,13 +442,13 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
-        if let Some(code) = self.exit {
-            return Ok(Some(code));
+        if let Some(outcome) = self.exit {
+            return outcome_to_io(outcome).map(Some);
         }
         match &self.waiter {
             Some(handle) if handle.is_finished() => self.join_waiter().map(Some),
             Some(_) => Ok(None),
-            None => Ok(self.exit),
+            None => Ok(None),
         }
     }
 
@@ -369,10 +459,35 @@ impl SandboxProcess for ExecSandboxProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        if let Some(terminator) = self.terminator.take() {
-            terminator();
+        // A confirmed exit retires the terminator. The process is gone, so
+        // there is nothing to kill, and an earlier refusal no longer describes
+        // reality — reporting it would fail a `kill()` for a process that is
+        // demonstrably dead. Running the terminator here would be equally
+        // wrong: it would surface a failure to terminate something that has
+        // already terminated.
+        if self.exit.is_some() {
+            self.terminator = None;
+            self.kill_refused = false;
+            return Ok(());
         }
-        Ok(())
+        match self.terminator.take() {
+            // A refusal now reaches the caller instead of being swallowed, and
+            // is remembered: the terminator is consumed either way, so this flag
+            // is the only surviving evidence of which outcome it produced.
+            Some(terminator) => terminator().map_err(|e| {
+                self.kill_refused = true;
+                std::io::Error::other(e.message)
+            }),
+            // A kill that was refused stays refused, until an exit is
+            // confirmed. Reporting `Ok` here would tell a caller retrying after
+            // a failure that the process is now dead, when nothing has changed
+            // since the refusal.
+            None if self.kill_refused => Err(std::io::Error::other(
+                "the sandbox refused an earlier request to terminate this exec",
+            )),
+            // Already killed: killing twice is not an error.
+            None => Ok(()),
+        }
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -382,15 +497,57 @@ impl SandboxProcess for ExecSandboxProcess {
 
 impl Drop for ExecSandboxProcess {
     fn drop(&mut self) {
-        // Kill the process (if not already) so the waiter thread cannot block
-        // forever, then join it to avoid detaching a thread that borrows the
-        // backend's process object.
-        if let Some(terminator) = self.terminator.take() {
-            terminator();
-        }
+        // Kill the process (if not already) so the waiter thread can finish,
+        // then join it to avoid detaching a thread that borrows the backend's
+        // process object.
+        //
+        // The join is conditional on the kill having been **accepted**. If the
+        // platform refused it, the process may still be running and its waiter
+        // parked in a wait with no deadline — joining would then block here
+        // forever, in a `Drop` a caller cannot opt out of. Abandoning the thread
+        // instead is memory-safe (it owns what it borrows through an `Arc`) and
+        // costs a leaked thread, its `Arc` share of the process object, and that
+        // object's COM reference — in a case that already indicates the sandbox
+        // is not responding to termination.
+        //
+        // This bounds the `Drop` only against a *reported* refusal. A terminate
+        // the platform accepted but that never took effect still reports `Ok`,
+        // and parks the join exactly as before; bounding that too needs the
+        // backend to confirm the process died, which its handle cannot yet do.
+        let kill_accepted = match self.terminator.take() {
+            // Nothing to terminate once the exit is known; running the
+            // terminator over a dead process only invites a spurious failure.
+            _ if self.exit.is_some() => true,
+            Some(terminator) => terminator().is_ok(),
+            // Already killed via `kill()`, whose result the caller has seen —
+            // and whose refusal, if it was one, is precisely the case this
+            // guard exists for.
+            None => !self.kill_refused,
+        };
         if let Some(handle) = self.waiter.take() {
-            let _ = handle.join();
+            if kill_accepted {
+                let _ = handle.join();
+            }
         }
+    }
+}
+
+/// Map an [`ExecOutcome`] onto the [`SandboxProcess`] convention, where a
+/// timeout is an `Err` carrying [`io::ErrorKind::TimedOut`](std::io::ErrorKind)
+/// rather than an exit code.
+///
+/// That convention is not invented here: five one-shot backends already report
+/// a timeout this way, and `mxc_sdk::Sandbox::wait` maps exactly this kind onto
+/// its public `WaitOutcome::TimedOut`. Translating at this boundary is what
+/// lets the state-aware path reach that outcome without changing anything above
+/// it.
+fn outcome_to_io(outcome: ExecOutcome) -> std::io::Result<i32> {
+    match outcome {
+        ExecOutcome::Exited(code) => Ok(code),
+        ExecOutcome::TimedOut => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "the exec timed out and the sandbox terminated it",
+        )),
     }
 }
 
@@ -607,10 +764,11 @@ mod tests {
             Err(MxcError::backend_error("stdout could not be duplicated")),
             Box::new(move || {
                 let _ = tx.send("waiter");
-                Ok(0)
+                Ok(ExecOutcome::Exited(0))
             }),
             Box::new(move || {
                 let _ = terminator_tx.send("terminator");
+                Ok(())
             }),
         );
 
@@ -648,40 +806,68 @@ mod tests {
         );
     }
 
-    /// An ExecHandle with null pipes (the IsolationSession shape) exposes no
-    /// streams and yields the waiter's exit code.
+    /// A handle with nothing on any stream is refused rather than wrapped.
+    ///
+    /// This test previously asserted the opposite — that the all-null shape
+    /// yielded a stream-less process carrying the waiter's exit code. That was
+    /// the contract when no backend surfaced real pipes; it is now the signature
+    /// of a backend that has not implemented the `Library` path, and handing the
+    /// caller a `SandboxProcess` with no streams hides that behind an object
+    /// that looks live. The exec is reaped on the way out, so refusing does not
+    /// orphan it.
     #[test]
-    fn null_pipes_expose_no_streams_and_return_exit_code() {
+    fn an_all_null_handle_is_refused_and_reaped() {
+        let (waiter_tx, waiter_rx) = mpsc::channel();
+        let (term_tx, term_rx) = mpsc::channel();
         let handle = ExecHandle {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(7)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(move || {
+                let _ = waiter_tx.send(());
+                Ok(ExecOutcome::Exited(7))
+            }),
+            terminator: Box::new(move || {
+                let _ = term_tx.send(());
+                Ok(())
+            }),
         };
-        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
-        assert!(proc.take_stdout().is_none());
-        assert!(proc.take_stderr().is_none());
-        assert!(proc.take_stdin().is_none());
-        assert_eq!(proc.id(), 0);
-        assert_eq!(proc.wait().unwrap(), 7);
-        // Idempotent.
-        assert_eq!(proc.wait().unwrap(), 7);
-        assert_eq!(proc.try_wait().unwrap(), Some(7));
+
+        let err = match ExecSandboxProcess::from_exec_handle(handle) {
+            Ok(_) => panic!("a backend exposing no streams cannot serve a library caller"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("relayed the output itself"),
+            "the refusal should say why: {}",
+            err.message
+        );
+
+        // Reaped, not orphaned: both closures ran.
+        assert!(
+            term_rx.try_recv().is_ok(),
+            "the exec must be terminated on refusal"
+        );
+        assert!(
+            waiter_rx.try_recv().is_ok(),
+            "the exec must be reaped on refusal"
+        );
     }
 
-    /// `kill` invokes the terminator exactly once.
+    /// `kill` invokes the terminator exactly once, and reports what it said.
     #[test]
     fn kill_invokes_terminator_once() {
+        // A real stdout, because an all-null handle is now refused outright.
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         let (tx, rx) = mpsc::channel();
         let handle = ExecHandle {
-            stdout: null_pipe_handle(),
+            stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            // Block the waiter until killed, so kill drives the outcome.
-            waiter: Box::new(|| Ok(0)),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
             terminator: Box::new(move || {
                 let _ = tx.send(());
+                Ok(())
             }),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
@@ -690,6 +876,366 @@ mod tests {
                               // Exactly one terminator signal.
         assert!(rx.recv().is_ok());
         assert!(rx.try_recv().is_err());
+
+        drop(stdout_w);
+        drop(stdout_r);
+    }
+
+    /// A terminator that reports a refusal reaches the caller through `kill`.
+    ///
+    /// The regression this pins: the terminator used to be infallible, so a
+    /// kill the platform rejected surfaced as `Ok(())` and a caller had no way
+    /// to learn the workload was still running.
+    #[test]
+    fn kill_reports_a_refused_termination() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let err = proc
+            .kill()
+            .expect_err("a refused kill must reach the caller");
+        assert!(
+            err.to_string().contains("Terminate was refused"),
+            "the backend's reason should survive: {err}"
+        );
+
+        drop(stdout_w);
+        drop(stdout_r);
+    }
+
+    /// A refused kill stays refused when the caller retries.
+    ///
+    /// The regression this pins: `kill` consumes the terminator on both
+    /// outcomes, so without a separate record of the refusal the second call
+    /// reads "already killed" and reports `Ok(())` — telling a caller retrying
+    /// after a failure that the process is now dead, when nothing has changed.
+    #[test]
+    fn a_refused_kill_stays_refused_on_retry() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        proc.kill().expect_err("first kill is refused");
+        proc.kill()
+            .expect_err("a retry must not claim the refusal succeeded");
+
+        drop(stdout_w);
+        drop(stdout_r);
+    }
+
+    /// `Drop` must not join the waiter after a kill the platform refused.
+    ///
+    /// The regression this pins: a refused `kill()` leaves no terminator, and
+    /// `Drop` used to read that absence as "already killed" and join. With the
+    /// process still running its waiter is parked in a wait with no deadline, so
+    /// the join never returns — a permanent hang inside a `Drop` the caller
+    /// cannot opt out of.
+    ///
+    /// The waiter here blocks until the test releases it, standing in for that
+    /// parked wait. `kill_reports_a_refused_termination` cannot catch this: its
+    /// waiter has already finished, so joining it costs nothing.
+    ///
+    /// The stand-in wait is **bounded**. An unbounded `recv()` deadlocks the
+    /// whole suite if an assertion above panics: unwinding drops locals in
+    /// reverse declaration order, so `proc` is dropped — and its `Drop` joins —
+    /// before the sender that would release the waiter. That is not
+    /// hypothetical; it hung a full test run.
+    #[test]
+    fn drop_abandons_the_waiter_after_a_refused_kill() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        // Held by the waiter; never sent to until the assertion is done.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(move || {
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(60));
+                Ok(ExecOutcome::Exited(0))
+            }),
+            terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+        proc.kill().expect_err("the kill is refused");
+
+        // Drop on a helper thread so a regression fails the test instead of
+        // hanging the run.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            drop(proc);
+            let _ = done_tx.send(());
+        });
+
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "Drop joined a waiter that cannot finish, after a refused kill"
+        );
+
+        let _ = release_tx.send(());
+        drop(stdout_w);
+        drop(stdout_r);
+    }
+
+    /// A confirmed exit retires an earlier refusal.
+    ///
+    /// The regression this pins: `kill_refused` was permanent, so a process
+    /// that refused a kill and then exited on its own still reported the old
+    /// refusal from every later `kill()` — telling the caller the sandbox would
+    /// not terminate a process that is demonstrably gone. `kill()` after a
+    /// completed `wait()` is required to be a no-op.
+    #[test]
+    fn a_confirmed_exit_retires_an_earlier_kill_refusal() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w); // EOF so the drain finishes
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        proc.kill().expect_err("the kill is refused while it runs");
+        assert_eq!(proc.wait().expect("the process exited on its own"), 0);
+        proc.kill()
+            .expect("a process known to have exited cannot still be refusing to die");
+
+        drop(stdout_r);
+    }
+
+    /// A natural exit must not run the terminator and surface its failure.
+    ///
+    /// The regression this pins: making the terminator fallible meant a
+    /// `kill()` after a completed `wait()` ran it against an already-dead
+    /// process and reported whatever that failed with, turning a no-op into an
+    /// error.
+    #[test]
+    fn kill_after_a_completed_wait_does_not_run_the_terminator() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let (tx, rx) = mpsc::channel();
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(3))),
+            terminator: Box::new(move || {
+                let _ = tx.send(());
+                Err(MxcError::backend_error("no such process"))
+            }),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        assert_eq!(proc.wait().expect("exited"), 3);
+        proc.kill().expect("kill after wait is a no-op");
+        assert!(
+            rx.try_recv().is_err(),
+            "the terminator must not run against a process already known to be gone"
+        );
+
+        drop(stdout_r);
+    }
+
+    /// Construction must not block when a refused kill leaves the waiter live.
+    ///
+    /// The regression this pins: the stream-prep failure path ran the
+    /// terminator, discarded its result, and then called the waiter *inline*.
+    /// With a refused kill the process may still be running, and with no
+    /// deadline (`script_timeout` defaults to 0 = INFINITE) that waiter never
+    /// returns — hanging the constructor, which no caller can interrupt because
+    /// it has not been handed a handle yet.
+    ///
+    /// The waiter here blocks until released, standing in for that parked wait.
+    #[test]
+    fn a_refused_kill_does_not_block_construction_on_a_stream_failure() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let result = ExecSandboxProcess::from_prepared_streams(
+                Err(MxcError::backend_error("stream setup failed")),
+                Box::new(move || {
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(60));
+                    Ok(ExecOutcome::Exited(0))
+                }),
+                Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+            );
+            let _ = done_tx.send(result.is_err());
+        });
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            finished.is_ok(),
+            "construction reaped a waiter that cannot finish, after a refused kill"
+        );
+        assert!(finished.unwrap(), "the setup error must still be returned");
+        let _ = release_tx.send(());
+    }
+
+    /// The same rule on the accepted path: the waiter IS reaped when the kill
+    /// was accepted, so the backend's completion work still runs.
+    ///
+    /// Paired with the test above so "does not block" cannot be satisfied by
+    /// never reaping at all.
+    #[test]
+    fn an_accepted_kill_still_reaps_on_a_stream_failure() {
+        let (tx, rx) = mpsc::channel();
+        let result = ExecSandboxProcess::from_prepared_streams(
+            Err(MxcError::backend_error("stream setup failed")),
+            Box::new(move || {
+                let _ = tx.send(());
+                Ok(ExecOutcome::Exited(0))
+            }),
+            Box::new(|| Ok(())),
+        );
+        assert!(result.is_err(), "the setup error must be returned");
+        assert!(
+            rx.try_recv().is_ok(),
+            "an accepted kill must still reap, or the backend leaks its completion work"
+        );
+    }
+
+    /// `wait()` must not block when a discard thread fails to start and the
+    /// kill is then refused.
+    ///
+    /// The regression this pins: `abort_after_drain_failure` joined the waiter
+    /// unconditionally. That reintroduces the exact stall the function exists to
+    /// avoid — stuck inside `wait` with the caller unable to reach `kill` — just
+    /// on the teardown path rather than the drain path.
+    ///
+    /// Driven through `abort_after_drain_failure` directly: making a real
+    /// thread spawn fail on demand is not something a unit test can arrange.
+    #[test]
+    fn a_refused_kill_does_not_block_the_drain_failure_teardown() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w);
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(move || {
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(60));
+                Ok(ExecOutcome::Exited(0))
+            }),
+            terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let err = proc.abort_after_drain_failure(
+                None,
+                std::io::Error::other("discard thread could not start"),
+            );
+            // Report the refusal state alongside completion, so the test can
+            // assert both without racing the thread's own teardown.
+            let _ = done_tx.send((err.to_string(), proc.kill_refused));
+            drop(proc);
+        });
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            finished.is_ok(),
+            "teardown joined a waiter that cannot finish, after a refused kill"
+        );
+        let (msg, refused) = finished.unwrap();
+        assert!(
+            msg.contains("discard thread could not start"),
+            "the original error must survive the cleanup: {msg}"
+        );
+        assert!(
+            refused,
+            "the refusal must be recorded so a later Drop makes the same choice"
+        );
+
+        let _ = release_tx.send(());
+        drop(stdout_r);
+    }
+
+    /// An all-null handle whose kill is refused must not park construction.
+    ///
+    /// The regression this pins: the backstop reaped unconditionally on the
+    /// assumption that an all-null handle always means a finished process. It
+    /// does not — the IsolationSession `Library` path starts a process and
+    /// passes through whatever handles the service returned, so an all-zero set
+    /// can name a live one. With a refused kill and no deadline, reaping it
+    /// hangs `from_exec_handle`, which the caller cannot interrupt because it
+    /// has not been handed anything yet.
+    #[test]
+    fn an_all_null_handle_with_a_refused_kill_does_not_block() {
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let handle = ExecHandle {
+                stdout: null_pipe_handle(),
+                stderr: null_pipe_handle(),
+                stdin: null_pipe_handle(),
+                waiter: Box::new(move || {
+                    let _ = release_rx.recv_timeout(std::time::Duration::from_secs(60));
+                    Ok(ExecOutcome::Exited(0))
+                }),
+                terminator: Box::new(|| Err(MxcError::backend_error("Terminate was refused"))),
+            };
+            let _ = done_tx.send(ExecSandboxProcess::from_exec_handle(handle).is_err());
+        });
+
+        let finished = done_rx.recv_timeout(std::time::Duration::from_secs(10));
+        assert!(
+            finished.is_ok(),
+            "the all-null backstop reaped a waiter that cannot finish, after a refused kill"
+        );
+        assert!(finished.unwrap(), "the refusal must still be returned");
+        let _ = release_tx.send(());
+    }
+
+    /// A waiter reporting a timeout surfaces as `ErrorKind::TimedOut`, which is
+    /// what `mxc_sdk::Sandbox::wait` maps onto `WaitOutcome::TimedOut`.
+    ///
+    /// The regression this pins: the waiter used to return a bare exit code, so
+    /// a timed-out exec was indistinguishable from one that exited with the code
+    /// its killed process happened to produce.
+    #[test]
+    fn a_timeout_surfaces_as_the_timed_out_error_kind() {
+        let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
+        drop(stdout_w); // EOF, so the drain finishes promptly
+        let handle = ExecHandle {
+            stdout: reader_handle(&stdout_r),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::TimedOut)),
+            terminator: Box::new(|| Ok(())),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        let err = proc.wait().expect_err("a timeout is not an exit code");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "the kind is the contract the SDK reads: {err}"
+        );
+
+        // Idempotent: the cached outcome maps the same way, rather than the
+        // second call reporting a missing waiter.
+        let again = proc.wait().expect_err("still a timeout");
+        assert_eq!(again.kind(), std::io::ErrorKind::TimedOut);
+
+        drop(stdout_r);
     }
 
     /// `wait()` drains a stream the caller never took.
@@ -732,12 +1278,12 @@ mod tests {
                     .recv_timeout(std::time::Duration::from_secs(30))
                     .map_err(|_| MxcError::backend_error("the child never finished writing"))?;
                 if wrote_everything {
-                    Ok(0)
+                    Ok(ExecOutcome::Exited(0))
                 } else {
                     Err(MxcError::backend_error("the child's writes failed"))
                 }
             }),
-            terminator: Box::new(|| {}),
+            terminator: Box::new(|| Ok(())),
         };
 
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
@@ -775,7 +1321,7 @@ mod tests {
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
             waiter: Box::new(|| Err(MxcError::backend_error("could not determine the exit"))),
-            terminator: Box::new(|| {}),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
 
@@ -825,7 +1371,7 @@ mod tests {
             // Fails, so the child cannot be assumed gone — the case where the
             // old design gave up on the join and detached the thread.
             waiter: Box::new(|| Err(MxcError::backend_error("could not determine the exit"))),
-            terminator: Box::new(|| {}),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
 
@@ -861,8 +1407,8 @@ mod tests {
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(0)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
 
@@ -919,8 +1465,8 @@ mod tests {
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(0)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
 
@@ -990,8 +1536,8 @@ mod tests {
             stdout: reader_handle(&reader),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(0)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
         // The adapter duplicated the handle; the test's original can now drop.
@@ -1015,8 +1561,8 @@ mod tests {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: writer_handle(&writer),
-            waiter: Box::new(|| Ok(0)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
         };
         let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
         drop(writer); // original write end closed; adapter owns a duplicate
