@@ -332,7 +332,8 @@ fn apply_proxy_env_enabled_sets_keys() {
 
     apply_proxy_env(&mut env, &proxy);
 
-    assert!(!env.iter().any(|e| e.contains("evil")));    assert!(PROXY_SET_KEYS
+    assert!(!env.iter().any(|e| e.contains("evil")));
+    assert!(PROXY_SET_KEYS
         .iter()
         .all(|k| value_for(&env, k) == Some(expected_url.as_str())));
     assert!(PROXY_NEUTRALIZE_KEYS

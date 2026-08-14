@@ -320,8 +320,7 @@ fn a_proxy_combined_with_a_block_list_is_refused() {
 
     let (_manager, _issued, result) = apply_and_collect("proxy-blocked", &policy);
 
-    let message =
-        result.expect_err("a policy whose block list cannot be enforced must be refused");
+    let message = result.expect_err("a policy whose block list cannot be enforced must be refused");
     assert!(
         message.contains("blockedHosts"),
         "the refusal must name the setting that cannot be enforced, got: {message}"

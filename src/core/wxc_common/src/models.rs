@@ -485,7 +485,6 @@ impl ProxyAddress {
             _ => std::borrow::Cow::Borrowed(host),
         }
     }
-
 }
 
 /// Strips one pair of surrounding `[` `]` from a bracketed IPv6 literal.
