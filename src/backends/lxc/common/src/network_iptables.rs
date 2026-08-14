@@ -691,17 +691,25 @@ impl NetworkIptablesManager {
     /// less connected but never less filtered. Refusing to run over it would
     /// turn a connectivity limitation into an outage on hosts where the
     /// forward policy is ACCEPT and nothing was broken to begin with.
+    ///
+    /// Takes the builder rather than a built rule so the removal it attempts on
+    /// failure cannot drift from the insert. `-I` reporting failure is only
+    /// nearly conclusive -- a command killed after the kernel accepted its rule
+    /// reports failure too -- and this returns `false`, which clears ownership.
+    /// Without the removal that combination strands an `ESTABLISHED,RELATED`
+    /// ACCEPT on a veth name the host is free to hand to another container.
     fn install_return_rule(
         run: fn(&[Vec<String>], &mut Logger) -> Result<(), String>,
-        rule: Vec<String>,
+        build: fn(&str, &str) -> Vec<String>,
         form: &str,
         iface: &str,
         tool: &str,
         logger: &mut Logger,
     ) -> bool {
-        match run(&[rule], logger) {
+        match run(&[build("-I", iface)], logger) {
             Ok(()) => true,
             Err(err) => {
+                let _ = run(&[build("-D", iface)], logger);
                 logger.log_line(&format!(
                     "Warning: could not install the {} return-path rule for {} ({}): {}. \
                      Replies to allowed outbound connections will rely on the host's FORWARD \
@@ -2087,7 +2095,7 @@ impl NetworkIptablesManager {
 
         let return_installed = Self::install_return_rule(
             run,
-            Self::build_forward_return_iface_rule_args("-I", iface),
+            Self::build_forward_return_iface_rule_args,
             "interface",
             iface,
             tool,
@@ -2095,7 +2103,7 @@ impl NetworkIptablesManager {
         );
         let physdev_return_installed = Self::install_return_rule(
             run,
-            Self::build_forward_return_physdev_rule_args("-I", iface),
+            Self::build_forward_return_physdev_rule_args,
             "physdev",
             iface,
             tool,
@@ -4716,6 +4724,39 @@ mod tests {
             "the failure must be reported, not swallowed; log: {}",
             logger.get_buffer()
         );
+    }
+
+    #[test]
+    fn a_return_rule_whose_install_failed_is_deleted_before_its_claim_is_released() {
+        // `-I` reporting failure is only nearly conclusive: a command killed
+        // after the kernel accepted its rule reports failure too. Releasing the
+        // claim without attempting the removal strands an ESTABLISHED,RELATED
+        // ACCEPT on a veth name the host can hand to a different container
+        // later. The hooks already close this window through
+        // `install_claimed_hook`; the return rules did not.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("--physdev-out", "simulated missing physdev module");
+
+        let mut manager = NetworkIptablesManager::new("return-undo");
+        manager.set_veth_interface("mxcv-undo");
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        manager
+            .apply_firewall_rules(&policy, &mut logger)
+            .expect("a failed return rule must not fail the apply");
+
+        let issued = fake.issued();
+        let undo =
+            NetworkIptablesManager::build_forward_return_physdev_rule_args("-D", "mxcv-undo");
+        for tool in ["iptables", "ip6tables"] {
+            assert!(
+                issued
+                    .iter()
+                    .any(|cmd| cmd[0] == tool && cmd[1..] == undo[..]),
+                "{tool} must try to remove the return rule whose insert failed; issued: {issued:?}"
+            );
+        }
     }
 
     #[test]
