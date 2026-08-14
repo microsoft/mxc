@@ -65,6 +65,9 @@ pub struct ProbeFacts {
     /// Tier 3 (AppContainer + DACL) enforces `deniedPaths` via DENY ACEs
     /// regardless of this bit; it is meaningful only for the BaseContainer tier.
     pub base_container_supports_deny_paths: bool,
+    /// Whether a BaseContainer contract on this host can honor
+    /// `network.ingress.hostLoopback = "allow"`.
+    pub base_container_supports_host_loopback: bool,
     /// Whether the in-proc IsolationSession service can be activated on this
     /// host. Always `false` here — `appcontainer_common` has no dependency on
     /// the isolation-session backend; `wxc-exec --probe` overrides it when
@@ -131,6 +134,8 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
         base_container_supports_deny_paths:
             crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
+        base_container_supports_host_loopback:
+            crate::base_container_runner::BaseContainerRunner::is_host_loopback_usable(),
         isolation_session_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
@@ -207,6 +212,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_host_loopback: true,
                 isolation_session_available: true,
                 ui_capabilities: all_ui_capabilities(),
             },
@@ -244,6 +250,7 @@ mod tests {
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
+                base_container_supports_host_loopback: false,
                 isolation_session_available: false,
                 ui_capabilities: UiCapabilitySupport {
                     can_block_input_injection: false,

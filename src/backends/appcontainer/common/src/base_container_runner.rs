@@ -493,6 +493,15 @@ impl BaseContainerRunner {
         Self::is_legacy_base_container_usable()
     }
 
+    /// Whether the host has a BaseContainer contract that can honor
+    /// `ingress.hostLoopback="allow"`.
+    pub fn is_host_loopback_usable() -> bool {
+        if Self::is_process_security_environment_usable() {
+            return true;
+        }
+        Self::query_sandbox_capabilities().is_some() && Self::is_legacy_base_container_usable()
+    }
+
     /// Whether PSEC can create and close a minimal security environment on
     /// this host. Export presence and the support query alone are insufficient
     /// on transitional builds where the API surface exists before the feature
