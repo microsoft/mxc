@@ -175,8 +175,7 @@ fn every_set_and_neutralize_key_is_in_the_scrub_list() {
 
 // Protects client (d): a sandboxed workload cannot pre-set a proxy variable to
 // escape the cooperative proxy. Every managed key the caller supplies -- in any
-// case, and the FTP family that is scrubbed but never re-set -- is gone or
-// replaced; the workload's `evil` target never survives.
+// case -- is gone or replaced; the workload's `evil` target never survives.
 #[test]
 fn cooperative_env_scrubs_all_caller_supplied_proxy_keys() {
     let caller = vec![
@@ -191,9 +190,8 @@ fn cooperative_env_scrubs_all_caller_supplied_proxy_keys() {
 
     assert!(!result.iter().any(|e| e.contains("evil")));
     assert!(!result.iter().any(|e| e.contains("internal.example.com")));
-    assert!(!result
-        .iter()
-        .any(|e| key_of(e).eq_ignore_ascii_case("FTP_PROXY")));
+    assert_eq!(value_for(&result, "FTP_PROXY"), Some(PROXY_URL));
+    assert_eq!(value_for(&result, "ftp_proxy"), Some(PROXY_URL));
 }
 
 // Protects client (d): duplicate and mixed-case proxy keys are an obvious
