@@ -376,9 +376,14 @@ fn select_backend_with_fallback(
         });
     }
     // Only thread the factory into the runner when it will actually be used —
-    // an AppContainer tier honoring `captureDenials`. This keeps T1/T2-without-
-    // capture/T3-without-capture identical to their pre-fallback construction.
-    let capture_factory_for_appcontainer = if request.policy.capture_denials.is_some() {
+    // an AppContainer tier honoring `captureDenials`. Reuse the already-derived
+    // `guarded_capture_required` rather than re-deriving the condition from
+    // `capture_denials`: for every AppContainer tier the two are equivalent
+    // (those arms only run when `tier != BaseContainer`), and in the
+    // BaseContainer arm this value is unused. This keeps
+    // T1/T2-without-capture/T3-without-capture identical to their pre-fallback
+    // construction.
+    let capture_factory_for_appcontainer = if guarded_capture_required {
         capture_factory
     } else {
         None
@@ -418,14 +423,26 @@ fn select_backend_with_fallback(
                 // Hand the derived SID string to the runner so it does
                 // not re-run `ConvertSidToStringSidW` for the firewall
                 // principal-id lookup.
-                let runner = with_capture_factory(
-                    AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
-                        FilesystemMode::Bfs,
-                        sid,
-                    )
-                    .with_external_denied_paths(),
-                    capture_factory_for_appcontainer,
+                //
+                // BFS cannot enforce `deniedPaths` itself. Marking them
+                // "externally enforced" — so the runner's `validate` accepts
+                // them and relies on the host deny-only DACL built above — is a
+                // capture-fallback affordance, gated to `captureDenials`
+                // requests. For non-capture requests we leave the runner
+                // unmarked, so `deniedPaths` on the BFS tier stay unsupported
+                // exactly as before this fallback existed (the runner's
+                // `validate` rejects them) rather than silently broadening BFS
+                // to honor `deniedPaths` via host DACLs.
+                let base_runner = AppContainerScriptRunner::with_filesystem_mode_and_sid_string(
+                    FilesystemMode::Bfs,
+                    sid,
                 );
+                let base_runner = if guarded_capture_required {
+                    base_runner.with_external_denied_paths()
+                } else {
+                    base_runner
+                };
+                let runner = with_capture_factory(base_runner, capture_factory_for_appcontainer);
                 (SelectedBackend::AppContainer(runner), mgr)
             }
         }
@@ -1181,6 +1198,32 @@ mod tests {
         assert!(
             dacl.is_some(),
             "T2 deniedPaths require deny ACEs via a DaclManager"
+        );
+    }
+
+    #[test]
+    fn select_backend_t2_non_capture_deny_still_rejects_denied_paths() {
+        // Item 15 regression: on the BFS tier a *non-capture* deniedPaths
+        // request must NOT be broadened to honor deniedPaths via a host DACL.
+        // The selected runner is left un-marked (no `with_external_denied_paths`),
+        // so its `validate` still rejects deniedPaths exactly as before the
+        // guarded-capture fallback existed. (The deny DACL is still built,
+        // preserving the has-DACL selection asserted above; only the runner's
+        // acceptance is gated.)
+        let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
+        let (policy, _tmp) = policy_with_denied_temp();
+        let req = test_request(policy);
+        let (backend, _dacl, tier, _w) =
+            select_backend_with_fallback(&req, None).expect("T2+deny selection should succeed");
+        assert!(matches!(tier, IsolationTier::AppContainerBfs));
+
+        let error = backend
+            .validate(&req)
+            .expect_err("non-capture deniedPaths on the BFS tier must be rejected");
+        assert!(
+            error.error_message.contains("deniedPaths"),
+            "expected a deniedPaths rejection, got: {}",
+            error.error_message
         );
     }
 

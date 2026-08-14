@@ -1143,31 +1143,18 @@ impl AppContainerScriptRunner {
                     }
                 };
                 match factory.start(std::process::id()) {
-                    Ok(mut session) => {
-                        if let Err(attach_error) = session.attach_process_tree(
+                    Ok(session) => {
+                        let session = attach_guarded_capture_or_cleanup(
+                            session,
                             job.handle_value(),
                             process_handle.get().0 as usize,
-                        ) {
-                            let termination_error = job.terminate_and_wait(u32::MAX).err();
-                            let discard_error = session.discard().err();
-                            let mut message = format!(
-                                "captureDenials guarded WPR session failed to attach the sandbox \
-                                 process tree: {attach_error}"
-                            );
-                            if let Some(terminate_error) = termination_error {
-                                message.push_str(&format!(
-                                    "; additionally failed to terminate the suspended sandbox: \
-                                     {terminate_error}"
-                                ));
-                            }
-                            if let Some(discard_error) = discard_error {
-                                message.push_str(&format!(
-                                    "; additionally failed to stop and discard guarded WPR: \
-                                     {discard_error}"
-                                ));
-                            }
-                            return Err(WxcError::Process(message));
-                        }
+                            || {
+                                job.terminate_and_wait(u32::MAX)
+                                    .err()
+                                    .map(|error| error.to_string())
+                            },
+                        )
+                        .map_err(WxcError::Process)?;
                         logger.log_line(&format!(
                             "guarded WPR captureDenials session started (output: {})",
                             output_path.display()
@@ -1305,6 +1292,44 @@ impl SpawnedChild {
         };
         let _ = session.discard();
     }
+}
+
+/// Attach `session` to the sandbox job / root process, or perform the
+/// security-sensitive abandonment cleanup on failure.
+///
+/// On attach failure the job is terminated (via `terminate_job`, which returns
+/// `Some(message)` if termination failed) **before** the guarded session is
+/// discarded — nothing may keep running once the trace is about to be torn
+/// down — and the returned error reports the attach failure plus any
+/// termination/discard failures, in that order. Returns the live session on
+/// success. Extracted so the orchestration ordering can be unit-tested with a
+/// fake session and a fake job terminator, without a real suspended process.
+fn attach_guarded_capture_or_cleanup(
+    mut session: Box<dyn GuardedCaptureSession>,
+    job_handle: usize,
+    root_process_handle: usize,
+    terminate_job: impl FnOnce() -> Option<String>,
+) -> Result<Box<dyn GuardedCaptureSession>, String> {
+    let Err(attach_error) = session.attach_process_tree(job_handle, root_process_handle) else {
+        return Ok(session);
+    };
+    let termination_error = terminate_job();
+    let discard_error = session.discard().err();
+    let mut message = format!(
+        "captureDenials guarded WPR session failed to attach the sandbox process tree: \
+         {attach_error}"
+    );
+    if let Some(terminate_error) = termination_error {
+        message.push_str(&format!(
+            "; additionally failed to terminate the suspended sandbox: {terminate_error}"
+        ));
+    }
+    if let Some(discard_error) = discard_error {
+        message.push_str(&format!(
+            "; additionally failed to stop and discard guarded WPR: {discard_error}"
+        ));
+    }
+    Err(message)
 }
 
 impl Default for AppContainerScriptRunner {
@@ -1755,9 +1780,27 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        self.job
-            .terminate_and_wait(u32::MAX)
-            .map_err(|error| std::io::Error::other(error.to_string()))
+        if self.capture_session.is_some() {
+            // Guarded-WPR capture needs strict drain certainty before the trace
+            // is stopped/discarded; a failure to drain is a hard error here.
+            return self
+                .job
+                .terminate_and_wait(u32::MAX)
+                .map_err(|error| std::io::Error::other(error.to_string()));
+        }
+        // Ordinary run: terminate the tree, but downgrade a slow drain to a
+        // warning so it does not fail an otherwise valid result.
+        match self.job.terminate_best_effort(u32::MAX) {
+            Ok(Some(drain_warning)) => {
+                capture_output::write_stderr_line_best_effort(format_args!(
+                    "sandbox job did not fully drain within the teardown window (continuing): \
+                     {drain_warning}"
+                ));
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -2173,6 +2216,140 @@ mod tests {
         request.policy.denied_paths = vec!["C:\\secret".into()];
 
         assert!(runner.validate(&request).is_ok());
+    }
+
+    /// Records the order of guarded-capture callbacks so orchestration tests can
+    /// assert the security-sensitive teardown ordering explicitly.
+    struct RecordingSession {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        attach_result: Result<(), String>,
+        discard_result: Result<(), String>,
+    }
+
+    impl GuardedCaptureSession for RecordingSession {
+        fn attach_process_tree(
+            &mut self,
+            _job_handle: usize,
+            _root_process_handle: usize,
+        ) -> Result<(), String> {
+            self.events.lock().unwrap().push("attach".to_string());
+            self.attach_result.clone()
+        }
+
+        fn discard(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("discard".to_string());
+            self.discard_result.clone()
+        }
+
+        fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push("stop_analyzed".to_string());
+            Ok(AnalysisResult::complete(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn attach_failure_terminates_job_before_discarding_and_composes_message() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Err("discard boom".to_string()),
+        });
+        let events_for_kill = Arc::clone(&events);
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            events_for_kill
+                .lock()
+                .unwrap()
+                .push("terminate".to_string());
+            Some("terminate boom".to_string())
+        }) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        // Ordering is load-bearing: attach is attempted, then the job is
+        // terminated, and only then is the session discarded — nothing may keep
+        // running once the trace is about to be torn down.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "attach".to_string(),
+                "terminate".to_string(),
+                "discard".to_string()
+            ]
+        );
+        // The composed message reports all three failures, terminate before
+        // discard.
+        assert!(error.contains("attach boom"), "got: {error}");
+        let terminate_at = error.find("terminate boom").expect("terminate reported");
+        let discard_at = error.find("discard boom").expect("discard reported");
+        assert!(
+            terminate_at < discard_at,
+            "terminate must be reported before discard: {error}"
+        );
+    }
+
+    #[test]
+    fn attach_failure_reports_only_attach_when_cleanup_succeeds() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Ok(()),
+        });
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || None) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("attach boom"), "got: {error}");
+        assert!(
+            !error.contains("additionally"),
+            "clean cleanup must not append failure suffixes: {error}"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["attach".to_string(), "discard".to_string()]
+        );
+    }
+
+    #[test]
+    fn attach_success_returns_the_live_session_without_cleanup() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+
+        let session = super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            panic!("the job must not be terminated when attach succeeds")
+        })
+        .expect("attach success returns the live session");
+
+        // The live session is returned undisturbed (no discard on success).
+        assert_eq!(*events.lock().unwrap(), vec!["attach".to_string()]);
+        drop(session);
+    }
+
+    #[test]
+    fn discard_after_launch_failure_stops_the_trace_once() {
+        // The resume-failure path abandons an already-started capture via
+        // `discard`. Model that discard contract directly: it must be invoked
+        // exactly once to stop the trace, with no analysis attempted.
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut session: Box<dyn GuardedCaptureSession> = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+        let _ = session.discard();
+        assert_eq!(*events.lock().unwrap(), vec!["discard".to_string()]);
     }
 
     #[test]

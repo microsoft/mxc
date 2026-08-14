@@ -160,20 +160,41 @@ pub fn remove_internal_capture_file(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Combines a primary result with a best-effort secondary `()` result, keeping
+/// the four-arm pattern in one place. On success the primary value flows
+/// through; if exactly one side fails its error is returned unchanged; if both
+/// fail, `combine_errors` merges them (owning both errors so callers control
+/// the resulting message and [`std::io::ErrorKind`]).
+fn combine_results<T>(
+    primary: std::io::Result<T>,
+    secondary: std::io::Result<()>,
+    combine_errors: impl FnOnce(std::io::Error, std::io::Error) -> std::io::Error,
+) -> std::io::Result<T> {
+    match (primary, secondary) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(primary_error), Ok(())) => Err(primary_error),
+        (Ok(_), Err(secondary_error)) => Err(secondary_error),
+        (Err(primary_error), Err(secondary_error)) => {
+            Err(combine_errors(primary_error, secondary_error))
+        }
+    }
+}
+
 /// Combines a capture result with a best-effort cleanup result, preserving
 /// both failure messages when both operations fail.
 pub fn combine_capture_and_cleanup_results<T>(
     capture_result: std::io::Result<T>,
     cleanup_result: std::io::Result<()>,
 ) -> std::io::Result<T> {
-    match (capture_result, cleanup_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(capture_error), Ok(())) => Err(capture_error),
-        (Ok(_), Err(cleanup_error)) => Err(cleanup_error),
-        (Err(capture_error), Err(cleanup_error)) => Err(std::io::Error::other(format!(
+    combine_results(
+        capture_result,
+        cleanup_result,
+        |capture_error, cleanup_error| {
+            std::io::Error::other(format!(
             "{capture_error}; additionally failed to clean up the internal capture state: {cleanup_error}"
-        ))),
-    }
+        ))
+        },
+    )
 }
 
 /// Combines a sandboxed process's wait result with a best-effort
@@ -190,15 +211,16 @@ pub fn combine_process_and_teardown_results(
     process_result: std::io::Result<i32>,
     teardown_result: std::io::Result<()>,
 ) -> std::io::Result<i32> {
-    match (process_result, teardown_result) {
-        (Ok(exit_code), Ok(())) => Ok(exit_code),
-        (Ok(_), Err(teardown_error)) => Err(teardown_error),
-        (Err(wait_error), Ok(())) => Err(wait_error),
-        (Err(wait_error), Err(teardown_error)) => Err(std::io::Error::new(
-            wait_error.kind(),
-            format!("{wait_error}; captureDenials teardown also failed: {teardown_error}"),
-        )),
-    }
+    combine_results(
+        process_result,
+        teardown_result,
+        |wait_error, teardown_error| {
+            std::io::Error::new(
+                wait_error.kind(),
+                format!("{wait_error}; captureDenials teardown also failed: {teardown_error}"),
+            )
+        },
+    )
 }
 
 /// Best-effort write of a single diagnostic line to stderr, used for failures

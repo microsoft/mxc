@@ -119,6 +119,59 @@ cargo build -p plm --target x86_64-pc-windows-msvc --release
 
 The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`) and is materialized only inside the elevated child's internal temporary scratch area. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
 
+## Guarded WPR `captureDenials` fallback
+
+Besides `--audit`, `plm.exe` also serves as the elevated **guardian** for the
+`processContainer.captureDenials` legacy-tier fallback (`src/elevated.rs`). When
+the native PSEC/V2 Learning Mode capture path is unavailable, MXC starts a
+guarded WPR session that is scoped to the sandbox's job object and its exact
+process generations, then stops/analyzes it after the sandbox exits.
+
+### Discovery (co-location, not trust)
+
+MXC locates `plm.exe` **module-relative to the loaded MXC native binary** — the
+directory that holds `wxc-exec.exe` (the executor) and `mxc_ffi.dll` (the native
+asset directory used by the FFI/C# SDK). `current_exe()` is deliberately not
+used, because a framework-dependent .NET host reports `dotnet.exe` rather than
+the loaded MXC module.
+
+Co-location is only a **discovery** mechanism; it is **not** a trust boundary.
+This PR does not yet enforce runtime integrity of `plm.exe` (no signature or
+directory-ACL check is performed before launch), so a writable install/asset
+directory remains an unaddressed elevation surface — `plm.exe` self-elevates, so
+a planted binary would run as administrator. Supplying that integrity
+(packaging + code-signing `plm.exe` alongside those binaries, and verifying it
+before launch) is required and is owned by **#834**. Until then the risk is
+scoped and deferred, not solved.
+
+### Bounded discard-confirmation
+
+If discarding a guarded session fails, MXC confirms that the elevated guardian
+actually released the sandbox before continuing. Each confirmation is given a
+**short 10-second bound** (not `plm`'s multi-minute WPR stop timeout) and is
+retried only a small, bounded number of times, so a failed discard can never
+block teardown for tens of minutes. If release still cannot be confirmed after
+the bounded attempts, MXC aborts to preserve sandbox enforcement rather than
+proceeding with an unconfirmed live guardian.
+
+### Short-lived descendant attestation race
+
+Job completion-port notifications carry a PID, and Windows documents (see
+`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`) that such a PID may already refer to an
+**inactive or recycled** process unless an open handle is held. The guardian
+authenticates every `NEW_PROCESS` PID by opening a process **handle** and
+checking `IsProcessInJob` (plus a PID re-read and a non-zero creation time)
+before retaining it — a PID is never trusted on its own.
+
+A short-lived descendant can exit before the guardian manages to open it. That
+observation race is **recorded, not fatal to the sandbox**: the running sandbox
+is *never* terminated because of it. Instead, the guardian fails the capture
+**analysis closed** after the sandbox has completed, and **no denials artifact
+is emitted** for that run (the operator gets an explicit error rather than a
+partial or mis-scoped denials report). Genuine tracker corruption (e.g. a
+duplicate active-process start, or an exit with no tracked start that is not a
+recorded race) still fails closed and terminates the job.
+
 ## Limitations
 
 - **Windows-only.** Uses `wpr.exe` and Job-Object UI-limit semantics that have no portable equivalent.

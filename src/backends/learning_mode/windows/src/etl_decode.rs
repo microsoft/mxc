@@ -176,6 +176,15 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
+    /// Whether an event for `pid` at `filetime` falls within the attested
+    /// sandbox process lifetimes. Legacy full-trace analysis (no lifetime
+    /// index) treats every event as in scope.
+    fn in_analysis_scope(&self, pid: u32, filetime: u64) -> bool {
+        self.process_lifetimes
+            .as_ref()
+            .is_none_or(|lifetimes| lifetimes.contains(pid, filetime))
+    }
+
     fn add_raw_denial(&mut self, raw: RawDenial) {
         if self
             .process_lifetimes
@@ -492,9 +501,6 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     if acc.stop_requested || acc.decode_error.is_some() || acc.panic_payload.is_some() {
         return;
     }
-    if !acc.begin_event() {
-        return;
-    }
 
     run_callback_guard(acc, |acc| {
         // SAFETY: ETW supplied a valid record, and `acc` is the live callback
@@ -536,16 +542,30 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
-    if matches!(acc.mode, CollectionMode::Analyze) && !is_learning_mode_event(provider, event_id) {
-        return;
-    }
 
-    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
-        Ok(parts) => match acc.mode {
-            CollectionMode::Analyze => {
-                let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
-                    return;
-                };
+    // Establish scope BEFORE charging the event against the shared processing
+    // budget. Provider, event id, PID and timestamp all live in the event
+    // header, so the scope test needs no (comparatively expensive) TDH decode.
+    // Out-of-scope host events — a foreign provider, or a PID/time outside the
+    // attested sandbox process lifetimes — must not consume the budget;
+    // otherwise a noisy host could exhaust the limit before a single in-scope
+    // sandbox denial is ever decoded, truncating the analysis of an innocent
+    // sandbox.
+    if matches!(acc.mode, CollectionMode::Analyze) {
+        if !is_learning_mode_event(provider, event_id) {
+            return;
+        }
+        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+            return;
+        };
+        if !acc.in_analysis_scope(header.ProcessId, filetime) {
+            return;
+        }
+        if !acc.begin_event() {
+            return;
+        }
+        match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+            Ok(parts) => {
                 if let Some(raw) = extract_denial(&parts, header.ProcessId, filetime) {
                     acc.add_raw_denial(raw);
                 }
@@ -555,8 +575,18 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
                     acc.add_raw_denial(raw);
                 }
             }
-            CollectionMode::Raw => acc.visit_raw_event(&parts),
-        },
+            Err(error) => acc.record_event_decode_error(provider, event_id, error),
+        }
+        return;
+    }
+
+    // Raw diagnostic mode has no provider/lifetime scoping, so every decoded
+    // event legitimately counts against the budget.
+    if !acc.begin_event() {
+        return;
+    }
+    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+        Ok(parts) => acc.visit_raw_event(&parts),
         Err(error) => acc.record_event_decode_error(provider, event_id, error),
     }
 }
@@ -814,6 +844,27 @@ mod tests {
         assert!(accumulator.processing_limit_reached);
         assert!(accumulator.stop_requested);
         assert!(accumulator.truncated);
+    }
+
+    #[test]
+    fn out_of_scope_events_are_excluded_before_consuming_the_budget() {
+        // Lifetime scoping gates the shared processing budget: an event whose
+        // PID/time falls outside the attested sandbox lifetimes is not in
+        // scope, so `process_event_record` skips it before ever calling
+        // `begin_event`. This asserts the scope predicate that drives that
+        // early return; legacy (no-lifetime) analysis treats everything as in
+        // scope.
+        let scoped = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
+            pid: 7,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        assert!(scoped.in_analysis_scope(7, 150));
+        assert!(!scoped.in_analysis_scope(7, 250), "outside the time range");
+        assert!(!scoped.in_analysis_scope(9, 150), "unrelated PID");
+
+        let legacy = Accumulator::analyze();
+        assert!(legacy.in_analysis_scope(9, 150), "no lifetime filter");
     }
 
     #[test]

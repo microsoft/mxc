@@ -76,6 +76,10 @@ use crate::secure_scratch::{ProfileGuard, RecoveryMarker, SecureScratch};
 const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
 const ATTACH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound on how long [`JobProcessTracker::stop_worker`] waits to join the
+/// job-tracker worker thread before detaching it, so a failed stop signal can
+/// never hang the guardian indefinitely.
+const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TRANSFER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SW_HIDE: i32 = 0;
@@ -568,6 +572,28 @@ struct ProcessTrackerState {
     active_process_zero_filetime: Option<u64>,
     error: Option<String>,
     termination_error: Option<String>,
+    /// Number of `JOB_OBJECT_MSG_NEW_PROCESS` observations whose exact process
+    /// generation could not be authenticated before the process exited.
+    ///
+    /// Windows documents (see `JOBOBJECT_ASSOCIATE_COMPLETION_PORT`) that a PID
+    /// delivered on a job completion port may already refer to an inactive or
+    /// recycled process unless an open handle is held — which the guardian does
+    /// not have at notification time. A short-lived descendant can therefore
+    /// exit before `attest_job_process` opens it. Recording that race here —
+    /// instead of calling [`Self::fail`], which terminates the *running*
+    /// sandbox — lets a valid sandbox finish normally while the *capture
+    /// analysis* still fails closed at [`JobProcessTracker::finish`]. The
+    /// sandbox execution must never be terminated solely because of this
+    /// asynchronous observation race.
+    attestation_race_count: usize,
+    /// The first observed attestation race, retained for a precise diagnostic
+    /// without letting an adversarial flood of unauthenticated observations
+    /// grow memory without bound.
+    first_attestation_race: Option<String>,
+    /// Per-PID count of unauthenticated observations still awaiting an exit
+    /// notification, so a delayed/backlogged descendant exit is reconciled as
+    /// the tail of a recorded race rather than mistaken for tracker corruption.
+    unattested_active: HashMap<u32, usize>,
 }
 
 impl ProcessTrackerState {
@@ -584,6 +610,9 @@ impl ProcessTrackerState {
             active_process_zero_filetime: None,
             error: None,
             termination_error: None,
+            attestation_race_count: 0,
+            first_attestation_race: None,
+            unattested_active: HashMap::new(),
         }
     }
 
@@ -591,6 +620,19 @@ impl ProcessTrackerState {
         if self.error.is_none() {
             self.error = Some(message.into());
         }
+    }
+
+    /// Record an asynchronous descendant-attestation race without failing the
+    /// tracker. See [`Self::attestation_race_count`] for why this must not
+    /// terminate a valid, still-running sandbox.
+    fn record_attestation_race(&mut self, pid: u32, observed_filetime: u64, reason: String) {
+        self.attestation_race_count = self.attestation_race_count.saturating_add(1);
+        if self.first_attestation_race.is_none() {
+            self.first_attestation_race = Some(format!(
+                "PID {pid} observed at {observed_filetime}: {reason}"
+            ));
+        }
+        *self.unattested_active.entry(pid).or_insert(0) += 1;
     }
 
     fn process_started<F>(&mut self, pid: u32, observed_filetime: u64, attest: F)
@@ -620,9 +662,14 @@ impl ProcessTrackerState {
         let (process, creation_filetime) = match attest() {
             Ok(attestation) => attestation,
             Err(error) => {
-                self.fail(format!(
-                    "failed to attest job process generation for PID {pid}: {error:#}"
-                ));
+                // The descendant exited before the guardian could open and
+                // authenticate it — the completion-port PID may already be
+                // inactive or recycled. Failing the tracker here would call
+                // `TerminateJobObject` and kill a *valid, still-running*
+                // sandbox over an observation race. Instead, record the race
+                // (so `finish` fails the capture analysis closed) and let the
+                // sandbox continue.
+                self.record_attestation_race(pid, observed_filetime, format!("{error:#}"));
                 return;
             }
         };
@@ -666,6 +713,17 @@ impl ProcessTrackerState {
                 .iter()
                 .any(|process| process.pid == pid && process.end_observed_filetime.is_some())
             {
+                return;
+            }
+            // A delayed/backlogged exit for a descendant whose start could not
+            // be authenticated (see `record_attestation_race`). Reconcile it as
+            // the tail of that recorded race rather than flagging tracker
+            // corruption — the race already fails the analysis closed.
+            if let Some(count) = self.unattested_active.get_mut(&pid) {
+                *count -= 1;
+                if *count == 0 {
+                    self.unattested_active.remove(&pid);
+                }
                 return;
             }
             self.fail(format!(
@@ -824,6 +882,25 @@ impl JobProcessTracker {
         if let Some(error) = state.error.take() {
             anyhow::bail!("{error}");
         }
+        if state.attestation_race_count > 0 {
+            // The sandbox already ran to completion (we are past
+            // ACTIVE_PROCESS_ZERO). We could not authenticate one or more
+            // descendant generations, so the capture cannot be scoped to the
+            // exact process lifetimes. Fail the *analysis* closed here — after
+            // the sandbox has finished — rather than terminating a valid run.
+            anyhow::bail!(
+                "guarded WPR observed {} sandbox descendant process(es) that exited before the \
+                 guardian could authenticate their identity (job completion-port PIDs may refer \
+                 to inactive or recycled processes); the capture could not be scoped to the exact \
+                 process generations and is failing closed. The sandbox itself ran to completion \
+                 and was not affected. First occurrence: {}",
+                state.attestation_race_count,
+                state
+                    .first_attestation_race
+                    .as_deref()
+                    .unwrap_or("<unavailable>")
+            );
+        }
         let completed_filetime = state
             .active_process_zero_filetime
             .context("guarded WPR sandbox job never reported zero active processes")?;
@@ -832,9 +909,11 @@ impl JobProcessTracker {
         if root_exit_filetime == 0 {
             anyhow::bail!("sandbox root process has no kernel-attested exit time after WPR stop");
         }
-        if root_exit_filetime < self.root_creation_filetime
-            || root_exit_filetime > completed_filetime
-        {
+        if !attested_lifetime_within_bounds(
+            root_exit_filetime,
+            self.root_creation_filetime,
+            completed_filetime,
+        ) {
             anyhow::bail!("sandbox root process has an invalid kernel-attested lifetime");
         }
         let processes = std::mem::take(&mut state.processes)
@@ -844,8 +923,11 @@ impl JobProcessTracker {
                     format!("failed to attest exit time for job process {}", process.pid)
                 })?;
                 if exit_filetime == 0
-                    || exit_filetime < process.creation_filetime
-                    || exit_filetime > completed_filetime
+                    || !attested_lifetime_within_bounds(
+                        exit_filetime,
+                        process.creation_filetime,
+                        completed_filetime,
+                    )
                 {
                     anyhow::bail!(
                         "job process {} has an invalid kernel-attested lifetime",
@@ -913,18 +995,92 @@ impl JobProcessTracker {
     }
 
     fn stop_worker(&mut self) {
-        if let Some(worker) = self.worker.take() {
-            let _ = unsafe {
-                PostQueuedCompletionStatus(self.completion_port.0, TRACKER_STOP_MESSAGE, 0, None)
-            };
-            if worker.join().is_err() {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.fail("guarded WPR job tracker thread panicked");
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        // Signal the worker to return from its blocking
+        // `GetQueuedCompletionStatus`.
+        let post_result = unsafe {
+            PostQueuedCompletionStatus(self.completion_port.0, TRACKER_STOP_MESSAGE, 0, None)
+        };
+        if let Err(error) = post_result {
+            // The stop signal could not be queued, so the worker may still be
+            // blocked in an INFINITE `GetQueuedCompletionStatus`. Do NOT enter
+            // the bounded wait below — that would guarantee a full
+            // `WORKER_JOIN_TIMEOUT` stall for no benefit. Record the failure and
+            // detach immediately; the completion port closes when `self` drops,
+            // which unblocks the worker as a fallback.
+            self.fail_state(format!(
+                "failed to signal the guarded WPR job tracker to stop: {error}"
+            ));
+            return;
+        }
+
+        // Bounded join: on the stop message the worker returns promptly. If it
+        // does not, detach rather than hang the guardian indefinitely.
+        match bounded_join(
+            || worker.is_finished(),
+            Instant::now,
+            std::thread::sleep,
+            WORKER_JOIN_TIMEOUT,
+            POLL_INTERVAL,
+        ) {
+            BoundedJoinOutcome::TimedOut => {
+                self.fail_state(
+                    "guarded WPR job tracker did not shut down within the bounded timeout; \
+                     detaching the worker thread"
+                        .to_string(),
+                );
+            }
+            BoundedJoinOutcome::Finished => {
+                if worker.join().is_err() {
+                    self.fail_state("guarded WPR job tracker thread panicked".to_string());
+                }
             }
         }
+    }
+
+    /// Record a tracker failure on the shared state, recovering from a poisoned
+    /// lock. Centralizes the lock-and-`fail` dance used across `stop_worker`.
+    fn fail_state(&self, message: String) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.fail(message);
+    }
+}
+
+/// Outcome of [`bounded_join`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundedJoinOutcome {
+    /// `is_finished` reported completion before the timeout elapsed.
+    Finished,
+    /// The timeout elapsed while `is_finished` still reported "not done".
+    TimedOut,
+}
+
+/// Pure bounded-wait loop shared by [`JobProcessTracker::stop_worker`]. Polls
+/// `is_finished` until it returns `true` or `timeout` elapses (measured via the
+/// injected `now` clock), sleeping `poll_interval` between polls via the
+/// injected `sleep`. Extracted with injectable clock/sleep so the timeout path
+/// is unit-testable deterministically — the tests never sleep for real.
+fn bounded_join(
+    mut is_finished: impl FnMut() -> bool,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+    timeout: Duration,
+    poll_interval: Duration,
+) -> BoundedJoinOutcome {
+    let deadline = now() + timeout;
+    loop {
+        if is_finished() {
+            return BoundedJoinOutcome::Finished;
+        }
+        if now() >= deadline {
+            return BoundedJoinOutcome::TimedOut;
+        }
+        sleep(poll_interval);
     }
 }
 
@@ -959,6 +1115,22 @@ fn process_times(process: HANDLE) -> Result<(u64, u64)> {
     Ok((filetime_value(creation), filetime_value(exit)))
 }
 
+/// Returns `true` when a kernel-attested `exit_filetime` is consistent with the
+/// process's `creation_filetime` and the job's `completed_filetime`: it must be
+/// no earlier than creation and no later than job completion.
+///
+/// Extracted as a pure function (independent of the `process_times` FFI reads
+/// and the system clock) so the attested-lifetime boundary conditions can be
+/// exercised deterministically in unit tests without opening real process
+/// handles or racing the wall clock.
+fn attested_lifetime_within_bounds(
+    exit_filetime: u64,
+    creation_filetime: u64,
+    completed_filetime: u64,
+) -> bool {
+    exit_filetime >= creation_filetime && exit_filetime <= completed_filetime
+}
+
 fn query_total_processes(job: HANDLE) -> Result<u32> {
     let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
     unsafe {
@@ -978,6 +1150,27 @@ fn filetime_value(value: FILETIME) -> u64 {
     (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
 }
 
+/// Drains the job's I/O completion port on the single dedicated tracker worker.
+///
+/// # Invariants
+///
+/// A job object is associated with exactly one completion port, and this is the
+/// only thread that calls `GetQueuedCompletionStatus` on it, so **all** job
+/// completion messages for the job (`JOB_OBJECT_MSG_NEW_PROCESS`,
+/// `..._EXIT_PROCESS`, `..._ACTIVE_PROCESS_ZERO`) are observed **serially, in
+/// kernel delivery order**, by this one worker. The recorded start/end
+/// *generation order* (the notification sequence numbers) is therefore
+/// consistent bookkeeping used only to reconcile membership and validate
+/// ordering after the fact — it is never treated as proof of identity.
+///
+/// Identity is authenticated separately and independently of the PID: each
+/// `NEW_PROCESS` PID is resolved to a process **handle** and checked with
+/// `IsProcessInJob` (plus a re-read of the PID and a non-zero creation time)
+/// before it is retained. Because a completion-port PID may already refer to an
+/// inactive or recycled process, a *failed* attestation is recorded as an
+/// attestation race that fails the capture **analysis** closed at
+/// [`JobProcessTracker::finish`] — it never causes an unauthenticated PID to be
+/// trusted, and never terminates the running sandbox.
 fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<ProcessTrackerState>>) {
     loop {
         let mut message = 0u32;
@@ -1133,13 +1326,25 @@ impl GuardedSession {
     }
 
     pub fn cancel(&mut self) -> Result<()> {
+        self.cancel_within(WAIT_TIMEOUT_DURATION)
+    }
+
+    /// Abandon the session, confirming guardian termination within an explicit
+    /// bounded `confirm_timeout` instead of the full stop timeout.
+    ///
+    /// Used by the discard-failure fallback so that repeated confirmation
+    /// attempts cannot each inherit the multi-minute stop timeout (which would
+    /// otherwise let a small retry loop block for tens of minutes). Once a
+    /// discard has been requested the guardian releases promptly, so a short
+    /// deadline is the appropriate certainty bound.
+    pub fn cancel_within(&mut self, confirm_timeout: Duration) -> Result<()> {
         let abandoned = !self.disarmed;
         if abandoned {
             self.pipe.take();
             self.disarmed = true;
             self.abandonment_report_pending = true;
         }
-        let exit_code = wait_for_child_termination(self.process.0, WAIT_TIMEOUT_DURATION).context(
+        let exit_code = wait_for_child_termination(self.process.0, confirm_timeout).context(
             "guarded PLM session could not confirm guardian termination after abandoning WPR state",
         )?;
         if self.abandonment_report_pending {
@@ -2545,6 +2750,167 @@ mod tests {
         assert!(!attested.get());
         assert!(state.processes.is_empty());
         assert_eq!(state.error.as_deref(), Some("terminal tracker failure"));
+    }
+
+    #[test]
+    fn same_pid_restart_records_distinct_generations() {
+        // A descendant PID that starts, exits, then a *new* process reuses the
+        // same PID must be retained as two distinct generations, disambiguated
+        // by their creation times and ordered start sequences.
+        let mut state = ProcessTrackerState::new(100, 7);
+
+        state.process_started(4242, 150, || Ok((OwnedHandle(HANDLE::default()), 111)));
+        state.process_exited(4242, 160);
+        state.process_started(4242, 170, || Ok((OwnedHandle(HANDLE::default()), 222)));
+        state.process_exited(4242, 180);
+
+        assert!(state.error.is_none());
+        assert!(state.active.is_empty());
+        assert_eq!(state.processes.len(), 2);
+        assert_eq!(state.processes[0].pid, 4242);
+        assert_eq!(state.processes[1].pid, 4242);
+        assert_eq!(state.processes[0].creation_filetime, 111);
+        assert_eq!(state.processes[1].creation_filetime, 222);
+        assert_ne!(
+            state.processes[0].start_sequence,
+            state.processes[1].start_sequence
+        );
+        assert!(state.processes[0].end_sequence < state.processes[1].end_sequence);
+    }
+
+    #[test]
+    fn delayed_short_lived_descendant_race_never_fails_the_sandbox() {
+        // Regression for the async NEW_PROCESS OpenProcess race: a short-lived
+        // descendant reported on the completion port can exit before the
+        // guardian authenticates it. That observation race must never terminate
+        // the running sandbox; it is recorded and fails the *analysis* closed.
+        let mut state = ProcessTrackerState::new(100, 7);
+
+        // Root start notification (the root is never opened via OpenProcess).
+        state.process_started(7, 150, || panic!("root generation must not be attested"));
+
+        // The descendant has already exited by the time attestation is
+        // attempted, so opening it fails.
+        state.process_started(4242, 151, || {
+            anyhow::bail!("OpenProcess failed: the process has exited")
+        });
+
+        assert!(
+            state.error.is_none(),
+            "an attestation race must not fail (and thereby terminate) the sandbox"
+        );
+        assert!(state.processes.is_empty());
+        assert_eq!(state.attestation_race_count, 1);
+        assert_eq!(state.unattested_active.get(&4242).copied(), Some(1));
+
+        // A deliberately delayed / backlogged exit for that same descendant
+        // arrives afterwards; it must reconcile the race, not be mistaken for
+        // tracker corruption.
+        state.process_exited(4242, 160);
+        assert!(state.error.is_none());
+        assert!(state.unattested_active.is_empty());
+
+        // The rest of the job completes normally.
+        state.process_exited(7, 170);
+        state.all_processes_exited(171);
+
+        assert!(
+            state.error.is_none(),
+            "the sandbox job must never be failed because of an observation race"
+        );
+        assert_eq!(state.attestation_race_count, 1);
+        assert!(state.first_attestation_race.is_some());
+    }
+
+    #[test]
+    fn untracked_exit_without_a_race_still_fails_closed() {
+        // A process exit for a PID that was never observed starting and is not
+        // a recorded attestation race is genuine tracker corruption and must
+        // still fail closed.
+        let mut state = ProcessTrackerState::new(100, 7);
+        state.process_exited(999, 160);
+        assert!(state
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("without a tracked start")));
+    }
+
+    #[test]
+    fn attested_lifetime_boundaries_are_deterministic() {
+        let creation = 100u64;
+        let completed = 200u64;
+        // Exactly at each boundary is valid.
+        assert!(attested_lifetime_within_bounds(
+            creation, creation, completed
+        ));
+        assert!(attested_lifetime_within_bounds(
+            completed, creation, completed
+        ));
+        assert!(attested_lifetime_within_bounds(150, creation, completed));
+        // One tick outside either boundary is invalid.
+        assert!(!attested_lifetime_within_bounds(
+            creation - 1,
+            creation,
+            completed
+        ));
+        assert!(!attested_lifetime_within_bounds(
+            completed + 1,
+            creation,
+            completed
+        ));
+    }
+
+    #[test]
+    fn bounded_join_times_out_without_real_sleep() {
+        // A worker that never finishes must make `bounded_join` return
+        // `TimedOut` after a bounded number of polls — using an injected clock
+        // and sleep so the test never actually sleeps.
+        let base = Instant::now();
+        let mut ticks = 0u64;
+        let mut sleeps = 0u32;
+
+        let outcome = bounded_join(
+            || false,
+            || {
+                ticks += 1;
+                base + Duration::from_millis(ticks * 5)
+            },
+            |_| sleeps += 1,
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        );
+
+        assert_eq!(outcome, BoundedJoinOutcome::TimedOut);
+        // Deadline = first now() (base+5ms) + 20ms = base+25ms. Subsequent
+        // now() calls advance 5ms each, so the loop terminates after a few
+        // polls rather than spinning forever.
+        assert!(
+            (1..=5).contains(&sleeps),
+            "expected a small bounded number of polls, got {sleeps}"
+        );
+    }
+
+    #[test]
+    fn bounded_join_returns_finished_when_worker_completes() {
+        // The worker reports "finished" on the second check; `bounded_join`
+        // must return `Finished` after exactly one poll, never timing out.
+        let base = Instant::now();
+        let mut checks = 0u32;
+        let mut sleeps = 0u32;
+
+        let outcome = bounded_join(
+            || {
+                checks += 1;
+                checks >= 2
+            },
+            || base,
+            |_| sleeps += 1,
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+        );
+
+        assert_eq!(outcome, BoundedJoinOutcome::Finished);
+        assert_eq!(sleeps, 1, "one poll between the two liveness checks");
     }
 
     #[test]

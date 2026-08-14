@@ -311,7 +311,20 @@ impl UiJobObject {
 
     /// Waits until no processes remain assigned to the job.
     pub fn wait_for_empty(&self) -> Result<(), WxcError> {
-        let deadline = Instant::now() + JOB_EMPTY_WAIT_TIMEOUT;
+        self.wait_for_empty_within(JOB_EMPTY_WAIT_TIMEOUT, JOB_EMPTY_POLL_INTERVAL)
+    }
+
+    /// Waits up to `timeout` for the job to reach zero active processes, polling
+    /// job accounting every `poll_interval`. Extracted from [`Self::wait_for_empty`]
+    /// so callers (and tests) can supply an explicit bound; `Duration::ZERO`
+    /// performs exactly one accounting probe with no sleep. The timeout message
+    /// reports the configured `timeout`.
+    fn wait_for_empty_within(
+        &self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), WxcError> {
+        let deadline = Instant::now() + timeout;
         loop {
             let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
             // SAFETY: `self.handle` is a valid job handle and `accounting`
@@ -337,18 +350,59 @@ impl UiJobObject {
                 return Err(WxcError::Process(format!(
                     "timed out after {}ms waiting for sandbox job to become empty; {} process(es) \
                      remain active",
-                    JOB_EMPTY_WAIT_TIMEOUT.as_millis(),
+                    timeout.as_millis(),
                     accounting.ActiveProcesses
                 )));
             }
-            std::thread::sleep(JOB_EMPTY_POLL_INTERVAL);
+            std::thread::sleep(poll_interval);
         }
     }
 
     /// Terminates the complete process tree and confirms that the job is empty.
+    ///
+    /// This is the **strict** drain: a failure to observe the job reach zero
+    /// active processes within [`JOB_EMPTY_WAIT_TIMEOUT`] is returned as an
+    /// error. Use it only where full drain certainty is a correctness
+    /// requirement — notably the guarded-WPR `captureDenials` paths, where ETL
+    /// scoping is only sound if nothing can still be running unobserved.
+    /// Ordinary (non-capture) teardown should prefer
+    /// [`Self::terminate_best_effort`], which does not fail an otherwise-valid
+    /// run just because the kernel had not finished tearing the tree down
+    /// within the window.
     pub fn terminate_and_wait(&self, exit_code: u32) -> Result<(), WxcError> {
         self.terminate(exit_code)?;
         self.wait_for_empty()
+    }
+
+    /// Terminates the complete process tree, treating a drain-observation
+    /// timeout as a recoverable warning rather than a hard failure.
+    ///
+    /// A failure of [`Self::terminate`] itself (the actual `TerminateJobObject`
+    /// call) is still returned as an error. But if the job does not reach zero
+    /// active processes within the window, this returns `Ok(Some(error))` so
+    /// the caller can surface a warning while preserving the run's result — the
+    /// kernel continues tearing the tree down, and
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` guarantees eventual teardown when
+    /// the handle closes. Returns `Ok(None)` when the job drained cleanly.
+    pub fn terminate_best_effort(&self, exit_code: u32) -> Result<Option<WxcError>, WxcError> {
+        self.terminate_best_effort_within(
+            exit_code,
+            JOB_EMPTY_WAIT_TIMEOUT,
+            JOB_EMPTY_POLL_INTERVAL,
+        )
+    }
+
+    /// [`Self::terminate_best_effort`] with an explicit drain bound. Factored
+    /// out so the warning (drain-timeout) path is unit-testable with
+    /// `Duration::ZERO` instead of the multi-second production window.
+    fn terminate_best_effort_within(
+        &self,
+        exit_code: u32,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Option<WxcError>, WxcError> {
+        self.terminate(exit_code)?;
+        Ok(self.wait_for_empty_within(timeout, poll_interval).err())
     }
 }
 
@@ -420,6 +474,54 @@ mod tests {
         job.terminate_and_wait(u32::MAX)
             .expect("terminated job should become empty");
         assert!(child.wait().expect("reap child").code().is_some());
+    }
+
+    #[test]
+    fn terminate_best_effort_reports_clean_drain() {
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let drain_warning = job
+            .terminate_best_effort(u32::MAX)
+            .expect("terminate itself must succeed");
+        assert!(
+            drain_warning.is_none(),
+            "a terminated job that drains cleanly yields no warning: {drain_warning:?}"
+        );
+        assert!(child.wait().expect("reap child").code().is_some());
+    }
+
+    #[test]
+    fn wait_for_empty_within_zero_timeout_reports_active_processes() {
+        // A single-probe (`Duration::ZERO`) wait against a still-running job
+        // deterministically reports the drain timeout without any real sleep.
+        // This is exactly the `WxcError` `terminate_best_effort` surfaces as its
+        // `Some(warning)` when a job has not drained within the window — testing
+        // it here keeps the coverage deterministic (a real `TerminateJobObject`
+        // followed by an immediate probe can race the async kernel teardown and
+        // observe the job already empty).
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let error = job
+            .wait_for_empty_within(Duration::ZERO, Duration::ZERO)
+            .expect_err("a live job must not be observed empty with a zero timeout");
+        let message = error.to_string();
+        assert!(message.contains("timed out"), "got: {message}");
+        assert!(message.contains("remain active"), "got: {message}");
+
+        job.terminate_and_wait(u32::MAX).expect("cleanup terminate");
+        child.wait().expect("reap child");
     }
 
     #[test]

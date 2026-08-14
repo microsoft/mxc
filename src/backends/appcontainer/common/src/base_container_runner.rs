@@ -475,6 +475,65 @@ impl BaseContainerRunner {
         self.proxy_coordinator.stop(logger);
     }
 
+    /// Security-sensitive teardown shared by every guarded-capture failure path
+    /// that must abandon a sandbox before it is handed to the caller (attach
+    /// failure, guardian-start failure, and post-resume failure).
+    ///
+    /// Ordering is load-bearing: the job is terminated **first** (killing the
+    /// child and every descendant), and per-run sandbox enforcement plus the
+    /// proxy are torn down **only** once termination succeeded — never while a
+    /// process could still be running unobserved. A guarded WPR `session`, if
+    /// one was already started, is discarded through the authenticated
+    /// protocol. Returns `base_message` with any termination/discard failures
+    /// appended; `terminate_context` names what was being terminated (e.g. "the
+    /// suspended sandbox" vs "the sandbox process tree").
+    #[allow(clippy::too_many_arguments)]
+    fn abandon_capture_launch(
+        &mut self,
+        job: &UiJobObject,
+        process: HANDLE,
+        thread: HANDLE,
+        session: Option<Box<dyn GuardedCaptureSession>>,
+        identity: &str,
+        sid_string: &str,
+        legacy_destroy_on_exit: bool,
+        proxy_enabled: bool,
+        terminate_context: &str,
+        mut base_message: String,
+        logger: &mut Logger,
+    ) -> String {
+        // Guarded capture needs strict drain certainty here: nothing may be
+        // left running before the trace is stopped/discarded.
+        let termination_error = job.terminate_and_wait(u32::MAX).err();
+        let discard_error = session.and_then(|mut session| session.discard().err());
+        // SAFETY: `process`/`thread` are the just-created, still-owned child
+        // handles; nothing else references them on this failure path.
+        unsafe {
+            let _ = CloseHandle(process);
+            let _ = CloseHandle(thread);
+        }
+        if termination_error.is_none() {
+            if legacy_destroy_on_exit {
+                run_sandbox_cleanup(identity, sid_string, proxy_enabled, logger);
+                sandbox_tracking::unregister_ctrl_c_cleanup();
+            }
+            self.proxy_coordinator.stop(logger);
+        }
+        if let Some(terminate_error) = termination_error {
+            let _ = write!(
+                base_message,
+                "; additionally failed to terminate {terminate_context}: {terminate_error}"
+            );
+        }
+        if let Some(discard_error) = discard_error {
+            let _ = write!(
+                base_message,
+                "; additionally failed to stop and discard guarded WPR: {discard_error}"
+            );
+        }
+        base_message
+    }
+
     /// Pre-flight probe: check whether the current OS build exports the
     /// `Experimental_CreateProcessInSandbox` symbol from `processmodel.dll`.
     ///
@@ -847,30 +906,43 @@ impl BaseContainerRunner {
         Self::is_process_security_environment_usable()
     }
 
+    /// Whether a `captureDenials` request is eligible for the native
+    /// (PSEC + Learning Mode) capture path, given the effective PSEC usability
+    /// and a [`CapturePlatformSupport`] probe. Shared by the instance
+    /// ([`Self::uses_process_security_environment`], probing `self.capture_support`)
+    /// and static ([`Self::uses_native_capture_for_request`], probing
+    /// [`RealCapturePlatformSupport`]) eligibility checks so the two cannot drift.
+    fn native_capture_eligible(
+        request: &ExecutionRequest,
+        psec_usable: bool,
+        support: &dyn CapturePlatformSupport,
+    ) -> bool {
+        #[cfg(test)]
+        let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
+            |_| psec_usable && support.check_apis(true).is_ok(),
+            |forced| forced == "1",
+        );
+        #[cfg(not(test))]
+        let native_capture_usable = psec_usable && support.check_apis(true).is_ok();
+
+        request.policy.capture_denials.is_some()
+            && native_capture_usable
+            && Self::psec_policy_compatible(
+                request,
+                request.policy.denied_paths.is_empty()
+                    || support.supports_deny_paths().unwrap_or(false),
+            )
+    }
+
     fn uses_process_security_environment(&self, request: &ExecutionRequest) -> bool {
         if request.policy.capture_denials.is_some() {
-            #[cfg(test)]
-            let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE")
-                .map_or_else(
-                    |_| {
-                        self.process_security_environment_usable()
-                            && self.capture_support.check_apis(true).is_ok()
-                    },
-                    |forced| forced == "1",
-                );
-            #[cfg(not(test))]
-            let native_capture_usable = self.process_security_environment_usable()
-                && self.capture_support.check_apis(true).is_ok();
-
-            return native_capture_usable
-                && Self::psec_policy_compatible(
-                    request,
-                    request.policy.denied_paths.is_empty()
-                        || self.capture_support.supports_deny_paths().unwrap_or(false),
-                );
+            return Self::native_capture_eligible(
+                request,
+                self.process_security_environment_usable(),
+                self.capture_support.as_ref(),
+            );
         }
-        let supports_deny_paths = request.policy.capture_denials.is_some()
-            || request.policy.denied_paths.is_empty()
+        let supports_deny_paths = request.policy.denied_paths.is_empty()
             || self.capture_support.supports_deny_paths().unwrap_or(false);
         Self::should_use_process_security_environment(
             request,
@@ -935,27 +1007,11 @@ impl BaseContainerRunner {
     }
 
     pub(crate) fn uses_native_capture_for_request(request: &ExecutionRequest) -> bool {
-        #[cfg(test)]
-        let native_capture_usable = std::env::var("MXC_FORCE_NATIVE_CAPTURE_USABLE").map_or_else(
-            |_| {
-                Self::is_process_security_environment_usable()
-                    && RealCapturePlatformSupport.check_apis(true).is_ok()
-            },
-            |forced| forced == "1",
-        );
-        #[cfg(not(test))]
-        let native_capture_usable = Self::is_process_security_environment_usable()
-            && RealCapturePlatformSupport.check_apis(true).is_ok();
-
-        request.policy.capture_denials.is_some()
-            && native_capture_usable
-            && Self::psec_policy_compatible(
-                request,
-                request.policy.denied_paths.is_empty()
-                    || RealCapturePlatformSupport
-                        .supports_deny_paths()
-                        .unwrap_or(false),
-            )
+        Self::native_capture_eligible(
+            request,
+            Self::is_process_security_environment_usable(),
+            &RealCapturePlatformSupport,
+        )
     }
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -2083,42 +2139,22 @@ impl BaseContainerRunner {
                     if let Err(attach_error) =
                         session.attach_process_tree(job.handle_value(), pi.hProcess.0 as usize)
                     {
-                        let termination_error = job.terminate_and_wait(u32::MAX).err();
-                        let discard_error = session.discard().err();
-                        unsafe {
-                            let _ = CloseHandle(pi.hProcess);
-                            let _ = CloseHandle(pi.hThread);
-                        }
-                        if termination_error.is_none() {
-                            if legacy_destroy_on_exit {
-                                run_sandbox_cleanup(
-                                    &identity,
-                                    &sid_string,
-                                    request.policy.network_proxy.is_enabled(),
-                                    logger,
-                                );
-                                sandbox_tracking::unregister_ctrl_c_cleanup();
-                            }
-                            self.proxy_coordinator.stop(logger);
-                        }
-                        let mut message = format!(
-                            "captureDenials failed to attach the sandbox process tree to guarded WPR \
-                             before resuming the sandbox: {attach_error}"
+                        let message = self.abandon_capture_launch(
+                            &job,
+                            pi.hProcess,
+                            pi.hThread,
+                            Some(session),
+                            &identity,
+                            &sid_string,
+                            legacy_destroy_on_exit,
+                            request.policy.network_proxy.is_enabled(),
+                            "the suspended sandbox",
+                            format!(
+                                "captureDenials failed to attach the sandbox process tree to \
+                                 guarded WPR before resuming the sandbox: {attach_error}"
+                            ),
+                            logger,
                         );
-                        if let Some(terminate_error) = termination_error {
-                            let _ = write!(
-                                message,
-                                "; additionally failed to terminate the suspended sandbox: \
-                                 {terminate_error}"
-                            );
-                        }
-                        if let Some(discard_error) = discard_error {
-                            let _ = write!(
-                                message,
-                                "; additionally failed to stop and discard guarded WPR: \
-                                 {discard_error}"
-                            );
-                        }
                         return Err(ScriptResponse {
                             failure_phase: FailurePhase::LaunchFailed,
                             ..ScriptResponse::error(&message)
@@ -2127,40 +2163,25 @@ impl BaseContainerRunner {
                     Some(session)
                 }
                 Err(error) => {
-                    if let Err(terminate_error) = job.terminate_and_wait(u32::MAX) {
-                        unsafe {
-                            let _ = CloseHandle(pi.hProcess);
-                            let _ = CloseHandle(pi.hThread);
-                        }
-                        return Err(ScriptResponse {
-                            failure_phase: FailurePhase::LaunchFailed,
-                            ..ScriptResponse::error(&format!(
-                                "captureDenials failed to start guarded WPR before resuming the \
-                                 sandbox: {error}; additionally failed to terminate the suspended \
-                                 sandbox: {terminate_error}"
-                            ))
-                        });
-                    }
-                    unsafe {
-                        let _ = CloseHandle(pi.hProcess);
-                        let _ = CloseHandle(pi.hThread);
-                    }
-                    if legacy_destroy_on_exit {
-                        run_sandbox_cleanup(
-                            &identity,
-                            &sid_string,
-                            request.policy.network_proxy.is_enabled(),
-                            logger,
-                        );
-                        sandbox_tracking::unregister_ctrl_c_cleanup();
-                    }
-                    self.proxy_coordinator.stop(logger);
-                    return Err(ScriptResponse {
-                        failure_phase: FailurePhase::LaunchFailed,
-                        ..ScriptResponse::error(&format!(
+                    let message = self.abandon_capture_launch(
+                        &job,
+                        pi.hProcess,
+                        pi.hThread,
+                        None,
+                        &identity,
+                        &sid_string,
+                        legacy_destroy_on_exit,
+                        request.policy.network_proxy.is_enabled(),
+                        "the suspended sandbox",
+                        format!(
                             "captureDenials failed to start guarded WPR before resuming the \
                              sandbox: {error}"
-                        ))
+                        ),
+                        logger,
+                    );
+                    return Err(ScriptResponse {
+                        failure_phase: FailurePhase::LaunchFailed,
+                        ..ScriptResponse::error(&message)
                     });
                 }
             }
@@ -2190,40 +2211,20 @@ impl BaseContainerRunner {
         } else {
             None
         };
-        if let Some(mut message) = resume_error {
-            let termination_error = job.terminate_and_wait(u32::MAX).err();
-            let discard_error = guarded_capture_session
-                .take()
-                .and_then(|mut session| session.discard().err());
-            unsafe {
-                let _ = CloseHandle(pi.hProcess);
-                let _ = CloseHandle(pi.hThread);
-            }
-            if termination_error.is_none() {
-                if legacy_destroy_on_exit {
-                    run_sandbox_cleanup(
-                        &identity,
-                        &sid_string,
-                        request.policy.network_proxy.is_enabled(),
-                        logger,
-                    );
-                    sandbox_tracking::unregister_ctrl_c_cleanup();
-                }
-                self.proxy_coordinator.stop(logger);
-            }
-            if let Some(terminate_error) = termination_error {
-                let _ = write!(
-                    message,
-                    "; additionally failed to terminate the sandbox process tree: \
-                     {terminate_error}"
-                );
-            }
-            if let Some(discard_error) = discard_error {
-                let _ = write!(
-                    message,
-                    "; additionally failed to stop and discard guarded WPR: {discard_error}"
-                );
-            }
+        if let Some(message) = resume_error {
+            let message = self.abandon_capture_launch(
+                &job,
+                pi.hProcess,
+                pi.hThread,
+                guarded_capture_session.take(),
+                &identity,
+                &sid_string,
+                legacy_destroy_on_exit,
+                request.policy.network_proxy.is_enabled(),
+                "the sandbox process tree",
+                message,
+                logger,
+            );
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::LaunchFailed,
                 ..ScriptResponse::error(&message)
@@ -2731,8 +2732,25 @@ impl BaseContainerSandboxProcess {
 
     fn kill_process_tree(&mut self) -> std::io::Result<()> {
         if let Some(job) = &self.job {
-            job.terminate_and_wait(u32::MAX)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if self.guarded_capture_session.is_some() {
+                // Guarded-WPR capture needs strict drain certainty: the ETL is
+                // only safely scoped if the job is proven to have fully drained
+                // before the trace is stopped/discarded.
+                job.terminate_and_wait(u32::MAX)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            } else {
+                // Ordinary run: terminate the tree, but a slow drain is a
+                // warning, not a hard failure that would discard an otherwise
+                // valid result.
+                match job.terminate_best_effort(u32::MAX) {
+                    Ok(Some(drain_warning)) => write_stderr_line_best_effort(format_args!(
+                        "sandbox job did not fully drain within the teardown window \
+                         (continuing): {drain_warning}"
+                    )),
+                    Ok(None) => {}
+                    Err(error) => return Err(std::io::Error::other(error.to_string())),
+                }
+            }
         } else {
             unsafe { TerminateProcess(self.process.get(), u32::MAX) }
                 .map_err(|error| std::io::Error::other(format!("TerminateProcess: {error}")))?;
@@ -4556,6 +4574,13 @@ mod tests {
 
     #[test]
     fn validate_runner_rejects_etl_retention_when_guarded_fallback_is_selected() {
+        // Hold the shared env lock and force native capture unavailable, so a
+        // concurrent capability-guarded test cannot leak
+        // `MXC_FORCE_NATIVE_CAPTURE_USABLE=1` and flip this runner onto the
+        // native (non-guarded) path — which would skip the retain-ETL rejection
+        // under test. `psec_usable_override` alone is insufficient because the
+        // env override takes precedence in `native_capture_eligible`.
+        let _capture_guard = crate::test_env::CaptureCapabilityGuard::set(false, false);
         let runner = BaseContainerRunner {
             psec_usable_override: Some(false),
             ..Default::default()

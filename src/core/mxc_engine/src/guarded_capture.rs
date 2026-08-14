@@ -23,15 +23,53 @@ use windows::Win32::System::LibraryLoader::{
 
 const GUARDIAN_CONFIRM_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
 const MAX_GUARDIAN_CONFIRM_ATTEMPTS: usize = 3;
+/// Bounded per-attempt deadline for confirming that the guardian released the
+/// sandbox after a discard failure. The guardian terminates promptly once a
+/// discard/abandon has been requested, so this is intentionally short: without
+/// it, each confirmation would inherit `plm`'s multi-minute stop timeout and a
+/// three-attempt retry loop could block for tens of minutes.
+const GUARDIAN_CONFIRM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Timing/attempt policy for [`confirm_guardian_release_after_discard_failure`].
+/// Extracted into a struct so the confirmation timeout and retry delay are
+/// injectable in tests without touching the production defaults ([`Self::default`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GuardianConfirmPolicy {
+    max_attempts: usize,
+    /// Per-attempt deadline handed to each guardian-release confirmation.
+    confirm_timeout: std::time::Duration,
+    /// Delay applied between confirmation attempts.
+    retry_delay: std::time::Duration,
+}
+
+impl Default for GuardianConfirmPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: MAX_GUARDIAN_CONFIRM_ATTEMPTS,
+            confirm_timeout: GUARDIAN_CONFIRM_TIMEOUT,
+            retry_delay: GUARDIAN_CONFIRM_RETRY_DELAY,
+        }
+    }
+}
+
+/// Retries guardian-release confirmation under `policy`. Each attempt calls
+/// `confirm_release` with the policy's `confirm_timeout`; between failed
+/// attempts it invokes `on_retry` (diagnostics) and then `sleep` with the
+/// policy's `retry_delay`. Both the clock (via `confirm_timeout`) and the sleep
+/// are injected so the timing is unit-testable without real waits.
 fn confirm_guardian_release_after_discard_failure(
-    mut confirm_release: impl FnMut() -> Result<(), String>,
+    policy: GuardianConfirmPolicy,
+    mut confirm_release: impl FnMut(std::time::Duration) -> Result<(), String>,
     mut on_retry: impl FnMut(usize, &str),
+    mut sleep: impl FnMut(std::time::Duration),
 ) -> Result<(), String> {
-    for attempt in 1..=MAX_GUARDIAN_CONFIRM_ATTEMPTS {
-        match confirm_release() {
+    for attempt in 1..=policy.max_attempts {
+        match confirm_release(policy.confirm_timeout) {
             Ok(()) => return Ok(()),
-            Err(error) if attempt < MAX_GUARDIAN_CONFIRM_ATTEMPTS => on_retry(attempt, &error),
+            Err(error) if attempt < policy.max_attempts => {
+                on_retry(attempt, &error);
+                sleep(policy.retry_delay);
+            }
             Err(error) => return Err(error),
         }
     }
@@ -44,6 +82,10 @@ fn confirm_guardian_release_after_discard_failure(
 /// asset directory for `mxc_ffi.dll`. `current_exe()` is not sufficient for
 /// library consumers because a framework-dependent .NET app reports
 /// `dotnet.exe`, not the loaded MXC native module.
+///
+/// Packaging and code-signing of `plm.exe` (so it ships alongside
+/// `wxc-exec.exe` / `mxc_ffi.dll` in released artifacts) is delivered by #834;
+/// this resolver only locates the co-located binary at runtime.
 fn plm_exe_path() -> Result<std::path::PathBuf, String> {
     let module = module_containing_plm_resolver()?;
     let dir = module
@@ -104,15 +146,20 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
         };
 
         match confirm_guardian_release_after_discard_failure(
-            || self.session.cancel().map_err(|error| format!("{error:#}")),
+            GuardianConfirmPolicy::default(),
+            |timeout| {
+                self.session
+                    .cancel_within(timeout)
+                    .map_err(|error| format!("{error:#}"))
+            },
             |attempt, error| {
                 eprintln!(
                     "[mxc] guarded WPR guardian termination remains unconfirmed after \
                      discard failure (attempt {attempt}/{MAX_GUARDIAN_CONFIRM_ATTEMPTS}); \
                      sandbox enforcement is still active: {error}"
                 );
-                std::thread::sleep(GUARDIAN_CONFIRM_RETRY_DELAY);
             },
+            std::thread::sleep,
         ) {
             Ok(()) => Err(format!(
                 "guarded WPR discard failed: {discard_error:#}; guardian termination was \
@@ -152,6 +199,18 @@ impl GuardedCaptureFactory for PlmGuardedCaptureFactory {
 /// missing-guardian rejection deterministically, against a synthetic path,
 /// rather than depending on whether `plm.exe` happens to already exist next to
 /// the current test binary in a given build/CI environment.
+///
+/// Trust disposition (guarded-capture item 10): this PR resolves `plm.exe` via
+/// [`plm_exe_path`] as the module directory of the loaded MXC native binary
+/// (`wxc-exec.exe` / `mxc_ffi.dll`). **Co-location is a discovery mechanism, not
+/// a trust boundary** — it locates the guardian; it does not attest it. This PR
+/// does **not** yet enforce runtime integrity of `plm.exe` (no signature or
+/// directory-ACL check is performed here), so a writable install/asset
+/// directory remains an unaddressed elevation surface: `plm.exe` self-elevates,
+/// so a planted binary would run as administrator. Supplying that integrity —
+/// packaging and code-signing `plm.exe` alongside those binaries, and verifying
+/// it before launch — is required and is owned by #834. Until then this risk is
+/// not solved; it is only scoped and deferred.
 fn start_with_plm_path(
     plm_path: &std::path::Path,
     owner_pid: u32,
@@ -225,9 +284,11 @@ mod tests {
     fn discard_failure_retries_with_backoff_until_release_is_confirmed() {
         let mut attempts = 0;
         let mut retries = Vec::new();
+        let mut sleeps = Vec::new();
 
         confirm_guardian_release_after_discard_failure(
-            || {
+            GuardianConfirmPolicy::default(),
+            |_timeout| {
                 attempts += 1;
                 if attempts < 3 {
                     Err(format!("confirmation attempt {attempts} failed"))
@@ -236,6 +297,7 @@ mod tests {
                 }
             },
             |attempt, error| retries.push((attempt, error.to_string())),
+            |delay| sleeps.push(delay),
         )
         .unwrap();
 
@@ -247,27 +309,89 @@ mod tests {
                 (2, "confirmation attempt 2 failed".to_string())
             ]
         );
+        // A retry sleep happens once per failed-but-retried attempt, using the
+        // policy's retry delay (never a real sleep in tests).
+        assert_eq!(
+            sleeps,
+            [GUARDIAN_CONFIRM_RETRY_DELAY, GUARDIAN_CONFIRM_RETRY_DELAY]
+        );
     }
 
     #[test]
     fn discard_failure_stops_after_bounded_confirmation_attempts() {
         let mut attempts = 0;
         let mut retries = Vec::new();
+        let mut sleeps = Vec::new();
 
         let error = confirm_guardian_release_after_discard_failure(
-            || {
+            GuardianConfirmPolicy::default(),
+            |_timeout| {
                 attempts += 1;
                 Err(format!("confirmation attempt {attempts} failed"))
             },
             |attempt, error| retries.push((attempt, error.to_string())),
+            |delay| sleeps.push(delay),
         )
         .unwrap_err();
 
         assert_eq!(attempts, MAX_GUARDIAN_CONFIRM_ATTEMPTS);
         assert_eq!(retries.len(), MAX_GUARDIAN_CONFIRM_ATTEMPTS - 1);
+        assert_eq!(sleeps.len(), MAX_GUARDIAN_CONFIRM_ATTEMPTS - 1);
         assert_eq!(
             error,
             format!("confirmation attempt {MAX_GUARDIAN_CONFIRM_ATTEMPTS} failed")
         );
+    }
+
+    #[test]
+    fn each_guardian_confirmation_receives_the_short_bounded_timeout() {
+        // Every confirmation attempt must be handed the short 10s bound (not
+        // plm's multi-minute stop timeout), so a retry loop cannot block for
+        // tens of minutes.
+        let mut timeouts = Vec::new();
+
+        let _ = confirm_guardian_release_after_discard_failure(
+            GuardianConfirmPolicy::default(),
+            |timeout| {
+                timeouts.push(timeout);
+                Err("still failing".to_string())
+            },
+            |_attempt, _error| {},
+            |_delay| {},
+        );
+
+        assert_eq!(timeouts.len(), MAX_GUARDIAN_CONFIRM_ATTEMPTS);
+        assert!(
+            timeouts
+                .iter()
+                .all(|&timeout| timeout == GUARDIAN_CONFIRM_TIMEOUT),
+            "every confirmation must receive the 10s bound, got: {timeouts:?}"
+        );
+        assert_eq!(GUARDIAN_CONFIRM_TIMEOUT, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn confirmation_returns_ok_once_abandonment_is_confirmed() {
+        // A single successful confirmation short-circuits with Ok — modelling
+        // `cancel_within` returning Ok after the guardian is confirmed gone. No
+        // retries, no sleeps.
+        let mut attempts = 0;
+        let mut retries = 0;
+        let mut sleeps = 0;
+
+        let result = confirm_guardian_release_after_discard_failure(
+            GuardianConfirmPolicy::default(),
+            |_timeout| {
+                attempts += 1;
+                Ok(())
+            },
+            |_attempt, _error| retries += 1,
+            |_delay| sleeps += 1,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 1);
+        assert_eq!(retries, 0);
+        assert_eq!(sleeps, 0);
     }
 }
