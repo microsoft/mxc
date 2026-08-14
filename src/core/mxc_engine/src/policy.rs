@@ -20,6 +20,9 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 
+use crate::process_container_config::apply_process_container_backend;
+pub use crate::process_container_config::ProcessContainer;
+
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
 // ---------------------------------------------------------------------------
@@ -521,7 +524,7 @@ pub enum CaptureDenialsMode {
 
 impl CaptureDenialsMode {
     /// Wire-format value accepted by the config parser.
-    fn wire(self) -> &'static str {
+    pub(crate) fn wire(self) -> &'static str {
         match self {
             CaptureDenialsMode::Block => "block",
             CaptureDenialsMode::Allow => "allow",
@@ -566,7 +569,7 @@ pub enum Containment {
     #[default]
     Process,
     /// Windows ProcessContainer with AppContainer-specific settings.
-    ProcessContainer(ProcessContainerSection),
+    ProcessContainer(ProcessContainer),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -574,23 +577,6 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
-}
-
-/// Windows ProcessContainer settings carried by
-/// [`Containment::ProcessContainer`].
-///
-/// Network-derived capabilities are added automatically. Values in
-/// [`capabilities`](Self::capabilities) are additional AppContainer
-/// capabilities and pass through the canonical wire model and shared config
-/// parser validation.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProcessContainerSection {
-    /// Enforce least-privilege mode.
-    pub least_privilege: bool,
-    /// Enable deny-and-record AppContainer learning mode.
-    pub learning_mode: bool,
-    /// Additional AppContainer capabilities, such as `registryRead`.
-    pub capabilities: Vec<String>,
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -861,10 +847,11 @@ pub fn build_request_with_containment(
 
     let mut logger = Logger::new(Mode::Buffer);
     // Map the wire config straight to a request — no base64/file round-trip.
-    // The command line is intentionally empty here (the caller fills
-    // `script_code` before running), so tolerate a missing command.
-    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+    let mut inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, false)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
+    // The placeholder only satisfies the versioned configuration contract.
+    // The caller supplies the real command through `SandboxRequest::set_script`.
+    inner.script_code.clear();
     Ok(SandboxRequest { inner })
 }
 
@@ -888,7 +875,10 @@ fn build_wire_config(
         "version": policy.version,
         "containerId": container_id,
         "lifecycle": { "destroyOnExit": true, "preservePolicy": !clear_policy },
-        "process": { "commandLine": "", "timeout": policy.timeout_ms.unwrap_or(0) },
+        "process": {
+            "commandLine": "mxc-sdk-command-placeholder",
+            "timeout": policy.timeout_ms.unwrap_or(0),
+        },
         "filesystem": {
             "readwritePaths": fs.readwrite_paths,
             "readonlyPaths": fs.readonly_paths,
@@ -1006,7 +996,7 @@ fn apply_host_process_backend(
         // The container id is carried only at the top level (`containerId`); the
         // wire `processContainer` object intentionally has no `name` field.
         let _ = container_id;
-        apply_process_container_backend(config, policy, &ProcessContainerSection::default());
+        apply_process_container_backend(config, policy, &ProcessContainer::default());
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1015,62 +1005,9 @@ fn apply_host_process_backend(
     }
 }
 
-fn apply_process_container_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    process_container: &ProcessContainerSection,
-) {
-    use serde_json::json;
-
-    config["containment"] = json!("processcontainer");
-    let mut capabilities = Vec::new();
-    if let Some(net) = &policy.network {
-        if net.allow_outbound {
-            capabilities.push("internetClient".to_string());
-        }
-        if net.allow_local_network {
-            capabilities.push("privateNetworkClientServer".to_string());
-        }
-    }
-    for capability in &process_container.capabilities {
-        if !capabilities
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(capability))
-        {
-            capabilities.push(capability.clone());
-        }
-    }
-
-    config["processContainer"] = json!({
-        "leastPrivilege": process_container.least_privilege,
-        "learningMode": process_container.learning_mode,
-        "capabilities": capabilities,
-        "ui": {
-            "isolation": "container",
-            "desktopSystemControl": false,
-            "systemSettings": "none",
-            "ime": false,
-        },
-    });
-    if let Some(cd) = &policy.capture_denials {
-        config["processContainer"]["captureDenials"] = json!({
-            "mode": cd.mode.wire(),
-            "outputPath": cd.output_path,
-            "retainEtl": cd.retain_etl,
-        });
-    }
-    if let Some(network) = config.get_mut("network") {
-        let mode = if has_host_rules(network) {
-            "both"
-        } else {
-            "capabilities"
-        };
-        network["enforcementMode"] = json!(mode);
-    }
-}
-
 /// True when the network section carries any host allow/deny rules, deciding
 /// whether host-level enforcement is engaged.
+#[cfg(target_os = "linux")]
 fn has_host_rules(network: &serde_json::Value) -> bool {
     let non_empty = |key: &str| {
         network
@@ -1646,7 +1583,8 @@ mod tests {
     }
 
     use super::{
-        build_request_with_containment, Containment, ProcessContainerSection, WslcSection,
+        build_request_with_containment, build_wire_config, Containment, ProcessContainer,
+        WslcSection,
     };
     use wxc_common::models::ContainmentBackend;
 
@@ -1676,9 +1614,8 @@ mod tests {
             allow_local_network: true,
             ..Default::default()
         });
-        let process_container = ProcessContainerSection {
+        let process_container = ProcessContainer {
             least_privilege: true,
-            learning_mode: true,
             capabilities: vec!["registryRead".to_string(), "INTERNETCLIENT".to_string()],
         };
 
@@ -1709,7 +1646,6 @@ mod tests {
             "internetClient",
             "privateNetworkClientServer",
             "registryRead",
-            "learningModeLogging",
         ] {
             assert!(
                 request
@@ -1726,7 +1662,7 @@ mod tests {
 
     #[test]
     fn process_container_capabilities_use_shared_parser_validation() {
-        let process_container = ProcessContainerSection {
+        let process_container = ProcessContainer {
             capabilities: vec!["internetClient,registryRead".to_string()],
             ..Default::default()
         };
@@ -1746,6 +1682,25 @@ mod tests {
     }
 
     #[test]
+    fn process_container_wire_shape_stays_compatible_with_versioned_contracts() {
+        let config = build_wire_config(
+            &minimal_policy(),
+            &Containment::ProcessContainer(ProcessContainer::default()),
+            None,
+        )
+        .expect("build wire config");
+
+        assert_eq!(
+            config["process"]["commandLine"],
+            "mxc-sdk-command-placeholder"
+        );
+        assert!(
+            config["processContainer"].get("learningMode").is_none(),
+            "latest-only fields must not be emitted unconditionally"
+        );
+    }
+
+    #[test]
     fn explicit_process_container_keeps_windows_host_rule_validation() {
         let policy = policy_with_network(NetworkSection {
             allowed_hosts: vec!["example.com".to_string()],
@@ -1754,7 +1709,7 @@ mod tests {
 
         let error = build_request_with_containment(
             &policy,
-            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            &Containment::ProcessContainer(ProcessContainer::default()),
             None,
         )
         .expect_err("ProcessContainer host rules require outbound access");

@@ -34,6 +34,7 @@ mod error;
 mod platform;
 pub mod policy;
 mod probe;
+pub mod process_container_config;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
@@ -44,10 +45,11 @@ pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, ProcessContainerSection,
-    SandboxPolicy, SandboxRequest, WslcSection,
+    user_profile_policy, Containment, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
+    WslcSection,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
+pub use process_container_config::ProcessContainer;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
