@@ -1063,13 +1063,21 @@ fn convert_wire_config(
                 }
             }
 
-            // LXC and WSLc each run in a private network namespace, so a
-            // loopback-literal proxy host names the container's own loopback
-            // rather than the host and cannot reach it.
-            if matches!(
-                containment,
-                ContainmentBackend::Lxc | ContainmentBackend::Wslc
-            ) {
+            // Under LXC a loopback-literal proxy host names the container's own
+            // network-namespace loopback rather than the host, so it can never
+            // be the proxy: the chain opens egress to the proxy endpoint across
+            // the veth and the address is pinned into the container's
+            // /etc/hosts, both of which assume a routable host.
+            //
+            // WSLc is deliberately excluded. Its supported topology puts the
+            // proxy *inside* the container -- `tests/configs/wslc_network_proxy.json`
+            // runs one on 127.0.0.1:8888 -- because loopback is the only address
+            // both the client and a self-hosted proxy can reach. The forms that
+            // name a host-run proxy, `localhost` and `builtinTestServer`, are
+            // already rejected for WSLc just above; that check is the one doing
+            // the work there, and this one would only break the case WSLc
+            // supports.
+            if containment == ContainmentBackend::Lxc {
                 if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
                     if host_is_loopback(host) {
                         let msg = "network.proxy.url host is a loopback address \
@@ -3862,6 +3870,8 @@ mod tests {
     fn proxy_loopback_url_rejected_with_lxc() {
         // The url form names the container's own loopback just as the
         // localhost shorthand does, so it is rejected for the same reason.
+        // WSLc is deliberately the other way: see
+        // `proxy_loopback_url_accepted_with_wslc`.
         for url in [
             "http://localhost:8080",
             "http://127.0.0.1:8080",
@@ -4446,11 +4456,17 @@ mod tests {
     }
 
     #[test]
-    fn proxy_loopback_url_rejected_with_wslc() {
-        // A WSLc container has its own network namespace, so a loopback-literal
-        // url names the container's own loopback and is rejected for the same
-        // reason as under LXC. Without the guard, defaultPolicy='allow' accepts
-        // it and the proxy silently points at an unreachable address.
+    fn proxy_loopback_url_accepted_with_wslc() {
+        // A WSLc container runs in its own network namespace, and the supported
+        // topology puts the proxy *inside* it. `tests/configs/wslc_network_proxy.json`
+        // starts a marker server on 127.0.0.1:8888 and points the proxy at it,
+        // because loopback is the only address both the client and a self-hosted
+        // proxy can reach -- `run_wslc_proxy_test.ps1` says so directly.
+        //
+        // The `localhost` and `builtinTestServer` forms stay rejected above:
+        // those name a proxy MXC runs on the *host*, which is the unreachable
+        // one. The distinction is which side of the namespace the proxy is on,
+        // not whether the literal is a loopback address.
         for url in [
             "http://localhost:8080",
             "http://127.0.0.1:8080",
@@ -4463,12 +4479,17 @@ mod tests {
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
 
-            let err = load_request(&encoded, &mut logger, true).unwrap_err();
-            assert!(
-                format!("{}", err).contains("loopback address"),
-                "expected the WSLc loopback-url rejection for {}, got: {}",
-                url,
-                err
+            let req = load_request(&encoded, &mut logger, true).unwrap_or_else(|e| {
+                panic!("WSLc must accept its in-container proxy {url}, got: {e}")
+            });
+            assert_eq!(
+                req.policy
+                    .network_proxy
+                    .address
+                    .as_ref()
+                    .expect("the proxy address must survive parsing")
+                    .to_url(),
+                url
             );
         }
     }
