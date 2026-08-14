@@ -15,7 +15,7 @@
 //!    workload cannot pre-disable the proxy via its own `HTTP_PROXY` (or a
 //!    `NO_PROXY` exemption). This only sanitizes the *initial* env; the model
 //!    is cooperative, so a workload can still mutate its own env at runtime.
-//! 2. **Set** the HTTP/HTTPS/ALL proxy keys ([`PROXY_SET_KEYS`]) to the
+//! 2. **Set** the HTTP/HTTPS/ALL/FTP proxy keys ([`PROXY_SET_KEYS`]) to the
 //!    configured URL — never `NO_PROXY` (a host exemption list, not a target).
 //!
 //! `NO_PROXY` is kept out of [`PROXY_SET_KEYS`] and handled per-backend:
@@ -35,25 +35,29 @@ pub const PROXY_ENV_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "FTP_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "ftp_proxy",
     "NO_PROXY",
     "no_proxy",
 ];
 
 /// Proxy env var keys that are actively *set* to the configured proxy URL.
 ///
-/// The HTTP/HTTPS/ALL keys (upper- and lower-case) are set. `NO_PROXY` is
+/// The HTTP/HTTPS/ALL/FTP keys (upper- and lower-case) are set. `NO_PROXY` is
 /// deliberately omitted (it is a host-exemption list, not a proxy target; see
 /// module docs and [`PROXY_NEUTRALIZE_KEYS`]).
 pub const PROXY_SET_KEYS: &[&str] = &[
     "HTTP_PROXY",
     "HTTPS_PROXY",
     "ALL_PROXY",
+    "FTP_PROXY",
     "http_proxy",
     "https_proxy",
     "all_proxy",
+    "ftp_proxy",
 ];
 
 /// Proxy env var keys that [`apply_cooperative_proxy_env`] sets to the *empty
@@ -129,7 +133,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sets_all_http_https_proxy_keys_to_url() {
+    fn sets_all_proxy_keys_to_url() {
         let env = apply_cooperative_proxy_env(&[], "http://127.0.0.1:8080");
         for key in PROXY_SET_KEYS {
             assert!(
@@ -137,6 +141,15 @@ mod tests {
                 "missing {key}: {env:?}"
             );
         }
+    }
+
+    #[test]
+    fn sets_ftp_proxy_to_override_image_environment() {
+        // WSLc merges these entries over image ENV, so emitting both spellings
+        // is what overrides an image-baked FTP proxy.
+        let env = apply_cooperative_proxy_env(&[], "http://127.0.0.1:8080");
+        assert!(env.contains(&"FTP_PROXY=http://127.0.0.1:8080".to_string()));
+        assert!(env.contains(&"ftp_proxy=http://127.0.0.1:8080".to_string()));
     }
 
     #[test]
@@ -166,6 +179,8 @@ mod tests {
             "FOO=bar".to_string(),
             "HTTP_PROXY=http://attacker.example:9999".to_string(),
             "https_proxy=http://attacker.example:9999".to_string(),
+            "FTP_PROXY=http://attacker.example:9999".to_string(),
+            "ftp_proxy=http://attacker.example:9999".to_string(),
             "NO_PROXY=example.com".to_string(),
             "PATH=/usr/bin".to_string(),
         ];
