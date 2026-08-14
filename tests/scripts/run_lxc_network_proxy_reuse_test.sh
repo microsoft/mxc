@@ -20,6 +20,7 @@ if [ ! -f "$LXC_EXEC" ]; then
 fi
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_proxy_reuse.json"
+NOPROXY_CONFIG="$REPO_DIR/tests/configs/lxc_network_proxy_reuse_noproxy.json"
 CONTAINER="CLI-LXC-Proxy-Reuse"
 CONTAINER_HOSTS="/var/lib/lxc/$CONTAINER/rootfs/etc/hosts"
 PROXY_HOSTNAME="proxy.mxc.test"
@@ -100,5 +101,34 @@ run_once "the first run"
 echo "--- second run: reuses the container the first run left behind ---"
 run_once "the second run"
 
-echo "PASS: the pin was present during each run and gone from the reused container afterwards."
+# The two runs above both pin, and a run that pins rewrites the file from a
+# filtered copy, so it disposes of a stale marker on its way past. The run that
+# does *not* pin is the one with no such side effect: a pin left behind by an
+# interrupted run, or by a cleanup that only warned when it failed, would
+# otherwise still be resolving a hostname under a later policy that never
+# authorized that address.
+echo "--- third run: a stale pin must not survive a run that configures no proxy ---"
+
+STALE_IP="198.51.100.7"
+printf '%s %s %s\n' "$STALE_IP" "$PROXY_HOSTNAME" "$MARKER" >> "$CONTAINER_HOSTS"
+grep -Fq "$MARKER" "$CONTAINER_HOSTS" \
+    || fail "the stale-pin fixture did not take, so the third run proves nothing."
+
+set +e
+out=$("$LXC_EXEC" --debug "$NOPROXY_CONFIG" 2>&1)
+status=$?
+set -e
+echo "$out"
+
+[ "$status" -eq 0 ] || fail "the non-proxy run exited $status."
+
+if ! grep -Fq "PIN_ABSENT_DURING_RUN" <<<"$out"; then
+    fail "the script ran with a stale proxy pin still in /etc/hosts: a hostname the \
+current policy never authorized was still resolving to $STALE_IP."
+fi
+
+assert_pin_gone_from_container "the non-proxy run"
+
+echo "PASS: the pin was present during each proxied run, gone from the reused container \
+afterwards, and a stale pin did not survive a run that configured no proxy."
 echo "LXC proxy host pin lifetime test complete."

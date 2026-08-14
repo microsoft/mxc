@@ -399,6 +399,38 @@ impl LxcScriptRunner {
                 ));
             }
             pinned = true;
+        } else if !container_created {
+            // A run that pins rewrites /etc/hosts from a filtered copy, so it
+            // disposes of an earlier pin on its way past.  A run that pins
+            // nothing has no such side effect, and a container this run did not
+            // create can still be carrying one -- left by a run interrupted
+            // after pinning, or by a removal that failed and only warned.  Left
+            // in place it keeps resolving a hostname to an address that only
+            // some earlier policy authorized.
+            let unpin = Self::build_hosts_unpin_command();
+            let stale_pin_error =
+                match container.attach_run(&unpin, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT)) {
+                    Ok((0, _, _)) => None,
+                    Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
+                    Err(e) => Some(e.to_string()),
+                };
+
+            // Unlike the post-run removal, this one runs *before* the script, so
+            // a failure still changes what the script would resolve. Refuse the
+            // run rather than execute against a mapping this policy never made.
+            if let Some(reason) = stale_pin_error {
+                if self.destroy_on_exit {
+                    let _ = container.destroy();
+                } else {
+                    let _ = container.stop();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to clear a stale network proxy pin from the container's \
+                     /etc/hosts: {}. The script was not run, because it could have resolved \
+                     the pinned hostname to an address this policy did not authorize.",
+                    reason
+                ));
+            }
         }
 
         // Execute the script using lxc-attach (container is already running).
