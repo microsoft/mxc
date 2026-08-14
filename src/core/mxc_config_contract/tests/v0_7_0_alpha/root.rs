@@ -488,13 +488,11 @@ fn rejects_lxc_null_release() {
 
 // Experimental tests
 #[test]
-fn rejects_experimental_field() {
+fn rejects_experimental_section() {
     let json = r#"{
         "version": "0.7.0-alpha",
         "process": {"commandLine": "echo"},
-        "experimental": {
-            "someField": true
-        }
+        "experimental": {}
     }"#;
 
     assert_invalid(json);
@@ -504,7 +502,7 @@ fn rejects_experimental_field() {
 #[test]
 fn rejects_state_aware_fields() {
     for field in [
-        r#""phase": "somePhase""#,
+        r#""phase": "exec""#,
         r#""sandboxId": "someId""#,
         r#""correlationVector": "someVector""#,
     ] {
