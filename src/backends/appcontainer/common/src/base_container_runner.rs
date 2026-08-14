@@ -2401,6 +2401,39 @@ impl SandboxBackend for BaseContainerRunner {
                  ingress.hostLoopback='allow'",
             ));
         }
+        if request.policy.network_proxy.is_enabled() && !request.policy.egress_rules.is_empty() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "runtime network proxy configuration cannot be combined with direct \
+                     network egress rules",
+                )
+            });
+        }
+        let uses_schema_08_proxy_authorization =
+            request.policy.allowed_proxy_peer.is_some() || request.policy.allow_host_loopback;
+        if request.policy.network_proxy.is_enabled()
+            && uses_schema_08_proxy_authorization
+            && request.policy.default_network_policy != NetworkPolicy::Block
+        {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "runtime network proxy configuration requires network egress default deny",
+                )
+            });
+        }
+        if request.policy.network_proxy.is_enabled()
+            && uses_schema_08_proxy_authorization
+            && !request.policy.allow_local_network
+        {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "runtime network proxy configuration requires ingress.default='allow'",
+                )
+            });
+        }
         Self::validate_network_rules(&request.policy).map_err(|message| ScriptResponse {
             failure_phase: FailurePhase::Rejected,
             ..ScriptResponse::error(&message)
@@ -4867,6 +4900,53 @@ mod tests {
         runner
             .validate(&request)
             .expect("network.proxy should route through the legacy SBOX contract");
+    }
+
+    #[test]
+    fn validate_runner_rejects_proxy_with_direct_egress_rules() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        request.policy.egress_rules.push(NetworkEgressRule {
+            destinations: vec![NetworkDestination {
+                cidr: "192.0.2.1/32".to_string(),
+                except: vec![],
+            }],
+            ports: vec![],
+            action: NetworkRuleAction::Allow,
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("proxy mode must reject direct egress rules");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("direct network egress rules"));
+    }
+
+    #[test]
+    fn validate_runner_requires_private_network_for_host_loopback_proxy() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+        request.policy.allow_host_loopback = true;
+
+        let error = runner
+            .validate(&request)
+            .expect_err("host-loopback proxy mode requires ingress allow");
+        assert_eq!(error.failure_phase, FailurePhase::Rejected);
+        assert!(error.error_message.contains("ingress.default='allow'"));
     }
 
     #[test]
