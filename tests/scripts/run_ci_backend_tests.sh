@@ -48,7 +48,7 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
-        bash "$script_root/run_lxc_all_tests.sh"
+        MXC_LXC_TESTS_REQUIRE_EXECUTION=1 bash "$script_root/run_lxc_all_tests.sh"
         ;;
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
