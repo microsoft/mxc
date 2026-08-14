@@ -315,6 +315,47 @@ impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     }
 }
 
+/// Transport protocol for a schema 0.8 egress rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+/// Whether a schema 0.8 egress rule allows or denies matching traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkRuleAction {
+    Allow,
+    Deny,
+}
+
+/// Validated IP/CIDR destination for a schema 0.8 egress rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkDestination {
+    pub cidr: String,
+    pub except: Vec<String>,
+}
+
+/// Validated protocol and optional inclusive port range for an egress rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPort {
+    pub protocol: NetworkProtocol,
+    pub port: Option<u16>,
+    pub end_port: Option<u16>,
+}
+
+/// Validated schema 0.8 egress rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkEgressRule {
+    pub destinations: Vec<NetworkDestination>,
+    pub ports: Vec<NetworkPort>,
+    pub action: NetworkRuleAction,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProxyAddress {
     pub address: String,
@@ -487,6 +528,12 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    /// Schema 0.8 L3/L4 egress rules. Legacy contracts leave this empty.
+    pub egress_rules: Vec<NetworkEgressRule>,
+    /// Whether bidirectional host-loopback connectivity is allowed.
+    pub allow_host_loopback: bool,
+    /// Optional ProcessContainer proxy peer identity.
+    pub allowed_proxy_peer: Option<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Whether the caller supplied a `network` block on the wire (any field
