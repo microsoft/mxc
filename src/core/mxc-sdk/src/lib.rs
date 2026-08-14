@@ -78,33 +78,6 @@
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
 //!
-//! Windows callers that need AppContainer-specific capabilities can select an
-//! explicit ProcessContainer configuration. The settings still pass through
-//! the canonical wire model and shared config parser:
-//!
-//! ```no_run
-//! use mxc_sdk::{
-//!     build_request_with_containment, Containment, ProcessContainer, SandboxPolicy,
-//! };
-//!
-//! # let policy = SandboxPolicy {
-//! #     version: "0.7.0-alpha".to_string(),
-//! #     filesystem: None, network: None, ui: None, timeout_ms: None,
-//! #     capture_denials: None,
-//! # };
-//! let process_container = ProcessContainer {
-//!     capabilities: vec!["registryRead".to_string()],
-//!     ..Default::default()
-//! };
-//! let mut request = build_request_with_containment(
-//!     &policy,
-//!     &Containment::ProcessContainer(process_container),
-//!     None,
-//! )?;
-//! request.set_script("reg query HKCU");
-//! # Ok::<(), mxc_sdk::Error>(())
-//! ```
-//!
 //! | Entry point            | Stdio                                   |
 //! |------------------------|-----------------------------------------|
 //! | [`run`]                | captured (stdout/stderr returned)       |

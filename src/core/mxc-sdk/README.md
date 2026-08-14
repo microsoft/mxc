@@ -49,33 +49,6 @@ To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`] — the same choice the
 TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
 
-On Windows, select `Containment::ProcessContainer` to add AppContainer-specific
-capabilities while retaining the cross-platform policy mapping:
-
-```rust,no_run
-use mxc_sdk::{build_request_with_containment, Containment, ProcessContainer, SandboxPolicy};
-
-let policy = SandboxPolicy {
-    version: "0.7.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-    capture_denials: None,
-};
-let process_container = ProcessContainer {
-    capabilities: vec!["registryRead".to_string()],
-    ..Default::default()
-};
-let mut request = build_request_with_containment(
-    &policy,
-    &Containment::ProcessContainer(process_container),
-    None,
-)?;
-request.set_script("reg query HKCU");
-# Ok::<(), mxc_sdk::Error>(())
-```
-
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
