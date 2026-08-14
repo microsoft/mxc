@@ -1228,6 +1228,15 @@ pub trait StatefulSandboxBackend {
     /// stderr may therefore arrive merged into stdout, leaving
     /// `ExecHandle::stderr` null. A backend that probes the host to decide how
     /// to wire stdio must confine that probe to the `Executor` case.
+    ///
+    /// A backend that cannot serve `Library` at all — because it relays the
+    /// workload's output to the *host process's* own stdio rather than
+    /// returning streams — must refuse **before running anything**. The
+    /// workload is arbitrary and may not be idempotent, so a refusal issued
+    /// after the fact reports "unsupported" for something that has already
+    /// taken effect and whose output has already gone somewhere the caller
+    /// never asked for. `wxc_common::state_aware_backend::unsupported_library_exec`
+    /// is the shared refusal.
     fn exec(
         &mut self,
         sandbox_id: &str,
@@ -1331,10 +1340,25 @@ pub struct ExecHandle {
     /// Stdin pipe handle. Not consumed by the executor relay, which forwards
     /// no input; the streaming path hands it to an in-process caller.
     pub stdin: PipeHandle,
-    /// Function to wait for exit; returns the exit code.
-    pub waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    /// Function to terminate the process (called on AbortSignal).
-    pub terminator: Box<dyn FnOnce() + Send>,
+    /// Function to wait for exit; returns how the exec finished.
+    pub waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    /// Function to terminate the process (called on AbortSignal). Fallible: a
+    /// platform that refuses the request must be able to say so, because a
+    /// caller that assumes a refused kill succeeded can block forever waiting
+    /// on a process that is still running.
+    pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+}
+
+/// How an exec finished, as distinct from why a wait failed. A timeout is an
+/// outcome — the deadline was spent while the process ran, and the process is
+/// no longer running — whereas `Err` means the exit could not be determined.
+/// Deliberately not "the backend killed it": a workload that overruns its
+/// deadline and then exits on its own has still missed it, and how far the
+/// termination reaches is the backend's to state. Only `ExecConsumer::Library`
+/// can observe `TimedOut`; the executor relay has no field to carry it.
+pub enum ExecOutcome {
+    Exited(i32),
+    TimedOut,
 }
 ```
 

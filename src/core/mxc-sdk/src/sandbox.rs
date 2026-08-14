@@ -22,8 +22,25 @@ pub enum WaitOutcome {
     /// The process exited with this code. On Unix a process terminated by a
     /// signal (rather than exiting normally) surfaces as `Exited(-1)`.
     Exited(i32),
-    /// The request's `scriptTimeout` elapsed before the process exited; the
-    /// process and its whole tree were killed.
+    /// The request's `scriptTimeout` elapsed while the process was running, and
+    /// the process is no longer running.
+    ///
+    /// **Deadline spent, and the process is gone.** Whether it was killed or
+    /// exited on its own a moment past the deadline is not distinguished: both
+    /// missed the deadline the caller asked for, and reporting the exit code
+    /// one of them happened to produce would hide that.
+    ///
+    /// How far "gone" reaches depends on the backend. A process-spawning
+    /// backend kills the whole tree. A backend whose only primitive is the
+    /// foreground process — the state-aware `exec` path over IsolationSession —
+    /// confirms that process, and a descendant the workload backgrounded is
+    /// reclaimed when the sandbox is stopped and deprovisioned rather than here.
+    ///
+    /// That state-aware route is not reachable from this crate yet:
+    /// [`exec_sandbox`](crate::exec_sandbox) parses without the experimental
+    /// opt-in, so an experimental backend is refused before dispatch. The
+    /// distinction is documented here because it is what implementors build
+    /// against, and because it becomes observable the moment that opt-in lands.
     TimedOut,
 }
 
@@ -114,8 +131,9 @@ impl Sandbox {
     ///
     /// Returns [`WaitOutcome::Exited`] with the exit code, or
     /// [`WaitOutcome::TimedOut`] if the request's `scriptTimeout` elapsed (the
-    /// process and its tree are killed first). `Err` is reserved for an actual
-    /// OS / wait failure.
+    /// workload is terminated first; see [`WaitOutcome::TimedOut`] for how far
+    /// that reaches on each backend). `Err` is reserved for an actual OS / wait
+    /// failure.
     pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
         match self.inner.wait() {
             Ok(code) => Ok(WaitOutcome::Exited(code)),
@@ -133,7 +151,7 @@ impl Sandbox {
     ///
     /// `Err` is reserved for an actual OS / wait failure; a timeout is reported
     /// as [`Output`] with `outcome: WaitOutcome::TimedOut` and whatever each
-    /// stream produced before the tree was killed.
+    /// stream produced before the workload was terminated.
     pub fn wait_with_output(mut self) -> std::io::Result<Output> {
         fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {
