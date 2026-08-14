@@ -222,6 +222,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "url",
  "wxc_common",
 ]
 

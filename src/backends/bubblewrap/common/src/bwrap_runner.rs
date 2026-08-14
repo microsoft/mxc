@@ -46,7 +46,7 @@ use wxc_common::validator::validate_common;
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version,
+    bwrap_version, proxy_network,
 };
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
@@ -116,6 +116,13 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // an opaque "unknown option" error.
         if let Err(err) = bwrap_version::probe_bwrap() {
             return Err(ScriptResponse::error(&err.to_string()));
+        }
+        if ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
+            == ResolvedNetworkMode::ProxyOnly
+        {
+            if let Err(error) = proxy_network::probe_dependencies() {
+                return Err(ScriptResponse::error(&error));
+            }
         }
 
         Ok(())
@@ -217,6 +224,38 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
+        let sandbox_proxy_address = if network_mode == ResolvedNetworkMode::ProxyOnly {
+            match proxy.address() {
+                Some(address) => match proxy_network::sandbox_proxy_address(address) {
+                    Ok(address) => Some(address),
+                    Err(error) => {
+                        proxy.stop(logger);
+                        return Err(ScriptResponse::error(&error));
+                    }
+                },
+                None => {
+                    proxy.stop(logger);
+                    return Err(ScriptResponse::error(
+                        "Bubblewrap: proxy mode was selected without a resolved proxy address.",
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let proxy_address = sandbox_proxy_address.as_ref().or_else(|| proxy.address());
+
+        let mut proxy_network = if network_mode == ResolvedNetworkMode::ProxyOnly {
+            match proxy_network::ProxyNetworkNamespace::start(logger) {
+                Ok(network) => Some(network),
+                Err(error) => {
+                    proxy.stop(logger);
+                    return Err(ScriptResponse::error(&error));
+                }
+            }
+        } else {
+            None
+        };
 
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
@@ -226,12 +265,23 @@ impl BubblewrapScriptRunner {
         {
             let _ = writeln!(logger, "{}", warning);
         }
-        let args = bwrap_command::build_args_classified_with_mode(
+        let mut args = bwrap_command::build_args_classified_with_mode(
             request,
-            proxy.address(),
+            proxy_address,
             denied_files,
             network_mode,
         );
+        let mut network_startup = match proxy_network.as_ref() {
+            Some(network) => match network.configure_bwrap(&mut args) {
+                Ok(startup) => Some(startup),
+                Err(error) => {
+                    proxy_network.take();
+                    proxy.stop(logger);
+                    return Err(ScriptResponse::error(&error));
+                }
+            },
+            None => None,
+        };
         let _ = writeln!(
             logger,
             "Bubblewrap: spawning bwrap with {} args",
@@ -310,6 +360,7 @@ impl BubblewrapScriptRunner {
             Err(error) => {
                 let mut fw_manager = fw_manager;
                 cleanup_iptables(&mut fw_manager, logger);
+                proxy_network.take();
                 proxy.stop(logger);
                 return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
@@ -317,6 +368,31 @@ impl BubblewrapScriptRunner {
                 )));
             }
         };
+
+        if let Some(mut startup) = network_startup.take() {
+            startup.child_spawned();
+            let startup_result = startup
+                .child_pid(&mut child)
+                .and_then(|child_pid| {
+                    proxy_network
+                        .as_mut()
+                        .ok_or_else(|| {
+                            "Bubblewrap: proxy network lifecycle disappeared during startup"
+                                .to_string()
+                        })?
+                        .attach(child_pid, logger)
+                })
+                .and_then(|()| startup.release());
+            if let Err(error) = startup_result {
+                let _ = child.kill();
+                let _ = child.wait();
+                let mut fw_manager = fw_manager;
+                cleanup_iptables(&mut fw_manager, logger);
+                proxy_network.take();
+                proxy.stop(logger);
+                return Err(ScriptResponse::error(&error));
+            }
+        }
 
         let (stdin, stdout, stderr) = match stdio {
             StdioMode::Pipes => (child.stdin.take(), child.stdout.take(), child.stderr.take()),
@@ -336,6 +412,7 @@ impl BubblewrapScriptRunner {
                     let _ = child.wait();
                     let mut fw_manager = fw_manager;
                     cleanup_iptables(&mut fw_manager, logger);
+                    proxy_network.take();
                     proxy.stop(logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::error(&format!(
@@ -359,6 +436,7 @@ impl BubblewrapScriptRunner {
             stderr_canceller,
             group,
             proxy,
+            proxy_network,
             fw_manager,
             timeout,
         })
@@ -381,6 +459,7 @@ struct BwrapChild {
     /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
     group: bool,
     proxy: UnixProxyCoordinator,
+    proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
     fw_manager: Option<NetworkIptablesManager>,
     timeout: Option<Duration>,
 }
@@ -390,6 +469,9 @@ impl BwrapChild {
     /// the manager level.
     fn cleanup(&mut self, logger: &mut Logger) {
         cleanup_iptables(&mut self.fw_manager, logger);
+        if let Some(mut network) = self.proxy_network.take() {
+            network.stop(logger);
+        }
         self.proxy.stop(logger);
     }
 }

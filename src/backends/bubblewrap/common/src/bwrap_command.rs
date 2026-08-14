@@ -94,18 +94,36 @@ pub(crate) enum ResolvedNetworkMode {
     Isolated,
     /// The host network namespace without MXC firewall filtering.
     Shared,
+    /// Pre-0.8 cooperative proxy routing in the host network namespace.
+    LegacyProxy,
     /// The host network namespace with per-destination iptables filtering.
     FirewallFiltered,
-    /// Cooperative proxy routing; later work moves this into a private
-    /// namespace and adds proxy-only egress enforcement.
+    /// Cooperative proxy routing inside a slirp-backed private namespace.
+    /// Later work adds proxy-only egress enforcement.
     ProxyOnly,
+}
+
+/// Whether this schema opts into the 0.8 private proxy-network contract.
+fn uses_private_proxy_network(request: &ExecutionRequest) -> bool {
+    let mut components = request.schema_version.split('.');
+    let major = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok());
+    let minor = components
+        .next()
+        .and_then(|value| value.parse::<u64>().ok());
+    matches!((major, minor), (Some(major), Some(minor)) if major > 0 || minor >= 8)
 }
 
 impl ResolvedNetworkMode {
     /// Classify the internal request using the proxy's resolved runtime state.
     pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
         if proxy_active {
-            return Self::ProxyOnly;
+            return if uses_private_proxy_network(request) {
+                Self::ProxyOnly
+            } else {
+                Self::LegacyProxy
+            };
         }
 
         let uses_firewall = matches!(
@@ -126,10 +144,16 @@ impl ResolvedNetworkMode {
 
     /// Whether current behavior gives the sandbox a private network namespace.
     pub(crate) fn uses_private_netns(self) -> bool {
-        matches!(self, Self::Isolated)
+        matches!(self, Self::Isolated | Self::ProxyOnly)
+    }
+
+    /// Whether the runner supplies a pre-created user namespace to Bubblewrap.
+    pub(crate) fn uses_external_userns(self) -> bool {
+        matches!(self, Self::ProxyOnly)
     }
 
     /// Whether current behavior installs iptables filtering rules.
+    #[cfg(any(target_os = "linux", test))]
     pub(crate) fn requires_iptables(self) -> bool {
         matches!(self, Self::FirewallFiltered)
     }
@@ -173,16 +197,16 @@ pub(crate) fn local_network_diagnostic_for_mode(
     ) {
         (false, false) => Some(
             "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
-             sandbox shares the host network namespace (defaultPolicy='allow' or network.proxy). \
+             sandbox shares the host network namespace (defaultPolicy='allow'). \
              The sandboxed process can still bind, listen and accept on host-local addresses. For \
              an unreachable sandbox use defaultPolicy='block' with no proxy, which applies \
              --unshare-net.",
         ),
         (true, true) => Some(
             "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-             network namespace. defaultPolicy='block' with no proxy applies --unshare-net, so a \
-             listener inside the sandbox is reachable only from within it, never from the host. \
-             Use defaultPolicy='allow' to share the host network namespace.",
+             network namespace. Isolated and proxy modes apply --unshare-net, so a listener inside \
+             the sandbox is reachable only from within it, never from the host. Use \
+             defaultPolicy='allow' without a proxy to share the host network namespace.",
         ),
         _ => None,
     }
@@ -205,11 +229,11 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// The returned vector does **not** include the `bwrap` binary name itself —
 /// callers pass it to `Command::new("bwrap").args(&args)`.
 ///
-/// `proxy_address` is the loopback address of the network proxy launched by
-/// the Bubblewrap runner (if the request has `network.proxy` configured).
+/// `proxy_address` is the proxy endpoint visible from the sandbox (if the
+/// request has `network.proxy` configured).
 /// When `Some`, the builder:
-/// - drops `--unshare-net` (the sandbox needs to reach the loopback proxy on
-///   the host's network namespace),
+/// - emits `--unshare-net` and expects the runner to provide `--userns FD`
+///   plus slirp-backed connectivity,
 /// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
 ///   `FTP_PROXY` / `NO_PROXY` entries from `request.env`,
 /// - emits `--setenv` for the proxy keys (all but `NO_PROXY`) pointing at the
@@ -236,22 +260,19 @@ pub(crate) fn build_args_classified_with_mode(
     network_mode: ResolvedNetworkMode,
 ) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
-    let mut args = vec![
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--unshare-uts",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect::<Vec<_>>();
+    let mut args = Vec::new();
+    if !network_mode.uses_external_userns() {
+        args.push("--unshare-user".into());
+    }
+    args.extend(
+        ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
+            .into_iter()
+            .map(String::from),
+    );
 
-    // Network: use --unshare-net for full block when no per-host rules are
-    // configured AND no proxy is active. When allowedHosts / blockedHosts
-    // are present the runner leaves the network namespace shared and
-    // applies iptables rules separately. When a network proxy is active we
-    // also keep the host network namespace so the sandbox can reach the
-    // loopback proxy.
+    // Network: full-block and proxy modes use a private namespace. Proxy mode
+    // receives rootless connectivity from the runner's slirp supervisor.
+    // Per-host firewall mode continues to share the host namespace.
     if network_mode.uses_private_netns() {
         args.push("--unshare-net".into());
     }
@@ -338,13 +359,8 @@ pub(crate) fn build_args_classified_with_mode(
     // are NOT enforced -- this is a documented limitation of the
     // unprivileged proxy model.
     //
-    // We deliberately do NOT set NO_PROXY here. Bubblewrap with a proxy
-    // keeps the host network namespace shared, so without a NO_PROXY entry
-    // a cooperating client doing `CONNECT 127.0.0.1:5432` (e.g. local
-    // Postgres) still goes via the proxy, where the configured
-    // allowed/blocked-hosts policy applies. Exempting loopback via
-    // NO_PROXY would silently bypass that filtering for host-loopback
-    // destinations.
+    // We deliberately do NOT set NO_PROXY here. Exempting any destination
+    // would let cooperating clients bypass the configured proxy policy.
     if let Some(addr) = proxy_address {
         let url = addr.to_url();
         for key in PROXY_SET_KEYS {
@@ -461,7 +477,10 @@ mod tests {
         ];
 
         for case in cases {
-            let mut request = ExecutionRequest::default();
+            let mut request = ExecutionRequest {
+                schema_version: "0.8.0-alpha".into(),
+                ..Default::default()
+            };
             request.policy.default_network_policy = case.default_policy;
             request.policy.network_enforcement_mode = case.enforcement_mode;
             request.policy.allowed_hosts = case
@@ -483,7 +502,10 @@ mod tests {
     #[test]
     fn resolved_network_mode_capabilities_match_current_behavior() {
         assert!(ResolvedNetworkMode::Isolated.uses_private_netns());
-        assert!(!ResolvedNetworkMode::ProxyOnly.uses_private_netns());
+        assert!(ResolvedNetworkMode::ProxyOnly.uses_private_netns());
+        assert!(ResolvedNetworkMode::ProxyOnly.uses_external_userns());
+        assert!(!ResolvedNetworkMode::Isolated.uses_external_userns());
+        assert!(!ResolvedNetworkMode::LegacyProxy.uses_private_netns());
         assert!(ResolvedNetworkMode::FirewallFiltered.requires_iptables());
         assert!(!ResolvedNetworkMode::Shared.requires_iptables());
     }
@@ -544,10 +566,18 @@ mod tests {
     }
 
     #[test]
-    fn local_network_denied_with_proxy_warns() {
+    fn local_network_denied_with_legacy_proxy_warns() {
         let r = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
         assert!(local_network_diagnostic(&r, Some(&addr)).is_some());
+    }
+
+    #[test]
+    fn local_network_denied_with_0_8_proxy_is_not_warned() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        let addr = ProxyAddress::new("127.0.0.1".into(), 8080);
+        assert!(local_network_diagnostic(&r, Some(&addr)).is_none());
     }
 
     #[test]
@@ -828,15 +858,39 @@ mod tests {
     // ------- Network proxy env-var injection tests ----------------------
 
     #[test]
-    fn proxy_active_omits_unshare_net_even_when_default_blocks() {
+    fn proxy_active_uses_private_network_and_external_user_namespace() {
         let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
         r.policy.default_network_policy = NetworkPolicy::Block;
         let addr = ProxyAddress::new("127.0.0.1".into(), 12345);
         let args = build_args(&r, Some(&addr));
         assert!(
-            !args.contains(&"--unshare-net".to_string()),
-            "proxy active must keep host netns so loopback proxy is reachable"
+            args.contains(&"--unshare-net".to_string()),
+            "proxy mode must use a private network namespace"
         );
+        assert!(
+            !args.contains(&"--unshare-user".to_string()),
+            "the runner supplies proxy mode's pre-created user namespace"
+        );
+    }
+
+    #[test]
+    fn pre_0_8_proxy_keeps_existing_shared_network_behavior() {
+        for version in ["", "0.6.0-alpha", "0.7.0-alpha"] {
+            let mut request = base_request();
+            request.schema_version = version.into();
+            let address = ProxyAddress::new("127.0.0.1".into(), 12345);
+            let args = build_args(&request, Some(&address));
+
+            assert!(
+                args.contains(&"--unshare-user".to_string()),
+                "{version:?} should retain Bubblewrap's existing user namespace setup"
+            );
+            assert!(
+                !args.contains(&"--unshare-net".to_string()),
+                "{version:?} should retain shared-network proxy behavior"
+            );
+        }
     }
 
     #[test]
@@ -870,8 +924,7 @@ mod tests {
     fn proxy_active_does_not_exempt_loopback_via_no_proxy() {
         // Setting NO_PROXY=localhost,127.0.0.1 would let cooperating HTTP
         // clients bypass the proxy for host-loopback destinations.
-        // Bubblewrap+proxy keeps the host netns shared, so that bypass
-        // would silently defeat allowedHosts/blockedHosts for loopback.
+        // Any bypass would silently defeat allowedHosts/blockedHosts.
         let r = base_request();
         let addr = ProxyAddress::new("127.0.0.1".into(), 7777);
         let args = build_args(&r, Some(&addr));

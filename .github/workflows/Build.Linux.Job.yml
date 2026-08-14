@@ -85,7 +85,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap slirp4netns
           # Ubuntu 24.04 runners restrict unprivileged user namespaces via
           # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
           # sandbox can start (no-op on kernels without this knob).

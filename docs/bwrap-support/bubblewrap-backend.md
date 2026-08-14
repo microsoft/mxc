@@ -27,6 +27,22 @@ requiring root privileges or a container runtime.
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
   below that floor.
+- **Schema 0.8 proxy mode only:** `slirp4netns` installed and on PATH. It is
+  not required when `network.proxy` is omitted or when a 0.6/0.7 policy uses
+  the legacy proxy behavior.
+  ```bash
+  # Debian/Ubuntu
+  sudo apt install slirp4netns
+
+  # Fedora/RHEL
+  sudo dnf install slirp4netns
+
+  # Alpine
+  apk add slirp4netns
+  ```
+  Proxy mode fails explicitly if `slirp4netns` is unavailable; it never falls
+  back to sharing the host network namespace. The host must also provide the
+  util-linux `unshare` command with `--map-current-user` and `--keep-caps`.
 - User namespaces must be enabled:
   ```bash
   # Check: should print "1"
@@ -219,7 +235,7 @@ namespace choice alone decides the outcome:
 
 | `allowLocalNetwork` | Namespace | Result |
 |---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` (default) | private (`--unshare-net`, including 0.8 proxy mode) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
 | `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
@@ -244,12 +260,19 @@ Standard `process` fields work as expected:
 }
 ```
 
-## Network proxy (cooperative, unprivileged)
+## Network proxy (private namespace, unprivileged)
 
 Bubblewrap supports an **unprivileged, cooperative network proxy** that
 enforces `allowedHosts` / `blockedHosts` at the proxy layer instead of via
-iptables. This is the **recommended** way to do per-host filtering on
-Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
+host-level iptables. The workload runs in a private network namespace and
+reaches the proxy through rootless `slirp4netns` routing. This requires no root
+privileges.
+
+This private-network behavior applies to schema **0.8 and later**. Policies
+using schema 0.6 or 0.7 retain the existing shared-host-network proxy behavior
+for compatibility and do not require `slirp4netns`. An absent schema version is
+also treated as legacy. The runner never silently falls back: a 0.8 proxy
+request fails if its private namespace cannot be configured.
 
 ### How it works
 
@@ -258,17 +281,19 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
    `unix-test-proxy` binary is used (`builtinTestServer: true`,
    testing-only and gated behind `--allow-testing-features`); in production callers
    supply their own proxy via `localhost: <port>` or `url: <url>`.
-2. The sandbox is then started **without** `--unshare-net` so the sandbox
-   shares the host network namespace and can reach the loopback proxy.
-3. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
+   with `--unshare-net`, and keeps the workload behind a startup barrier.
+3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
+   namespace. Host-loopback proxy endpoints are presented to the sandbox
+   through slirp's `10.0.2.2` host gateway. The workload starts only after
+   slirp reports that `tap0` is configured.
+4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
    `bwrap --setenv` (caller-supplied values for these keys, including
-   `NO_PROXY` / `no_proxy`, are stripped before injection). The runner deliberately
-   does **not** set `NO_PROXY`: since the sandbox shares the host netns,
-   a `NO_PROXY=localhost,127.0.0.1` entry would let cooperating clients
-   bypass the proxy for host-loopback destinations, defeating
-   `allowedHosts` / `blockedHosts` enforcement for those targets.
-4. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
+   `NO_PROXY` / `no_proxy`, are stripped before injection). The runner
+   deliberately does **not** set `NO_PROXY`, because exempt destinations would
+   bypass the configured proxy policy.
+5. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
    honor the env vars and traffic flows through the proxy, which applies
    the `allowedHosts` / `blockedHosts` lists.
 
@@ -309,7 +334,8 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
   `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox environment, so only
   well-behaved clients that honor those vars are routed through the
   proxy. Tools that bypass them (raw sockets, custom HTTP clients,
-  statically-linked binaries that ignore the env) are **not enforced**.
+  statically-linked binaries that ignore the env) can still use slirp's direct
+  egress and are **not yet enforced**.
   This applies to **both** the builtin test proxy and external (BYO)
   proxy modes — the limitation is in the env-var injection mechanism,
   not in the proxy itself; a BYO proxy can do whatever it likes for
