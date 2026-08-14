@@ -1,11 +1,12 @@
 # MXC Version-Specific Config Parsers
 
-Status: implementation plan; Phase 1 merged in PR #807, Phase 2 merged in
-PR #816, Phase 3 is under review in PR #835, and Phase 4 is under review in
-PR #838
+Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
+#838. Phase 4.1 merged in PR #907, and the Phase 4.2 test-alignment follow-up is
+under review in PR #912. Phase 5A and Phase 5B are under review as GitHub stack
+#911 in PRs #909 and #910. Phase 5C and Phase 5D remain to be implemented.
 
-Base: `origin/main` at `79c39c70c3fb38df192afd4d99756a01aa510fc8`
-(2026-08-10)
+Base: `origin/main` at `2bbd0345b88c46e9e1e3d5f2eab3a460825be6c7`
+(2026-08-14)
 
 ## Goals
 
@@ -321,6 +322,10 @@ the same `wire::MxcConfig` produced by the current deserializer.
 
 ### Phase 4: Add the `0.7.0-alpha` contract and adapter
 
+Implemented by PR #838. PR #907 completed published-API rustdoc coverage; PR
+#912 aligns positive adapter tests with the published schema's backend-section
+constraints.
+
 Create an independent self-contained module rather than sharing field-bearing
 types.
 
@@ -347,11 +352,21 @@ version and reject unknown fields more consistently than those advisory files.
 
 ### Phase 5: Add the closed `0.8.0-alpha` development contract and adapters
 
+Status:
+
+- **Phase 5A** — one-shot development contract, under review in PR #909
+- **Phase 5B** — one-shot development adapter, stacked on 5A in PR #910
+- **Phase 5C** — phase discriminator and state-aware development contracts,
+  not started
+- **Phase 5D** — state-aware adapter and convergence tests, not started
+
 Separate the mutable development contract into:
 
 ```text
 dev/
   mod.rs
+  primitives.rs
+  network.rs
   stable.rs
   experimental.rs
   one_shot.rs
@@ -370,6 +385,11 @@ Add mutable development adapters outside the contract crate:
 src/core/wxc_common/src/config_contract_adapters/dev/
   mod.rs
   one_shot.rs
+  one_shot_tests/
+    mod.rs
+    common.rs
+    stable_candidate.rs
+    experimental.rs
   state_aware.rs
 ```
 
@@ -393,6 +413,120 @@ The adapters exhaustively map the one-shot request and each phase-specific
 state-aware request into the existing one-shot and state-aware normalization
 models. Add expected-wire and current-wire equivalence tests for representative
 stable, experimental, and phase-specific development requests.
+
+#### Phase 5A: Closed one-shot development contract
+
+Implemented in PR #909.
+
+The exact one-shot root:
+
+- requires `version: "0.8.0-alpha"` and a non-empty
+  `process.commandLine`
+- independently owns the mutable stable-candidate field-bearing types rather
+  than reusing a published contract
+- accepts stable containment selections and the development-only `vm`,
+  `windows_sandbox`, `microvm`, `hyperlight`, `wslc`, and
+  `isolation_session` selections
+- includes the stable-candidate ProcessContainer `learningMode` and
+  `captureDenials` fields, including `retainEtl`
+- defines a recursively closed one-shot experimental subtree for TestFeature,
+  telemetry, Windows Sandbox compatibility settings, and flat one-shot WSLC
+  settings and port mappings
+- excludes the state-aware `experimental.isolation_session` and
+  `experimental.wslc.provision` shapes
+- rejects the moved `experimental.seatbelt` and
+  `experimental.macos_sandbox` paths; Seatbelt configuration and its
+  compatibility alias are top-level
+
+The one-shot containment enum is deliberately broader than the experimental
+configuration subtree. Windows Sandbox, IsolationSession, and WSLC support
+both one-shot and state-aware execution; MicroVM and Hyperlight are one-shot
+only. IsolationSession has no one-shot backend-configuration object.
+
+Contract tests cover field cardinality, null and duplicate rejection, recursive
+closure, numeric boundaries, string-only enum encoding, compatibility aliases,
+state-aware exclusions, and adjacent-version introduction boundaries. Valid
+JSON fixtures remain semantically credible examples; structurally valid but
+runtime-incompatible combinations belong in focused inline tests.
+
+#### Phase 5B: One-shot development adapter
+
+Implemented in PR #910.
+
+The adapter exhaustively converts `dev::OneShotRequest` into the current
+`wire::MxcConfig`. It explicitly destructures every source field and fills
+every destination field without `..`. It preserves compatibility aliases,
+non-zero WSLC port validation, both Windows Sandbox timeout spellings,
+`captureDenials.retainEtl`, and explicit false values.
+
+One-shot-only normalization fills the broader rolling wire model explicitly:
+
+- `phase`, `sandboxId`, and `correlationVector` are absent
+- `experimental.isolation_session` and the obsolete experimental Seatbelt
+  field are absent
+- `experimental.wslc.provision` is absent
+
+Adapter tests are organized along the publication boundary:
+
+- `stable_candidate.rs` covers mappings that will be copied into the frozen
+  v0.8 adapter at publication
+- `experimental.rs` covers development-only containment and experimental
+  mappings that remain with mutable dev when it advances to v0.9
+- `common.rs` contains only test mechanics, not contract-bearing fixtures
+
+Both groups contain direct expected-wire assertions and current-wire
+deserialization equivalence coverage. Published and development adapters do
+not share test fixtures or conversion helpers.
+
+#### Phase 5C: State-aware development contracts
+
+Add a source-text phase probe after the exact version probe. An absent phase
+selects `dev::one_shot::Request`; a present valid phase selects one of five
+closed state-aware root types. Duplicate, null, non-string, and unknown phase
+declarations fail before root deserialization.
+
+Provision defines a state-aware-specific containment enum. Initially it should
+contain only concrete backends with lifecycle implementations:
+
+- `windows_sandbox`
+- `isolation_session`
+- `wslc`
+
+Do not reuse the one-shot containment enum. In particular, do not accept the
+abstract `vm` intent for state-aware provision unless abstract state-aware
+backend selection is made an explicit requirement.
+
+Each phase root must encode its field matrix structurally:
+
+- provision accepts containment, provision-time policy, and only the selected
+  backend's provision configuration
+- start, stop, and deprovision require `sandboxId` and accept no process block
+- exec requires `sandboxId` and the process block
+- post-provision phases reject containment and immutable provision-time policy
+- correlation-vector and telemetry fields appear only on the phases where the
+  existing state-aware protocol accepts them
+
+Every experimental object and nested phase/backend object is recursively
+closed. The contract crate defines its own backend payload types and retains
+its dependency boundary; it does not import backend crates.
+
+#### Phase 5D: State-aware development adapter and convergence
+
+Add the mutable state-aware adapter outside the contract crate. It maps every
+phase root into `ParsedStateAwareRequest` and the existing state-aware
+normalization model while preserving the source text needed for positional
+diagnostics.
+
+The adapter may reconstruct the raw experimental value required by the current
+dispatcher only after the complete typed contract validates it. Backend-specific
+runtime deserialization remains in the dispatcher so `wxc_common` does not gain
+backend dependencies.
+
+Add expected-model and current-parser equivalence tests for every supported
+backend/phase combination, wrong-phase fields, backend-key closure, immutable
+post-provision policy, telemetry, and required envelope fields. Explicitly
+classify intentional tightening where the rolling parser accepted or ignored
+state-aware experimental content that the exact phase root rejects.
 
 ### Phase 6: Add versioned development-schema codegen
 
