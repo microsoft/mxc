@@ -14,7 +14,7 @@ use serde::Serialize;
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 
@@ -23,7 +23,7 @@ use windows::Win32::Foundation::HANDLE;
 use super::error::map_lifecycle_error;
 use super::manager::{ClosingProcess, IsolationSessionManager};
 use super::policy::{validate_post_provision_policy, validate_provision_policy};
-use super::process_options::build_process_options;
+use super::process_options::{build_process_options, with_service_timeout_grace};
 use super::sandbox_id::{self, SandboxIdPayload};
 use super::IsolationSessionRunner;
 
@@ -310,8 +310,16 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     stdout: null,
                     stderr: null,
                     stdin: null,
-                    waiter: Box::new(move || Ok(exit_code)),
-                    terminator: Box::new(|| {}),
+                    // `Exited`, never `TimedOut`, and not for lack of knowing:
+                    // `create_process` ran the ladder inline and a timed-out
+                    // workload is already dead by now. The executor has no
+                    // timeout channel to report it through — `ScriptResponse`
+                    // carries an exit code and nothing else — so reporting one
+                    // here would be information the CLI must then discard.
+                    waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+                    // Nothing to terminate: `create_process` returned only once
+                    // the process was gone.
+                    terminator: Box::new(|| Ok(())),
                 })
             }
             ExecConsumer::Library => {
@@ -319,7 +327,11 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     request,
                     wants_interactive_console(consumer, || std::io::stdout().is_terminal()),
                 );
+                // The caller's deadline, enforced by our own wait below. The
+                // service timer is armed with a margin so it cannot fire first
+                // and turn a timeout into an ordinary exit we could not report.
                 let timeout_ms = options.timeout_ms;
+                let options = with_service_timeout_grace(options);
 
                 let started = Arc::new(ClosingProcess::new(
                     manager
@@ -343,18 +355,19 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
                     stdout,
                     stderr,
                     stdin,
+                    // Reports `TimedOut` when the deadline elapsed with the
+                    // process still running — see `StartedProcess::wait`, which
+                    // samples that before the shutdown ladder destroys the
+                    // evidence by killing the survivor.
                     waiter: Box::new(move || {
                         waiter_process.wait(timeout_ms).map_err(map_lifecycle_error)
                     }),
-                    // `ExecHandle::terminator` cannot report failure, so a
-                    // failed kill is logged-by-discard here. The fallible
-                    // signature still earns its keep: it is what stops
-                    // `terminate` from waiting INFINITE on a `Terminate` that
-                    // never landed, and it lets a future handle type surface
-                    // the error without changing the backend.
-                    terminator: Box::new(move || {
-                        let _ = started.terminate();
-                    }),
+                    // The result now reaches the caller instead of being
+                    // discarded here. It reports whether the platform *accepted*
+                    // the kill: `terminate`'s bounded post-kill wait is not
+                    // consulted, so a `Terminate` that was accepted and then did
+                    // not take effect still reports success.
+                    terminator: Box::new(move || started.terminate().map_err(map_lifecycle_error)),
                 })
             }
         }
