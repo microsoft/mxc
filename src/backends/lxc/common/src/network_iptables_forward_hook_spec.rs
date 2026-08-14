@@ -167,7 +167,7 @@ fn physdev_hook_rule_args_operate_on_the_forward_chain() {
     );
 }
 
-// Once a veth is bridge-enslaved, the bridge port it entered on is the only
+// Once a veth is attached to a bridge, the bridge port it entered on is the only
 // thing that still identifies that one container, so the exact token
 // sequence iptables needs for the physdev match -- not just "physdev appears
 // somewhere" -- is the contract itself.
@@ -212,7 +212,7 @@ fn physdev_hook_rule_args_jump_to_the_named_chain() {
     );
 }
 
-// Once a veth is bridge-enslaved, FORWARD sees the bridge as the input
+// Once a veth is attached to a bridge, FORWARD sees the bridge as the input
 // interface, not the veth; an -i match naming the veth would match nothing
 // at all, so this builder must not carry one.
 #[test]
@@ -258,7 +258,7 @@ fn physdev_hook_delete_spec_differs_from_its_insert_only_by_the_operation() {
 }
 
 // The two builders exist because a directly routed veth and a
-// bridge-enslaved veth need different matches to see the same packets. If
+// bridge-attached veth need different matches to see the same packets. If
 // they ever produced identical rule specs, one of those two topologies would
 // silently collapse onto the other's match, bringing back the bug this
 // change fixes.
@@ -278,11 +278,11 @@ fn the_iface_and_physdev_hook_builders_never_produce_the_same_rule_specification
     );
 }
 
-// The kernel only creates a `master` entry once an interface is enslaved to
+// The kernel only creates a `master` entry once an interface is attached to
 // a bridge, so its presence alone is what this function is allowed to trust.
 #[test]
-fn an_interface_with_a_master_entry_is_reported_as_bridge_enslaved() {
-    let root = fresh_fixture_dir("enslaved");
+fn an_interface_with_a_master_entry_is_reported_as_bridge_attached() {
+    let root = fresh_fixture_dir("bridge-attached");
     let iface_dir = root.join("veth-a1b2");
     fs::create_dir_all(&iface_dir).expect("failed to create the fake sysfs interface directory");
     fs::write(iface_dir.join("master"), "").expect("failed to create the fake master entry");
@@ -293,15 +293,15 @@ fn an_interface_with_a_master_entry_is_reported_as_bridge_enslaved() {
     assert_eq!(
         result,
         VethTopology::Bridged,
-        "an interface with a master entry must be reported as bridge-enslaved"
+        "an interface with a master entry must be reported as bridge-attached"
     );
 }
 
-// A veth that is not enslaved has an interface directory but no `master`
+// A veth that is not attached to a bridge has an interface directory but no `master`
 // entry inside it; this is the ordinary "routed directly" topology.
 #[test]
-fn an_interface_without_a_master_entry_is_not_bridge_enslaved() {
-    let root = fresh_fixture_dir("unenslaved");
+fn an_interface_without_a_master_entry_is_not_bridge_attached() {
+    let root = fresh_fixture_dir("not-bridge-attached");
     let iface_dir = root.join("veth-d4e5");
     fs::create_dir_all(&iface_dir).expect("failed to create the fake sysfs interface directory");
 
@@ -316,7 +316,7 @@ fn an_interface_without_a_master_entry_is_not_bridge_enslaved() {
 }
 
 // A missing interface directory is not evidence that the interface is
-// unenslaved.  The two facts are independent: `discover_veth_interface` parses `lxc-info`,
+// not attached to a bridge.  The two facts are independent: `discover_veth_interface` parses `lxc-info`,
 // not sysfs, so the veth can be known to exist while its sysfs entry is
 // missing, masked, or unreadable.  Absence of the directory is therefore a
 // failed lookup, not evidence about the topology.
@@ -352,7 +352,7 @@ fn an_unreadable_sysfs_root_is_an_unknown_topology() {
 
 // The two probes in `veth_topology_in` read metadata differently on purpose,
 // and only a symlink can tell them apart. A dangling `master` still means the
-// veth is enslaved, so that probe must NOT follow the link -- following it
+// veth is attached to a bridge, so that probe must NOT follow the link -- following it
 // would report a bridged veth as directly routed, which is the relaxed branch.
 //
 // This is the mutation that survived the first battery. It is Unix-gated
@@ -376,7 +376,7 @@ fn a_dangling_master_symlink_still_means_the_veth_is_bridged() {
     assert_eq!(
         result,
         VethTopology::Bridged,
-        "a dangling master symlink still means enslaved; following it would \
+        "a dangling master symlink still means attached; following it would \
          report a bridged veth as directly routed"
     );
 }

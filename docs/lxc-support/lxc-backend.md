@@ -188,7 +188,7 @@ the veth is attached:
 | Attachment | Rule that matches |
 |------------|-------------------|
 | veth routed directly by the host | `-i <veth>` |
-| veth enslaved to a bridge (the default LXC topology) | `-m physdev --physdev-in <veth>` |
+| veth attached to a bridge (the default LXC topology) | `-m physdev --physdev-in <veth>` |
 
 The two are mutually exclusive for any given packet, so nothing is counted
 twice. Installing only `-i <veth>` is what previously let a fully populated

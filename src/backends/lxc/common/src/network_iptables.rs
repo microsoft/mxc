@@ -377,9 +377,9 @@ fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -
 /// Failure to establish it is a third answer rather than a negative one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VethTopology {
-    /// The interface is enslaved to a bridge.
+    /// The interface is attached to a bridge.
     Bridged,
-    /// The interface is not enslaved to a bridge. Established, not assumed.
+    /// The interface is not attached to a bridge. Established, not assumed.
     DirectlyRouted,
     /// The topology could not be established.
     Unknown,
@@ -513,7 +513,7 @@ impl NetworkIptablesManager {
     /// Build one FORWARD hook rule matching the veth as the *bridge port* the
     /// packet entered on.
     ///
-    /// On the default LXC topology the veth is enslaved to a bridge
+    /// On the default LXC topology the veth is attached to a bridge
     /// (`lxc.net.0.link` set to `lxcbr0`). A packet leaving such a container is
     /// bridged onto `lxcbr0` and then routed off it, so by the time FORWARD
     /// sees the packet its input interface is the bridge and not the veth --
@@ -539,7 +539,7 @@ impl NetworkIptablesManager {
         ]
     }
 
-    /// Determine whether `iface` is enslaved to a bridge, looked up under an
+    /// Determine whether `iface` is attached to a bridge, looked up under an
     /// injectable sysfs root so this is testable without a live interface.
     ///
     /// `master` is a symlink, and `Path::exists` follows links, so it would
@@ -1930,7 +1930,7 @@ impl NetworkIptablesManager {
         //
         // Two rules per family, because the input interface FORWARD sees
         // depends on how the veth is attached. A veth routed directly by the
-        // host arrives as `-i <veth>`. A veth enslaved to a bridge -- the
+        // host arrives as `-i <veth>`. A veth attached to a bridge -- the
         // default LXC topology -- arrives as `-i <bridge>`, and only
         // `--physdev-in <veth>` still identifies the container. Installing
         // only the first is what let a fully populated deny-all chain sit in
@@ -2078,7 +2078,7 @@ impl NetworkIptablesManager {
         // change exists to remove: a chain that looks enforced and is not.
         if bridged && !Self::bridge_netfilter_active(bridge_nf_path) {
             return Err(format!(
-                "Container veth {} is enslaved to a bridge but bridged packets are not \
+                "Container veth {} is attached to a bridge but bridged packets are not \
                  delivered to {} ({} is absent or 0), so chain {} could never be reached \
                  from FORWARD. Refusing to report success for an unenforceable policy.",
                 iface, tool, bridge_nf_path, chain_name
