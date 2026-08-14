@@ -20,6 +20,9 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 
+pub use crate::process_container_config::ProcessContainer;
+use crate::process_container_config::{create_process_container_config, CaptureDenialsInput};
+
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
 // ---------------------------------------------------------------------------
@@ -576,16 +579,6 @@ pub enum Containment {
     Wslc(WslcSection),
 }
 
-/// Windows ProcessContainer settings carried by
-/// [`Containment::ProcessContainer`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProcessContainer {
-    /// Enforce least-privilege mode.
-    pub least_privilege: bool,
-    /// Additional AppContainer capabilities, such as `registryRead`.
-    pub capabilities: Vec<String>,
-}
-
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
 /// block; carried by [`Containment::Wslc`].
 ///
@@ -951,10 +944,15 @@ fn build_wire_config(
     }
 
     match containment {
-        Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
-        Containment::ProcessContainer(process_container) => {
-            apply_process_container_backend(&mut config, policy, process_container)
+        Containment::Process => {
+            apply_host_process_backend(&mut config, policy, &container_id, &policy.version)?
         }
+        Containment::ProcessContainer(process_container) => apply_process_container_backend(
+            &mut config,
+            policy,
+            process_container,
+            &policy.version,
+        )?,
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -977,7 +975,8 @@ fn apply_host_process_backend(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
     container_id: &str,
-) {
+    version: &str,
+) -> Result<(), MxcError> {
     use serde_json::json;
 
     // Resolve the abstract Process intent per host.
@@ -1003,58 +1002,43 @@ fn apply_host_process_backend(
         // The container id is carried only at the top level (`containerId`); the
         // wire `processContainer` object intentionally has no `name` field.
         let _ = container_id;
-        apply_process_container_backend(config, policy, &ProcessContainer::default());
+        apply_process_container_backend(config, policy, &ProcessContainer::default(), version)?;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         let _ = (policy, container_id);
     }
+
+    Ok(())
 }
 
 fn apply_process_container_backend(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
     process_container: &ProcessContainer,
-) {
+    version: &str,
+) -> Result<(), MxcError> {
     use serde_json::json;
 
     config["containment"] = json!("processcontainer");
-    let mut capabilities = Vec::new();
-    if let Some(net) = &policy.network {
-        if net.allow_outbound {
-            capabilities.push("internetClient".to_string());
-        }
-        if net.allow_local_network {
-            capabilities.push("privateNetworkClientServer".to_string());
-        }
-    }
-    for capability in &process_container.capabilities {
-        if !capabilities
-            .iter()
-            .any(|existing| existing.eq_ignore_ascii_case(capability))
-        {
-            capabilities.push(capability.clone());
-        }
-    }
-
-    config["processContainer"] = json!({
-        "leastPrivilege": process_container.least_privilege,
-        "capabilities": capabilities,
-        "ui": {
-            "isolation": "container",
-            "desktopSystemControl": false,
-            "systemSettings": "none",
-            "ime": false,
-        },
-    });
-    if let Some(cd) = &policy.capture_denials {
-        config["processContainer"]["captureDenials"] = json!({
-            "mode": cd.mode.wire(),
-            "outputPath": cd.output_path,
-            "retainEtl": cd.retain_etl,
+    let network = policy.network.as_ref();
+    let capture_denials = policy
+        .capture_denials
+        .as_ref()
+        .map(|capture| CaptureDenialsInput {
+            mode: capture.mode.wire(),
+            output_path: capture.output_path.as_deref(),
+            retain_etl: capture.retain_etl,
         });
-    }
+    config["processContainer"] = create_process_container_config(
+        version,
+        process_container,
+        network.is_some_and(|network| network.allow_outbound),
+        network.is_some_and(|network| network.allow_local_network),
+        capture_denials,
+    )?
+    .into_value()?;
     if let Some(network) = config.get_mut("network") {
         let mode = if has_host_rules(network) {
             "both"
@@ -1063,6 +1047,7 @@ fn apply_process_container_backend(
         };
         network["enforcementMode"] = json!(mode);
     }
+    Ok(())
 }
 
 /// True when the network section carries any host allow/deny rules, deciding
@@ -1450,7 +1435,7 @@ mod tests {
 
     fn policy_with_capture_denials(section: CaptureDenialsSection) -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
+            version: "0.8.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
@@ -1621,6 +1606,7 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
+        policy.version = "0.8.0-alpha".to_string();
         policy.capture_denials = Some(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),

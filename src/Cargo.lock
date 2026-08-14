@@ -1530,6 +1530,7 @@ dependencies = [
  "isolation_session_bindings",
  "isolation_session_common",
  "lxc_common",
+ "mxc_config_contract",
  "nanvix_runner",
  "seatbelt_common",
  "serde",
