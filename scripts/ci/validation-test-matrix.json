@@ -325,26 +325,6 @@
       }
     }
   ],
-  "handlers": {
-    "windows": {
-      "process-t1": "process-container",
-      "process-t3": "process-container",
-      "isolation-session": "isolation-session",
-      "wslc": "wslc",
-      "windows-sandbox": "windows-sandbox",
-      "microvm": "microvm",
-      "hyperlight": "hyperlight"
-    },
-    "linux": {
-      "bubblewrap": "bubblewrap",
-      "lxc": "lxc",
-      "microvm": "microvm",
-      "hyperlight": "hyperlight"
-    },
-    "macos": {
-      "seatbelt": "seatbelt"
-    }
-  },
   "triggers": {
     "pr": [],
     "nightly": [
@@ -352,7 +332,6 @@
         "os": "windows-prerelease-process-container",
         "backends": [
           "process-t1",
-          "process-t3",
           "isolation-session",
           "wslc"
         ]
@@ -408,31 +387,6 @@
       }
     ],
     "weekly": [],
-    "enabled": [
-      {
-        "os": "windows-prerelease-process-container",
-        "backends": [
-          "wslc"
-        ]
-      },
-      {
-        "os": "windows-25h2",
-        "backends": [
-          "wslc"
-        ]
-      },
-      {
-        "os": "windows-24h2",
-        "backends": [
-          "wslc"
-        ]
-      },
-      {
-        "os": "windows-23h2",
-        "backends": [
-          "wslc"
-        ]
-      }
-    ]
+    "enabled": []
   }
 }

@@ -1,11 +1,23 @@
 <#
 .SYNOPSIS
 Runs a Windows backend test from a downloaded CI artifact.
+
+.DESCRIPTION
+Takes the matrix backend id straight from the catalog, so there is no
+id-to-command mapping to keep in sync. 
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('process-container', 'isolation-session', 'windows-sandbox', 'wslc', 'microvm', 'hyperlight')]
+    [ValidateSet(
+        'process-t1',
+        'process-t3',
+        'isolation-session',
+        'windows-sandbox',
+        'wslc',
+        'microvm',
+        'hyperlight'
+    )]
     [string]$Backend,
 
     [Parameter(Mandatory)]
@@ -13,10 +25,7 @@ param(
 
     [Parameter(Mandatory)]
     [ValidateSet('x64', 'arm64')]
-    [string]$Architecture,
-
-    [ValidateSet('T1', 'T3')]
-    [string]$ExpectedTier
+    [string]$Architecture
 )
 
 Set-StrictMode -Version Latest
@@ -54,64 +63,52 @@ function Invoke-TestScript {
 
 Assert-File -Path $wxc
 
+function Invoke-ProcessContainerTests {
+    # The existing harness expects separate debug and release layouts. CI
+    # intentionally tests one release artifact, so stage it in both slots.
+    $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
+    $releaseDirectory = Join-Path $binaryDirectoryPath 'release'
+    New-Item -ItemType Directory -Force -Path $debugDirectory, $releaseDirectory | Out-Null
+    Copy-Item -LiteralPath $wxc -Destination (Join-Path $debugDirectory 'wxc-exec.exe') -Force
+    Copy-Item -LiteralPath $wxc -Destination (Join-Path $releaseDirectory 'wxc-exec.exe') -Force
+
+    $uiProbe = Join-Path $binaryDirectoryPath 'wxc-ui-probe.exe'
+    Assert-File -Path $uiProbe
+    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
+    Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
+
+    $script = Join-Path $scriptRoot 'WinProcessContainer-Tests.ps1'
+    # Skip build and Cargo phases because this job consumes a previously
+    # built artifact; retain the host and containment behavior phases.
+    $phases = @(
+        'Probes',
+        'T3Forced',
+        'T1DenyForced',
+        'UiMitigationMatrix',
+        'GlobalAtomIsolation',
+        'DaclDisabled',
+        'CrashRecovery'
+    )
+    $global:LASTEXITCODE = 0
+    & $script `
+        -SkipBuild `
+        -SkipReleaseLane `
+        -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
+        -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
+        -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
+        -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
+        -Phases $phases
+    if ($LASTEXITCODE -ne 0) {
+        throw "Process Container tests failed with exit code $LASTEXITCODE."
+    }
+}
+
 switch ($Backend) {
-    'process-container' {
-        if (-not $ExpectedTier) {
-            throw 'Process Container tests require -ExpectedTier.'
-        }
-
-        $expectedProbeTier = @{
-            T1 = 'base-container'
-            T3 = 'appcontainer-dacl'
-        }[$ExpectedTier]
-
-        # The existing harness expects separate debug and release layouts. CI
-        # intentionally tests one release artifact, so stage it in both slots.
-        $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
-        $releaseDirectory = Join-Path $binaryDirectoryPath 'release'
-        New-Item -ItemType Directory -Force -Path $debugDirectory, $releaseDirectory | Out-Null
-        Copy-Item -LiteralPath $wxc -Destination (Join-Path $debugDirectory 'wxc-exec.exe') -Force
-        Copy-Item -LiteralPath $wxc -Destination (Join-Path $releaseDirectory 'wxc-exec.exe') -Force
-
-        $uiProbe = Join-Path $binaryDirectoryPath 'wxc-ui-probe.exe'
-        Assert-File -Path $uiProbe
-        Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
-        Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
-
-        # Fail before running the suite if the selected image does not provide
-        # the Process Container tier promised by the matrix entry.
-        $probe = (& $wxc --probe | Out-String) | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0) {
-            throw "Process Container probe failed with exit code $LASTEXITCODE."
-        }
-        if ($probe.tier -ne $expectedProbeTier) {
-            throw "Expected $ExpectedTier ($expectedProbeTier), but the host selected '$($probe.tier)'."
-        }
-
-        $script = Join-Path $scriptRoot 'WinProcessContainer-Tests.ps1'
-        # Skip build and Cargo phases because this job consumes a previously
-        # built artifact; retain the host and containment behavior phases.
-        $phases = @(
-            'Probes',
-            'T3Forced',
-            'T1DenyForced',
-            'UiMitigationMatrix',
-            'GlobalAtomIsolation',
-            'DaclDisabled',
-            'CrashRecovery'
-        )
-        $global:LASTEXITCODE = 0
-        & $script `
-            -SkipBuild `
-            -SkipReleaseLane `
-            -WxcDebug (Join-Path $debugDirectory 'wxc-exec.exe') `
-            -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
-            -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
-            -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
-            -Phases $phases
-        if ($LASTEXITCODE -ne 0) {
-            throw "Process Container tests failed with exit code $LASTEXITCODE."
-        }
+    'process-t1' {
+        Invoke-ProcessContainerTests
+    }
+    'process-t3' {
+        Invoke-ProcessContainerTests
     }
     'isolation-session' {
         Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
@@ -138,7 +135,7 @@ switch ($Backend) {
         }
     }
     'hyperlight' {
-        # Keep unwired commands explicit so accidental activation fails loudly.
-        throw 'The Hyperlight CI handler is not wired to an existing backend test entry point yet.'
+        # Keep unwired backends explicit so accidental activation fails loudly.
+        throw 'The Hyperlight CI backend is not wired to an existing test entry point yet.'
     }
 }

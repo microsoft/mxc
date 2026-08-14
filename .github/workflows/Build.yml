@@ -1,14 +1,13 @@
+# Entry point for GHA PR/CI validation. Mirrors the 1ES `1ES.Build.yml`
+# split: this file orchestrates, each stage lives in its own reusable.
+
 name: Build
 
 on:
   push:
-    paths-ignore:
-      - 'docs/**'
     branches: [main]
 
   pull_request:
-    paths-ignore:
-      - 'docs/**'
     branches: [main, 'feature/*', 'user/*']
 
   workflow_call:

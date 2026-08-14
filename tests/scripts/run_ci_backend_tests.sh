@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Dispatches a downloaded Unix artifact to the repository's existing backend
-# test suites. Unsupported handlers fail explicitly rather than reporting a
-# false-success placeholder job.
+# test suites, keyed by the matrix backend id. Unsupported backends fail
+# explicitly rather than reporting a false-success placeholder job.
 
 usage() {
     echo "Usage: $0 <bubblewrap|lxc|microvm|hyperlight|seatbelt> <binary-directory>" >&2
@@ -24,13 +24,13 @@ case "$backend" in
     microvm)
         # Keep unwired commands explicit so accidental activation fails loudly.
         # Future test script: run_microvm_tests.sh
-        echo "The MicroVM CI handler is not wired to an artifact-only Linux test entry point yet." >&2
+        echo "The MicroVM CI backend is not wired to an artifact-only Linux test entry point yet." >&2
         exit 2
         ;;
     hyperlight)
         # Keep unwired commands explicit so accidental activation fails loudly.
         # Future test script: run_hyperlight_tests.sh
-        echo "The Hyperlight CI handler is not wired to an existing backend test entry point yet." >&2
+        echo "The Hyperlight CI backend is not wired to an existing test entry point yet." >&2
         exit 2
         ;;
     bubblewrap)
@@ -53,7 +53,7 @@ case "$backend" in
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
         test -x "$binary_directory/unix-test-proxy"
-        echo "The Seatbelt CI handler is not wired to an existing backend test entry point yet." >&2
+        echo "The Seatbelt CI backend is not wired to an existing test entry point yet." >&2
         exit 2
         ;;
     *)

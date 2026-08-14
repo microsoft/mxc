@@ -5,8 +5,7 @@
     Prepares a Windows host for a backend's artifact-only test suite.
 
 .PARAMETER Backend
-    Matrix backend id (not the handler command), because process-t1 and
-    process-t3 share a handler but differ in host preparation.
+    Matrix backend id.
 
 .PARAMETER BinaryDirectory
     Directory holding the downloaded build artifact.

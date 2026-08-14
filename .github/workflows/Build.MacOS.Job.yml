@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     name: arm64
-    runs-on: macos-26
+    runs-on: macos-15
     defaults:
       run:
         working-directory: src

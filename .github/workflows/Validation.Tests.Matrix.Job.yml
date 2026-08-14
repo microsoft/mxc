@@ -38,7 +38,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.windows) }}
     runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -49,6 +49,7 @@ jobs:
           path: artifacts/bin
 
       - name: Prepare backend prerequisites
+        timeout-minutes: 15
         shell: pwsh
         run: |
           & ./scripts/ci/prepare-windows-host.ps1 `
@@ -59,20 +60,13 @@ jobs:
       - name: Run backend tests
         # A backend that hangs (rather than failing) would otherwise burn the
         # full job timeout. Fail fast enough to keep the log useful.
-        timeout-minutes: 30
+        timeout-minutes: 45
         shell: pwsh
         run: |
-          $arguments = @{
-            Backend = '${{ matrix.command }}'
-            BinaryDirectory = (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin')
-            Architecture = '${{ matrix.architecture }}'
-          }
-          if ('${{ matrix.backend }}' -eq 'process-t1') {
-            $arguments.ExpectedTier = 'T1'
-          } elseif ('${{ matrix.backend }}' -eq 'process-t3') {
-            $arguments.ExpectedTier = 'T3'
-          }
-          & ./tests/scripts/run_ci_backend_tests.ps1 @arguments *>&1 |
+          & ./tests/scripts/run_ci_backend_tests.ps1 `
+            -Backend '${{ matrix.backend }}' `
+            -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
+            -Architecture '${{ matrix.architecture }}' *>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
 
       - name: Upload failure logs
@@ -96,7 +90,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.linux) }}
     runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -107,24 +101,26 @@ jobs:
           path: artifacts/bin
 
       - name: Prepare backend prerequisites
+        timeout-minutes: 15
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/ci/prepare-linux-host.sh \
-            '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
             tee -a "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Run backend tests
+        timeout-minutes: 45
         shell: bash
         run: |
           set -euo pipefail
-          if [[ '${{ matrix.command }}' == 'lxc' ]]; then
+          if [[ '${{ matrix.backend }}' == 'lxc' ]]; then
             sudo --preserve-env=RUNNER_TEMP bash tests/scripts/run_ci_backend_tests.sh \
-              '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
               tee -a "$RUNNER_TEMP/mxc-ci.log"
           else
             bash tests/scripts/run_ci_backend_tests.sh \
-              '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+              '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
               tee -a "$RUNNER_TEMP/mxc-ci.log"
           fi
 
@@ -145,7 +141,7 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.macos) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -156,12 +152,13 @@ jobs:
           path: artifacts/bin
 
       - name: Run backend tests
+        timeout-minutes: 60
         shell: bash
         run: |
           set -euo pipefail
           chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
           bash tests/scripts/run_ci_backend_tests.sh \
-            '${{ matrix.command }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
             tee "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Upload failure logs

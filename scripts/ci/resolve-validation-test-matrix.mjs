@@ -10,7 +10,6 @@ import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 const FAMILIES = ['windows', 'linux', 'macos'];
-const PLANS = ['pr', 'nightly', 'weekly', 'enabled'];
 const ARM64_UNSUPPORTED_BACKENDS = new Set(['hyperlight', 'microvm']);
 
 function assertNonEmptyString(value, label) {
@@ -74,10 +73,6 @@ export function validateCatalog(catalog) {
         if (architecture === 'arm64' && ARM64_UNSUPPORTED_BACKENDS.has(backend)) {
           throw new Error(`${backend} cannot be scheduled on arm64 (${platform.id})`);
         }
-        assertNonEmptyString(
-          catalog.handlers?.[platform.family]?.[backend],
-          `${platform.family} handler entry for ${backend}`
-        );
         backends.add(backend);
       }
     }
@@ -96,11 +91,27 @@ export function validateCatalog(catalog) {
     throw new Error(`catalog targets do not match the five required build targets`);
   }
 
+  // The catalog's `triggers` keys are the plan list: a plan exists because it
+  // is declared there.
+  const triggers = catalog.triggers;
+  if (triggers == null || typeof triggers !== 'object' || Array.isArray(triggers)) {
+    throw new Error('catalog triggers must be an object keyed by plan name');
+  }
+  const plans = Object.keys(triggers);
+  if (plans.length === 0) {
+    throw new Error('catalog declares no plans under triggers');
+  }
+
   // Trigger entries name an OS/backend pair. Architecture expansion happens
   // later, so a backend is valid here when at least one OS architecture has it.
-  for (const plan of PLANS) {
+  for (const plan of plans) {
+    assertNonEmptyString(plan, 'trigger plan name');
+    if (!Array.isArray(triggers[plan])) {
+      throw new Error(`${plan} must be an array of trigger requests`);
+    }
+
     const seenRequests = new Set();
-    for (const request of catalog.triggers?.[plan] ?? []) {
+    for (const request of triggers[plan]) {
       const platform = platforms.get(request.os);
       if (!platform) {
         throw new Error(`${plan} references unknown platform ${request.os}`);
@@ -120,17 +131,17 @@ export function validateCatalog(catalog) {
     }
   }
 
-  return { platforms };
+  return { platforms, plans };
 }
 
 export function expandPlan(catalog, plan) {
-  if (!PLANS.includes(plan)) {
-    throw new Error(`unsupported plan: ${plan}`);
+  const { platforms, plans } = validateCatalog(catalog);
+  if (!plans.includes(plan)) {
+    throw new Error(`unsupported plan: ${plan} (catalog declares: ${plans.join(', ')})`);
   }
-  const { platforms } = validateCatalog(catalog);
   const combinations = [];
 
-  for (const request of catalog.triggers?.[plan] ?? []) {
+  for (const request of catalog.triggers[plan]) {
     const platform = platforms.get(request.os);
     // A trigger is architecture-neutral. Expand it only where the platform's
     // capability declaration supports the requested backend.
@@ -152,8 +163,7 @@ export function expandPlan(catalog, plan) {
           artifact: details.artifact,
           pool: details.pool,
           runner: details.runner,
-          backend,
-          command: catalog.handlers[platform.family][backend]
+          backend
         });
       }
     }
@@ -163,11 +173,7 @@ export function expandPlan(catalog, plan) {
 }
 
 export function resolvePlan(catalog, plan) {
-  if (!PLANS.includes(plan)) {
-    throw new Error(`unsupported plan: ${plan}`);
-  }
-
-  validateCatalog(catalog);
+  // expandPlan validates the catalog and rejects an unknown plan name.
   const matrices = Object.fromEntries(FAMILIES.map(family => [family, []]));
 
   for (const combination of expandPlan(catalog, plan)) {

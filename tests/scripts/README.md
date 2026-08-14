@@ -61,30 +61,32 @@ directly.
 ### CI dispatch
 
 The validation matrix (see `scripts/ci/validation-test-matrix.json` and
-`.github/workflows/Validation.Tests.Matrix.Job.yml`) never builds from source.
+`.github/workflows/Validation.Tests.Matrix.Job.yml`, documented end to end in
+[`docs/ci-validation-infrastructure.md`](../../docs/ci-validation-infrastructure.md))
+never builds from source.
 It downloads a build artifact, prepares the host, and then hands off to one of
-these dispatchers, which map a backend handler to the suites above:
+these dispatchers, which map a matrix backend id to the suites above:
 
-| Dispatcher | Platforms | Handlers |
-|------------|-----------|----------|
-| `run_ci_backend_tests.ps1` | Windows | `process-container` (needs `-ExpectedTier`), `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
+| Dispatcher | Platforms | Backend ids |
+|------------|-----------|-------------|
+| `run_ci_backend_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
 | `run_ci_backend_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
 
-Pass the **handler** name from the catalog's `handlers` map, not the matrix
-backend id (they differ where one handler serves several entries — `process-t1`
-and `process-t3` both dispatch to `process-container` and are distinguished by
-`-ExpectedTier`):
+Pass the backend id exactly as it appears in the catalog — there is no separate
+handler name. Ids that share a suite have their own case in the dispatcher:
+`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
+determines the tier it expects from the host's own `wxc-exec --probe`.
 
 ```powershell
-tests\scripts\run_ci_backend_tests.ps1 -Backend process-container `
-    -BinaryDirectory <dir> -Architecture x64 -ExpectedTier T1
+tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 `
+    -BinaryDirectory <dir> -Architecture x64
 ```
 
 ```bash
 tests/scripts/run_ci_backend_tests.sh bubblewrap <binary-directory>
 ```
 
-A handler with no wired suite exits non-zero on purpose, so accidentally
+A backend with no wired suite exits non-zero on purpose, so accidentally
 enabling it in a trigger fails loudly instead of reporting a false success.
 
 To see exactly what a plan would schedule without pushing:
