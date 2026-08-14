@@ -28,8 +28,6 @@ if (-not (Test-Path $wxcExe)) {
 }
 
 try {
-    New-Item -ItemType Directory -Path $testDir -Force | Out-Null
-
     Write-Host "Running BFS spaces-in-path test..."
     & $wxcExe --debug $testConfig
     $exitCode = $LASTEXITCODE

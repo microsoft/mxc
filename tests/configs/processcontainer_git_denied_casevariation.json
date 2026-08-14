@@ -3,18 +3,18 @@
   "containerId": "CLI-ProcessContainer-Git-DeniedCaseVariation",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "C:\\Windows\\System32\\cmd.exe /c \"cd /d C:\\temp\\wxc_test_gitproj & mkdir .GiT 2>nul & if exist .GiT (echo LEAK:GiT_created&rmdir .GiT 2>nul&exit 1) else (echo OK:GiT_create_denied) & exit 0\"",
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$root = 'C:\\Users\\Public\\mxc_git_denied_case'; try { New-Item -ItemType Directory -Path (Join-Path $root '.GiT') -Force -ErrorAction Stop | Out-Null; Write-Output 'LEAK:GiT_created'; exit 1 } catch { Write-Output 'OK:GiT_create_denied'; exit 0 }\"",
     "timeout": 30000
   },
   "filesystem": {
     "readwritePaths": [
-      "C:\\temp\\wxc_test_gitproj"
+      "C:\\Users\\Public\\mxc_git_denied_case"
     ],
     "readonlyPaths": [
       "C:\\Windows"
     ],
     "deniedPaths": [
-      "C:\\temp\\wxc_test_gitproj\\.git"
+      "C:\\Users\\Public\\mxc_git_denied_case\\.git"
     ]
   },
   "ui": {

@@ -24,6 +24,7 @@ All scripts accept a `-Release` switch to use the release build (default: debug)
 | `run_filesystem_bfs_test.ps1` | BFS filesystem test | `wxc-exec.exe` |
 | `run_filesystem_bfsreadonly_test.ps1` | BFS read-only filesystem test | `wxc-exec.exe` |
 | `run_filesystem_bfs_spaces_test.ps1` | BFS path-with-spaces test | `wxc-exec.exe` |
+| `run_processcontainer_denied_path_tests.ps1` | BaseContainer missing, case-variant, and existing denied-path tests | `wxc-exec.exe`, host denied-path support |
 | `run_test_configs.ps1` | All test configs via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_examples.ps1` | All examples via wxc-test-driver | `wxc-test-driver.exe` |
 | `run_microvm_basic_test.ps1` | MicroVM smoke test | `wxc-exec.exe`, NanVix binaries |

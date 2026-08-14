@@ -72,21 +72,14 @@ fn processcontainer_lpac() {
 }
 
 fn filesystem_bfs() {
-    let _temp = TempDirs::create(&["C:\\temp\\wxc_test_allowed", "C:\\temp\\wxc_test_denied"]);
     assert_wxc_success("filesystem_bfs_test.json", &["--debug"]);
 }
 
 fn filesystem_bfs_readonly() {
-    let temp = TempDirs::create(&["C:\\temp\\wxc_test_allowedreadonly"]);
-    temp.write_absolute_file(
-        "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
-        "Test Input",
-    );
     assert_wxc_success("filesystem_bfs_readonly_test.json", &["--debug"]);
 }
 
 fn filesystem_bfs_spaces() {
-    let _temp = TempDirs::create(&["C:\\Users\\Public\\wxc bfs test"]);
     assert_wxc_success("filesystem_bfs_spaces_test.json", &["--debug"]);
 }
 
@@ -99,9 +92,10 @@ fn test_configs() {
         "C:\\temp\\wxc_test_allowed",
         "C:\\temp\\wxc_test_allowedreadonly",
         "C:\\temp\\wxc_test_denied",
-        "C:\\temp\\wxc_test_gitproj",
-        "C:\\temp\\wxc_test_gitexisting",
         "C:\\temp\\wxc_test_outside",
+        "C:\\Users\\Public\\mxc_git_denied_missing",
+        "C:\\Users\\Public\\mxc_git_denied_case",
+        "C:\\Users\\Public\\mxc_git_denied_existing\\.git",
     ]);
     temp.write_absolute_file(
         "C:\\temp\\wxc_test_allowedreadonly\\test_input.txt",
@@ -109,7 +103,10 @@ fn test_configs() {
     );
     // Pre-seed a protected child inside a writable parent (the `.git` protection
     // regression scenario) and an out-of-policy secret for the deny tests.
-    temp.write_absolute_file("C:\\temp\\wxc_test_gitexisting\\.git\\config", "ORIGINAL");
+    temp.write_absolute_file(
+        "C:\\Users\\Public\\mxc_git_denied_existing\\.git\\config",
+        "ORIGINAL",
+    );
     temp.write_absolute_file("C:\\temp\\wxc_test_outside\\secret.txt", "SECRET");
 
     let result = run_test_driver(&test_configs_dir(), &[]);

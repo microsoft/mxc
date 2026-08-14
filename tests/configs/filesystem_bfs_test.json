@@ -3,13 +3,15 @@
   "containerId": "CLI-BFS-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"import os\nallowed_path = 'C:\\\\temp\\\\wxc_test_allowed\\\\test_output.txt'\ndenied_path = 'C:\\\\temp\\\\wxc_test_denied\\\\forbidden.txt'\nprint('Testing filesystem BFS enforcement...')\nf = open(allowed_path, 'w')\nf.write('SUCCESS: Write to allowed path worked!')\nf.close()\nprint(f'Successfully wrote to: {allowed_path}')\nprint('Now attempting to write to denied path...')\ntry:\n    f2 = open(denied_path, 'w')\n    f2.write('This should fail')\n    f2.close()\n    print('ERROR: Should not have been able to write to denied path!')\nexcept PermissionError:\n    print('SUCCESS: Access to denied path was blocked as expected')\"",
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$allowed = 'C:\\Users\\Public\\mxc_bfs_allowed'; $outside = 'C:\\ProgramData\\mxc_bfs_outside'; New-Item -ItemType Directory -Path $allowed -Force -ErrorAction Stop | Out-Null; $output = Join-Path $allowed 'test_output.txt'; Set-Content -Path $output -Value 'BFS_ALLOWED' -ErrorAction Stop; if ((Get-Content -Path $output -Raw).Trim() -ne 'BFS_ALLOWED') { Write-Output 'FAIL:allowed_readback'; exit 1 }; Write-Output 'OK:allowed_write'; try { New-Item -ItemType Directory -Path $outside -Force -ErrorAction Stop | Out-Null; Write-Output 'FAIL:outside_create'; exit 1 } catch { Write-Output 'OK:outside_create_denied'; exit 0 }\"",
     "timeout": 30000
   },
   "filesystem": {
     "readwritePaths": [
-      "C:\\temp\\wxc_test_allowed",
-      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
+      "C:\\Users\\Public"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
     ]
   },
   "ui": {

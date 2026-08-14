@@ -2,8 +2,8 @@
 # Licensed under the MIT License.
 
 # BFS filesystem read-only test runner.
-# Creates a temporary directory with a test input file, runs the test,
-# and cleans up regardless of outcome.
+# Uses the always-present C:\Windows\win.ini fixture so no host setup is
+# required.
 #
 # Usage:
 #   .\run_filesystem_bfsreadonly_test.ps1              # debug build
@@ -34,24 +34,13 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
-$TestDir = "C:\temp\wxc_test_allowedreadonly"
+Write-Host "Running BFS filesystem read-only test..." -ForegroundColor Cyan
+& $WxcExec --debug $TestConfig
+$exitCode = $LASTEXITCODE
 
-try {
-    New-Item -ItemType Directory -Path $TestDir -Force | Out-Null
-    Set-Content -Path (Join-Path $TestDir "test_input.txt") -Value "Test Input"
-
-    Write-Host "Running BFS filesystem read-only test..." -ForegroundColor Cyan
-    & $WxcExec --debug $TestConfig
-    $exitCode = $LASTEXITCODE
-
-    if ($exitCode -ne 0) {
-        Write-Host "FAILED: wxc-exec exited with code $exitCode" -ForegroundColor Red
-        exit $exitCode
-    }
-
-    Write-Host "PASSED: BFS filesystem read-only test" -ForegroundColor Green
-} finally {
-    if (Test-Path $TestDir) {
-        Remove-Item -Recurse -Force $TestDir -ErrorAction SilentlyContinue
-    }
+if ($exitCode -ne 0) {
+    Write-Host "FAILED: wxc-exec exited with code $exitCode" -ForegroundColor Red
+    exit $exitCode
 }
+
+Write-Host "PASSED: BFS filesystem read-only test" -ForegroundColor Green

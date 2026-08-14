@@ -1320,6 +1320,39 @@ impl BaseContainerRunner {
     }
 }
 
+fn log_process_security_environment_spec(spec_bytes: &[u8], logger: &mut Logger) {
+    let spec = match process_security_environment_spec::process_security_environment_layout::root_as_process_security_environment(spec_bytes) {
+        Ok(spec) => spec,
+        Err(_) => return,
+    };
+
+    let _ = writeln!(
+        logger,
+        "process security environment spec built (PSEC {}.{}, {} bytes)",
+        spec.version().major(),
+        spec.version().minor(),
+        spec_bytes.len()
+    );
+    if let Some(default_action) = spec
+        .network_policy()
+        .and_then(|network| network.egress())
+        .map(|egress| egress.default_action())
+    {
+        let _ = writeln!(
+            logger,
+            "  network_policy.egress.default_action: {:?}",
+            default_action
+        );
+    }
+    if let Some(url) = spec
+        .network_policy()
+        .and_then(|network| network.proxy())
+        .and_then(|proxy| proxy.url())
+    {
+        let _ = writeln!(logger, "  network_policy.proxy.url: {url}");
+    }
+}
+
 impl BaseContainerRunner {
     /// Set up and launch the BaseContainer child, returning a [`BaseChild`] the
     /// caller runs to completion (blocking) or wraps in a streaming handle. When
@@ -1400,11 +1433,7 @@ impl BaseContainerRunner {
         let process_security_environment_spec = use_process_security_environment
             .then(|| Self::build_process_security_environment_spec(&request));
         if let Some(psec_spec) = process_security_environment_spec.as_ref() {
-            let _ = writeln!(
-                logger,
-                "process security environment spec built (PSEC 1.0, {} bytes)",
-                psec_spec.len()
-            );
+            log_process_security_environment_spec(psec_spec, logger);
         }
 
         // Resolve two paths for the capture:

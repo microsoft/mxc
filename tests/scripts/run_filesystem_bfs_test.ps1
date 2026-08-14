@@ -2,8 +2,8 @@
 # Licensed under the MIT License.
 
 # BFS filesystem test runner.
-# Creates temporary directories required by the test config, runs the test,
-# and cleans up regardless of outcome.
+# The contained command creates its own fixture under C:\Users\Public.
+# The runner only removes stale artifacts after the test.
 #
 # Usage:
 #   .\run_filesystem_bfs_test.ps1              # debug build
@@ -34,16 +34,12 @@ if (-not (Test-Path $WxcExec)) {
     exit 1
 }
 
-$TempDirs = @(
-    "C:\temp\wxc_test_allowed",
-    "C:\temp\wxc_test_denied"
+$TestDirs = @(
+    "C:\Users\Public\mxc_bfs_allowed",
+    "C:\ProgramData\mxc_bfs_outside"
 )
 
 try {
-    foreach ($dir in $TempDirs) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
-    }
-
     Write-Host "Running BFS filesystem test..." -ForegroundColor Cyan
     & $WxcExec --debug $TestConfig
     $exitCode = $LASTEXITCODE
@@ -55,7 +51,7 @@ try {
 
     Write-Host "PASSED: BFS filesystem test" -ForegroundColor Green
 } finally {
-    foreach ($dir in $TempDirs) {
+    foreach ($dir in $TestDirs) {
         if (Test-Path $dir) {
             Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
         }

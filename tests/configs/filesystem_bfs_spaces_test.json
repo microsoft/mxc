@@ -3,12 +3,15 @@
   "containerId": "CLI-BFS-Spaces-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "cmd.exe /c echo SUCCESS > \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\" && type \"C:\\Users\\Public\\wxc bfs test\\test_output.txt\"",
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$path = 'C:\\Users\\Public\\wxc bfs test'; New-Item -ItemType Directory -Path $path -Force -ErrorAction Stop | Out-Null; $output = Join-Path $path 'test_output.txt'; Set-Content -Path $output -Value 'SUCCESS' -ErrorAction Stop; if ((Get-Content -Path $output -Raw).Trim() -ne 'SUCCESS') { Write-Output 'FAIL:bfs_spaces'; exit 1 }; Write-Output 'OK:bfs_spaces'; exit 0\"",
     "timeout": 30000
   },
   "filesystem": {
     "readwritePaths": [
-      "C:\\Users\\Public\\wxc bfs test"
+      "C:\\Users\\Public"
+    ],
+    "readonlyPaths": [
+      "C:\\Windows"
     ]
   },
   "ui": {

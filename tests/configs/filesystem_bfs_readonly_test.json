@@ -3,15 +3,12 @@
   "containerId": "CLI-BFSReadOnly-Test",
   "containment": "processcontainer",
   "process": {
-    "commandLine": "python -c \"import os\nallowedreadonly_path = 'C:\\\\temp\\\\wxc_test_allowedreadonly\\\\test_input.txt'\nprint('Testing filesystem BFS Read-Only enforcement...')\nf = open(allowedreadonly_path, 'r')\ntemp = f.read()\nf.close()\nprint(f'Successfully read from : {allowedreadonly_path}')\nprint('Now attempting to write to readonly path...')\ntry:\n    f2 = open(allowedreadonly_path, 'w')\n    f2.write('This should fail')\n    f2.close()\n    print('ERROR: Should not have been able to write to read-only path!')\nexcept PermissionError:\n    print('SUCCESS: Write access to read-only path was blocked as expected')\"",
+    "commandLine": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoProfile -NonInteractive -Command \"$path = 'C:\\Windows\\win.ini'; $content = Get-Content -Path $path -Raw -ErrorAction Stop; if ([string]::IsNullOrEmpty($content)) { Write-Output 'FAIL:readonly_read'; exit 1 }; Write-Output 'OK:readonly_read'; try { Set-Content -Path $path -Value 'This should fail' -ErrorAction Stop; Write-Output 'FAIL:readonly_write'; exit 1 } catch { Write-Output 'OK:readonly_write_denied'; exit 0 }\"",
     "timeout": 30000
   },
   "filesystem": {
-    "readwritePaths": [
-      "C:\\Users\\AdminUser\\AppData\\Local\\Programs"
-    ],
     "readonlyPaths": [
-      "C:\\temp\\wxc_test_allowedreadonly"
+      "C:\\Windows"
     ]
   },
   "ui": {
