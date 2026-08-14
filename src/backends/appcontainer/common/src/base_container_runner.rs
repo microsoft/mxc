@@ -631,8 +631,8 @@ impl BaseContainerRunner {
             return false;
         }
         if request.policy.allowed_proxy_peer.is_some()
-            && !queried_capabilities
-                .is_some_and(|capabilities| capabilities & SANDBOX_CAP_NETWORK_PROXY != 0)
+            && queried_capabilities
+                .is_none_or(|capabilities| capabilities & SANDBOX_CAP_NETWORK_PROXY == 0)
         {
             return false;
         }
