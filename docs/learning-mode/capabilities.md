@@ -39,10 +39,20 @@ it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
-whenever it is present, both the AppContainer and BaseContainer runners emit an
-always-visible **security warning** on the host's stderr. In-process Rust callers
-can also inspect it through `Sandbox::warnings()` or `Output::warnings`. It is a
-reserved internal capability enabled by the dedicated audit/capture entry points.
+whenever it is present, both the AppContainer and BaseContainer runners record a
+**security warning**. The library does not write it to the host's stderr — it
+must not write to an embedding process's terminal behind its back — so each
+surface delivers it explicitly:
+
+| Surface | How the warning is delivered |
+|---------|------------------------------|
+| Rust | `Sandbox::warnings()` / `Output::warnings` |
+| C# | `RunResult.Warnings` |
+| C ABI (`mxc_ffi`) | `MxcRunResult::warnings_json_utf8` (JSON array of strings) |
+| `wxc-exec` | printed to stderr after the run — the CLI owns its terminal |
+
+It is a reserved internal capability enabled by the dedicated audit/capture
+entry points.
 
 The parser rejects both learning-mode capability names in
 `processContainer.capabilities`, case-insensitively. This prevents a policy from
@@ -69,8 +79,8 @@ wxc-exec --audit --config <config>
 These entry points inject the reserved capability strings internally; users
 must not add them directly to `processContainer.capabilities`.
 When either learning-mode capability is in effect the runner emits a diagnostic
-describing the mode (informational logging for `learningModeLogging`, an
-always-visible stderr security warning for `permissiveLearningMode`).
+describing the mode (informational logging for `learningModeLogging`, a retained
+security warning for `permissiveLearningMode`, readable via `warnings()`).
 
 ## Three learning-mode flows
 
@@ -219,6 +229,25 @@ The pointer echoes the file's `summary`; the authoritative record is the file
 itself. In-process Rust callers receive the same information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
-`MxcSandboxProcess.OutputMetadata`. The intermediate ETW `.etl` trace is an
-internal, runner-managed temp file that MXC decodes and then deletes — callers
-never see it.
+`MxcSandboxProcess.OutputMetadata`.
+
+By default, the intermediate ETW `.etl` trace is an internal, runner-managed
+file in a protected per-run temporary directory that MXC deletes after
+analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
+for diagnostics after a terminal wait. Retention-enabled captures begin under
+`%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and move to a protected
+per-run directory under `capture-denials\retained` only after sealing succeeds.
+Abandoning or disposing a process without a terminal wait deletes the internal
+trace because no caller can observe its structured path. When retention
+succeeds, the structured pointer and in-process metadata include its absolute
+`etlPath`:
+
+```json
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false,"etlPath":"C:\\Users\\runneradmin\\AppData\\Local\\Microsoft\\MXC\\capture-denials\\retained\\4321_0123456789abcdef0123456789abcdef\\capture.etl"}
+```
+
+If analysis fails while retention is enabled, MXC preserves the ETL, includes
+its path in the returned error, and exposes `captureDenialsError` through
+in-process output metadata. ETL traces can contain sensitive resource paths
+and identifiers; callers that retain them are responsible for deleting the ETL
+and its now-empty per-run parent directory when they are no longer needed.

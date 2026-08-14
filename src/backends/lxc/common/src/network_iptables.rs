@@ -203,7 +203,7 @@ impl CreatedResources {
 /// (IPv6 egress is live but unfiltered, which is a silent fail-open on a
 /// security control). They must be handled differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ip6tablesStatus {
+pub(crate) enum Ip6tablesStatus {
     /// `ip6tables` works; program the parallel IPv6 chain.
     Available,
     /// The kernel has no active IPv6, so there is no IPv6 traffic to filter.
@@ -224,7 +224,7 @@ enum Ip6tablesStatus {
 /// policy that leaves IPv6 egress unfiltered — on a host whose IPv6 state we
 /// could not actually read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HostIpv6State {
+pub(crate) enum HostIpv6State {
     /// A non-loopback interface carries an IPv6 address, so IPv6 egress is
     /// possible and must be filtered.
     Active,
@@ -278,6 +278,12 @@ const CHAIN_HASH_BYTES: usize = 10;
 /// This carries no identity; two containers may share a slug.
 const CHAIN_SLUG_LEN: usize = 7;
 
+/// Slug budget for the inbound (ingress) chain. The ingress prefix `MXCI-` is
+/// one byte longer than the egress `MXC-`, so the slug is shortened by one to
+/// keep `MXCI-<slug>-<hash>` within [`CHAIN_NAME_MAX_LEN`]
+/// (5 + 6 + 1 + 16 = 28).
+const INGRESS_CHAIN_SLUG_LEN: usize = 6;
+
 /// RFC 4648 base32 alphabet, lowercased. Base32 packs 5 bits per character
 /// against hex's 4, so 80 bits needs 16 characters here where hex would need
 /// 20. `MXC-`, the slug, and the slug's separator take 12 of the 28 bytes,
@@ -329,19 +335,40 @@ fn base32_lower(bytes: &[u8]) -> String {
 /// chooses container names; that requires a persisted ownership record rather
 /// than a longer name, because 28 characters caps the available entropy.
 pub fn chain_name_for(container_name: &str) -> String {
+    chain_name_with_prefix("MXC-", CHAIN_SLUG_LEN, container_name)
+}
+
+/// Build the *inbound* (ingress) iptables chain name for a container.
+///
+/// Uses a distinct `MXCI-` prefix (vs [`chain_name_for`]'s `MXC-`) so the
+/// inbound `INPUT` chain and the egress `FORWARD` chain for the same container
+/// can never collide or be torn down for each other. Reuses the same base32
+/// hash machinery and stays within [`CHAIN_NAME_MAX_LEN`]; see
+/// [`INGRESS_CHAIN_SLUG_LEN`]. The hash is over the *original* container name,
+/// as in [`chain_name_for`].
+pub fn ingress_chain_name_for(container_name: &str) -> String {
+    chain_name_with_prefix("MXCI-", INGRESS_CHAIN_SLUG_LEN, container_name)
+}
+
+/// Shared chain-name builder: `<prefix><slug>-<hash>`, or `<prefix><hash>` when
+/// the container name yields no slug. The hash is the leading
+/// [`CHAIN_HASH_BYTES`] of the SHA-256 of the original container name, base32
+/// encoded, so names that differ only in slug-dropped characters still receive
+/// different chains.
+fn chain_name_with_prefix(prefix: &str, slug_len: usize, container_name: &str) -> String {
     let digest = Sha256::digest(container_name.as_bytes());
     let hash = base32_lower(&digest[..CHAIN_HASH_BYTES]);
 
     let slug: String = container_name
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(CHAIN_SLUG_LEN)
+        .take(slug_len)
         .collect();
 
     if slug.is_empty() {
-        format!("MXC-{hash}")
+        format!("{prefix}{hash}")
     } else {
-        format!("MXC-{slug}-{hash}")
+        format!("{prefix}{slug}-{hash}")
     }
 }
 
@@ -1350,7 +1377,14 @@ impl NetworkIptablesManager {
     /// active IPv6 there is nothing to filter and skipping is safe, but if
     /// IPv6 is live the tool is genuinely missing or broken and setup must
     /// fail closed rather than leave IPv6 egress unfiltered.
-    fn classify_ip6tables_status(probe_succeeded: bool, host_ipv6_active: bool) -> Ip6tablesStatus {
+    ///
+    /// Exposed to the crate so the inbound (ingress) chain in
+    /// [`crate::network_ingress`] reuses this pure fail-open-vs-fail-closed
+    /// decision while feeding it a *container-namespace*-scoped probe.
+    pub(crate) fn classify_ip6tables_status(
+        probe_succeeded: bool,
+        host_ipv6_active: bool,
+    ) -> Ip6tablesStatus {
         match (probe_succeeded, host_ipv6_active) {
             (true, _) => Ip6tablesStatus::Available,
             (false, true) => Ip6tablesStatus::UnusableButIpv6Active,
@@ -1397,7 +1431,11 @@ impl NetworkIptablesManager {
     /// - Any other read error (permission denied, I/O error) likewise leaves
     ///   the state `Unknown` rather than asserting IPv6 is off. Converting
     ///   such an error into `Inactive` would fail open.
-    fn classify_host_ipv6_state(
+    ///
+    /// Exposed to the crate so [`crate::network_ingress`] can classify a
+    /// *container-namespace* `/proc/<pid>/net/if_inet6` read with the same
+    /// pure logic.
+    pub(crate) fn classify_host_ipv6_state(
         read_result: std::io::Result<String>,
         proc_net_present: bool,
     ) -> HostIpv6State {
@@ -1458,8 +1496,9 @@ impl NetworkIptablesManager {
     /// under a drop-required stance the safe reaction to "we do not know" is to
     /// keep filtering (and, if `ip6tables` is then unusable, to fail closed)
     /// rather than to leave IPv6 egress unfiltered. Pure so the decision is
-    /// unit-testable.
-    fn ipv6_state_treated_as_active(state: HostIpv6State) -> bool {
+    /// unit-testable. Exposed to the crate for reuse by
+    /// [`crate::network_ingress`].
+    pub(crate) fn ipv6_state_treated_as_active(state: HostIpv6State) -> bool {
         match state {
             HostIpv6State::Active | HostIpv6State::Unknown => true,
             HostIpv6State::Inactive => false,

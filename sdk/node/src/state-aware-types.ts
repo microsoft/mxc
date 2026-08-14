@@ -4,6 +4,7 @@
 import {
   ContainmentBackend,
   FilesystemConfig,
+  NetworkConfig,
   ProcessConfig,
 } from './types.js';
 
@@ -18,7 +19,7 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  */
 export type StateAwareContainmentBackend = Extract<
   ContainmentBackend,
-  'isolation_session' | 'windows_sandbox'
+  'isolation_session' | 'windows_sandbox' | 'wslc'
 >;
 
 /**
@@ -119,8 +120,8 @@ export interface WindowsSandboxProvisionConfig {
    * sandbox. `readwritePaths` / `readonlyPaths` are mapped into the guest at
    * the same absolute host path; `deniedPaths` name HOST paths the contained
    * code must not reach. The SDK forwards this policy as-is; the backend
-   * enforces it at provision and rejects a `deniedPath` equal to or nested
-   * within a mapped share (`.wsb` has no Deny primitive).
+   * enforces it at provision and rejects a `deniedPaths` entry equal to or
+   * nested within a mapped share (`.wsb` has no Deny primitive).
    */
   filesystem?: FilesystemConfig;
 }
@@ -142,6 +143,79 @@ export interface WindowsSandboxStopConfig {
 }
 
 export interface WindowsSandboxDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+// WSLc per-(backend, phase) Configs. WSLc runs each sandbox as a warm
+// container behind a persistent host-side daemon (one amortized WSL session
+// shared across sandboxes). Filesystem mounts and network mode are applied at
+// provision and frozen for the sandbox's lifetime; a cooperative env-var proxy
+// may be injected per-exec.
+
+export interface WslcProvisionConfig {
+  /** Schema version (semver). When omitted, the SDK fills in `0.8.0-alpha`. */
+  version?: string;
+  /**
+   * Filesystem policy applied at provision and frozen for the life of the
+   * sandbox. `readwritePaths` / `readonlyPaths` become container volume mounts
+   * at the same absolute host path. The backend runs the same object-identity
+   * normalization + delegation gate as the one-shot runner and rejects a
+   * `deniedPaths` entry equal to or nested within a mounted share (WSLc has no
+   * Deny mount primitive) with `code: 'policy_validation'`.
+   */
+  filesystem?: FilesystemConfig;
+  /**
+   * Network mode applied at provision and frozen thereafter. Only
+   * `defaultPolicy` is honored: `'allow'` provisions a bridged container,
+   * `'block'` (the default when omitted) provisions with no network. Per-host
+   * filtering (`allowedHosts` / `blockedHosts`) and a `proxy` are rejected at
+   * provision (`code: 'policy_validation'`) — WSLc has no in-kernel iptables,
+   * and the cooperative proxy is an exec-phase concern (see
+   * {@link WslcExecConfig.network}).
+   */
+  network?: NetworkConfig;
+  /**
+   * Container image reference (e.g. `alpine:latest`). Defaults to
+   * `alpine:latest` when omitted. Nested under
+   * `experimental.wslc.provision.image` on the wire.
+   */
+  image?: string;
+  /**
+   * Path to a local image tarball to import instead of pulling. Nested under
+   * `experimental.wslc.provision.imageTarPath` on the wire.
+   */
+  imageTarPath?: string;
+}
+
+export interface WslcStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WslcExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+  /**
+   * Per-exec network overrides. Only `proxy` is honored: it injects a
+   * cooperative `HTTP_PROXY` / `HTTPS_PROXY` into the command's environment
+   * (well-behaved HTTP clients honor it; raw-socket clients can bypass it).
+   * WSLc accepts only the `{ url }` proxy form — its containers run in their
+   * own network namespace, so the `localhost` / `builtinTestServer` loopback
+   * forms are unreachable and rejected. Every other network field — host
+   * filters, a `defaultPolicy` change, and `allowLocalNetwork` — is rejected
+   * with `code: 'policy_validation'` (network mode is fixed at provision).
+   */
+  network?: NetworkConfig;
+}
+
+export interface WslcStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface WslcDeprovisionConfig {
   /** Schema version (semver). */
   version?: string;
 }
@@ -183,6 +257,13 @@ type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
     exec: WindowsSandboxExecConfig;
     stop: WindowsSandboxStopConfig;
     deprovision: WindowsSandboxDeprovisionConfig;
+  };
+  wslc: {
+    provision: WslcProvisionConfig;
+    start: WslcStartConfig;
+    exec: WslcExecConfig;
+    stop: WslcStopConfig;
+    deprovision: WslcDeprovisionConfig;
   };
 }>;
 
@@ -274,6 +355,10 @@ export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
   // checks for `C = 'windows_sandbox'`. `Record<never, never>` has `keyof =
   // never`, so every `*MetadataFor<'windows_sandbox'>` resolves to `undefined`.
   windows_sandbox: Record<never, never>;
+  // WSLc returns no metadata for any phase (provision yields only the sandbox
+  // id). `Record<never, never>` has `keyof = never`, so every
+  // `*MetadataFor<'wslc'>` resolves to `undefined`.
+  wslc: Record<never, never>;
   // Future state-aware-capable backends add typed entries here.
 }>;
 

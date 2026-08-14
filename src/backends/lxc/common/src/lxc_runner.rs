@@ -17,6 +17,7 @@ use wxc_common::script_runner::ScriptRunner;
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
+use crate::network_ingress::IngressManager;
 use crate::network_iptables::NetworkIptablesManager;
 use crate::signal_cleanup;
 
@@ -278,6 +279,89 @@ impl LxcScriptRunner {
             }
         }
 
+        // Configure inbound (ingress) network rules inside the container's own
+        // netns. This is a separate, orthogonal chain from the egress rules
+        // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
+        // container's own iptables INPUT chain, reached with `nsenter`.
+        //
+        // A firewall enforcement mode means the caller asked for the inbound
+        // deny chain. LXC enforces it inside the container's own netns, so it
+        // is useless without the init PID that lets us enter that netns — and
+        // the ingress manager cannot even be constructed without one.
+        let use_firewall = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        );
+
+        // Kept in scope for post-execution cleanup; `None` when there is no
+        // netns PID and no firewall was requested (nothing to enforce).
+        let mut ingress_manager: Option<IngressManager> = None;
+
+        match container.init_pid() {
+            Some(pid) => {
+                let _ = writeln!(logger, "Container init PID: {}", pid);
+                if self.destroy_on_exit {
+                    // Tell the watchdog about the netns PID so signal-time
+                    // cleanup can remove the container's INPUT rules before it's
+                    // destroyed.
+                    signal_cleanup::set_active_pid(pid);
+                }
+                let mut mgr = IngressManager::new(&container_name, pid);
+                match mgr.apply_firewall_rules(&request.policy, logger) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if self.destroy_on_exit || container_created {
+                            let _ = container.destroy();
+                        }
+                        return ScriptResponse::error(
+                            "Failed to apply inbound network firewall rules.",
+                        );
+                    }
+                    Err(e) => {
+                        if self.destroy_on_exit || container_created {
+                            let _ = container.destroy();
+                        }
+                        return ScriptResponse::error(&format!(
+                            "Inbound network policy error: {}",
+                            e
+                        ));
+                    }
+                }
+                // Every non-success arm above returns, so the apply call
+                // succeeded. Only now may the policy be marked for
+                // preservation: the flag also suppresses `Drop`, and a partial
+                // chain from a failed install must still be torn down. Success
+                // does not imply a chain exists — a non-firewall enforcement
+                // mode succeeds without installing one — but in that case no
+                // ownership flag is set and `Drop` has nothing to do either way.
+                mgr.set_preserve_policy(!self.cleanup_policy);
+                ingress_manager = Some(mgr);
+            }
+            None if use_firewall => {
+                // The run asked for a firewall but we could not find the
+                // container netns to enforce it in. There is no legitimate
+                // ingress-without-a-netns case: enforcing inbound requires
+                // entering the container's namespace, so running anyway would
+                // silently disable the requested inbound deny (a fail-open).
+                // Abort instead. This guard is specific to the LXC ingress
+                // path, which addresses its namespace by init PID; other
+                // backends reach their firewall handling through their own
+                // runners and never construct an `IngressManager`.
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(
+                    "Failed to discover the container init PID; cannot enter the container \
+                     network namespace to enforce the requested inbound firewall. Aborting \
+                     rather than running with inbound enforcement silently disabled.",
+                );
+            }
+            None => {
+                // No firewall requested and no netns PID: nothing to enforce
+                // inbound, so no ingress chain is installed.
+            }
+        }
+
         let mut pinned = false;
 
         // A proxied chain opens no port 53, so without this the container has
@@ -377,6 +461,11 @@ impl LxcScriptRunner {
         // Cleanup: remove network rules
         if fw_manager.rules_applied() && self.cleanup_policy {
             let _ = fw_manager.remove_firewall_rules(logger);
+        }
+        if let Some(mgr) = &mut ingress_manager {
+            if mgr.rules_applied() && self.cleanup_policy {
+                let _ = mgr.remove_firewall_rules(logger);
+            }
         }
 
         // Cleanup: destroy container if configured

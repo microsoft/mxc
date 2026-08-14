@@ -359,12 +359,13 @@ concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl reuses the existing one-shot `create_process` path
-synchronously: `manager.create_process(&options)` blocks until the agent
-process exits and the relay drains. Two concurrent exec calls against the
-same `sandboxId` from two `wxc-exec` processes are not coordinated by MXC;
-the OS-side service serialises (or rejects, depending on session state) at
-its own layer.
+The runner's `exec` impl blocks for an **executor** consumer: it reuses the
+one-shot `create_process` path, and that call runs until the agent process
+exits and the relay drains. For an **in-process** consumer it starts the
+process and returns without waiting, handing back the live pipe handles and a
+waiter, so the caller decides when to block. Either way, two concurrent exec
+calls against the same `sandboxId` are not coordinated by MXC; the OS-side
+service serialises (or rejects, depending on session state) at its own layer.
 
 ### Deprovision and concurrent sandboxes
 
@@ -452,12 +453,31 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.
 
-`ExecHandle.terminator` is currently a no-op closure on the
-IsolationSession path because the backend reuses the one-shot
-`create_process` synchronously and there is no mid-flight cancellation
-seam. Future work — explicit Rust-layer `AbortSignal` plumbing — would
-require splitting `create_process` into a non-blocking start + a separate
-waiter, with `terminator` invoking `IsoSessionProcess::Terminate()`.
+`ExecHandle.terminator` is a no-op closure on the IsolationSession path
+when the consumer is the executor binary, which reuses the one-shot
+`create_process` synchronously and so has no mid-flight cancellation
+seam. For an in-process consumer the backend instead starts the process
+without waiting and returns a terminator that calls
+`IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
+waiter that blocks on exit.
+
+That terminator reports **nothing**: `ExecHandle.terminator` is an
+infallible `FnOnce()`, so the backend requests termination and discards
+whether the platform even accepted it. The underlying
+`StartedProcess::terminate` does distinguish an accepted request from a
+rejected one — it is the handle type that has nowhere to carry the
+answer. Teardown is also not bounded: the streaming adapter's `Drop`
+joins the waiter unconditionally, and nothing in that path caps the
+wait. A process that survives the kill can park that waiter by either of
+two routes — in its leading `WaitForExit` (INFINITE when the caller
+supplied no timeout), or, when a timeout was supplied, in the graceful
+ladder's tier 3, which is `Terminate` followed by an INFINITE
+`WaitForExit(0)`. Neither is certain to stall: tier 1 ends a child that
+exits on stdin EOF once the caller has dropped its own duplicate of the
+write end, and tier 3's `Terminate` is a fresh attempt that may land
+where the first did not. The narrow claim is that nothing bounds the
+join if the process does survive. Making the terminator fallible end to
+end, and bounding that join, is future work.
 
 ## Known issues
 

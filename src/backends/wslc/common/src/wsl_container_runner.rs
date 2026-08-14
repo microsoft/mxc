@@ -29,6 +29,7 @@ use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::container_steps::sdk_error;
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
@@ -146,6 +147,13 @@ fn write_through(mut sink: impl std::io::Write, bytes: &[u8]) -> std::io::Result
 /// output has been flushed and no further callback can arrive. Bounded so a
 /// misbehaving runtime can't park teardown forever.
 const EXIT_CALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// VM/session boot budget, in milliseconds. This is the deadline for bringing
+/// the WSL session up, and is deliberately independent of the per-command
+/// `scriptTimeout` (the command runtime deadline is enforced separately at the
+/// wait, see [`wait_timeout_ms`]). A short `scriptTimeout` must not be able to
+/// abort a cold VM boot.
+const SESSION_BOOT_TIMEOUT_MS: u32 = 180_000;
 
 /// Lock a mutex, tolerating poisoning: every mutex here guards plain output
 /// state with no invariant a panicking writer could break.
@@ -593,16 +601,6 @@ enum TarFormat {
     Unknown,
 }
 
-/// Create a ScriptResponse error from an HRESULT failure with optional SDK error message.
-fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
-}
-
 /// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
 /// reports as missing. `missing` may combine multiple bits, and the guidance is branched
 /// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
@@ -768,11 +766,9 @@ impl WSLContainerRunner {
                 return Err(sdk_error("WslcSetSessionSettingsMemory failed", hr, ""));
             }
         }
-        if request.script_timeout > 0 {
-            let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, request.script_timeout);
-            if hr != S_OK {
-                return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
-            }
+        let hr = sdk.WslcSetSessionSettingsTimeout(&mut settings, SESSION_BOOT_TIMEOUT_MS);
+        if hr != S_OK {
+            return Err(sdk_error("WslcSetSessionSettingsTimeout failed", hr, ""));
         }
         if self.config.gpu {
             let hr = sdk.WslcSetSessionSettingsFeatureFlags(
@@ -1288,17 +1284,14 @@ impl WSLContainerRunner {
     ) -> Result<StartedContainer, ScriptResponse> {
         let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
 
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw) before mapping to
-        // volume mounts. See `wxc_common::filesystem_object`. (A path moved to
-        // `denied` is simply not mounted by WSLC — unmounted = invisible.) Only
-        // clone the request when an aliasing conflict actually needs tightening;
-        // an unresolvable path with deniedPaths present fails closed.
+        // WSLc provision-time filesystem-policy gate (D6 normalization → D3
+        // delegation → denied-path overlap), shared verbatim with the
+        // state-aware provision path via `policy_mapping::apply_provision_policy_gate`
+        // so the two runners cannot drift. Only clone the request when
+        // normalization actually tightened something; any failure is surfaced on
+        // the streaming logger and returned as a `ScriptResponse` error.
         let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
-            &request.policy,
-            logger,
-        ) {
+        let request = match policy_mapping::apply_provision_policy_gate(request, logger) {
             Ok(Some(policy)) => {
                 normalized = ExecutionRequest {
                     policy,
@@ -1307,34 +1300,11 @@ impl WSLContainerRunner {
                 &normalized
             }
             Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
+            Err(msg) => {
+                let _ = writeln!(logger, "[WSLC] {}", msg);
+                return Err(ScriptResponse::error(&msg));
+            }
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents. On Windows this covers directory readwrite paths (the common
-        // WSLC case).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
-
-        // Denied-path overlap validation: WSLC's flat volume-mount surface has no
-        // overlay primitive, so a deniedPaths entry nested under a mounted
-        // (readwrite/readonly) parent cannot be masked and would stay accessible
-        // through the parent mount. A lexical tier catches `..`/case/whole-drive
-        // spellings; a canonicalizing tier resolves symlink/junction/8.3/`\\?\`
-        // aliases (including a not-yet-created deny under an aliased parent) and
-        // fails closed on unresolvable paths. Reject such configs rather than
-        // silently leaving the subtree exposed. Runs after object normalization
-        // so it sees the already-tightened intents.
-        if let Err(msg) = policy_mapping::validate_denied_path_overlap(
-            &request.policy.readwrite_paths,
-            &request.policy.readonly_paths,
-            &request.policy.denied_paths,
-        ) {
-            let _ = writeln!(logger, "[WSLC] {}", msg);
-            return Err(ScriptResponse::error(&msg));
-        }
 
         // -- Init: COM + SDK + preflight --
         let sdk = Self::init_and_load_sdk(logger)?;
@@ -1497,25 +1467,27 @@ impl WSLContainerRunner {
         // therefore only ever sees `"tcp"` today, but the explicit branch is
         // retained so this code keeps compiling cleanly if/when the parser
         // starts accepting UDP after an SDK update.
-        if !self.config.port_mappings.is_empty() {
-            let mappings: Vec<WslcContainerPortMapping> = self
-                .config
-                .port_mappings
-                .iter()
-                .map(|pm| WslcContainerPortMapping {
-                    windowsPort: pm.windows_port,
-                    containerPort: pm.container_port,
-                    protocol: if pm.protocol == "udp" {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
-                    } else {
-                        WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
-                    },
-                    // Default bind address (typically loopback/0.0.0.0 per
-                    // SDK config). Not exposed in the MXC config today.
-                    windowsAddress: ptr::null_mut(),
-                })
-                .collect();
-
+        // Built at function scope: these arrays must outlive
+        // `WslcCreateContainer` below, which is the call that actually consumes
+        // the pointers handed to `WslcSetContainerSettingsPortMappings`.
+        let mappings: Vec<WslcContainerPortMapping> = self
+            .config
+            .port_mappings
+            .iter()
+            .map(|pm| WslcContainerPortMapping {
+                windowsPort: pm.windows_port,
+                containerPort: pm.container_port,
+                protocol: if pm.protocol == "udp" {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_UDP
+                } else {
+                    WslcPortProtocol::WSLC_PORT_PROTOCOL_TCP
+                },
+                // Default bind address (typically loopback/0.0.0.0 per
+                // SDK config). Not exposed in the MXC config today.
+                windowsAddress: ptr::null_mut(),
+            })
+            .collect();
+        if !mappings.is_empty() {
             let hr = sdk.WslcSetContainerSettingsPortMappings(
                 &mut container_settings,
                 mappings.as_ptr(),
@@ -1555,17 +1527,18 @@ impl WSLContainerRunner {
             })
             .collect();
 
-        if !mounts.is_empty() {
-            let volumes: Vec<WslcContainerVolume> = wide_paths
-                .iter()
-                .zip(mounts.iter())
-                .map(|((win, ctr), m)| WslcContainerVolume {
-                    windowsPath: win.as_ptr(),
-                    containerPath: ctr.as_ptr() as PCSTR,
-                    readOnly: if m.read_only { 1 } else { 0 },
-                })
-                .collect();
-
+        // Built at function scope alongside `wide_paths`: these structs point
+        // into `wide_paths` and must outlive `WslcCreateContainer` below.
+        let volumes: Vec<WslcContainerVolume> = wide_paths
+            .iter()
+            .zip(mounts.iter())
+            .map(|((win, ctr), m)| WslcContainerVolume {
+                windowsPath: win.as_ptr(),
+                containerPath: ctr.as_ptr() as PCSTR,
+                readOnly: if m.read_only { 1 } else { 0 },
+            })
+            .collect();
+        if !volumes.is_empty() {
             let hr = sdk.WslcSetContainerSettingsVolumes(
                 &mut container_settings,
                 volumes.as_ptr(),

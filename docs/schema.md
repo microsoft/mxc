@@ -84,10 +84,15 @@ production configs and the dev schema when working on experimental features:
                                            // is logged (deny-by-default preserved). "allow":
                                            // access is allowed and logged (audit; relaxes
                                            // deny-by-default, emits a security warning).
-            "outputPath": "C:\\logs\\denials.json" // JSON denials file the app reads. The parent
-        }                                  // dir must already exist; a unique per-run id is stamped
-                                           // into the stem (denials.<run-id>.json) and the actual
-                                           // path printed on stderr. Omit outputPath for a managed temp file.
+            "outputPath": "C:\\logs\\denials.json", // JSON denials file the app reads. Parent dir
+                                           // must exist; a unique per-run id is stamped into the
+                                           // stem and the actual path is printed on stderr.
+            "retainEtl": false             // Keep the sealed ETL after analysis and report its
+                                           // path in output metadata. Defaults to false.
+                                           // Retention requires a terminal wait; abandoning the
+                                           // process handle deletes the internal trace.
+        }
+                                           // Omit outputPath for a managed JSON output file.
                                            // captureDenials cannot be combined with leastPrivilege.
                                            // captureDenials cannot currently be combined with network.proxy.
     },

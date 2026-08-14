@@ -72,11 +72,65 @@ pub struct DeprovisionResult<M> {
     pub metadata: Option<M>,
 }
 
+/// Who will consume an exec's streams — the state-aware counterpart to
+/// [`StdioMode`](crate::sandbox_process::StdioMode).
+///
+/// This is deliberately **not** `StdioMode`. That enum offers `Inherit`,
+/// meaning the OS hands the child the executor's own stdin/stdout/stderr. No
+/// state-aware backend can do that: the workload runs inside an isolation
+/// session, inside a VM, or behind an SDK callback, so its streams always have
+/// to be materialised on this side of the boundary and copied across. For this
+/// contract `Inherit` is not merely ambiguous, it is unimplementable.
+///
+/// What a state-aware backend needs to know is who is on the other end, because
+/// that decides the **topology** of the streams it returns:
+///
+/// * [`Executor`](Self::Executor) — the executor binary relays onto its own
+///   stdio for a human. The backend may allocate a pseudo-console inside the
+///   sandbox when the executor is itself on a TTY. A pseudo-console has a
+///   single output stream, so stderr is then merged into stdout and
+///   [`ExecHandle::stderr`] is null. That is a correct result, not a failure.
+///
+///   Under this variant the relay forwards **no** input, so the backend must
+///   not give the child a stdin pipe whose write end it retains: nothing would
+///   ever write to it or close it, and a workload that reads stdin would block
+///   forever. Give the child a stdin already at EOF, and return a null
+///   [`ExecHandle::stdin`].
+/// * [`Library`](Self::Library) — an in-process caller (the Rust SDK, the FFI)
+///   drives the streams itself. The backend must return separate raw stdout and
+///   stderr pipes, allocate no pseudo-console, and leave the host's console
+///   untouched.
+///
+/// The value is **authoritative**. A backend that probes the host to shape
+/// stdio ("is my stdout a terminal?") may consult that probe only within
+/// `Executor`. Under `Library` the probe is meaningless — an embedded host's
+/// stdout says nothing about the sandbox — and acting on it risks mutating
+/// console state the caller owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecConsumer {
+    /// The executor binary, relaying the streams to its own stdio.
+    Executor,
+    /// An in-process caller, driving the returned streams itself.
+    Library,
+}
+
 /// Streaming exec handle. The dispatcher relays `stdout` / `stderr` to the
-/// executor's own streams, forwards executor stdin into `stdin`, awaits exit
-/// via `waiter`, and calls `terminator` on cancellation signals. Pipe-handle
-/// ownership stays with the underlying process object; the relay does not
-/// close them.
+/// executor's own streams, awaits exit via `waiter`, and calls `terminator` to
+/// tear the exec down.
+///
+/// # Handle ownership
+///
+/// Ownership of `stdout` and `stderr` stays with the underlying process object:
+/// consumers duplicate them and never close the originals.
+///
+/// `stdin` is **not consumed by the executor relay**, which forwards no input.
+/// The streaming path does hand it to an in-process caller, but with a caveat
+/// that is a known gap rather than a contract: because the handle is duplicated
+/// rather than taken, dropping the writer a caller obtained does not close the
+/// child's stdin, so a workload reading to EOF will not see one. Closing it
+/// needs an ownership model this type does not have yet — a pipe reaches EOF
+/// only once *every* write handle is closed, and nothing here can close the
+/// backend's original.
 pub struct ExecHandle {
     pub stdout: PipeHandle,
     pub stderr: PipeHandle,
@@ -149,11 +203,43 @@ pub trait StatefulSandboxBackend {
     }
 
     /// Required. Executes the workload and returns a streaming handle.
+    ///
+    /// `consumer` carries the **caller's** intent and is authoritative — see
+    /// [`ExecConsumer`] for the full contract, including why this is not
+    /// [`StdioMode`](crate::sandbox_process::StdioMode) and what each variant
+    /// implies for the topology of the returned streams.
+    ///
+    /// In short: [`ExecConsumer::Library`] means an in-process caller drives
+    /// the returned handle, so the backend must surface separate real pipe
+    /// handles and must not touch the host's console;
+    /// [`ExecConsumer::Executor`] means the executor binary is relaying to its
+    /// own stdio, where a pseudo-console is legitimate and stderr may therefore
+    /// arrive merged into stdout.
+    ///
+    /// # Honored by one backend so far
+    ///
+    /// The above states what an implementation must satisfy to be driven
+    /// through the streaming entry points. It is not yet a description of every
+    /// backend's behaviour:
+    ///
+    /// - **IsolationSession** honors both variants. Under `Library` it starts
+    ///   the process without waiting, hands back its real pipe handles, a waiter
+    ///   that blocks on exit and a terminator that kills, and does not touch the
+    ///   host console. Under `Executor` it relays internally and returns null
+    ///   handles.
+    /// - **Windows Sandbox** and **WSLc** relay internally and return null
+    ///   handles whatever the caller asked for, so for those two the streaming
+    ///   path still yields a process with no streams — treat them as
+    ///   executor-path only.
+    ///
+    /// Reaching any of this from an in-process caller additionally requires the
+    /// experimental opt-in, which the state-aware entry points do not yet expose.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -254,6 +340,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
+            _consumer: ExecConsumer,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("StubBackend::exec not implemented"))
         }
@@ -335,7 +422,12 @@ mod tests {
         // surface this code rather than aborting the test binary.
         let mut b = StubBackend;
         let err = b
-            .exec("stub:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "stub:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
     }

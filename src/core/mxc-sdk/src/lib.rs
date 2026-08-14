@@ -120,7 +120,8 @@ pub use mxc_engine::{
 };
 
 pub use sandbox::{
-    CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata, StreamCloser, WaitOutcome,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,
+    StreamCloser, WaitOutcome,
 };
 
 /// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with

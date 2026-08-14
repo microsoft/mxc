@@ -11,7 +11,7 @@ For which policy aspects this backend can enforce on each Windows 11 release
 ## Prerequisites
 
 1. Read the
-[Sandbox Policy spec](../sandbox-policy/v1/policy.md) to
+[Sandbox Policy spec](../sandbox-policy/0.7.0/policy.md) to
 understand how SandboxPolicy maps to ContainerConfig.
 2. Read
 [authoring-a-new-feature.md](../authoring-a-new-feature.md),

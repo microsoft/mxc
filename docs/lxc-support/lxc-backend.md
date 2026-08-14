@@ -109,9 +109,11 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
-Everything in this section requires `enforcementMode` to be `firewall` or `both`.  Under the default `capabilities` mode, MXC installs no iptables rules at all, so `defaultPolicy`, `allowedHosts`, and `blockedHosts` are parsed but never take effect.
+Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Network policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
+Both halves require `enforcementMode` to be `firewall` or `both`.  Under the default `capabilities` mode, MXC installs no iptables rules at all, so `defaultPolicy`, `allowedHosts`, and `blockedHosts` are parsed but never take effect.
+
+Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
 | Policy | Implementation |
 |--------|---------------|
@@ -214,7 +216,32 @@ filters nothing — strictly worse than no firewall, because it looks enforced.
 Installing the rules host-wide instead is not an option either: unscoped, they
 would apply to every container and to the host's own traffic.
 
-Firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no network-policy opt-out field. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
+Egress firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` does not currently keep the egress chains alive. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
+
+### Inbound (ingress) policy
+
+Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
+
+Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
+
+The rows below describe the `firewall` and `both` enforcement modes. `networkEnforcementMode` defaults to `capabilities`, and under that mode the ingress path installs nothing at all — the same gate that skips the egress chains skips this one, so inbound is unfiltered and `allowLocalNetwork: true` is accepted rather than refused. Inbound default-deny is a property of the firewall enforcement modes, not of every LXC run.
+
+| Policy (`networkEnforcementMode`: `firewall` or `both`) | Implementation |
+|--------|---------------|
+| `allowLocalNetwork: false` (default) | Container `INPUT` chain drops new inbound connections |
+| `allowLocalNetwork: true` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
+
+The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
+
+IPv6 is classified with the same three-way probe as egress, but against the *container* namespace rather than the host, and from a different signal. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
+
+The signal differs because a container is not a long-running host. Egress reads the *contents* of `/proc/net/if_inet6` and treats loopback-only as inactive, which is a fair reading for a host that has been up for a while. A container has not been: `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off. Inbound therefore keys on that file's *existence*, which is stable — the kernel never creates `/proc/<pid>/net/if_inet6` when IPv6 is disabled at boot. A present but address-less file counts as active, so an unusable `ip6tables` fails the run closed instead of installing IPv4-only enforcement that an IPv6 address arriving moments later would slip past. The trade is deliberate and one-directional: this can abort a run that the egress rule would have let proceed, never the reverse.
+
+Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
+
+Inbound default-deny is not a containment boundary against the sandboxed workload. Because the chain lives in the container's own network namespace, the workload can reach it: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chain lives in, where it can flush or delete it. The egress chains are not exposed this way: they sit on the host and hook into `FORWARD` by the container's host-side veth, out of the workload's reach. The asymmetry follows from where each chain is installed. Inbound default-deny therefore closes off external reachability — including for services the workload itself starts — for any workload that does not deliberately tear it down, and does not survive one that does. Making inbound enforcement tamper-proof is tracked in issue #854.
+
+Unlike egress, the inbound chain honors the lifecycle's `preservePolicy`: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
 ### Cooperative proxy
 

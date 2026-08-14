@@ -948,6 +948,7 @@ fn convert_wire_config(
             policy.capture_denials = Some(CaptureDenialsConfig {
                 mode,
                 output_path: cd.output_path,
+                retain_etl: cd.retain_etl.unwrap_or(false),
             });
         }
 
@@ -995,6 +996,14 @@ fn convert_wire_config(
     // to `Block` either way).
     policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
+        // Presence of any network *mode* field (everything except `proxy`), so
+        // post-provision phases can reject an immutable-posture change by
+        // presence while still accepting a proxy-only network block.
+        policy.network_mode_specified = net.default_policy.is_some()
+            || net.enforcement_mode.is_some()
+            || net.allow_local_network.is_some()
+            || net.allowed_hosts.is_some()
+            || net.blocked_hosts.is_some();
         if let Some(proxy) = net.proxy {
             // Capture which shorthand was used before the wire proxy is
             // consumed — LXC can't reach a localhost/loopback proxy.
@@ -1509,6 +1518,20 @@ fn convert_wire_state_aware(
         .as_ref()
         .map(|c| map_wire_containment(Some(c)));
 
+    // `containment` is a provision-only field: the backend is selected once at
+    // provision, and every later phase routes by `sandboxId`. A stray
+    // `containment` on a non-provision phase would otherwise leak into the
+    // shared converter's per-backend network guards and produce contradictory
+    // policy behavior (e.g. an exec `containment:"wslc"` + proxy is rejected
+    // either as "proxy requires allow" or as an immutable post-provision mode
+    // change). Reject it once, clearly, as a malformed envelope.
+    if phase != Phase::Provision && cfg.containment.is_some() {
+        return Err(WxcError::ConfigParse(format!(
+            "State-aware '{phase}' requests must not carry 'containment'; the backend is fixed \
+             at provision and later phases route by 'sandboxId'."
+        )));
+    }
+
     // Mirror the one-shot rejection of moved-to-stable experimental sections.
     // The one-shot path errors on `experimental.seatbelt` in `convert_wire_config`,
     // but the state-aware path peels `experimental` into `experimental_raw`
@@ -1883,6 +1906,82 @@ mod tests {
         }"#;
         let r = load_mxc(json);
         assert!(matches!(r, Err(ParseError::StateAware(_))), "got {:?}", r);
+    }
+
+    #[test]
+    fn state_aware_rejects_containment_on_non_provision_phase() {
+        // `containment` is provision-only; later phases route by `sandboxId`.
+        // A stray `containment` on start/exec/stop/deprovision is a malformed
+        // envelope, rejected once rather than leaking into per-backend guards.
+        for phase in ["start", "exec", "stop", "deprovision"] {
+            let json = format!(
+                r#"{{
+                    "phase": "{phase}",
+                    "sandboxId": "iso:abcd1234",
+                    "containment": "wslc"
+                }}"#
+            );
+            let opts = LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            };
+            let r = load_mxc_with_opts(&json, opts);
+            assert!(
+                matches!(r, Err(ParseError::StateAware(_))),
+                "phase {phase}: expected state-aware rejection, got {:?}",
+                r
+            );
+        }
+    }
+
+    /// Parse a provision request and return the resolved cross-cutting policy.
+    fn provision_policy(network_json: &str) -> ContainerPolicy {
+        let json = format!(
+            r#"{{
+                "phase": "provision",
+                "containment": "processcontainer",
+                "network": {network_json}
+            }}"#
+        );
+        match load_mxc(&json).unwrap() {
+            MxcRequest::StateAware(p) => p.request.policy,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        }
+    }
+
+    #[test]
+    fn state_aware_network_mode_specified_true_for_each_mode_field() {
+        // Every network *mode* field (everything except `proxy`) must flip the
+        // presence bit so post-provision phases can reject an immutable-posture
+        // change by presence.
+        for net in [
+            r#"{"defaultPolicy": "allow"}"#,
+            r#"{"enforcementMode": "firewall"}"#,
+            r#"{"allowLocalNetwork": true}"#,
+            r#"{"allowedHosts": ["example.com"]}"#,
+            r#"{"blockedHosts": ["example.com"]}"#,
+        ] {
+            let policy = provision_policy(net);
+            assert!(
+                policy.network_mode_specified,
+                "network {net} should set network_mode_specified"
+            );
+            assert!(policy.network_specified);
+        }
+    }
+
+    #[test]
+    fn state_aware_proxy_only_block_leaves_network_mode_unspecified() {
+        // A proxy-only block sets `network_specified` (the block is present) but
+        // NOT `network_mode_specified`, so the cooperative proxy stays honourable
+        // at exec while no immutable mode change is falsely detected.
+        let policy = provision_policy(r#"{"proxy": {"url": "http://proxy.example:8080"}}"#);
+        assert!(policy.network_specified);
+        assert!(
+            !policy.network_mode_specified,
+            "proxy-only block must not set network_mode_specified"
+        );
+        assert!(policy.network_proxy.is_enabled());
     }
 
     #[test]
@@ -2669,8 +2768,23 @@ mod tests {
             .capture_denials
             .expect("captureDenials presence should enable capture");
         assert!(cd.output_path.is_none());
+        assert!(!cd.retain_etl);
         // Omitting `mode` defaults to the safe block behavior.
         assert_eq!(cd.mode, CaptureDenialsMode::Block);
+    }
+
+    #[test]
+    fn capture_denials_retain_etl_is_parsed() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "containment": "processcontainer",
+            "processContainer": {"captureDenials": {"retainEtl": true}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        let cd = req.policy.capture_denials.expect("captureDenials present");
+        assert!(cd.retain_etl);
     }
 
     #[test]

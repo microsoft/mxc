@@ -7,19 +7,21 @@
 //! between caller invocations.
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use serde::Serialize;
 
 use wxc_common::models::{ExecutionRequest, IsolationSessionProvisionConfig};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
 
 use windows::Win32::Foundation::HANDLE;
 
 use super::error::map_lifecycle_error;
-use super::manager::IsolationSessionManager;
+use super::manager::{ClosingProcess, IsolationSessionManager};
 use super::policy::{validate_post_provision_policy, validate_provision_policy};
 use super::process_options::build_process_options;
 use super::sandbox_id::{self, SandboxIdPayload};
@@ -50,6 +52,30 @@ pub struct IsolationSessionProvisionMetadata {
 /// format and its rationale.
 fn extract_agent_user_name(sandbox_id: &str) -> Result<String, MxcError> {
     Ok(sandbox_id::decode(sandbox_id)?.agent_user_name)
+}
+
+/// Whether this exec should ask the OS API to set up a ConPTY.
+///
+/// `host_is_terminal` is a **closure**, not a value, and that is load-bearing:
+/// Rust evaluates arguments eagerly, so passing the probe's result would run the
+/// probe on the `Library` path too — contradicting the contract this function
+/// exists to enforce. Taking a closure makes "never probes under `Library`" a
+/// property of the code rather than a claim in a comment, and one a test can
+/// actually observe.
+///
+/// The rule itself: only [`ExecConsumer::Executor`] may consult the host. Under
+/// `Library` an embedded host's stdout says nothing about the sandbox, and
+/// allocating a pseudo-console would both merge stderr into stdout — destroying
+/// the separate streams the caller asked for — and touch console state the
+/// caller owns.
+fn wants_interactive_console(
+    consumer: ExecConsumer,
+    host_is_terminal: impl FnOnce() -> bool,
+) -> bool {
+    match consumer {
+        ExecConsumer::Executor => host_is_terminal(),
+        ExecConsumer::Library => false,
+    }
 }
 
 impl StatefulSandboxBackend for IsolationSessionRunner {
@@ -210,41 +236,128 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         validate_post_provision_policy(request).map_err(map_lifecycle_error)
     }
 
-    /// Reuses `IsolationSessionManager::create_process` — the same path the
-    /// one-shot runner uses. Output streams to wxc-exec's stdout/stderr via
-    /// internal relay threads while the call is in flight; the call returns
-    /// once the process has exited and the relays have drained. The
-    /// resulting `ExecHandle` carries sentinel pipe handles plus a waiter
-    /// closure that yields the already-captured exit code, so the
-    /// dispatcher's `relay_exec_to_stdio` is a thin call-through.
+    /// Executes the workload inside the running isolation session.
+    ///
+    /// **The two consumers get different shapes, deliberately** — see
+    /// [`ExecConsumer`]. Under `Executor` this keeps the backend's own relay:
+    /// `create_process` blocks, bridging the guest's pipes to wxc-exec's stdio
+    /// through internal threads that also manage the ConPTY, the raw-VT console
+    /// mode, the viewport size and stdin. None of that exists in the
+    /// dispatcher's generic relay — which since the relay landed does not
+    /// forward stdin at all — so handing it real handles here would regress the
+    /// interactive shell. The returned `ExecHandle` therefore carries sentinel
+    /// handles plus a waiter yielding the already-captured exit code, and the
+    /// dispatcher's relay stays a call-through.
+    ///
+    /// Under `Library` the caller drives the streams, so this starts the process
+    /// without waiting and hands back its real pipe handles, a waiter that
+    /// blocks on exit, and a terminator that actually kills. It performs **no**
+    /// console probe: an embedded host's stdout says nothing about the sandbox,
+    /// and touching console state would mutate something the caller owns.
+    ///
+    /// # Testing gap — deliberate, and not closable here
+    ///
+    /// The `Library` branch has **no end-to-end coverage**: nothing proves that
+    /// the returned handles really stream, or that the terminator really kills.
+    /// Two independent reasons, and neither is fixable at this layer:
+    ///
+    /// 1. It needs a host running the OS-side isolation-session service, which
+    ///    CI and most dev machines do not have.
+    /// 2. More fundamentally, the path is unreachable through the public
+    ///    in-process entry points even *on* such a host:
+    ///    `mxc_engine::exec_state_aware` calls `require_experimental_optin`,
+    ///    and `config_parser` hardcodes `experimental_enabled: false` with the
+    ///    only setter sitting on the one-shot builder. Until the state-aware
+    ///    entry points take an `experimental` parameter, every in-process call
+    ///    against this backend is rejected before it reaches `exec`.
+    ///
+    /// A test could fake its way past (2) by building the request in-crate with
+    /// the flag set, but that scaffolding would have to be deleted as soon as
+    /// the real opt-in lands. The end-to-end proof belongs with the change that
+    /// makes this path publicly reachable.
+    ///
+    /// What *is* pinned here: the consumer split itself
+    /// (`wants_interactive_console`), and — in `wxc_common` — that
+    /// `ExecSandboxProcess::wait` drains streams the caller did not take, which
+    /// is the deadlock this branch would otherwise arm.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         let agent_user_name = extract_agent_user_name(sandbox_id)?;
         let manager =
             IsolationSessionManager::new(&agent_user_name).map_err(map_lifecycle_error)?;
 
-        let interactive = std::io::stdout().is_terminal();
-        let options = build_process_options(request, interactive);
+        match consumer {
+            ExecConsumer::Executor => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(consumer, || std::io::stdout().is_terminal()),
+                );
 
-        let exit_code = manager
-            .create_process(&options)
-            .map_err(map_lifecycle_error)?;
+                let exit_code = manager
+                    .create_process(&options)
+                    .map_err(map_lifecycle_error)?;
 
-        // The output relay completed inside `create_process`. The dispatcher
-        // sees zero pipe handles, skips its own relay setup, and gets the
-        // exit code from the waiter closure.
-        let null = HANDLE(std::ptr::null_mut());
-        Ok(ExecHandle {
-            stdout: null,
-            stderr: null,
-            stdin: null,
-            waiter: Box::new(move || Ok(exit_code)),
-            terminator: Box::new(|| {}),
-        })
+                // The output relay completed inside `create_process`. The
+                // dispatcher sees zero pipe handles, skips its own relay setup,
+                // and gets the exit code from the waiter closure.
+                let null = HANDLE(std::ptr::null_mut());
+                Ok(ExecHandle {
+                    stdout: null,
+                    stderr: null,
+                    stdin: null,
+                    waiter: Box::new(move || Ok(exit_code)),
+                    terminator: Box::new(|| {}),
+                })
+            }
+            ExecConsumer::Library => {
+                let options = build_process_options(
+                    request,
+                    wants_interactive_console(consumer, || std::io::stdout().is_terminal()),
+                );
+                let timeout_ms = options.timeout_ms;
+
+                let started = Arc::new(ClosingProcess::new(
+                    manager
+                        .start_process(&options)
+                        .map_err(map_lifecycle_error)?,
+                ));
+
+                // Read the handles before the closures take ownership. A zero
+                // means the stream is genuinely absent, which is exactly the
+                // sentinel the consumer already treats as "no stream".
+                let stdout = HANDLE(started.stdout as *mut std::ffi::c_void);
+                let stderr = HANDLE(started.stderr as *mut std::ffi::c_void);
+                let stdin = HANDLE(started.stdin as *mut std::ffi::c_void);
+
+                // `IsoSessionProcess` is an agile WinRT object (the bindings
+                // declare it `Send + Sync`), so both closures can hold it
+                // without the apartment-affine worker thread the WSLC backend
+                // needs.
+                let waiter_process = Arc::clone(&started);
+                Ok(ExecHandle {
+                    stdout,
+                    stderr,
+                    stdin,
+                    waiter: Box::new(move || {
+                        waiter_process.wait(timeout_ms).map_err(map_lifecycle_error)
+                    }),
+                    // `ExecHandle::terminator` cannot report failure, so a
+                    // failed kill is logged-by-discard here. The fallible
+                    // signature still earns its keep: it is what stops
+                    // `terminate` from waiting INFINITE on a `Terminate` that
+                    // never landed, and it lets a future handle type surface
+                    // the error without changing the backend.
+                    terminator: Box::new(move || {
+                        let _ = started.terminate();
+                    }),
+                })
+            }
+        }
     }
 }
 
@@ -261,6 +374,49 @@ mod tests {
     // silently swallow every per-phase config (the field would still
     // deserialize from the containment slot via models.rs's serde
     // rename — only the experimental block would go missing).
+    // ====== Consumer-conditional stdio ======
+
+    /// A library caller must never get a ConPTY — **including on a host whose
+    /// stdout is a terminal**, which is the only case that can distinguish a
+    /// correct implementation from one that ignores the consumer.
+    ///
+    /// Allocating one here would be doubly wrong: a pseudo-console merges
+    /// stderr into stdout, so the caller would silently lose the separate
+    /// stream it asked for, and setting it up touches console state the caller
+    /// owns.
+    #[test]
+    fn a_library_caller_never_gets_an_interactive_console() {
+        let mut probed = false;
+        assert!(
+            !wants_interactive_console(ExecConsumer::Library, || {
+                probed = true;
+                true
+            }),
+            "a terminal host must not leak a console into the library path"
+        );
+        assert!(
+            !probed,
+            "the library path must not even evaluate the host probe -- passing the \
+             probe's value rather than a closure would run it eagerly"
+        );
+    }
+
+    /// The executor path is the only one allowed to act on the probe, and it
+    /// must actually follow it rather than hardcoding either answer.
+    ///
+    /// Both host answers are asserted, so hardcoding `true` *or* `false` fails.
+    #[test]
+    fn the_executor_path_follows_the_host() {
+        assert!(
+            wants_interactive_console(ExecConsumer::Executor, || true),
+            "a terminal host must still get an interactive console"
+        );
+        assert!(
+            !wants_interactive_console(ExecConsumer::Executor, || false),
+            "a piped host must not get one"
+        );
+    }
+
     #[test]
     fn backend_key_matches_wire_format() {
         assert_eq!(

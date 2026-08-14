@@ -7,7 +7,7 @@ document are Windows 11**, and the minimum considered here is Windows 11 23H2.
 
 For the enforcement mechanisms themselves see the
 [UI policy schema](./UIPolicy_Schema.md) and the
-[sandbox policy spec](../sandbox-policy/v1/policy.md).
+[sandbox policy spec](../sandbox-policy/0.7.0/policy.md).
 
 ## Windows 11 releases
 
@@ -33,15 +33,16 @@ available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
 |------|-----------|:--:|:--:|:--:|:--:|
-| **T1** BaseContainer | `Experimental_CreateProcessInSandbox` (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when the OS feature is enabled, else falls back to T3 |
+| **T1** BaseContainer | PSEC `CreateProcessSecurityEnvironment`, with transitional `Experimental_CreateProcessInSandbox` fallback (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when an OS contract is enabled, else falls back to T3 |
 | **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
 | **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
 
-- **T1 (BaseContainer)** requires `processmodel.dll` to export
-  `Experimental_CreateProcessInSandbox` *and* the OS feature to be enabled; this
-  is a 25H2+ capability. Usability is resolved up front by
-  `BaseContainerRunner::is_base_container_usable()` so tier selection never picks
-  a T1 that cannot launch.
+- **T1 (BaseContainer)** requires an enabled processmodel.dll BaseContainer
+  contract. MXC prefers PSEC when its runtime probe succeeds and otherwise
+  checks the transitional legacy SBOX FlatBuffer contract through CPIS. This is
+  a 25H2+ capability. Usability is resolved up front by
+  `BaseContainerRunner::is_usable_for_request()` so tier selection never picks
+  a T1 that cannot launch the requested policy.
 - **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
   later, but the `tier2_bfs` Cargo feature is **off** in all shipping builds
   because invoking `bfscfg.exe` can deadlock the host on 25H2. Treat T2 as
@@ -49,15 +50,14 @@ available bounds what policy can be enforced.
 - **T3 (AppContainer + DACL)** is the universal fallback and enforces
   filesystem policy via host path ACEs on every release.
 
-## Schema 0.8 process security environment preference
+## Process security environment preference
 
-BaseContainer requests using schema versions through 0.7 use the SBOX contract
-and the T1/T2/T3 fallback chain above. Schema 0.8 and later prefer the PSEC
-process-security-environment contract when its complete export set resolves and
-`QueryProcessSecurityEnvironmentSupport` succeeds. During the transition from
-the experimental SBOX API to PSEC, an ordinary schema 0.8 request falls back to
-SBOX when PSEC is unavailable, then continues through the existing AppContainer
-fallback tiers when neither BaseContainer contract is usable.
+BaseContainer requests prefer the PSEC process-security-environment contract
+whenever its runtime probe succeeds, independent of schema version. During the
+transition, an ordinary request falls back to the legacy SBOX FlatBuffer
+contract through CPIS when PSEC is unavailable or cannot represent the
+requested policy, then continues through the existing AppContainer fallback
+tiers when neither BaseContainer contract is usable.
 
 The PSEC probe requires:
 
@@ -76,15 +76,16 @@ expose the complete official V2 Learning Mode export set:
 For capture, unsupported or earlier-contract hosts fail as
 `backend_unavailable`. Ordinary ProcessContainer execution still follows the
 fallback chain. Internal validation confirmed the earlier contract on build
-`26657.1002` is rejected for capture while schema 0.7 SBOX execution remains
-functional, and the full V2 contract on build `26663.1000` is accepted. These
+`26657.1002` is rejected for capture while legacy SBOX execution remains
+functional when PSEC is unavailable, and the full V2 contract on build
+`26663.1000` is accepted. These
 builds are validation points, not a public release-floor commitment; runtime
 probing is the source of truth.
 
 The PSEC contract cannot represent `processContainer.leastPrivilege`, so
-ordinary schema 0.8 requests using that option use the transitional SBOX
-contract instead of failing. MXC also does not yet supply the AppContainer peer
-identity required by the current model-2 SBOX proxy contract. On hosts with
+requests using that option use the transitional SBOX contract instead of
+failing. MXC also does not yet supply the package-family or AppContainer-profile
+peer identity required by the current model-2 SBOX proxy contract. On hosts with
 `Experimental_QuerySandboxSupport`, proxy requests therefore skip
 BaseContainer and continue to the AppContainer fallback; older query-less hosts
 retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
@@ -113,6 +114,10 @@ Notes:
 
 ## Network policy
 
+This matrix describes the current schema 0.7 implementation. A checkmark for
+the AppContainer compatibility proxy means cooperative routing is available;
+it does not imply the planned schema 0.8 model-2 proxy-only guarantee.
+
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
 | Capabilities (`internetClient`) | ✅ | ✅ | ✅ | ✅ |
@@ -124,8 +129,8 @@ Notes:
   primitive and works on every release.
 - OS-configured WinHTTP proxy (passed in the FlatBuffer spec to
   `CreateProcessInSandbox`) is used only on legacy query-less T1 hosts. The
-  capability-aware model-2 contract requires an AppContainer proxy peer
-  identity that MXC does not yet author, so those hosts use the AppContainer
+  capability-aware model-2 contract requires a package-family or
+  AppContainer-profile proxy peer identity that MXC does not yet author, so those hosts use the AppContainer
   compatibility fallback.
 - The AppContainer compatibility path uses `winhttp-proxy-shim.exe`. It is not
   the forward-looking proxy architecture; support for the model-2 BaseContainer

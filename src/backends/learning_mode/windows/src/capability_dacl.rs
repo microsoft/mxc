@@ -306,8 +306,10 @@ fn extract_names<'a>(parts: &DecodedEventParts, index: &'a CapabilityIndex) -> H
         let Ok(decoded) = decode_hex(candidate) else {
             continue;
         };
-        let (found, _) = walk_aces(&decoded, index);
-        names.extend(found);
+        let (found, error) = walk_aces(&decoded, index);
+        if error.is_none() {
+            names.extend(found);
+        }
     }
     names
 }
@@ -812,6 +814,15 @@ mod tests {
         let (names, error) = walk_aces(&bytes, &index);
         assert_eq!(names, HashSet::from(["internetClient"]));
         assert!(matches!(error, Some(DaclDecodeError::TruncatedAce(_))));
+    }
+
+    #[test]
+    fn truncated_tail_is_not_promoted_by_extractor() {
+        let sid = sid();
+        let index = CapabilityIndex::for_test(&[("internetClient", &sid)]);
+        let mut bytes = standard_ace(1, &sid);
+        bytes.push(0);
+        assert!(extract_names(&parts("Dacl", hex(&bytes)), &index).is_empty());
     }
 
     #[test]

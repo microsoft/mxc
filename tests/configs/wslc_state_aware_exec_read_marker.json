@@ -1,0 +1,9 @@
+{
+    "version": "0.8.0-alpha",
+    "phase": "exec",
+    "sandboxId": "{{SANDBOX_ID}}",
+    "process": {
+        "commandLine": "cat /tmp/wslc_sa_marker",
+        "timeout": 30000
+    }
+}

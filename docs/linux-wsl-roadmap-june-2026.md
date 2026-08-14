@@ -22,11 +22,19 @@ Each item is prioritized within its backend and tagged with an effort tier.
       "allow": [{ "to": [{ "cidr": "140.82.112.0/20" }], "ports": [{ "protocol": "tcp", "port": 443 }] }],
       "deny": [{ "to": [{ "cidr": "10.0.0.0/8" }] }]
     },
-    "ingress": { "hostLoopback": "deny" },
-    "proxy": { "http": "127.0.0.1:8080" }
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
   }
 }
 ```
+
+Proxy endpoints are runtime data supplied separately through `runtimeConfig.networkProxy`; there is no caller-selected
+egress mode.
+
+`ingress.hostLoopback` is bidirectional. The N2 roadmap details often focus on the host-to-container half because it
+needs INPUT and port-forwarding work; GA also requires the corresponding container-to-host-loopback path.
 
 **Naming:** the backend is "Bubblewrap" (used in headers and proper nouns like the `BubblewrapConfig` type or `Container-Bubblewrap` label); **Bwrap** is used as the short reference in tables and cross-cutting themes.
 
@@ -78,9 +86,12 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 13 | **(N1) Default-deny outbound** | 🟡 Actionable | Already in place: iptables FORWARD hook with default DROP when firewall mode + veth detected. New work: ensure hook is always applied; fail-fast if veth not found rather than silently skipping. | M |
-| 14 | **(N2) Inbound control (`hostLoopback`)** | 🟡 Actionable | `allowLocalNetwork` is parsed but silently ignored. New work: enforce ingress in the container's **network-namespace INPUT** chain (via `nsenter -t <init-pid> -n iptables -I INPUT`) with a default **DROP** for new inbound — this protects the container IP from direct veth/LAN ingress, honoring the GA prohibition on host/LAN inbound. `-i lo` ACCEPT covers **intra-container** loopback only; `ESTABLISHED,RELATED` ACCEPT. **A bare `NEW -j ACCEPT` is wrong** — it would also accept connections to the container IP over the veth (LAN-style ingress). `hostLoopback: "allow"` per GA means host **loopback only** (`127.0.0.1`/`::1`) → sandbox listener, which the netns can't receive directly (host loopback isn't routed into it). It requires a **host-side loopback-bound DNAT/forward** (host `127.0.0.1:port` → container `ip:port`, à la WSLC portMappings); the INPUT chain then allows `NEW` **only** for that forwarded path and DROPs everything else. Supersedes the earlier host-side FORWARD-on-veth idea (dead for host→container-direct packets: the dest is the container's own IP, so they traverse container INPUT, not host FORWARD). **Dual-stack:** `iptables` filters IPv4 only, so a parallel `ip6tables` (or `nftables`) INPUT chain is required for the `::1` half of `hostLoopback` — otherwise IPv6 inbound bypasses the default DROP. This shares the IPv6 tooling gap tracked in **item #19**; N2 depends on that IPv6 path landing. | M |
+| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | `allowLocalNetwork` is parsed but silently ignored. A private network namespace makes sandbox `127.0.0.1`/`::1` different from host loopback, so both directions need explicit cross-namespace plumbing. Container-to-host requires a host-loopback relay or translated gateway endpoint plus OUTPUT enforcement. Host-to-container requires a host-loopback-bound relay or DNAT/forward and an INPUT chain that allows `NEW` only for that forwarded path while dropping direct veth/LAN ingress. The shared allow/deny policy does not identify listener ports, so a separate runtime port-mapping contract is required; `hostLoopback: "allow"` authorizes mappings but cannot create them by itself. Until that contract and dual-stack `iptables`/`ip6tables` or `nftables` enforcement exist, reject `hostLoopback: "allow"` rather than guessing ports or exposing the container IP. `-i lo` remains intra-container only, and `ESTABLISHED,RELATED` remains allowed. Depends on the IPv6 path in item #19. | L |
 
-> **Example (N2).** An MCP server listens on port 3000 inside the sandbox. With `ingress.hostLoopback: "deny"` (default), the host cannot reach it. With `"allow"`, the host can connect via `127.0.0.1:3000`. Today: no enforcement — inbound is uncontrolled.
+> **Example (N2).** With `ingress.hostLoopback: "deny"` (default), the host cannot reach an MCP server in the container
+> and the container cannot reach a service on host loopback. With `"allow"`, both directions are authorized, but the
+> runtime configuration must identify the host-to-container listener mappings. Today neither direction is fully
+> implemented, so LXC must reject `"allow"` until the required plumbing is available.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
@@ -97,7 +108,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 18 | **(N7) Schema migration** | 🟡 Actionable | Current schema (`allowedHosts`/`blockedHosts`/`defaultPolicy`) → GA schema (`egress.allow[]/deny[]`, `ingress.hostLoopback`, `proxy.http`). Shared parser + SDK types. | L |
+| 18 | **(N7) Schema migration** | 🟡 Actionable | Adopt shared 0.8 egress/ingress and runtime proxy types. | L |
 | 19 | **IPv6 + CIDR parsing** | 🟡 Actionable | `NetworkIptablesManager` resolves hostnames to IPv4 only. Add proper CIDR parsing + `ip6tables` for IPv6. | M |
 | 20 | **Port filtering** | 🟡 Actionable | Not implemented. iptables `--dport` natively supported. | S |
 | 21 | **Protocol filtering** | 🟡 Actionable | Not implemented. iptables `-p tcp/udp/icmp` natively supported. | S |
@@ -161,7 +172,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 13 | **(N1) Default-deny outbound** | 🟡 Actionable | Already in place: `--unshare-net` provides full cutoff when no proxy/rules. New work: with proxy active (currently shares host netns), switch to `--unshare-net` + route proxy into the namespace (slirp4netns or veth pair). Elevation required. | M |
-| 14 | **(N2) Inbound control (`hostLoopback`)** | 🟡 Actionable | Already in place: `--unshare-net` inherently blocks inbound (no route). New work (proxy mode): GA requires ingress enforced via an iptables **INPUT** chain in the sandbox's **own network namespace** (`docs/sandbox-policy/v2/networking.md` L148/L212/L289/L295), scoped per-sandbox (D6). This **depends on N1** moving proxy mode off the shared host netns onto `--unshare-net` + a routed proxy (slirp4netns/veth, elevation required). Once Bwrap has a private netns, ingress runs there via the shared `NetworkIptablesManager` with a default **DROP** (same chain as LXC): `-i lo` ACCEPT (intra-container only), `ESTABLISHED,RELATED` ACCEPT. As on LXC, a bare `NEW -j ACCEPT` is **wrong** (it exposes the container IP over the veth); `hostLoopback: "allow"` requires a **host-loopback-bound DNAT/forward** with INPUT allowing `NEW` **only** for that path. A host-side INPUT chain on the shared netns is **not** the GA target: it can't be attributed to a single sandbox. **Dual-stack:** as on LXC, the `iptables` INPUT chain covers IPv4 only; a parallel `ip6tables`/`nftables` INPUT path is required for `::1`, otherwise IPv6 inbound escapes the default DROP. Shares the IPv6 tooling gap in Bwrap **item #19** and depends on it. | M |
+| 14 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 Runtime API dependency | `--unshare-net` blocks both host-loopback directions by default because sandbox loopback is private. N1 must first move proxy mode off the shared host namespace. After that, container-to-host requires a host-loopback relay or translated gateway endpoint plus OUTPUT enforcement; host-to-container requires a host-loopback-bound relay or DNAT/forward plus per-sandbox INPUT filtering that allows `NEW` only for mapped listeners and drops direct veth/LAN ingress. The shared allow/deny policy does not identify listener ports, so a separate runtime port-mapping contract is required; `hostLoopback: "allow"` authorizes mappings but cannot create them by itself. Until that contract, N1, and dual-stack `iptables`/`ip6tables` or `nftables` enforcement exist, reject `hostLoopback: "allow"` rather than retaining the shared host namespace, guessing ports, or exposing the container IP. `-i lo` remains intra-container only, and `ESTABLISHED,RELATED` remains allowed. Depends on item #19. | L |
 | 15 | **(N3) IP/CIDR only, no DNS names** | 🟡 Actionable | Delegates to LXC's `NetworkIptablesManager` — same IPv4-only hostname resolution, same dual-stack bypass. New GA schema needed. | L |
 
 > **Example (N3).** Same IPv6 bypass as LXC: `allowedHosts: ["api.github.com"]` only blocks IPv4; IPv6 traffic passes unfiltered on dual-stack GHA runners (confirmed by probe).
@@ -286,9 +297,10 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 16 | **(N2) Inbound control (`hostLoopback`)** | 🟠 With SDK dep | No inbound filtering primitive. VM-level API would provide inbound control. | M |
+| 16 | **(N2) Host-loopback control (`hostLoopback`)** | 🟠 With SDK dep | No bidirectional host-loopback policy primitive. VM-level API must provide both directions. | M |
 
-> **Example (N2).** N2 governs the inbound direction (host → sandbox): can the Windows host reach a service the container is listening on? GA field is `ingress.hostLoopback` (legacy: `allowLocalNetwork`).
+> **Example (N2).** `ingress.hostLoopback` is bidirectional. The port-mapping support below covers the
+> host-to-container half. Container-to-host-loopback access also requires VM-level routing and policy support.
 >
 > **✅ Supported today — explicit per-port forward.** The container runs in the NAT'd WSL2 VM, so by default the host can't reach arbitrary container ports (incidental default-deny). [PR #530](https://github.com/microsoft/mxc/pull/530) adds the per-port primitive via `WslcSetContainerSettingsPortMappings` (`wsl_container_runner.rs:975+`) — an explicit `hostLoopback: "allow"` for one TCP port:
 >
@@ -336,18 +348,22 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 |---|---|---|---|---|
 | 18 | **(N4) Deny-wins precedence** | 🟠 With SDK dep | No `egress.deny[]` path today — the builder does allow-list XOR block-list, never both, so deny-wins ordering isn't expressed. VM-level API + N7 schema needed. | S |
 
-> **Example (N4).** GA spec D4: when a connection matches both an `egress.allow` and an `egress.deny` rule, **the deny wins** (fail-closed). The canonical case is "allow everything except a few malicious IPs." Applies only in `mode: "direct"` (model 1) — `egress.allow`/`egress.deny` are rejected under `mode: "proxy"`.
+> **Example (N4).** GA spec D4: when a connection matches both an `egress.allow` and an `egress.deny` rule, **the
+> deny wins** (fail-closed). The canonical case is "allow everything except a few malicious IPs." These rules apply
+> only to model 1 and do not apply when `runtimeConfig.networkProxy` selects the proxy-only runtime path.
 >
 > ```json
 > {
 >   "network": {
 >     "egress": {
->       "mode": "direct",
 >       "default": "allow",
 >       "allow": [ { "to": [{ "cidr": "0.0.0.0/0" }] } ],
 >       "deny":  [ { "to": [{ "cidr": "203.0.113.0/24" }] } ]
 >     },
->     "ingress": { "hostLoopback": "deny" }
+>     "ingress": {
+>       "default": "deny",
+>       "hostLoopback": "deny"
+>     }
 >   }
 > }
 > ```
@@ -362,19 +378,29 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | 20 | **(N5) Proxy — egress enforcement** | 🟠 With SDK dep | Restricting egress to proxy port only requires VM-level network policy API. Without it, proxy is advisory (apps can bypass env vars and connect directly). | M |
 | 25 | **(N5) Proxy — env-var hygiene** | 🟡 Actionable NOW | Clear all proxy vars, set only configured proxy. No SDK dependency — env manipulation at process spawn. | S |
 
-> **Example (N5).** The proxy is the **recommended GA path** (model 2, "deny-all-except-proxy"). Per GA spec: MXC does **not** run the proxy — the consumer supplies a localhost proxy and starts it; MXC restricts egress to it and points env vars at it. Crucially, the env vars are an **advisory routing hint** — the iptables DROP is the actual enforcement; "cooperation-dependent routing… is never the enforcement mechanism itself." Under `mode: "proxy"`, `egress.allow`/`deny` are rejected.
+> **Example (N5).** The proxy is the **recommended GA path** (model 2, "deny-all-except-proxy"). MXC does **not**
+> run the proxy: the consumer supplies and starts it, while MXC restricts egress to it and sets the proxy environment
+> variables. The variables are an advisory routing hint; the VM-level network policy is the containment boundary.
+> Direct `egress.allow`/`deny` rules do not apply when `runtimeConfig.networkProxy` is present.
 >
 > ```json
 > {
 >   "network": {
->     "egress": { "mode": "proxy" },
->     "proxy": { "http": "127.0.0.1:8080" },
->     "ingress": { "hostLoopback": "deny" }
+>     "egress": { "default": "deny" },
+>     "ingress": {
+>       "default": "deny",
+>       "hostLoopback": "deny"
+>     }
+>   },
+>   "runtimeConfig": {
+>     "networkProxy": "http://127.0.0.1:8080"
 >   }
 > }
 > ```
 >
-> `egress.mode: "proxy"` selects the posture; `network.proxy.http` supplies the endpoint MXC restricts egress to. The consumer must start that proxy listening before launching the workload. *(Note: the GA doc's minimal model-2 example shows only `egress.mode: "proxy"` and never defines where the host:port lives, though its text requires one "in the configuration" — the address field is carried by `network.proxy`, matching what MXC parses today.)*
+> The presence of `runtimeConfig.networkProxy` selects the proxy-only runtime path; there is no caller-selected mode.
+> `ingress.hostLoopback` remains denied because the container-to-proxy connection is outbound. WSLC must translate the
+> caller's local endpoint to a VM-reachable address and authorize only that outbound endpoint.
 >
 > **❌ Not implemented today (but #19/#25 are unblocked).** WSLC has no proxy code at all. The env path exists — `request.env` is piped in via `WslcSetProcessSettingsEnvVariables` (`wsl_container_runner.rs:929-942`) — but nothing injects `HTTP_PROXY`/`HTTPS_PROXY` from the proxy config (#19), and the GA-mandated clearing of all inherited proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY` + lowercase) isn't done (#25). Both are doable now through the existing env path — no SDK dependency — they're just unwritten.
 >
@@ -390,7 +416,10 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 > **Example (N7).** N7 is the schema/parser/SDK work to accept the GA network block — *expressing* the policy, independent of whether a backend can *enforce* it. It's the same shared parser + SDK types as LXC/Bwrap, so no WSLC SDK dependency.
 >
-> **⚠️ Today — flat legacy schema only.** The parser accepts only `defaultPolicy`/`allowedHosts`/`blockedHosts` (`config_parser.rs:778-779`, flat string lists), mapped to `policy.allowed_hosts`/`blocked_hosts`. There is no `egress`/`ingress`/`proxy` structure, no `mode`, no per-rule `to[].cidr` + `ports[]`.
+> **⚠️ Today — flat legacy schema only.** The parser accepts only
+> `defaultPolicy`/`allowedHosts`/`blockedHosts` (`config_parser.rs:778-779`, flat string lists), mapped to
+> `policy.allowed_hosts`/`blocked_hosts`. There is no schema 0.8 `egress`/`ingress` structure or per-rule
+> `to[].cidr` + `ports[]`, and no `runtimeConfig.networkProxy`.
 >
 > **✅ GA target.** Parse the structured GA block (shared across all backends), with deprecation aliases from the legacy fields:
 >
@@ -398,14 +427,16 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 > {
 >   "network": {
 >     "egress": {
->       "mode": "direct",
 >       "default": "deny",
 >       "allow": [
 >         { "to": [{ "cidr": "140.82.112.0/20" }], "ports": [{ "protocol": "tcp", "port": 443 }] }
 >       ],
 >       "deny": []
 >     },
->     "ingress": { "hostLoopback": "deny" }
+>     "ingress": {
+>       "default": "deny",
+>       "hostLoopback": "deny"
+>     }
 >   }
 > }
 > ```
@@ -455,7 +486,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
 | 28 | **Port-mapping support** | ✅ Addressed | TCP host→container port forwarding shipped in [PR #530](https://github.com/microsoft/mxc/pull/530) (merged 2026-06-23). Provides explicit per-port inbound exposure (the `hostLoopback: "allow"` primitive for mapped ports); policy-driven `ingress.hostLoopback` default posture still needs the VM-level API (see Network #16 / SDK dep #1). | — |
-| 29 | **State-aware lifecycle** | 🟡 Actionable | Implement `StatefulSandboxBackend`. WSLC bears the largest startup cost — session reuse is the highest-value win. | L |
+| 29 | **State-aware lifecycle** | ✅ Addressed | Daemon-backed warm session/container reuse across separate phase processes (`wxc-wslc-daemon.exe`) implements `StatefulSandboxBackend` for WSLC — the highest-value WSLC win (slowest cold start). See `docs/wsl/wslc-state-aware.md`. | — |
 | 30 | **Structured denied-resource diagnostics** | 🟡 Actionable | Parity with Process Container's structured denial reporting. | M |
 | 31 | **Un-gate WSLC tests in CI** | ⛔ Blocked | Needs `wslcsdk.dll` public NuGet (see SDK dep #2 above). | M |
 
@@ -482,7 +513,7 @@ These show up on multiple backends and are worth coordinating to avoid divergent
 
 1. **Filesystem policy alignment** — D4 (path-tree resolver), D3 (delegation check), D6 (object validation), same-path conflict (most-restrictive-wins), paths-should-exist warning all belong in `wxc_common` and serve all three backends.
 2. **Network policy alignment** — N1 (default-deny), N2 (inbound), N3 (CIDR-only schema), N5 (proxy enforcement), N7 (schema migration). Shared `NetworkIptablesManager` in `wxc_common` serves LXC and Bwrap; WSLC depends on SDK VM-level API.
-3. **State-aware lifecycle** — LXC #27, Bwrap #30, WSLC #29. None of the three implement `StatefulSandboxBackend` today. WSLC has the largest payoff (slowest cold start).
+3. **State-aware lifecycle** — LXC #27, Bwrap #30, WSLC #29. WSLC now implements `StatefulSandboxBackend` (daemon-backed warm reuse — the largest payoff, slowest cold start); LXC and Bwrap do not yet.
 4. **Resource limits (cgroups v2)** — LXC #28, Bwrap #28. Same kernel API; build a shared `cgroup_controller` crate.
 5. **Structured denied-resource diagnostics** — LXC #29, Bwrap #33, WSLC #30. Replicate Process Container's structured denial reporting on Linux.
 6. **CI gating** — LXC #31, Bwrap #34, WSLC #31.

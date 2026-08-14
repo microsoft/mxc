@@ -46,9 +46,13 @@ export interface CaptureDenials {
    */
   mode?: CaptureDenialsMode | null;
   /**
-   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed temp file that is decoded then deleted.)
+   * Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ "denials": [...], "summary": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed file in a protected per-run directory. Retained traces use `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\retained`; non-retained traces use the system temporary directory.)
    */
   outputPath?: string | null;
+  /**
+   * Keep the sealed ETL trace after analysis and report its path in output metadata. Defaults to `false`, which deletes the trace after analysis. Retention requires a terminal wait; abandoning the process handle deletes the internal trace. If post-seal analysis fails, the failure and retained path are exposed through `captureDenialsError` output metadata. Retained traces can contain sensitive resource paths and identifiers; callers are responsible for deleting them.
+   */
+  retainEtl?: boolean | null;
 }
 
 /**
@@ -440,6 +444,10 @@ export interface Wslc {
    */
   portMappings?: PortMapping[] | null;
   /**
+   * State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
+   */
+  provision?: WslcProvisionPhase | null;
+  /**
    * Storage path override.
    */
   storagePath?: string | null;
@@ -447,6 +455,23 @@ export interface Wslc {
    * OS inside the WSL container.
    */
   targetOs?: string | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
+ * 
+ * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
+ */
+export interface WslcProvisionPhase {
+  /**
+   * Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.
+   */
+  image?: string | null;
+  /**
+   * Path to a local image tarball to import instead of pulling.
+   */
+  imageTarPath?: string | null;
   [k: string]: unknown;
 }
 

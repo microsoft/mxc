@@ -395,6 +395,102 @@ fn processcontainer_capture_denials_output_file() {
     let _ = std::fs::remove_file(emitted_path);
 }
 
+/// Exercises timeout -> capture teardown -> retained metadata end to end.
+fn processcontainer_capture_denials_timeout_retention() {
+    let output_path = std::env::temp_dir().join(format!(
+        "mxc_e2e_timeout_denials_{}.json",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = std::fs::remove_file(&output_path);
+
+    let config = serde_json::json!({
+        "process": {
+            "commandLine": "cmd.exe /d /c \"for /L %i in (1,1,100000000) do @rem\"",
+            "timeout": 1000
+        },
+        "containment": "processcontainer",
+        "processContainer": {
+            "captureDenials": {
+                "mode": "block",
+                "outputPath": output_path.to_string_lossy(),
+                "retainEtl": true,
+            }
+        }
+    });
+
+    let result = run_wxc_config_value(
+        "processcontainer_capture_denials_timeout_retention",
+        &config,
+        &["--debug"],
+    );
+    let combined = result.combined_output_with_decoded_base64();
+    if combined.contains("learning-mode trace API is not available") {
+        println!(
+            "SKIPPED: processcontainer_capture_denials_timeout_retention requires the brokered \
+             learning-mode trace API"
+        );
+        return;
+    }
+    if result.is_missing_process_prerequisite() {
+        println!(
+            "SKIPPED: processcontainer_capture_denials_timeout_retention requires local sandbox \
+             runtime prerequisites not available here"
+        );
+        return;
+    }
+
+    assert_ne!(
+        result.code,
+        Some(0),
+        "the long-running command should time out\n--- stderr ---\n{}",
+        result.stderr
+    );
+    assert!(
+        result.stderr.contains("script timed out after 1000ms"),
+        "stderr should report the timeout\n--- stderr ---\n{}",
+        result.stderr
+    );
+
+    let pointer_line = result
+        .stderr
+        .lines()
+        .find(|line| line.contains(r#""type":"captureDenials""#))
+        .unwrap_or_else(|| {
+            panic!(
+                "stderr should carry capture metadata after timeout\n--- stderr ---\n{}",
+                result.stderr
+            )
+        });
+    let pointer: serde_json::Value =
+        serde_json::from_str(pointer_line.trim()).expect("pointer line should be valid JSON");
+    let emitted_path = pointer
+        .get("outputPath")
+        .and_then(|value| value.as_str())
+        .expect("timeout pointer must carry outputPath");
+    let etl_path = pointer
+        .get("etlPath")
+        .and_then(|value| value.as_str())
+        .expect("timeout pointer must carry the retained etlPath");
+
+    assert!(
+        std::path::Path::new(emitted_path).is_file(),
+        "timeout denial output should exist: {emitted_path}"
+    );
+    assert!(
+        std::path::Path::new(etl_path).is_file(),
+        "retained timeout ETL should exist: {etl_path}"
+    );
+
+    let _ = std::fs::remove_file(emitted_path);
+    let _ = std::fs::remove_file(etl_path);
+    if let Some(directory) = std::path::Path::new(etl_path).parent() {
+        let _ = std::fs::remove_dir(directory);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -426,6 +522,15 @@ fn test_processcontainer_capture_denials_output_file() {
         return;
     }
     with_test_lock(processcontainer_capture_denials_output_file);
+}
+
+#[test]
+#[ignore] // Live capture needs the brokered learning-mode API + BFS velocity key; skips otherwise
+fn test_processcontainer_capture_denials_timeout_retention() {
+    if !cached_has_wxc_exe() {
+        return;
+    }
+    with_test_lock(processcontainer_capture_denials_timeout_retention);
 }
 
 #[test]

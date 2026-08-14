@@ -34,6 +34,9 @@ pub mod validator;
 // the JSON Schema is generated from it under the `schema-gen` feature.
 pub mod wire;
 
+// Adapters that map between specific JSON contracts and the 'wire' model.
+pub(crate) mod config_contract_adapters;
+
 // TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
 // schema value and emits `sdk/node/src/generated/wire.ts`. Compiled with the wire
 // model under the `schema-gen` feature.
