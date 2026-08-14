@@ -79,7 +79,7 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
-`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data.
+`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
 
 **Node.js:** ≥ 18.
 
@@ -370,7 +370,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: neither LXC nor Bubblewrap on PATH. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
