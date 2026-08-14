@@ -571,6 +571,8 @@ pub enum Containment {
     ProcessContainer(ProcessContainer),
     /// Linux LXC container settings.
     Lxc(Lxc),
+    /// macOS Seatbelt settings.
+    Seatbelt(Seatbelt),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -604,6 +606,55 @@ impl Default for Lxc {
         Self {
             distribution: "alpine".to_string(),
             release: "3.23".to_string(),
+        }
+    }
+}
+
+/// macOS Seatbelt settings carried by [`Containment::Seatbelt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Seatbelt {
+    /// Replace the generated sandbox profile.
+    pub profile_override: Option<String>,
+    /// Allow GUI application access.
+    pub gui_access: bool,
+    /// How to launch the contained process.
+    pub launch_method: SeatbeltLaunchMethod,
+    /// Allow the contained process to allocate nested pseudo-terminals.
+    pub nested_pty: bool,
+    /// Allow macOS Keychain access.
+    pub keychain_access: bool,
+    /// Additional Mach service global names the process may resolve.
+    pub extra_mach_lookups: Vec<String>,
+}
+
+impl Default for Seatbelt {
+    fn default() -> Self {
+        Self {
+            profile_override: None,
+            gui_access: false,
+            launch_method: SeatbeltLaunchMethod::Exec,
+            nested_pty: true,
+            keychain_access: false,
+            extra_mach_lookups: Vec::new(),
+        }
+    }
+}
+
+/// Seatbelt inner-process launch method.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SeatbeltLaunchMethod {
+    /// Apply Seatbelt, then execute the process directly.
+    #[default]
+    Exec,
+    /// Launch through macOS LaunchServices.
+    Open,
+}
+
+impl SeatbeltLaunchMethod {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::Open => "open",
         }
     }
 }
@@ -946,6 +997,7 @@ fn build_wire_config(
         Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
         Containment::ProcessContainer(_) => false,
         Containment::Lxc(_) => true,
+        Containment::Seatbelt(_) => true,
         Containment::Wslc(_) => true,
     };
 
@@ -979,6 +1031,7 @@ fn build_wire_config(
             apply_process_container_backend(&mut config, policy, process_container)
         }
         Containment::Lxc(lxc) => apply_lxc_backend(&mut config, lxc),
+        Containment::Seatbelt(seatbelt) => apply_seatbelt_backend(&mut config, seatbelt),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -1098,6 +1151,20 @@ fn apply_lxc_backend(config: &mut serde_json::Value, lxc: &Lxc) {
         "release": lxc.release,
     });
     apply_linux_network_policy(config);
+}
+
+fn apply_seatbelt_backend(config: &mut serde_json::Value, seatbelt: &Seatbelt) {
+    use serde_json::json;
+
+    config["containment"] = json!("seatbelt");
+    config["seatbelt"] = json!({
+        "profileOverride": seatbelt.profile_override,
+        "guiAccess": seatbelt.gui_access,
+        "launchMethod": seatbelt.launch_method.wire(),
+        "nestedPty": seatbelt.nested_pty,
+        "keychainAccess": seatbelt.keychain_access,
+        "extraMachLookups": seatbelt.extra_mach_lookups,
+    });
 }
 
 /// True when the network section carries any host allow/deny rules, deciding
@@ -1677,9 +1744,11 @@ mod tests {
 
     use super::{
         build_request_with_containment, build_wire_config, Containment, Lxc, ProcessContainer,
-        WslcSection,
+        Seatbelt, SeatbeltLaunchMethod, WslcSection,
     };
-    use wxc_common::models::{ContainmentBackend, NetworkEnforcementMode};
+    use wxc_common::models::{
+        ContainmentBackend, LaunchMethod as DomainLaunchMethod, NetworkEnforcementMode,
+    };
 
     fn minimal_policy() -> SandboxPolicy {
         SandboxPolicy {
@@ -1878,6 +1947,71 @@ mod tests {
         assert_eq!(config["containment"], "lxc");
         assert_eq!(config["lxc"]["distribution"], "alpine");
         assert_eq!(config["lxc"]["release"], "3.23");
+        assert!(config.get("processContainer").is_none());
+    }
+
+    #[test]
+    fn seatbelt_containment_maps_config_to_the_request() {
+        let seatbelt = Seatbelt {
+            profile_override: Some("(version 1)(deny default)".to_string()),
+            gui_access: true,
+            launch_method: SeatbeltLaunchMethod::Open,
+            nested_pty: false,
+            keychain_access: true,
+            extra_mach_lookups: vec!["com.example.service".to_string()],
+        };
+
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Seatbelt(seatbelt),
+            None,
+        )
+        .expect("Seatbelt settings should satisfy the wire contract");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Seatbelt);
+        let config = request.inner.seatbelt.as_ref().expect("Seatbelt config");
+        assert_eq!(
+            config.profile_override.as_deref(),
+            Some("(version 1)(deny default)")
+        );
+        assert!(config.gui_access);
+        assert_eq!(config.launch_method, DomainLaunchMethod::Open);
+        assert!(!config.nested_pty);
+        assert!(config.keychain_access);
+        assert_eq!(config.extra_mach_lookups, ["com.example.service"]);
+    }
+
+    #[test]
+    fn seatbelt_defaults_match_the_backend() {
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Seatbelt(Seatbelt::default()),
+            None,
+        )
+        .expect("default Seatbelt settings should build");
+
+        let config = request.inner.seatbelt.as_ref().expect("Seatbelt config");
+        assert!(config.profile_override.is_none());
+        assert!(!config.gui_access);
+        assert_eq!(config.launch_method, DomainLaunchMethod::Exec);
+        assert!(config.nested_pty);
+        assert!(!config.keychain_access);
+        assert!(config.extra_mach_lookups.is_empty());
+    }
+
+    #[test]
+    fn seatbelt_wire_shape_stays_compatible_with_the_versioned_contract() {
+        let config = build_wire_config(
+            &minimal_policy(),
+            &Containment::Seatbelt(Seatbelt::default()),
+            None,
+        )
+        .expect("build Seatbelt wire config");
+
+        assert_eq!(config["containment"], "seatbelt");
+        assert_eq!(config["seatbelt"]["launchMethod"], "exec");
+        assert_eq!(config["seatbelt"]["nestedPty"], true);
+        assert!(config.get("lxc").is_none());
         assert!(config.get("processContainer").is_none());
     }
 

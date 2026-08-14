@@ -45,7 +45,7 @@ pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
     user_profile_policy, Containment, FilesystemPolicyResult, Lxc, ProcessContainer, SandboxPolicy,
-    SandboxRequest, WslcSection,
+    SandboxRequest, Seatbelt, SeatbeltLaunchMethod, WslcSection,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

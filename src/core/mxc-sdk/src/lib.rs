@@ -52,6 +52,7 @@
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer settings | Windows | [`Containment::ProcessContainer`] |
 //! | LXC request construction | Linux | [`Containment::Lxc`] |
+//! | Explicit Seatbelt settings | macOS | [`Containment::Seatbelt`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
@@ -120,7 +121,7 @@ pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
     BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, Lxc, PlatformSupport,
-    ProcessContainer, SandboxPolicy, SandboxRequest, WslcSection,
+    ProcessContainer, SandboxPolicy, SandboxRequest, Seatbelt, SeatbeltLaunchMethod, WslcSection,
 };
 
 pub use sandbox::{
