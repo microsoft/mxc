@@ -6,6 +6,8 @@ use serde::Serialize;
 use serde_json::Value;
 use wxc_common::mxc_error::MxcError;
 
+use crate::backend_config::{BackendConfigContext, BackendConfigImpl};
+
 /// Windows ProcessContainer settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessContainer {
@@ -13,6 +15,58 @@ pub struct ProcessContainer {
     pub least_privilege: bool,
     /// Additional AppContainer capabilities, such as `registryRead`.
     pub capabilities: Vec<String>,
+}
+
+impl BackendConfigImpl for ProcessContainer {
+    fn accepts_host_rules_without_outbound(&self) -> bool {
+        false
+    }
+
+    fn apply(
+        &self,
+        config: &mut Value,
+        context: &BackendConfigContext<'_>,
+    ) -> Result<(), MxcError> {
+        config["containment"] = serde_json::json!("processcontainer");
+        let network = context.policy.network.as_ref();
+        let capture_denials =
+            context
+                .policy
+                .capture_denials
+                .as_ref()
+                .map(|capture| CaptureDenialsInput {
+                    mode: capture.mode.wire(),
+                    output_path: capture.output_path.as_deref(),
+                    retain_etl: capture.retain_etl,
+                });
+        config["processContainer"] = create_process_container_config(
+            &context.policy.version,
+            self,
+            network.is_some_and(|network| network.allow_outbound),
+            network.is_some_and(|network| network.allow_local_network),
+            capture_denials,
+        )?
+        .into_value()?;
+        if let Some(network) = config.get_mut("network") {
+            let mode = if has_host_rules(network) {
+                "both"
+            } else {
+                "capabilities"
+            };
+            network["enforcementMode"] = serde_json::json!(mode);
+        }
+        Ok(())
+    }
+}
+
+fn has_host_rules(network: &Value) -> bool {
+    let non_empty = |key: &str| {
+        network
+            .get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.is_empty())
+    };
+    non_empty("allowedHosts") || non_empty("blockedHosts")
 }
 
 pub(crate) struct CaptureDenialsInput<'a> {

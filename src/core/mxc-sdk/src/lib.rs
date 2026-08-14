@@ -116,8 +116,8 @@ pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
-    ProcessContainer, SandboxPolicy, SandboxRequest, WslcSection,
+    BackendCapability, BackendConfig, Containment, Error, ErrorCode, FilesystemPolicyResult,
+    PlatformSupport, ProcessContainer, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{

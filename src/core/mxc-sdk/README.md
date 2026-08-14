@@ -48,6 +48,9 @@ working directory / env) before spawning.
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`] — the same choice the
 TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
+Backend configurations implement the sealed [`BackendConfig`] trait, so a
+typed `ProcessContainer` can be passed directly or stored as
+`Box<dyn BackendConfig>` without exposing the engine's wire-format internals.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env

@@ -29,6 +29,7 @@
 //! - [`Error`] / [`ErrorCode`] — the crate-owned error facade over
 //!   `wxc_common`'s internal error type.
 
+mod backend_config;
 mod dispatch;
 mod error;
 mod platform;
@@ -39,6 +40,7 @@ mod process_container_config;
 mod run;
 mod state_aware;
 
+pub use backend_config::BackendConfig;
 pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;

@@ -20,8 +20,8 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 
+use crate::backend_config::{BackendConfig, BackendConfigContext, BackendConfigImpl};
 pub use crate::process_container_config::ProcessContainer;
-use crate::process_container_config::{create_process_container_config, CaptureDenialsInput};
 
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
@@ -524,7 +524,7 @@ pub enum CaptureDenialsMode {
 
 impl CaptureDenialsMode {
     /// Wire-format value accepted by the config parser.
-    fn wire(self) -> &'static str {
+    pub(crate) fn wire(self) -> &'static str {
         match self {
             CaptureDenialsMode::Block => "block",
             CaptureDenialsMode::Allow => "allow",
@@ -578,6 +578,34 @@ pub enum Containment {
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
 }
+
+impl Containment {
+    fn backend_config(&self) -> &dyn BackendConfigImpl {
+        match self {
+            Self::Process => &HOST_PROCESS_BACKEND,
+            Self::ProcessContainer(config) => config,
+            Self::Wslc(config) => config,
+        }
+    }
+}
+
+impl BackendConfigImpl for Containment {
+    fn accepts_host_rules_without_outbound(&self) -> bool {
+        self.backend_config().accepts_host_rules_without_outbound()
+    }
+
+    fn apply(
+        &self,
+        config: &mut serde_json::Value,
+        context: &BackendConfigContext<'_>,
+    ) -> Result<(), MxcError> {
+        self.backend_config().apply(config, context)
+    }
+}
+
+struct HostProcessBackend;
+
+static HOST_PROCESS_BACKEND: HostProcessBackend = HostProcessBackend;
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
 /// block; carried by [`Containment::Wslc`].
@@ -811,8 +839,9 @@ pub fn build_request(
 /// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
 /// — the Rust port of `createConfigFromPolicy(policy, containment, name)`.
 ///
-/// Same mapping and validation as [`build_request`]; the containment argument
-/// picks the backend rather than always resolving the host's native one.
+/// Same mapping and validation as [`build_request`]. The backend argument may
+/// be a [`Containment`] convenience value, a typed backend configuration such
+/// as [`ProcessContainer`], or a `Box<dyn BackendConfig>`.
 /// Experimental backends additionally need
 /// [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
 /// before they will spawn.
@@ -835,7 +864,7 @@ pub fn build_request(
 /// ```
 pub fn build_request_with_containment(
     policy: &SandboxPolicy,
-    containment: &Containment,
+    containment: &dyn BackendConfig,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
     // The shared parser tolerates an empty schema version (treats it as
@@ -859,7 +888,7 @@ pub fn build_request_with_containment(
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
 fn build_wire_config(
     policy: &SandboxPolicy,
-    containment: &Containment,
+    containment: &dyn BackendConfig,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
     use serde_json::json;
@@ -913,11 +942,7 @@ fn build_wire_config(
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
-    let accepts_host_rules_without_outbound = match containment {
-        Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
-        Containment::ProcessContainer(_) => false,
-        Containment::Wslc(_) => true,
-    };
+    let accepts_host_rules_without_outbound = containment.accepts_host_rules_without_outbound();
 
     if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
@@ -943,18 +968,13 @@ fn build_wire_config(
         config["network"] = json!({ "defaultPolicy": "block" });
     }
 
-    match containment {
-        Containment::Process => {
-            apply_host_process_backend(&mut config, policy, &container_id, &policy.version)?
-        }
-        Containment::ProcessContainer(process_container) => apply_process_container_backend(
-            &mut config,
+    containment.apply(
+        &mut config,
+        &BackendConfigContext {
             policy,
-            process_container,
-            &policy.version,
-        )?,
-        Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
-    }
+            container_id: &container_id,
+        },
+    )?;
     Ok(config)
 }
 
@@ -971,87 +991,42 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
 /// AppContainer at runtime by host capability).
-fn apply_host_process_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    container_id: &str,
-    version: &str,
-) -> Result<(), MxcError> {
-    use serde_json::json;
+impl BackendConfigImpl for HostProcessBackend {
+    fn accepts_host_rules_without_outbound(&self) -> bool {
+        cfg!(any(target_os = "linux", target_os = "macos"))
+    }
 
-    // Resolve the abstract Process intent per host.
-    config["containment"] = json!("process");
+    fn apply(
+        &self,
+        config: &mut serde_json::Value,
+        context: &BackendConfigContext<'_>,
+    ) -> Result<(), MxcError> {
+        use serde_json::json;
 
-    #[cfg(target_os = "linux")]
-    {
-        let _ = (policy, container_id);
+        config["containment"] = json!("process");
+
+        #[cfg(target_os = "linux")]
         apply_linux_network_policy(config);
-    }
 
-    #[cfg(target_os = "macos")]
-    {
-        let _ = (policy, container_id);
-        config["containment"] = json!("seatbelt");
-        if config.get("seatbelt").is_none() {
-            config["seatbelt"] = json!({});
+        #[cfg(target_os = "macos")]
+        {
+            config["containment"] = json!("seatbelt");
+            if config.get("seatbelt").is_none() {
+                config["seatbelt"] = json!({});
+            }
         }
+
+        #[cfg(target_os = "windows")]
+        ProcessContainer::default().apply(config, context)?;
+
+        let _ = context.container_id;
+        Ok(())
     }
-
-    #[cfg(target_os = "windows")]
-    {
-        // The container id is carried only at the top level (`containerId`); the
-        // wire `processContainer` object intentionally has no `name` field.
-        let _ = container_id;
-        apply_process_container_backend(config, policy, &ProcessContainer::default(), version)?;
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (policy, container_id);
-    }
-
-    Ok(())
-}
-
-fn apply_process_container_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    process_container: &ProcessContainer,
-    version: &str,
-) -> Result<(), MxcError> {
-    use serde_json::json;
-
-    config["containment"] = json!("processcontainer");
-    let network = policy.network.as_ref();
-    let capture_denials = policy
-        .capture_denials
-        .as_ref()
-        .map(|capture| CaptureDenialsInput {
-            mode: capture.mode.wire(),
-            output_path: capture.output_path.as_deref(),
-            retain_etl: capture.retain_etl,
-        });
-    config["processContainer"] = create_process_container_config(
-        version,
-        process_container,
-        network.is_some_and(|network| network.allow_outbound),
-        network.is_some_and(|network| network.allow_local_network),
-        capture_denials,
-    )?
-    .into_value()?;
-    if let Some(network) = config.get_mut("network") {
-        let mode = if has_host_rules(network) {
-            "both"
-        } else {
-            "capabilities"
-        };
-        network["enforcementMode"] = json!(mode);
-    }
-    Ok(())
 }
 
 /// True when the network section carries any host allow/deny rules, deciding
 /// whether host-level enforcement is engaged.
+#[cfg(target_os = "linux")]
 fn has_host_rules(network: &serde_json::Value) -> bool {
     let non_empty = |key: &str| {
         network
@@ -1067,10 +1042,21 @@ fn has_host_rules(network: &serde_json::Value) -> bool {
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
 /// its settings live under `experimental.wslc` because the backend is
 /// experimental.
-fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
-    use serde_json::json;
-    config["containment"] = json!("wslc");
-    config["experimental"] = json!({ "wslc": wslc.wire() });
+impl BackendConfigImpl for WslcSection {
+    fn accepts_host_rules_without_outbound(&self) -> bool {
+        true
+    }
+
+    fn apply(
+        &self,
+        config: &mut serde_json::Value,
+        _context: &BackendConfigContext<'_>,
+    ) -> Result<(), MxcError> {
+        use serde_json::json;
+        config["containment"] = json!("wslc");
+        config["experimental"] = json!({ "wslc": self.wire() });
+        Ok(())
+    }
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
@@ -1743,6 +1729,36 @@ mod tests {
             config["processContainer"].get("learningMode").is_none(),
             "latest-only fields must not be emitted unconditionally"
         );
+    }
+
+    #[test]
+    fn typed_process_container_implements_the_backend_interface() {
+        let process_container = ProcessContainer {
+            capabilities: vec!["registryRead".to_string()],
+            ..Default::default()
+        };
+
+        let request = build_request_with_containment(&minimal_policy(), &process_container, None)
+            .expect("typed ProcessContainer config");
+
+        assert!(request
+            .inner
+            .policy
+            .capabilities
+            .contains(&"registryRead".to_string()));
+    }
+
+    #[test]
+    fn boxed_backend_interface_preserves_process_container_configuration() {
+        let backend: Box<dyn super::BackendConfig> = Box::new(ProcessContainer {
+            least_privilege: true,
+            ..Default::default()
+        });
+
+        let request = build_request_with_containment(&minimal_policy(), backend.as_ref(), None)
+            .expect("boxed ProcessContainer config");
+
+        assert!(request.inner.policy.least_privilege_mode);
     }
 
     #[test]
