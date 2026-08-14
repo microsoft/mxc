@@ -44,7 +44,7 @@ pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, ProcessContainer, SandboxPolicy,
+    user_profile_policy, Containment, FilesystemPolicyResult, Lxc, ProcessContainer, SandboxPolicy,
     SandboxRequest, WslcSection,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};

@@ -51,6 +51,7 @@
 //! | Seatbelt | macOS | [`Containment::Process`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer settings | Windows | [`Containment::ProcessContainer`] |
+//! | LXC request construction | Linux | [`Containment::Lxc`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
@@ -59,8 +60,10 @@
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
 //! Other backends (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-//! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
-//! the standalone executor binaries for those.
+//! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`] from
+//! [`run`] / [`spawn_sandbox`]; drive the standalone executor binaries for
+//! those. LXC request construction is available for consumers of
+//! `mxc_engine`'s run-to-completion surface.
 //!
 //! ```no_run
 //! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
@@ -116,7 +119,7 @@ pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
+    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, Lxc, PlatformSupport,
     ProcessContainer, SandboxPolicy, SandboxRequest, WslcSection,
 };
 

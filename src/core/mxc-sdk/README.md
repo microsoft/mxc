@@ -49,6 +49,11 @@ To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`] — the same choice the
 TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
 
+`Containment::Lxc` carries the Linux distribution and release, defaulting to
+the TypeScript SDK's `alpine`/`3.23` values. The request can be used with the
+engine's run-to-completion surface; `mxc-sdk::run` and `spawn_sandbox` do not
+yet support LXC because they require a streaming backend.
+
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].

@@ -556,9 +556,11 @@ pub struct CaptureDenialsSection {
 /// Rust analogue of the SDK's `ContainmentType | ContainmentBackend` argument
 /// to `createConfigFromPolicy`.
 ///
-/// Only the backends this library can actually run are listed; select a
-/// concrete backend when you specifically need it, and prefer
-/// [`Containment::Process`] otherwise.
+/// Select a concrete backend when you specifically need it, and prefer
+/// [`Containment::Process`] otherwise. Request construction and streaming
+/// execution support are separate: [`Containment::Lxc`] can be built here, but
+/// the public Rust SDK does not yet expose the engine's LXC run-to-completion
+/// path.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Containment {
     /// Abstract "OS-native process isolation" intent, resolved per host:
@@ -567,6 +569,8 @@ pub enum Containment {
     Process,
     /// Windows ProcessContainer with AppContainer-specific settings.
     ProcessContainer(ProcessContainer),
+    /// Linux LXC container settings.
+    Lxc(Lxc),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -584,6 +588,24 @@ pub struct ProcessContainer {
     pub least_privilege: bool,
     /// Additional AppContainer capabilities, such as `registryRead`.
     pub capabilities: Vec<String>,
+}
+
+/// Linux LXC settings carried by [`Containment::Lxc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lxc {
+    /// Linux distribution name.
+    pub distribution: String,
+    /// Distribution release.
+    pub release: String,
+}
+
+impl Default for Lxc {
+    fn default() -> Self {
+        Self {
+            distribution: "alpine".to_string(),
+            release: "3.23".to_string(),
+        }
+    }
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -923,6 +945,7 @@ fn build_wire_config(
     let accepts_host_rules_without_outbound = match containment {
         Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
         Containment::ProcessContainer(_) => false,
+        Containment::Lxc(_) => true,
         Containment::Wslc(_) => true,
     };
 
@@ -955,6 +978,7 @@ fn build_wire_config(
         Containment::ProcessContainer(process_container) => {
             apply_process_container_backend(&mut config, policy, process_container)
         }
+        Containment::Lxc(lxc) => apply_lxc_backend(&mut config, lxc),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -1065,6 +1089,17 @@ fn apply_process_container_backend(
     }
 }
 
+fn apply_lxc_backend(config: &mut serde_json::Value, lxc: &Lxc) {
+    use serde_json::json;
+
+    config["containment"] = json!("lxc");
+    config["lxc"] = json!({
+        "distribution": lxc.distribution,
+        "release": lxc.release,
+    });
+    apply_linux_network_policy(config);
+}
+
 /// True when the network section carries any host allow/deny rules, deciding
 /// whether host-level enforcement is engaged.
 fn has_host_rules(network: &serde_json::Value) -> bool {
@@ -1091,7 +1126,6 @@ fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
 /// Promote network enforcement to `firewall` when host rules are present and
 /// no cooperative proxy is configured — the Linux counterpart of the SDK's
 /// `applyLinuxNetworkPolicy`.
-#[cfg(target_os = "linux")]
 fn apply_linux_network_policy(config: &mut serde_json::Value) {
     use serde_json::json;
     let Some(network) = config.get_mut("network") else {
@@ -1642,10 +1676,10 @@ mod tests {
     }
 
     use super::{
-        build_request_with_containment, build_wire_config, Containment, ProcessContainer,
+        build_request_with_containment, build_wire_config, Containment, Lxc, ProcessContainer,
         WslcSection,
     };
-    use wxc_common::models::ContainmentBackend;
+    use wxc_common::models::{ContainmentBackend, NetworkEnforcementMode};
 
     fn minimal_policy() -> SandboxPolicy {
         SandboxPolicy {
@@ -1780,6 +1814,71 @@ mod tests {
             "got: {}",
             error.message
         );
+    }
+
+    #[test]
+    fn lxc_containment_maps_config_to_the_request() {
+        let lxc = Lxc {
+            distribution: "ubuntu".to_string(),
+            release: "24.04".to_string(),
+        };
+
+        let request =
+            build_request_with_containment(&minimal_policy(), &Containment::Lxc(lxc), None)
+                .expect("LXC settings should satisfy the wire contract");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Lxc);
+        assert_eq!(request.inner.lxc_config.distribution, "ubuntu");
+        assert_eq!(request.inner.lxc_config.release, "24.04");
+    }
+
+    #[test]
+    fn lxc_defaults_match_the_typescript_sdk() {
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Lxc(Lxc::default()),
+            None,
+        )
+        .expect("default LXC settings should build");
+
+        assert_eq!(request.inner.lxc_config.distribution, "alpine");
+        assert_eq!(request.inner.lxc_config.release, "3.23");
+    }
+
+    #[test]
+    fn lxc_host_rules_select_firewall_enforcement() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+
+        let request =
+            build_request_with_containment(&policy, &Containment::Lxc(Lxc::default()), None)
+                .expect("LXC host filtering should build");
+
+        assert_eq!(
+            request.inner.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall
+        );
+    }
+
+    #[test]
+    fn lxc_wire_shape_stays_compatible_with_versioned_contracts() {
+        let config = build_wire_config(
+            &minimal_policy(),
+            &Containment::Lxc(Lxc {
+                distribution: "alpine".to_string(),
+                release: "3.23".to_string(),
+            }),
+            None,
+        )
+        .expect("build LXC wire config");
+
+        assert_eq!(config["containment"], "lxc");
+        assert_eq!(config["lxc"]["distribution"], "alpine");
+        assert_eq!(config["lxc"]["release"], "3.23");
+        assert!(config.get("processContainer").is_none());
     }
 
     #[test]
