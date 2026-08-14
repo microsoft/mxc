@@ -414,15 +414,41 @@ mod tests {
         "filesystem": {},
         "fallback": {},
         "network": {},
-        "ui": {},
+        "ui": {}
+    }"#;
+
+    const EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON: &str = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
+        "process": {
+            "commandLine": "echo hello"
+        },
+        "processContainer": {}
+    }"#;
+
+    const EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON: &str = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "processcontainer",
+        "process": {
+            "commandLine": "echo hello"
+        },
         "processContainer": {
             "ui": {}
+        }
+    }"#;
+
+    const EMPTY_SEATBELT_SECTION_REQUEST_JSON: &str = r#"{
+        "version": "0.7.0-alpha",
+        "containment": "seatbelt",
+        "process": {
+            "commandLine": "echo hello"
         },
         "seatbelt": {}
     }"#;
 
     const APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
         "version": "0.7.0-alpha",
+        "containment": "processcontainer",
         "process": {
             "commandLine": "echo hello"
         },
@@ -597,6 +623,7 @@ mod tests {
         format!(
             r#"{{
                 "version": "0.7.0-alpha",
+                "containment": "seatbelt",
                 "process": {{"commandLine": "echo hello"}},
                 "seatbelt": {{"launchMethod": "{launch_method}"}}
             }}"#
@@ -916,6 +943,29 @@ mod tests {
         assert!(ui.disable.is_none());
         assert!(ui.clipboard.is_none());
         assert!(ui.injection.is_none());
+    }
+
+    #[test]
+    fn empty_process_container_section_maps_to_present_empty_wire_section() {
+        let request: super::contract::Request =
+            serde_json::from_str(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON).unwrap();
+        let wire = super::into_wire(request);
+
+        let process_container = wire
+            .process_container
+            .expect("processContainer should be populated");
+        assert!(process_container.least_privilege.is_none());
+        assert!(process_container.learning_mode.is_none());
+        assert!(process_container.capabilities.is_none());
+        assert!(process_container.capture_denials.is_none());
+        assert!(process_container.ui.is_none());
+    }
+
+    #[test]
+    fn empty_process_container_ui_section_maps_to_present_empty_wire_section() {
+        let request: super::contract::Request =
+            serde_json::from_str(EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON).unwrap();
+        let wire = super::into_wire(request);
 
         let process_container = wire
             .process_container
@@ -925,13 +975,28 @@ mod tests {
         assert!(process_container.capabilities.is_none());
         assert!(process_container.capture_denials.is_none());
 
-        let process_container_ui = process_container
+        let ui = process_container
             .ui
             .expect("processContainer.ui should be populated");
-        assert!(process_container_ui.isolation.is_none());
-        assert!(process_container_ui.desktop_system_control.is_none());
-        assert!(process_container_ui.system_settings.is_none());
-        assert!(process_container_ui.ime.is_none());
+        assert!(ui.isolation.is_none());
+        assert!(ui.desktop_system_control.is_none());
+        assert!(ui.system_settings.is_none());
+        assert!(ui.ime.is_none());
+    }
+
+    #[test]
+    fn empty_seatbelt_section_maps_to_present_empty_wire_section() {
+        let request: super::contract::Request =
+            serde_json::from_str(EMPTY_SEATBELT_SECTION_REQUEST_JSON).unwrap();
+        let wire = super::into_wire(request);
+
+        let seatbelt = wire.seatbelt.expect("seatbelt should be populated");
+        assert!(seatbelt.profile_override.is_none());
+        assert!(seatbelt.gui_access.is_none());
+        assert!(seatbelt.launch_method.is_none());
+        assert!(seatbelt.nested_pty.is_none());
+        assert!(seatbelt.keychain_access.is_none());
+        assert!(seatbelt.extra_mach_lookups.is_none());
     }
 
     #[test]
@@ -1216,6 +1281,23 @@ mod tests {
     #[test]
     fn empty_optional_sections_match_current_wire_deserialization() {
         assert_matches_current_wire_deserialization(EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON);
+    }
+
+    #[test]
+    fn empty_process_container_section_matches_current_wire_deserialization() {
+        assert_matches_current_wire_deserialization(EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON);
+    }
+
+    #[test]
+    fn empty_process_container_ui_section_matches_current_wire_deserialization() {
+        assert_matches_current_wire_deserialization(
+            EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON,
+        );
+    }
+
+    #[test]
+    fn empty_seatbelt_section_matches_current_wire_deserialization() {
+        assert_matches_current_wire_deserialization(EMPTY_SEATBELT_SECTION_REQUEST_JSON);
     }
 
     #[test]

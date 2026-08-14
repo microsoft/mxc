@@ -487,6 +487,7 @@ mod tests {
         format!(
             r#"{{
                 "version": "0.6.0-alpha",
+                "containment": "processcontainer",
                 "process": {{"commandLine": "echo hello"}},
                 "processContainer": {{"ui": {{"isolation": "{isolation}"}}}}
             }}"#
