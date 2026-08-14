@@ -48,8 +48,6 @@ export function getSdkBinDir(): string {
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
   'wxc-host-prep.exe',
-  'wxc-ui-probe.exe',
-  'wxc-test-driver.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
   'wxc-windows-sandbox-daemon.exe',
@@ -74,6 +72,14 @@ const OPTIONAL_BINARIES = [
   'wxc-wslc-daemon.exe',  // Only built with --with-wslc
   'plm.exe',       // Permissive Learning Mode helper (Windows-only); staged
                    // only when the plm crate is included in the build.
+  // Test-only binaries. The GitHub build artifact carries them so the
+  // validation matrix can run the Windows suites from a downloaded artifact,
+  // and the npm packager copies that whole artifact into bin/ — so they show
+  // up here. They are not required: no SDK consumer needs them, and the ADO
+  // package producer filters its artifact through signPattern, which
+  // deliberately ships only product binaries.
+  'wxc-ui-probe.exe',     // WinProcessContainer-Tests.ps1
+  'wxc-test-driver.exe',  // run_test_configs.ps1
 ];
 
 // Combined list of all known binaries across platforms. The npm package

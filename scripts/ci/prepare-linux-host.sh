@@ -25,54 +25,21 @@ apt_update() {
     fi
 }
 
-# Repo-committed copy of Fedora's EPEL 10 signing key (see
-# https://docs.fedoraproject.org/en-US/security/cryptography/signatures/),
-# used to verify the fallback RPM download 
-epel_gpg_key() {
-    echo "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/keys/RPM-GPG-KEY-EPEL-10"
-}
-
+# Red Hat ships no third-party content, so epel-release is not in RHEL's own
+# repos; the documented install is the release RPM straight from Fedora. EPEL
+# packages also routinely link against CRB (CodeReady Builder) content, which
+# is shipped but disabled by default.
 install_epel() {
     local package_manager="$1"
-    # Prefer the package manager's own repos first; only reach out to
-    # Fedora directly as a fallback, and verify the download's GPG
-    # signature against our committed key before trusting it.
-    if sudo "$package_manager" install -y epel-release; then
-        return
+
+    if command -v subscription-manager >/dev/null 2>&1; then
+        sudo subscription-manager repos \
+            --enable "codeready-builder-for-rhel-10-$(arch)-rpms" ||
+            echo "WARNING: could not enable the CRB repository; EPEL packages that depend on it may fail to install." >&2
     fi
 
-    echo "epel-release is not available from $package_manager's configured repos; falling back to a signature-verified direct download from Fedora." >&2
-
-    local gpg_key
-    gpg_key="$(epel_gpg_key)"
-    if [[ ! -f "$gpg_key" ]]; then
-        echo "ERROR: missing committed EPEL GPG key at $gpg_key; refusing to install an unverifiable package." >&2
-        exit 1
-    fi
-
-    local tmp_dir
-    tmp_dir="$(mktemp -d)"
-    # shellcheck disable=SC2064
-    trap "rm -rf '$tmp_dir'" RETURN
-
-    local rpm_path="$tmp_dir/epel-release-latest-10.noarch.rpm"
-    curl -fsSL -o "$rpm_path" \
+    sudo "$package_manager" install -y \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
-
-    sudo rpm --import "$gpg_key"
-    local checksig_output
-    if ! checksig_output="$(sudo rpm --checksig "$rpm_path" 2>&1)"; then
-        echo "$checksig_output" >&2
-        echo "ERROR: GPG signature verification failed for $rpm_path; aborting install." >&2
-        exit 1
-    fi
-    echo "$checksig_output"
-    if echo "$checksig_output" | grep -qiE 'NOT OK|MISSING KEYS|NOKEY'; then
-        echo "ERROR: GPG signature verification reported a problem for $rpm_path; aborting install." >&2
-        exit 1
-    fi
-
-    sudo "$package_manager" install -y "$rpm_path"
 }
 
 install_bubblewrap() {

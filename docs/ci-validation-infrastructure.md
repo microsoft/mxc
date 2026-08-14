@@ -203,9 +203,9 @@ message instead of surfacing later as an opaque backend error.
 
 - `bubblewrap` — installs `bwrap` (apt/dnf/yum/microdnf) and relaxes
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
-- `lxc` — installs the LXC stack (plus EPEL on RHEL-likes, verified against the
-  committed key under `scripts/ci/keys/`), reloads the AppArmor profile, starts
-  and waits for `lxcbr0`, and prints network diagnostics.
+- `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
+  for `lxcbr0`, and prints network diagnostics. On RHEL-likes it first needs
+  EPEL, because Red Hat dropped LXC after RHEL 7 and ships no replacement.
 - `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
