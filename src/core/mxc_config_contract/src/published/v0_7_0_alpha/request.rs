@@ -215,8 +215,10 @@ pub struct Seatbelt {
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
+    /// Optional JSON Schema reference for editor validation.
     #[serde(rename = "$schema", default)]
     pub schema: OptionalField<String>,
+    /// Optional human-readable annotation ignored by the runtime.
     #[serde(rename = "_comment", default)]
     pub comment: OptionalField<serde_json::Value>,
     /// The exact contract version marker.
