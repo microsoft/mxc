@@ -649,6 +649,13 @@ impl AppContainerScriptRunner {
         {
             capabilities_to_add.push("internetClient".to_string());
         }
+        if request.policy.allow_local_network
+            && !capabilities_to_add
+                .iter()
+                .any(|capability| capability == "privateNetworkClientServer")
+        {
+            capabilities_to_add.push("privateNetworkClientServer".to_string());
+        }
 
         // --- Derive SIDs for each capability ---
         // `owned_capability_sids` owns the derived SIDs (freed on drop); it
@@ -1320,6 +1327,33 @@ impl SandboxBackend for AppContainerScriptRunner {
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
+        if !request.policy.egress_rules.is_empty() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "network egress rules require the BaseContainer tier and are not supported \
+                     by the AppContainer fallback",
+                )
+            });
+        }
+        if request.policy.allow_host_loopback {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "ingress.hostLoopback='allow' requires the BaseContainer tier and is not \
+                     supported by the AppContainer fallback",
+                )
+            });
+        }
+        if request.policy.allowed_proxy_peer.is_some() {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::Rejected,
+                ..ScriptResponse::error(
+                    "processContainer.network.allowedProxyPeer requires the BaseContainer tier \
+                     and is not supported by the AppContainer fallback",
+                )
+            });
+        }
         Ok(())
     }
 
@@ -1886,6 +1920,39 @@ mod tests {
             .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_rich_egress_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request
+            .policy
+            .egress_rules
+            .push(wxc_common::models::NetworkEgressRule {
+                destinations: vec![],
+                ports: vec![],
+                action: wxc_common::models::NetworkRuleAction::Allow,
+            });
+
+        let err = runner
+            .validate(&request)
+            .expect_err("AppContainer fallback cannot enforce rich egress");
+        assert_eq!(err.failure_phase, FailurePhase::Rejected);
+        assert!(err.error_message.contains("BaseContainer"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_host_loopback_allow() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allow_host_loopback = true;
+
+        let err = runner
+            .validate(&request)
+            .expect_err("AppContainer fallback cannot enable host loopback");
+        assert_eq!(err.failure_phase, FailurePhase::Rejected);
+        assert!(err.error_message.contains("hostLoopback"));
     }
 
     #[test]
