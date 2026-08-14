@@ -35,7 +35,7 @@ use std::time::Duration;
 use lxc_common::network_iptables::NetworkIptablesManager;
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, ScriptResponse};
+use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
@@ -44,7 +44,10 @@ use wxc_common::sandbox_process::{
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::validate_common;
 
-use crate::{bwrap_command, bwrap_version};
+use crate::{
+    bwrap_command::{self, ResolvedNetworkMode},
+    bwrap_version,
+};
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
 /// no backend-specific config struct required.
@@ -213,13 +216,22 @@ impl BubblewrapScriptRunner {
             }
         }
 
+        let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
+
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
-        if let Some(warning) = bwrap_command::local_network_diagnostic(request, proxy.address()) {
+        if let Some(warning) =
+            bwrap_command::local_network_diagnostic_for_mode(request, network_mode)
+        {
             let _ = writeln!(logger, "{}", warning);
         }
-        let args = bwrap_command::build_args_classified(request, proxy.address(), denied_files);
+        let args = bwrap_command::build_args_classified_with_mode(
+            request,
+            proxy.address(),
+            denied_files,
+            network_mode,
+        );
         let _ = writeln!(
             logger,
             "Bubblewrap: spawning bwrap with {} args",
@@ -229,7 +241,7 @@ impl BubblewrapScriptRunner {
         // 3. Determine whether iptables network rules are needed. When the
         //    cooperative proxy is active we skip iptables entirely (host
         //    enforcement happens at the proxy layer).
-        let needs_iptables = needs_iptables_rules(request) && !proxy.is_active();
+        let needs_iptables = network_mode.requires_iptables();
         let container_name = if request.container_id.is_empty() {
             format!("bwrap-{:08x}", std::process::id())
         } else {
@@ -514,21 +526,6 @@ impl Drop for BubblewrapSandboxProcess {
         let _ = self.inner.child.wait();
         self.run_teardown();
     }
-}
-
-/// Returns `true` when the request has per-host network rules that require
-/// iptables. Pure `"block"` with no host lists uses `--unshare-net` instead.
-fn needs_iptables_rules(request: &ExecutionRequest) -> bool {
-    let uses_firewall = matches!(
-        request.policy.network_enforcement_mode,
-        NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-    );
-    let has_host_rules =
-        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
-
-    // Only invoke iptables when there are actual per-host rules to apply and
-    // the enforcement mode includes firewall.
-    uses_firewall && has_host_rules
 }
 
 /// Build the iptables manager for a Bubblewrap sandbox.

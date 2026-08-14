@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use wxc_common::filesystem_resolve::FsIntent;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress};
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
@@ -87,17 +87,52 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
     "/mnt/wsl/resolv.conf",
 ];
 
-/// Whether the sandbox gets its own network namespace (`--unshare-net`) rather
-/// than sharing the host's.
-///
-/// Full isolation applies only when the default policy denies outbound, no
-/// per-host rules need iptables on the shared namespace, and no loopback proxy
-/// has to stay reachable.
-fn uses_private_netns(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> bool {
-    request.policy.default_network_policy == NetworkPolicy::Block
-        && request.policy.allowed_hosts.is_empty()
-        && request.policy.blocked_hosts.is_empty()
-        && proxy_address.is_none()
+/// The networking behavior Bubblewrap applies for one execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolvedNetworkMode {
+    /// A private network namespace with no external connectivity.
+    Isolated,
+    /// The host network namespace without MXC firewall filtering.
+    Shared,
+    /// The host network namespace with per-destination iptables filtering.
+    FirewallFiltered,
+    /// Cooperative proxy routing; later work moves this into a private
+    /// namespace and adds proxy-only egress enforcement.
+    ProxyOnly,
+}
+
+impl ResolvedNetworkMode {
+    /// Classify the internal request using the proxy's resolved runtime state.
+    pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
+        if proxy_active {
+            return Self::ProxyOnly;
+        }
+
+        let uses_firewall = matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        );
+        let has_host_rules =
+            !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
+
+        if uses_firewall && has_host_rules {
+            Self::FirewallFiltered
+        } else if request.policy.default_network_policy == NetworkPolicy::Block && !has_host_rules {
+            Self::Isolated
+        } else {
+            Self::Shared
+        }
+    }
+
+    /// Whether current behavior gives the sandbox a private network namespace.
+    pub(crate) fn uses_private_netns(self) -> bool {
+        matches!(self, Self::Isolated)
+    }
+
+    /// Whether current behavior installs iptables filtering rules.
+    pub(crate) fn requires_iptables(self) -> bool {
+        matches!(self, Self::FirewallFiltered)
+    }
 }
 
 /// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
@@ -123,9 +158,18 @@ pub fn local_network_diagnostic(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Option<&'static str> {
+    let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
+    local_network_diagnostic_for_mode(request, network_mode)
+}
+
+/// Describe an inbound-policy mismatch using a previously resolved mode.
+pub(crate) fn local_network_diagnostic_for_mode(
+    request: &ExecutionRequest,
+    network_mode: ResolvedNetworkMode,
+) -> Option<&'static str> {
     match (
         request.policy.allow_local_network,
-        uses_private_netns(request, proxy_address),
+        network_mode.uses_private_netns(),
     ) {
         (false, false) => Some(
             "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
@@ -180,6 +224,17 @@ pub fn build_args_classified(
     proxy_address: Option<&ProxyAddress>,
     denied_files: &HashSet<String>,
 ) -> Vec<String> {
+    let network_mode = ResolvedNetworkMode::from_request(request, proxy_address.is_some());
+    build_args_classified_with_mode(request, proxy_address, denied_files, network_mode)
+}
+
+/// Build Bubblewrap arguments using a previously resolved network mode.
+pub(crate) fn build_args_classified_with_mode(
+    request: &ExecutionRequest,
+    proxy_address: Option<&ProxyAddress>,
+    denied_files: &HashSet<String>,
+    network_mode: ResolvedNetworkMode,
+) -> Vec<String> {
     // -- Namespace isolation (all unshared by default) ---------------------
     let mut args = vec![
         "--unshare-user",
@@ -197,7 +252,7 @@ pub fn build_args_classified(
     // applies iptables rules separately. When a network proxy is active we
     // also keep the host network namespace so the sandbox can reach the
     // loopback proxy.
-    if uses_private_netns(request, proxy_address) {
+    if network_mode.uses_private_netns() {
         args.push("--unshare-net".into());
     }
 
@@ -309,7 +364,6 @@ pub fn build_args_classified(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -326,6 +380,112 @@ mod tests {
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--unshare-ipc".to_string()));
         assert!(args.contains(&"--unshare-uts".to_string()));
+    }
+
+    struct NetworkPlanCase {
+        name: &'static str,
+        default_policy: NetworkPolicy,
+        enforcement_mode: NetworkEnforcementMode,
+        allowed_hosts: &'static [&'static str],
+        blocked_hosts: &'static [&'static str],
+        proxy_active: bool,
+        expected: ResolvedNetworkMode,
+    }
+
+    #[test]
+    fn classifies_current_network_policy_modes() {
+        let cases = [
+            NetworkPlanCase {
+                name: "default block is isolated",
+                default_policy: NetworkPolicy::Block,
+                enforcement_mode: NetworkEnforcementMode::Capabilities,
+                allowed_hosts: &[],
+                blocked_hosts: &[],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::Isolated,
+            },
+            NetworkPlanCase {
+                name: "default allow is shared",
+                default_policy: NetworkPolicy::Allow,
+                enforcement_mode: NetworkEnforcementMode::Capabilities,
+                allowed_hosts: &[],
+                blocked_hosts: &[],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::Shared,
+            },
+            NetworkPlanCase {
+                name: "firewall allow rules require filtering",
+                default_policy: NetworkPolicy::Block,
+                enforcement_mode: NetworkEnforcementMode::Firewall,
+                allowed_hosts: &["example.com"],
+                blocked_hosts: &[],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::FirewallFiltered,
+            },
+            NetworkPlanCase {
+                name: "combined enforcement block rules require filtering",
+                default_policy: NetworkPolicy::Allow,
+                enforcement_mode: NetworkEnforcementMode::Both,
+                allowed_hosts: &[],
+                blocked_hosts: &["example.com"],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::FirewallFiltered,
+            },
+            NetworkPlanCase {
+                name: "capabilities mode with host rules stays shared",
+                default_policy: NetworkPolicy::Block,
+                enforcement_mode: NetworkEnforcementMode::Capabilities,
+                allowed_hosts: &["example.com"],
+                blocked_hosts: &[],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::Shared,
+            },
+            NetworkPlanCase {
+                name: "proxy takes precedence over isolation",
+                default_policy: NetworkPolicy::Block,
+                enforcement_mode: NetworkEnforcementMode::Capabilities,
+                allowed_hosts: &[],
+                blocked_hosts: &[],
+                proxy_active: true,
+                expected: ResolvedNetworkMode::ProxyOnly,
+            },
+            NetworkPlanCase {
+                name: "proxy takes precedence over firewall filtering",
+                default_policy: NetworkPolicy::Allow,
+                enforcement_mode: NetworkEnforcementMode::Firewall,
+                allowed_hosts: &[],
+                blocked_hosts: &["example.com"],
+                proxy_active: true,
+                expected: ResolvedNetworkMode::ProxyOnly,
+            },
+        ];
+
+        for case in cases {
+            let mut request = ExecutionRequest::default();
+            request.policy.default_network_policy = case.default_policy;
+            request.policy.network_enforcement_mode = case.enforcement_mode;
+            request.policy.allowed_hosts = case
+                .allowed_hosts
+                .iter()
+                .map(|host| (*host).into())
+                .collect();
+            request.policy.blocked_hosts = case
+                .blocked_hosts
+                .iter()
+                .map(|host| (*host).into())
+                .collect();
+
+            let actual = ResolvedNetworkMode::from_request(&request, case.proxy_active);
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn resolved_network_mode_capabilities_match_current_behavior() {
+        assert!(ResolvedNetworkMode::Isolated.uses_private_netns());
+        assert!(!ResolvedNetworkMode::ProxyOnly.uses_private_netns());
+        assert!(ResolvedNetworkMode::FirewallFiltered.requires_iptables());
+        assert!(!ResolvedNetworkMode::Shared.requires_iptables());
     }
 
     #[test]
