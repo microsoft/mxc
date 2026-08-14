@@ -49,23 +49,17 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, DestinationRule as PsecDestinationRule,
-    DestinationRuleArgs as PsecDestinationRuleArgs, EndpointPolicy as PsecEndpointPolicy,
-    EndpointPolicyArgs as PsecEndpointPolicyArgs, EndpointRule as PsecEndpointRule,
-    EndpointRuleArgs as PsecEndpointRuleArgs, FilterAction as PsecFilterAction,
-    IpProtocol as PsecIpProtocol, IpSubnet as PsecIpSubnet, IpSubnetArgs as PsecIpSubnetArgs,
-    NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
-    PortRule as PsecPortRule, PortRuleArgs as PsecPortRuleArgs,
-    ProcessSecurityEnvironment as PsecProcessSecurityEnvironment,
-    ProcessSecurityEnvironmentArgs as PsecProcessSecurityEnvironmentArgs,
-    ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs, SchemaVersion,
+    finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRule,
+    EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRule,
+    FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnet,
+    NetworkPolicyT as PsecNetworkPolicy, PortRuleT as PsecPortRule,
+    ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
+    SchemaVersionT,
 };
 use sandbox_spec::base_container_layout::{
-    destination_rule, destination_ruleArgs, endpoint_policy, endpoint_policyArgs, endpoint_rule,
-    endpoint_ruleArgs, finish_sandbox_spec_buffer, ip_subnet, ip_subnetArgs, port_rule,
-    port_ruleArgs, proxy_info, proxy_infoArgs, FilterAction as SboxFilterAction, IntegrityLevel,
-    IpProtocol as SboxIpProtocol, NetworkPolicy as FbsNetworkPolicy, NetworkPolicyArgs,
-    SandboxSpec, SandboxSpecArgs,
+    destination_ruleT, endpoint_policyT, endpoint_ruleT, finish_sandbox_spec_buffer, ip_subnetT,
+    port_ruleT, proxy_infoT, FilterAction as SboxFilterAction, IntegrityLevel,
+    IpProtocol as SboxIpProtocol, NetworkPolicyT as SboxNetworkPolicy, SandboxSpecT,
 };
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
@@ -110,21 +104,6 @@ fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
     }
     block.push(0);
     block
-}
-
-fn create_string_vector<'a>(
-    builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-    values: &'a [String],
-) -> Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>
-{
-    if values.is_empty() {
-        return None;
-    }
-    let offsets: Vec<_> = values
-        .iter()
-        .map(|value| builder.create_string(value))
-        .collect();
-    Some(builder.create_vector(&offsets))
 }
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -747,69 +726,35 @@ impl BaseContainerRunner {
     }
 
     // A BaseContainer network policy contains either proxy settings or an egress policy.
-    fn build_network_policy<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-        policy: &ContainerPolicy,
-    ) -> flatbuffers::WIPOffset<FbsNetworkPolicy<'a>> {
-        let allowed_appcontainer_peer = policy
-            .allowed_proxy_peer
-            .as_ref()
-            .map(|peer| builder.create_string(peer));
+    fn build_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
+        let mut network = SboxNetworkPolicy::default();
+        network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
         match Self::resolved_network_policy(policy) {
             ResolvedNetworkPolicy::Proxy(address) => {
-                let proxy = address.map(|address| {
-                    let url = builder.create_string(&address.to_url());
-                    proxy_info::create(builder, &proxy_infoArgs { url: Some(url) })
+                network.proxy = address.map(|address| {
+                    let mut proxy = proxy_infoT::default();
+                    proxy.url = Some(address.to_url());
+                    Box::new(proxy)
                 });
-
-                FbsNetworkPolicy::create(
-                    builder,
-                    &NetworkPolicyArgs {
-                        proxy,
-                        allowed_appcontainer_peer,
-                        ..Default::default()
-                    },
-                )
             }
             ResolvedNetworkPolicy::Egress(default_policy) => {
-                let default_action = match default_policy {
+                let mut egress = endpoint_policyT::default();
+                egress.default_action = match default_policy {
                     NetworkPolicy::Allow => SboxFilterAction::allow,
                     NetworkPolicy::Block => SboxFilterAction::deny,
                 };
-                let allow =
-                    Self::build_sbox_endpoint_rules(builder, policy, NetworkRuleAction::Allow);
-                let deny =
-                    Self::build_sbox_endpoint_rules(builder, policy, NetworkRuleAction::Deny);
-                let egress = endpoint_policy::create(
-                    builder,
-                    &endpoint_policyArgs {
-                        default_action,
-                        allow,
-                        deny,
-                    },
-                );
-
-                FbsNetworkPolicy::create(
-                    builder,
-                    &NetworkPolicyArgs {
-                        egress: Some(egress),
-                        allowed_appcontainer_peer,
-                        ..Default::default()
-                    },
-                )
+                egress.allow = Self::build_sbox_endpoint_rules(policy, NetworkRuleAction::Allow);
+                egress.deny = Self::build_sbox_endpoint_rules(policy, NetworkRuleAction::Deny);
+                network.egress = Some(Box::new(egress));
             }
         }
+        network
     }
 
-    fn build_sbox_endpoint_rules<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    fn build_sbox_endpoint_rules(
         policy: &ContainerPolicy,
         action: NetworkRuleAction,
-    ) -> Option<
-        flatbuffers::WIPOffset<
-            flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<endpoint_rule<'a>>>,
-        >,
-    > {
+    ) -> Option<Vec<endpoint_ruleT>> {
         let mut endpoint_rules = Vec::new();
         for rule in policy
             .egress_rules
@@ -817,147 +762,84 @@ impl BaseContainerRunner {
             .filter(|rule| rule.action == action)
         {
             for destination in &rule.destinations {
-                let subnet = Self::build_sbox_subnet(builder, &destination.cidr);
+                let mut destination_rule = destination_ruleT::default();
+                destination_rule.subnet =
+                    Some(Box::new(Self::build_sbox_subnet(&destination.cidr)));
                 let except = (!destination.except.is_empty()).then(|| {
-                    let subnets = destination
+                    destination
                         .except
                         .iter()
-                        .map(|cidr| Self::build_sbox_subnet(builder, cidr))
-                        .collect::<Vec<_>>();
-                    builder.create_vector(&subnets)
+                        .map(|cidr| Self::build_sbox_subnet(cidr))
+                        .collect()
                 });
-                let destination_rule = destination_rule::create(
-                    builder,
-                    &destination_ruleArgs {
-                        subnet: Some(subnet),
-                        except,
-                    },
-                );
-                let destinations = builder.create_vector(&[destination_rule]);
+                destination_rule.except = except;
                 let ports = (!rule.ports.is_empty()).then(|| {
                     let ipv6 = destination.cidr.contains(':');
-                    let port_rules = rule
-                        .ports
+                    rule.ports
                         .iter()
                         .map(|port| {
-                            port_rule::create(
-                                builder,
-                                &port_ruleArgs {
-                                    protocol: match port.protocol {
-                                        NetworkProtocol::Tcp => SboxIpProtocol::tcp,
-                                        NetworkProtocol::Udp => SboxIpProtocol::udp,
-                                        NetworkProtocol::Icmp if ipv6 => SboxIpProtocol::icmpv6,
-                                        NetworkProtocol::Icmp => SboxIpProtocol::icmpv4,
-                                        NetworkProtocol::Any => SboxIpProtocol::any,
-                                    },
-                                    port: port.port.unwrap_or(0),
-                                    end_port: port.end_port.unwrap_or(0),
-                                },
-                            )
+                            let mut port_rule = port_ruleT::default();
+                            port_rule.protocol = match port.protocol {
+                                NetworkProtocol::Tcp => SboxIpProtocol::tcp,
+                                NetworkProtocol::Udp => SboxIpProtocol::udp,
+                                NetworkProtocol::Icmp if ipv6 => SboxIpProtocol::icmpv6,
+                                NetworkProtocol::Icmp => SboxIpProtocol::icmpv4,
+                                NetworkProtocol::Any => SboxIpProtocol::any,
+                            };
+                            port_rule.port = port.port.unwrap_or(0);
+                            port_rule.end_port = port.end_port.unwrap_or(0);
+                            port_rule
                         })
-                        .collect::<Vec<_>>();
-                    builder.create_vector(&port_rules)
+                        .collect()
                 });
-                endpoint_rules.push(endpoint_rule::create(
-                    builder,
-                    &endpoint_ruleArgs {
-                        destinations: Some(destinations),
-                        ports,
-                    },
-                ));
+                let mut endpoint_rule = endpoint_ruleT::default();
+                endpoint_rule.destinations = Some(vec![destination_rule]);
+                endpoint_rule.ports = ports;
+                endpoint_rules.push(endpoint_rule);
             }
         }
-        (!endpoint_rules.is_empty()).then(|| builder.create_vector(&endpoint_rules))
+        (!endpoint_rules.is_empty()).then_some(endpoint_rules)
     }
 
-    fn build_sbox_subnet<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-        cidr: &str,
-    ) -> flatbuffers::WIPOffset<ip_subnet<'a>> {
-        let (address, prefix_length) = cidr
-            .split_once('/')
-            .map(|(address, prefix)| {
-                (
-                    address,
-                    prefix
-                        .parse()
-                        .expect("network CIDRs must be validated before runner dispatch"),
-                )
-            })
-            .unwrap_or((cidr, if cidr.contains(':') { 128 } else { 32 }));
-        let address = builder.create_string(address);
-        ip_subnet::create(
-            builder,
-            &ip_subnetArgs {
-                address: Some(address),
-                prefix_length,
-            },
-        )
+    fn build_sbox_subnet(cidr: &str) -> ip_subnetT {
+        let (address, prefix_length) = Self::cidr_parts(cidr);
+        let mut subnet = ip_subnetT::default();
+        subnet.address = Some(address);
+        subnet.prefix_length = prefix_length;
+        subnet
     }
 
-    fn build_process_security_environment_network_policy<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    fn build_process_security_environment_network_policy(
         policy: &ContainerPolicy,
-    ) -> flatbuffers::WIPOffset<PsecNetworkPolicy<'a>> {
-        let allowed_appcontainer_peer = policy
-            .allowed_proxy_peer
-            .as_ref()
-            .map(|peer| builder.create_string(peer));
+    ) -> PsecNetworkPolicy {
+        let mut network = PsecNetworkPolicy::default();
+        network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
         match Self::resolved_network_policy(policy) {
             ResolvedNetworkPolicy::Proxy(address) => {
-                let proxy = address.map(|address| {
-                    let url = builder.create_string(&address.to_url());
-                    PsecProxyInfo::create(builder, &PsecProxyInfoArgs { url: Some(url) })
+                network.proxy = address.map(|address| {
+                    let mut proxy = PsecProxyInfo::default();
+                    proxy.url = Some(address.to_url());
+                    Box::new(proxy)
                 });
-
-                PsecNetworkPolicy::create(
-                    builder,
-                    &PsecNetworkPolicyArgs {
-                        proxy,
-                        allowed_appcontainer_peer,
-                        ..Default::default()
-                    },
-                )
             }
             ResolvedNetworkPolicy::Egress(default_policy) => {
-                let default_action = match default_policy {
+                let mut egress = PsecEndpointPolicy::default();
+                egress.default_action = match default_policy {
                     NetworkPolicy::Allow => PsecFilterAction::allow,
                     NetworkPolicy::Block => PsecFilterAction::deny,
                 };
-                let allow =
-                    Self::build_psec_endpoint_rules(builder, policy, NetworkRuleAction::Allow);
-                let deny =
-                    Self::build_psec_endpoint_rules(builder, policy, NetworkRuleAction::Deny);
-                let egress = PsecEndpointPolicy::create(
-                    builder,
-                    &PsecEndpointPolicyArgs {
-                        default_action,
-                        allow,
-                        deny,
-                    },
-                );
-
-                PsecNetworkPolicy::create(
-                    builder,
-                    &PsecNetworkPolicyArgs {
-                        egress: Some(egress),
-                        allowed_appcontainer_peer,
-                        ..Default::default()
-                    },
-                )
+                egress.allow = Self::build_psec_endpoint_rules(policy, NetworkRuleAction::Allow);
+                egress.deny = Self::build_psec_endpoint_rules(policy, NetworkRuleAction::Deny);
+                network.egress = Some(Box::new(egress));
             }
         }
+        network
     }
 
-    fn build_psec_endpoint_rules<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    fn build_psec_endpoint_rules(
         policy: &ContainerPolicy,
         action: NetworkRuleAction,
-    ) -> Option<
-        flatbuffers::WIPOffset<
-            flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<PsecEndpointRule<'a>>>,
-        >,
-    > {
+    ) -> Option<Vec<PsecEndpointRule>> {
         let mut endpoint_rules = Vec::new();
         for rule in policy
             .egress_rules
@@ -965,63 +847,54 @@ impl BaseContainerRunner {
             .filter(|rule| rule.action == action)
         {
             for destination in &rule.destinations {
-                let subnet = Self::build_psec_subnet(builder, &destination.cidr);
+                let mut destination_rule = PsecDestinationRule::default();
+                destination_rule.subnet =
+                    Some(Box::new(Self::build_psec_subnet(&destination.cidr)));
                 let except = (!destination.except.is_empty()).then(|| {
-                    let subnets = destination
+                    destination
                         .except
                         .iter()
-                        .map(|cidr| Self::build_psec_subnet(builder, cidr))
-                        .collect::<Vec<_>>();
-                    builder.create_vector(&subnets)
+                        .map(|cidr| Self::build_psec_subnet(cidr))
+                        .collect()
                 });
-                let destination_rule = PsecDestinationRule::create(
-                    builder,
-                    &PsecDestinationRuleArgs {
-                        subnet: Some(subnet),
-                        except,
-                    },
-                );
-                let destinations = builder.create_vector(&[destination_rule]);
+                destination_rule.except = except;
                 let ports = (!rule.ports.is_empty()).then(|| {
                     let ipv6 = destination.cidr.contains(':');
-                    let port_rules = rule
-                        .ports
+                    rule.ports
                         .iter()
                         .map(|port| {
-                            PsecPortRule::create(
-                                builder,
-                                &PsecPortRuleArgs {
-                                    protocol: match port.protocol {
-                                        NetworkProtocol::Tcp => PsecIpProtocol::tcp,
-                                        NetworkProtocol::Udp => PsecIpProtocol::udp,
-                                        NetworkProtocol::Icmp if ipv6 => PsecIpProtocol::icmpv6,
-                                        NetworkProtocol::Icmp => PsecIpProtocol::icmpv4,
-                                        NetworkProtocol::Any => PsecIpProtocol::any,
-                                    },
-                                    port: port.port.unwrap_or(0),
-                                    end_port: port.end_port.unwrap_or(0),
-                                },
-                            )
+                            let mut port_rule = PsecPortRule::default();
+                            port_rule.protocol = match port.protocol {
+                                NetworkProtocol::Tcp => PsecIpProtocol::tcp,
+                                NetworkProtocol::Udp => PsecIpProtocol::udp,
+                                NetworkProtocol::Icmp if ipv6 => PsecIpProtocol::icmpv6,
+                                NetworkProtocol::Icmp => PsecIpProtocol::icmpv4,
+                                NetworkProtocol::Any => PsecIpProtocol::any,
+                            };
+                            port_rule.port = port.port.unwrap_or(0);
+                            port_rule.end_port = port.end_port.unwrap_or(0);
+                            port_rule
                         })
-                        .collect::<Vec<_>>();
-                    builder.create_vector(&port_rules)
+                        .collect()
                 });
-                endpoint_rules.push(PsecEndpointRule::create(
-                    builder,
-                    &PsecEndpointRuleArgs {
-                        destinations: Some(destinations),
-                        ports,
-                    },
-                ));
+                let mut endpoint_rule = PsecEndpointRule::default();
+                endpoint_rule.destinations = Some(vec![destination_rule]);
+                endpoint_rule.ports = ports;
+                endpoint_rules.push(endpoint_rule);
             }
         }
-        (!endpoint_rules.is_empty()).then(|| builder.create_vector(&endpoint_rules))
+        (!endpoint_rules.is_empty()).then_some(endpoint_rules)
     }
 
-    fn build_psec_subnet<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-        cidr: &str,
-    ) -> flatbuffers::WIPOffset<PsecIpSubnet<'a>> {
+    fn build_psec_subnet(cidr: &str) -> PsecIpSubnet {
+        let (address, prefix_length) = Self::cidr_parts(cidr);
+        let mut subnet = PsecIpSubnet::default();
+        subnet.address = Some(address);
+        subnet.prefix_length = prefix_length;
+        subnet
+    }
+
+    fn cidr_parts(cidr: &str) -> (String, u8) {
         let (address, prefix_length) = cidr
             .split_once('/')
             .map(|(address, prefix)| {
@@ -1033,14 +906,7 @@ impl BaseContainerRunner {
                 )
             })
             .unwrap_or((cidr, if cidr.contains(':') { 128 } else { 32 }));
-        let address = builder.create_string(address);
-        PsecIpSubnet::create(
-            builder,
-            &PsecIpSubnetArgs {
-                address: Some(address),
-                prefix_length,
-            },
-        )
+        (address.to_string(), prefix_length)
     }
 
     fn validate_network_rules(policy: &ContainerPolicy) -> Result<(), String> {
@@ -1173,23 +1039,8 @@ impl BaseContainerRunner {
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-        let version = SchemaVersion::new(1, 0);
 
         let capabilities = Self::effective_capabilities(request);
-        let capabilities = if capabilities.is_empty() {
-            None
-        } else {
-            Some(builder.create_string(&capabilities.join(",")))
-        };
-
-        let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
-        let fs_read_only = create_string_vector(&mut builder, &request.policy.readonly_paths);
-        let fs_deny = create_string_vector(&mut builder, &request.policy.denied_paths);
-        let network_policy = Some(Self::build_process_security_environment_network_policy(
-            &mut builder,
-            &request.policy,
-        ));
-
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
             &wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -1197,19 +1048,19 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        let spec = PsecProcessSecurityEnvironment::create(
-            &mut builder,
-            &PsecProcessSecurityEnvironmentArgs {
-                version: Some(&version),
-                capabilities,
-                disallow_win32k_system_calls: request.policy.ui.disable,
-                ui_restrictions,
-                fs_read_write,
-                fs_read_only,
-                fs_deny,
-                network_policy,
-            },
-        );
+        let version = SchemaVersionT { major: 1, minor: 0 };
+        let mut spec = PsecProcessSecurityEnvironment::default();
+        spec.version = version;
+        spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
+        spec.disallow_win32k_system_calls = request.policy.ui.disable;
+        spec.ui_restrictions = ui_restrictions;
+        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
+        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
+        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
+        spec.network_policy = Some(Box::new(
+            Self::build_process_security_environment_network_policy(&request.policy),
+        ));
+        let spec = spec.pack(&mut builder);
         finish_process_security_environment_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
     }
@@ -1230,54 +1081,7 @@ impl BaseContainerRunner {
     fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
-        let version = builder.create_string(SANDBOX_SPEC_VERSION);
-
         let caps = Self::effective_capabilities(request);
-        let capabilities = if caps.is_empty() {
-            None
-        } else {
-            Some(builder.create_string(&caps.join(",")))
-        };
-
-        let fs_read_write = if request.policy.readwrite_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .readwrite_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let fs_read_only = if request.policy.readonly_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .readonly_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let fs_deny = if request.policy.denied_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .denied_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let network_policy = Some(Self::build_network_policy(&mut builder, &request.policy));
-
-        // UI restrictions
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
             &wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -1285,25 +1089,25 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        let spec = SandboxSpec::create(
-            &mut builder,
-            &SandboxSpecArgs {
-                version: Some(version),
-                app_container: true,
-                disallow_win32k_system_calls: request.policy.ui.disable,
-                ui_restrictions,
-                least_privilege: request.policy.least_privilege_mode,
-                capabilities,
-                fs_read_write,
-                fs_read_only,
-                fs_deny,
-                network_policy,
-                ..Default::default()
-            },
-        );
-
+        let mut spec = SandboxSpecT::default();
+        spec.version = SANDBOX_SPEC_VERSION.to_string();
+        spec.app_container = true;
+        spec.disallow_win32k_system_calls = request.policy.ui.disable;
+        spec.ui_restrictions = ui_restrictions;
+        spec.least_privilege = request.policy.least_privilege_mode;
+        spec.capabilities = (!caps.is_empty()).then(|| caps.join(","));
+        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
+        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
+        spec.network_policy = Some(Box::new(Self::build_network_policy(&request.policy)));
+        spec.integrity = IntegrityLevel::system_default;
+        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
+        let spec = spec.pack(&mut builder);
         finish_sandbox_spec_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
+    }
+
+    fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
+        (!paths.is_empty()).then(|| paths.to_vec())
     }
 
     fn needs_internet_client(request: &ExecutionRequest) -> bool {
