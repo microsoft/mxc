@@ -29,7 +29,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use learning_mode_core::{
-    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
+    AnalysisResult, AnalyzeError, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
+    DataLoopSummary, DenialAnalyzer, DeniedResource, ProcessLifetime,
+    MAX_DATA_LOOP_SIGNATURE_BYTES,
 };
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
@@ -138,6 +140,8 @@ struct Accumulator<'visitor> {
     decode_error: Option<String>,
     panic_payload: Option<Box<dyn std::any::Any + Send>>,
     schema_cache: tdh_decode::EventSchemaCache,
+    data_loop: DataLoopSummary,
+    data_loop_signature_bytes: usize,
 }
 
 impl<'visitor> Accumulator<'visitor> {
@@ -158,6 +162,8 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+            data_loop: DataLoopSummary::default(),
+            data_loop_signature_bytes: 0,
         }
     }
 
@@ -185,6 +191,8 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+            data_loop: DataLoopSummary::default(),
+            data_loop_signature_bytes: 0,
         }
     }
 
@@ -205,38 +213,43 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+            data_loop: DataLoopSummary::default(),
+            data_loop_signature_bytes: 0,
         }
     }
 
-    /// Whether an event for `pid` at `filetime` falls within the attested
-    /// sandbox process lifetimes. Legacy full-trace analysis (no lifetime
-    /// index) treats every event as in scope.
-    fn in_analysis_scope(&self, pid: u32, filetime: u64) -> bool {
-        self.process_lifetimes
-            .as_ref()
-            .is_none_or(|lifetimes| lifetimes.contains(pid, filetime))
-    }
-
     fn add_raw_denial(&mut self, raw: RawDenial) {
-        if self
-            .process_lifetimes
-            .as_ref()
-            .is_some_and(|lifetimes| !lifetimes.contains(raw.pid, raw.filetime))
-        {
+        if !self.event_in_scope(raw.pid, raw.filetime) {
             return;
         }
         let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
                 Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
-                Some(_) => return,
+                Some(candidate) => {
+                    self.record_raw_denial_outcome(
+                        &raw,
+                        &candidate,
+                        DataLoopExclusionReason::UnusableResourcePath,
+                    );
+                    return;
+                }
                 None if path_norm::is_user_visible_absolute(&raw.object_name) => {
                     raw.object_name.clone()
                 }
-                None => return,
+                None => {
+                    let candidate = raw.object_name.clone();
+                    self.record_raw_denial_outcome(
+                        &raw,
+                        &candidate,
+                        DataLoopExclusionReason::UnusableResourcePath,
+                    );
+                    return;
+                }
             }
         } else {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
+        self.record_raw_denial_outcome(&raw, &resource, DataLoopExclusionReason::CanonicalDenial);
         let dedup_resource = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
                 resource.to_ascii_lowercase()
@@ -249,9 +262,13 @@ impl<'visitor> Accumulator<'visitor> {
         {
             return;
         }
+        // The canonical unique-denial bound is reached: keep reading (up to
+        // the processed-event bound) so every remaining outcome is still
+        // aggregated into the Data Loop summary, rather than stopping the
+        // trace early.
         if self.denials.len() >= MAX_UNIQUE_DENIALS {
             self.truncated = true;
-            self.stop_requested = true;
+            self.data_loop.mark_canonical_denial_limit_reached();
             return;
         }
         self.seen.insert((dedup_resource, raw.access_type));
@@ -264,10 +281,102 @@ impl<'visitor> Accumulator<'visitor> {
         });
     }
 
+    /// Records an outcome for an already-built [`RawDenial`]. Retains the
+    /// resolved resource/capability identity (redacting only its
+    /// user-profile path segment, if any) plus the resource/access type —
+    /// never the exact `filetime`.
+    fn record_raw_denial_outcome(
+        &mut self,
+        raw: &RawDenial,
+        resource: &str,
+        reason: DataLoopExclusionReason,
+    ) {
+        let mut properties = raw
+            .data_loop_properties
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let has_object_name = properties
+            .keys()
+            .any(|name| name.eq_ignore_ascii_case("ObjectName"));
+        if !matches!(
+            raw.resource_type,
+            learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other
+        ) || !has_object_name
+        {
+            properties.insert(
+                "resource".to_string(),
+                crate::extractors::redact_username_in_path(resource),
+            );
+        }
+        let properties =
+            crate::extractors::bound_properties(properties.into_iter().collect::<Vec<_>>());
+        self.record_outcome(
+            raw.provider,
+            raw.event_id,
+            reason,
+            raw.pid,
+            (Some(raw.access_type), Some(raw.resource_type)),
+            properties,
+        );
+    }
+
+    /// Records one excluded outcome as a deduplicated Data Loop signature:
+    /// symbolic provider, provider GUID, event ID, reason, PID, and the
+    /// already-sanitized/bounded property list all identify the group;
+    /// repeats of the same signature only increment its `count`.
+    fn record_exclusion(
+        &mut self,
+        provider: DataLoopProvider,
+        event_id: u16,
+        reason: DataLoopExclusionReason,
+        pid: u32,
+        properties: Vec<(String, String)>,
+    ) {
+        self.record_outcome(provider, event_id, reason, pid, (None, None), properties);
+    }
+
+    fn record_outcome(
+        &mut self,
+        provider: DataLoopProvider,
+        event_id: u16,
+        reason: DataLoopExclusionReason,
+        pid: u32,
+        classification: (
+            Option<learning_mode_core::AccessType>,
+            Option<learning_mode_core::ResourceType>,
+        ),
+        properties: Vec<(String, String)>,
+    ) {
+        let (access_type, resource_type) = classification;
+        let signature = DataLoopSignature {
+            provider,
+            provider_guid: crate::extractors::provider_guid_string(provider),
+            event_id,
+            reason,
+            pid,
+            access_type,
+            resource_type,
+            properties,
+        };
+        self.data_loop.record_with_byte_budget(
+            signature,
+            &mut self.data_loop_signature_bytes,
+            MAX_DATA_LOOP_SIGNATURE_BYTES,
+        );
+    }
+
+    fn event_in_scope(&self, pid: u32, filetime: u64) -> bool {
+        self.process_lifetimes
+            .as_ref()
+            .is_none_or(|lifetimes| lifetimes.contains(pid, filetime))
+    }
+
     fn begin_event(&mut self) -> bool {
         if self.processed_event_count >= MAX_PROCESSED_EVENTS {
             self.processing_limit_reached = true;
             self.truncated = true;
+            self.data_loop.mark_processed_events_truncated();
             self.stop_requested = true;
             return false;
         }
@@ -288,16 +397,62 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
+    /// Handles a TDH decode failure for one event.
+    ///
+    /// Schema-level failures (the event's manifest itself could not be
+    /// resolved) are fatal in every mode: they indicate the trace/schema
+    /// state is unreliable beyond this single event. Per-event decode
+    /// failures are fatal only for the raw diagnostic visitor (which needs
+    /// every event to succeed); in [`CollectionMode::Analyze`] they are
+    /// aggregated into the Data Loop summary for a known provider instead of
+    /// silently dropped.
     fn record_event_decode_error(
         &mut self,
         provider: windows::core::GUID,
         event_id: u16,
+        pid: u32,
         error: tdh_decode::DecodeError,
     ) {
-        if (matches!(self.mode, CollectionMode::Raw) || error.is_schema_error())
-            && self.decode_error.is_none()
-        {
-            self.decode_error = Some(format!("provider {:?} event {event_id}: {error}", provider));
+        let fatal = matches!(self.mode, CollectionMode::Raw) || error.is_schema_error();
+        if fatal {
+            if self.decode_error.is_none() {
+                self.decode_error =
+                    Some(format!("provider {:?} event {event_id}: {error}", provider));
+            }
+            return;
+        }
+        if let Some(category) = crate::extractors::provider_category(provider) {
+            let reason = match error.event_kind() {
+                Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
+                    DataLoopExclusionReason::EventPayloadMalformed
+                }
+                Some(tdh_decode::EventDecodeKind::DecoderLimitReached) => {
+                    DataLoopExclusionReason::DecoderLimitReached
+                }
+                Some(tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding) => {
+                    DataLoopExclusionReason::UnsupportedPropertyEncoding
+                }
+                None => return,
+            };
+            // Retain only the bounded schema-declared name. The free-form
+            // decoder message can include property values and is never emitted.
+            let properties = error
+                .event_name()
+                .map(|name| vec![("EventName".to_string(), name.to_string())])
+                .map(crate::extractors::bound_properties)
+                .unwrap_or_default();
+            let classification = match event_id {
+                crate::extractors::LEARNING_MODE_VIOLATION_EVENT_ID => (
+                    Some(learning_mode_core::AccessType::Unknown),
+                    Some(learning_mode_core::ResourceType::Ui),
+                ),
+                crate::extractors::CAPABILITY_DENIAL_EVENT_ID => (
+                    Some(learning_mode_core::AccessType::Unknown),
+                    Some(learning_mode_core::ResourceType::Capability),
+                ),
+                _ => (None, None),
+            };
+            self.record_outcome(category, event_id, reason, pid, classification, properties);
         }
     }
 
@@ -305,10 +460,22 @@ impl<'visitor> Accumulator<'visitor> {
         if let Some(error) = self.decode_error {
             return Err(AnalyzeError::Decode(error));
         }
-        Ok(AnalysisResult {
+        let mut result = AnalysisResult {
             denials: self.denials,
             denied_resources_truncated: self.truncated,
-        })
+            data_loop: self.data_loop,
+        };
+        match result.fit_data_loop_within_serialized_bytes(
+            crate::guarded_wpr_protocol::MAX_ANALYSIS_BYTES as usize,
+        ) {
+            Ok(true) => Ok(result),
+            Ok(false) => Err(AnalyzeError::Decode(
+                "canonical Learning Mode analysis exceeds the guarded transport limit".to_string(),
+            )),
+            Err(error) => Err(AnalyzeError::Decode(format!(
+                "failed to size Learning Mode analysis: {error}"
+            ))),
+        }
     }
 }
 
@@ -361,9 +528,10 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
     }
 }
 
-/// Runs the pure decode composition over already-collected events:
-/// route each event through [`extract_denial`], then normalise +
-/// de-duplicate into public [`DeniedResource`]s. Split out from
+/// Runs the pure decode composition over already-collected events, using the
+/// same event-classification path ([`handle_decoded_event`]) as the real ETW
+/// callback: provider/vocabulary gating, extraction, capability-DACL
+/// fallback, and Data Loop aggregation. Split out from
 /// [`EtlDenialAnalyzer::analyze`] so it can be tested with hand-built events
 /// that mirror real traces, without a live ETW/TDH read (which needs the
 /// provider manifests registered on the machine).
@@ -377,26 +545,15 @@ fn resources_from_events_for_process_lifetimes(
     events: &[CollectedEvent],
     process_lifetimes: Option<&[ProcessLifetime]>,
 ) -> AnalysisResult {
-    let mut raws = Vec::new();
-    for event in events {
-        if let Some(raw) = extract_denial(&event.parts, event.pid, event.filetime) {
-            raws.push(raw);
-        }
-        raws.extend(crate::capability_dacl::extract_denials(
-            &event.parts,
-            event.pid,
-            event.filetime,
-        ));
-    }
     let mut accumulator = match process_lifetimes {
         Some(lifetimes) => Accumulator::analyze_for_process_lifetimes(lifetimes),
         None => Accumulator::analyze(),
     };
-    for raw in raws {
-        accumulator.add_raw_denial(raw);
-        if accumulator.stop_requested {
+    for event in events {
+        if !accumulator.begin_event() {
             break;
         }
+        handle_decoded_event(&event.parts, event.pid, event.filetime, &mut accumulator);
     }
     accumulator
         .into_analysis()
@@ -454,9 +611,6 @@ fn dedup_to_resources<I: IntoIterator<Item = RawDenial>>(raws: I) -> AnalysisRes
     let mut accumulator = Accumulator::analyze();
     for raw in raws {
         accumulator.add_raw_denial(raw);
-        if accumulator.stop_requested {
-            break;
-        }
     }
     accumulator
         .into_analysis()
@@ -593,7 +747,6 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
-
     if matches!(acc.mode, CollectionMode::SelectForRelogging) {
         if !is_learning_mode_event(provider, event_id) {
             return;
@@ -609,7 +762,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
             return;
         };
-        if acc.in_analysis_scope(header.ProcessId, filetime) {
+        if acc.event_in_scope(header.ProcessId, filetime) {
             if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
                 acc.decode_error = Some(format!(
                     "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
@@ -622,51 +775,123 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         return;
     }
 
-    // Establish scope BEFORE charging the event against the shared processing
-    // budget. Provider, event id, PID and timestamp all live in the event
-    // header, so the scope test needs no (comparatively expensive) TDH decode.
-    // Out-of-scope host events — a foreign provider, or a PID/time outside the
-    // attested sandbox process lifetimes — must not consume the budget;
-    // otherwise a noisy host could exhaust the limit before a single in-scope
-    // sandbox denial is ever decoded, truncating the analysis of an innocent
-    // sandbox.
+    let mut analyze_filetime = None;
+
     if matches!(acc.mode, CollectionMode::Analyze) {
-        if !is_learning_mode_event(provider, event_id) {
+        let Some(category) = crate::extractors::provider_category(provider) else {
+            // Unrelated provider: unrelated host traffic, ignored entirely
+            // (not aggregated as an excluded Learning Mode outcome).
             return;
-        }
+        };
         let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
             return;
         };
-        if !acc.in_analysis_scope(header.ProcessId, filetime) {
+        analyze_filetime = Some(filetime);
+        if !is_learning_mode_event(provider, event_id) {
+            if !acc.event_in_scope(header.ProcessId, filetime) || !acc.begin_event() {
+                return;
+            }
+            // A known provider, but outside its supported event vocabulary:
+            // aggregate (as a signature with no decoded properties) without
+            // paying for a TDH decode.
+            acc.record_exclusion(
+                category,
+                event_id,
+                DataLoopExclusionReason::UnsupportedEventSchema,
+                header.ProcessId,
+                Vec::new(),
+            );
             return;
         }
-        if !acc.begin_event() {
-            return;
-        }
-        match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
-            Ok(parts) => {
-                if let Some(raw) = extract_denial(&parts, header.ProcessId, filetime) {
-                    acc.add_raw_denial(raw);
-                }
-                for raw in
-                    crate::capability_dacl::extract_denials(&parts, header.ProcessId, filetime)
-                {
-                    acc.add_raw_denial(raw);
+    }
+
+    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+        Ok(parts) => match acc.mode {
+            CollectionMode::Analyze => {
+                let filetime = analyze_filetime.expect("analyze mode has normalized FILETIME");
+                handle_decoded_event(&parts, header.ProcessId, filetime, acc);
+            }
+            CollectionMode::Raw => {
+                if acc.begin_event() {
+                    acc.visit_raw_event(&parts);
                 }
             }
-            Err(error) => acc.record_event_decode_error(provider, event_id, error),
+            CollectionMode::SelectForRelogging => unreachable!("relogging returns before decode"),
+        },
+        Err(error) => {
+            if matches!(acc.mode, CollectionMode::Analyze) {
+                if !acc.event_in_scope(
+                    header.ProcessId,
+                    analyze_filetime.expect("analyze mode has normalized FILETIME"),
+                ) || !acc.begin_event()
+                {
+                    return;
+                }
+            } else if !acc.begin_event() {
+                return;
+            }
+            acc.record_event_decode_error(provider, event_id, header.ProcessId, error);
         }
+    }
+}
+
+/// Extracts denials from one decoded, in-vocabulary event and feeds them
+/// (or their closed exclusion reason) into `acc`.
+///
+/// Re-checks the provider/event vocabulary so it stays a single source of
+/// truth for both the real ETW path (which gates before decoding, above)
+/// and pure-composition tests that hand this already-"decoded" fixtures.
+fn handle_decoded_event(
+    parts: &DecodedEventParts,
+    header_pid: u32,
+    filetime: u64,
+    acc: &mut Accumulator<'_>,
+) {
+    let pid = crate::extractors::effective_event_pid(parts, header_pid);
+    if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
+        return;
+    }
+    let Some(category) = crate::extractors::provider_category(parts.provider) else {
+        return;
+    };
+    if !is_learning_mode_event(parts.provider, parts.event_id) {
+        acc.record_exclusion(
+            category,
+            parts.event_id,
+            DataLoopExclusionReason::UnsupportedEventSchema,
+            pid,
+            crate::extractors::sanitize_properties(&parts.props),
+        );
         return;
     }
 
-    // Raw diagnostic mode has no provider/lifetime scoping, so every decoded
-    // event legitimately counts against the budget.
-    if !acc.begin_event() {
-        return;
+    let primary = extract_denial(parts, pid, filetime);
+    // Some permissive capability checks leave the primary access-check event
+    // unidentified (`ObjectType`/`ObjectName` both empty); the identifier may
+    // still be recoverable from the event's DACL payload. Each recovered
+    // candidate is fed independently, and the primary `UnresolvedCapability`
+    // outcome is only counted if none of them panned out.
+    let capability_candidates = crate::capability_dacl::extract_denials(parts, pid, filetime);
+    for raw in capability_candidates.iter().cloned() {
+        acc.add_raw_denial(raw);
     }
-    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
-        Ok(parts) => acc.visit_raw_event(&parts),
-        Err(error) => acc.record_event_decode_error(provider, event_id, error),
+
+    match primary {
+        Ok(raw) => acc.add_raw_denial(raw),
+        Err(reason) => {
+            let recovered_by_dacl = reason == DataLoopExclusionReason::UnresolvedCapability
+                && !capability_candidates.is_empty();
+            if !recovered_by_dacl {
+                acc.record_outcome(
+                    category,
+                    parts.event_id,
+                    reason,
+                    pid,
+                    crate::extractors::data_loop_classification(parts),
+                    crate::extractors::sanitize_properties(&parts.props),
+                );
+            }
+        }
     }
 }
 
@@ -794,7 +1019,12 @@ mod tests {
         accumulator.record_event_decode_error(
             windows::core::GUID::from_u128(1),
             14,
-            tdh_decode::DecodeError::Event("malformed property".to_string()),
+            1,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::PayloadMalformed,
+                "malformed property".to_string(),
+                None,
+            ),
         );
 
         assert!(accumulator.into_analysis().is_ok());
@@ -807,7 +1037,12 @@ mod tests {
         accumulator.record_event_decode_error(
             windows::core::GUID::from_u128(1),
             14,
-            tdh_decode::DecodeError::Event("malformed property".to_string()),
+            1,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::PayloadMalformed,
+                "malformed property".to_string(),
+                None,
+            ),
         );
 
         let error = accumulator.decode_error.as_deref().unwrap();
@@ -821,6 +1056,7 @@ mod tests {
         accumulator.record_event_decode_error(
             windows::core::GUID::from_u128(1),
             14,
+            1,
             tdh_decode::DecodeError::Schema("manifest unavailable".to_string()),
         );
 
@@ -836,6 +1072,8 @@ mod tests {
             access_type: access,
             filetime: 1,
             event_id: 4907,
+            provider: learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+            data_loop_properties: Vec::new(),
         }
     }
 
@@ -920,7 +1158,25 @@ mod tests {
     }
 
     #[test]
-    fn unique_denial_bound_requests_trace_stop() {
+    fn unique_denial_bound_marks_truncated_without_stopping() {
+        fn exclusion_count(
+            summary: &learning_mode_core::DataLoopSummary,
+            provider: learning_mode_core::DataLoopProvider,
+            event_id: u16,
+            reason: DataLoopExclusionReason,
+        ) -> u64 {
+            summary
+                .signatures
+                .iter()
+                .filter(|group| {
+                    group.signature.provider == provider
+                        && group.signature.event_id == event_id
+                        && group.signature.reason == reason
+                })
+                .map(|group| group.count)
+                .sum()
+        }
+
         let mut accumulator = Accumulator::analyze();
         accumulator.denials = (0..MAX_UNIQUE_DENIALS)
             .map(|index| DeniedResource {
@@ -931,6 +1187,9 @@ mod tests {
                 filetime: 1,
             })
             .collect();
+        accumulator.seen = (0..MAX_UNIQUE_DENIALS)
+            .map(|index| (format!(r"c:\data\{index}.txt"), AccessType::Read))
+            .collect();
 
         accumulator.add_raw_denial(raw(
             r"C:\data\overflow.txt",
@@ -938,8 +1197,42 @@ mod tests {
             ResourceType::File,
         ));
 
-        assert!(accumulator.stop_requested);
+        assert!(
+            !accumulator.stop_requested,
+            "hitting the unique-denial cap must not halt the trace early"
+        );
         assert!(accumulator.truncated);
+        assert!(accumulator.data_loop.canonical_denial_limit_reached);
+        assert_eq!(
+            exclusion_count(
+                &accumulator.data_loop,
+                learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+                4907,
+                DataLoopExclusionReason::CanonicalDenial
+            ),
+            1
+        );
+
+        // Processing continues past the cap: a further overflow candidate is
+        // still aggregated (not silently discarded), and a duplicate of an
+        // already-canonical denial retains the same canonical classification.
+        accumulator.add_raw_denial(raw(
+            r"C:\data\overflow-2.txt",
+            AccessType::Read,
+            ResourceType::File,
+        ));
+        accumulator.add_raw_denial(raw(r"C:\data\0.txt", AccessType::Read, ResourceType::File));
+
+        assert!(!accumulator.stop_requested);
+        assert_eq!(
+            exclusion_count(
+                &accumulator.data_loop,
+                learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+                4907,
+                DataLoopExclusionReason::CanonicalDenial
+            ),
+            3
+        );
     }
 
     #[test]
@@ -970,12 +1263,12 @@ mod tests {
             start_filetime: 100,
             end_filetime: 200,
         }]);
-        assert!(scoped.in_analysis_scope(7, 150));
-        assert!(!scoped.in_analysis_scope(7, 250), "outside the time range");
-        assert!(!scoped.in_analysis_scope(9, 150), "unrelated PID");
+        assert!(scoped.event_in_scope(7, 150));
+        assert!(!scoped.event_in_scope(7, 250), "outside the time range");
+        assert!(!scoped.event_in_scope(9, 150), "unrelated PID");
 
         let legacy = Accumulator::analyze();
-        assert!(legacy.in_analysis_scope(9, 150), "no lifetime filter");
+        assert!(legacy.event_in_scope(9, 150), "no lifetime filter");
     }
 
     #[test]
@@ -1182,7 +1475,38 @@ mod tests {
             kernel_event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "true")]),
             kernel_event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
         ];
-        assert!(resources_from_events(&events).denials.is_empty());
+        let out = resources_from_events(&events);
+        assert!(out.denials.is_empty());
+
+        // Every dropped candidate is still aggregated by closed reason, never
+        // by raw payload: one unresolved access-check event (14) plus two
+        // unresolved capability denials (28). The two event-28 signatures stay
+        // distinct because their retained ProcessId properties differ.
+        let groups = &out.data_loop.signatures;
+        assert_eq!(groups.len(), 3);
+        let event_14_group = groups
+            .iter()
+            .find(|group| group.signature.event_id == 14)
+            .expect("event 14 exclusion group present");
+        assert_eq!(
+            event_14_group.signature.provider,
+            DataLoopProvider::KernelGeneral
+        );
+        assert_eq!(
+            event_14_group.signature.reason,
+            DataLoopExclusionReason::UnresolvedCapability
+        );
+        assert_eq!(event_14_group.count, 1);
+        let event_28_groups = groups
+            .iter()
+            .filter(|group| group.signature.event_id == 28)
+            .collect::<Vec<_>>();
+        assert_eq!(event_28_groups.len(), 2);
+        assert!(event_28_groups.iter().all(|group| {
+            group.signature.provider == DataLoopProvider::KernelGeneral
+                && group.signature.reason == DataLoopExclusionReason::UnresolvedCapability
+                && group.count == 1
+        }));
     }
 
     #[test]
@@ -1198,6 +1522,8 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             ),
+            kernel_event(9999, 43, 150, &[("Marker", "\"host\"")]),
+            kernel_event(9999, 42, 151, &[("Marker", "\"owned\"")]),
             kernel_event(
                 14,
                 42,
@@ -1239,6 +1565,56 @@ mod tests {
 
         assert_eq!(analysis.denials.len(), 1);
         assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
+        assert_eq!(analysis.data_loop.signatures.len(), 2);
+        assert!(analysis
+            .data_loop
+            .signatures
+            .iter()
+            .all(|group| group.signature.pid == 42));
+        let unsupported = analysis
+            .data_loop
+            .signatures
+            .iter()
+            .find(|group| group.signature.reason == DataLoopExclusionReason::UnsupportedEventSchema)
+            .expect("owned unknown event retained");
+        assert_eq!(property(&unsupported.signature, "Marker"), "owned");
+    }
+
+    #[test]
+    fn brokered_capability_uses_payload_pid_for_process_scope() {
+        let events = vec![kernel_event(
+            28,
+            900,
+            150,
+            &[
+                ("Denied", "\"true\""),
+                ("ProcessId", "0x2a"),
+                ("CapabilityName", "\"internetClient\""),
+            ],
+        )];
+        let lifetimes = [ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }];
+
+        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&lifetimes));
+
+        assert_eq!(analysis.denials.len(), 1);
+        assert_eq!(analysis.denials[0].pid, 42);
+        assert_eq!(analysis.denials[0].resource, "internetClient");
+        let group = analysis
+            .data_loop
+            .signatures
+            .iter()
+            .find(|group| group.signature.reason == DataLoopExclusionReason::CanonicalDenial)
+            .expect("canonical capability event retained");
+        assert_eq!(group.signature.pid, 42);
+        assert_eq!(group.signature.access_type, Some(AccessType::Unknown));
+        assert_eq!(
+            group.signature.resource_type,
+            Some(ResourceType::Capability)
+        );
     }
 
     #[test]
@@ -1257,10 +1633,13 @@ mod tests {
         let analysis = resources_from_events_for_process_lifetimes(&events, Some(&[]));
 
         assert!(analysis.denials.is_empty());
+        assert!(analysis.data_loop.is_empty());
     }
 
     /// Non-actionable object types and not-denied capability records are
-    /// dropped by the pipeline; unknown event IDs are ignored.
+    /// dropped by the pipeline as closed extraction reasons; an unknown event
+    /// ID from a known provider is classified `UnsupportedEventSchema`
+    /// without ever reaching TDH-decoded extraction logic.
     #[test]
     fn non_actionable_events_are_dropped() {
         let events = vec![
@@ -1268,7 +1647,25 @@ mod tests {
             kernel_event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
             kernel_event(9999, 1, 3, &[("Foo", "\"bar\"")]),
         ];
-        assert!(resources_from_events(&events).denials.is_empty());
+        let out = resources_from_events(&events);
+        assert!(out.denials.is_empty());
+
+        let reason_for = |event_id: u16| {
+            out.data_loop
+                .signatures
+                .iter()
+                .find(|group| group.signature.event_id == event_id)
+                .map(|group| group.signature.reason)
+        };
+        assert_eq!(
+            reason_for(14),
+            Some(DataLoopExclusionReason::UnsupportedObjectType)
+        );
+        assert_eq!(reason_for(28), Some(DataLoopExclusionReason::NotActionable));
+        assert_eq!(
+            reason_for(9999),
+            Some(DataLoopExclusionReason::UnsupportedEventSchema)
+        );
     }
 
     #[test]
@@ -1292,6 +1689,388 @@ mod tests {
             ),
         ];
 
-        assert!(resources_from_events(&events).denials.is_empty());
+        let out = resources_from_events(&events);
+        assert!(out.denials.is_empty());
+
+        // Each event ID is valid for the *other* known provider, so both are
+        // classified `UnsupportedEventSchema` for their own provider rather
+        // than silently ignored or misrouted.
+        assert_eq!(out.data_loop.signatures.len(), 2);
+        assert!(
+            out.data_loop
+                .signatures
+                .iter()
+                .all(|group| group.signature.reason
+                    == DataLoopExclusionReason::UnsupportedEventSchema)
+        );
+        assert!(out
+            .data_loop
+            .signatures
+            .iter()
+            .any(|group| group.signature.provider
+                == DataLoopProvider::PrivacyAuditingPermissiveLearningMode
+                && group.signature.event_id == 28));
+        assert!(out
+            .data_loop
+            .signatures
+            .iter()
+            .any(
+                |group| group.signature.provider == DataLoopProvider::KernelGeneral
+                    && group.signature.event_id == 4907
+            ));
+    }
+
+    #[test]
+    fn unrelated_provider_is_ignored_without_accounting() {
+        // A provider outside the known Learning Mode vocabulary must not
+        // contribute any Data Loop accounting at all, even though its event
+        // ID happens to collide with a known access-check ID.
+        let events = vec![event_with_provider(
+            windows::core::GUID::from_u128(0xdead_beef),
+            14,
+            1,
+            1,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", "\"C:\\unrelated.txt\""),
+                ("AccessMask", "0x1"),
+            ],
+        )];
+
+        let out = resources_from_events(&events);
+        assert!(out.denials.is_empty());
+        assert!(
+            out.data_loop.is_empty(),
+            "unrelated providers are ignored, not aggregated"
+        );
+    }
+
+    #[test]
+    fn canonical_candidates_and_duplicates_share_one_data_loop_signature() {
+        let make_event = |sequence_no: u64| {
+            kernel_event(
+                14,
+                7,
+                sequence_no,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"D:\\profiles\\jsmith\\dup.txt\""),
+                    ("AccessMask", "0x1"),
+                    ("UserName", "\"jsmith\""),
+                ],
+            )
+        };
+        let events = vec![make_event(1), make_event(2), make_event(3)];
+
+        let out = resources_from_events(&events);
+        assert_eq!(out.denials.len(), 1, "duplicates collapse to one denial");
+
+        let canonical_group = out
+            .data_loop
+            .signatures
+            .iter()
+            .find(|group| group.signature.reason == DataLoopExclusionReason::CanonicalDenial)
+            .expect("canonical outcome recorded");
+        assert_eq!(
+            canonical_group.signature.provider,
+            DataLoopProvider::KernelGeneral
+        );
+        assert_eq!(canonical_group.signature.event_id, 14);
+        assert_eq!(
+            canonical_group.count, 3,
+            "all three occurrences are retained"
+        );
+        assert_eq!(
+            canonical_group.signature.access_type,
+            Some(AccessType::Read)
+        );
+        assert_eq!(
+            canonical_group.signature.resource_type,
+            Some(ResourceType::File)
+        );
+        assert_eq!(
+            property(&canonical_group.signature, "ObjectName"),
+            r"D:\profiles\<redacted-user>\dup.txt"
+        );
+        assert_eq!(
+            property(&canonical_group.signature, "UserName"),
+            "<redacted-user>"
+        );
+    }
+
+    #[test]
+    fn processing_continues_past_the_unique_denial_cap_through_the_full_pipeline() {
+        let overflow_candidates = 5usize;
+        let events: Vec<CollectedEvent> = (0..MAX_UNIQUE_DENIALS + overflow_candidates)
+            .map(|index| {
+                kernel_event(
+                    14,
+                    1,
+                    index as u64,
+                    &[
+                        ("ObjectType", "\"File\""),
+                        ("ObjectName", &format!("\"C:\\data\\{index}.txt\"")),
+                        ("AccessMask", "0x1"),
+                    ],
+                )
+            })
+            .collect();
+
+        let out = resources_from_events(&events);
+
+        assert_eq!(out.denials.len(), MAX_UNIQUE_DENIALS);
+        assert!(out.denied_resources_truncated);
+        assert!(out.data_loop.canonical_denial_limit_reached);
+        assert!(!out.data_loop.processed_events_truncated);
+
+        // If the trace had stopped as soon as the cap was reached, only the
+        // The Data Loop accounts for every denial candidate, including those
+        // observed after the canonical unique-denial cap.
+        assert_eq!(
+            out.data_loop.total_occurrences,
+            (MAX_UNIQUE_DENIALS + overflow_candidates) as u64
+        );
+    }
+
+    #[test]
+    fn capability_denial_recovered_from_dacl_records_no_exclusion() {
+        // Same shape as `allow_shape_recovers_capability_from_dacl`, but
+        // asserting the Data Loop side: a successfully DACL-recovered
+        // capability candidate must not also surface an `UnresolvedCapability`
+        // exclusion for the same event.
+        let dacl = "hex:000000000000000001000000010200000000000F0300000001000000";
+        let events = vec![permissive_event(
+            14,
+            5900,
+            21,
+            &[
+                ("Mode", "\"Permissive\""),
+                ("ObjectType", "\"\""),
+                ("ObjectName", "\"\""),
+                ("AccessMask", "0x1"),
+                ("Dacl", dacl),
+            ],
+        )];
+
+        let out = resources_from_events(&events);
+        assert_eq!(out.denials.len(), 1);
+        assert_eq!(out.denials[0].resource, "internetClient");
+        assert_eq!(out.data_loop.signatures.len(), 1);
+        let signature = &out.data_loop.signatures[0].signature;
+        assert_eq!(signature.reason, DataLoopExclusionReason::CanonicalDenial);
+        assert_eq!(signature.access_type, Some(AccessType::Unknown));
+        assert_eq!(signature.resource_type, Some(ResourceType::Capability));
+    }
+
+    // ---- Data Loop signature retention (identifiers + redaction + dedup) --
+
+    fn find_signature(
+        summary: &learning_mode_core::DataLoopSummary,
+        event_id: u16,
+    ) -> &learning_mode_core::DataLoopAggregate {
+        summary
+            .signatures
+            .iter()
+            .find(|group| group.signature.event_id == event_id)
+            .unwrap_or_else(|| panic!("expected a Data Loop signature for event {event_id}"))
+    }
+
+    fn property<'a>(signature: &'a learning_mode_core::DataLoopSignature, name: &str) -> &'a str {
+        signature
+            .properties
+            .iter()
+            .find(|(key, _)| key == name)
+            .unwrap_or_else(|| panic!("expected property {name:?} in signature {signature:?}"))
+            .1
+            .as_str()
+    }
+
+    #[test]
+    fn data_loop_byte_budget_preserves_guarded_protocol_headroom() {
+        let mut accumulator = Accumulator::analyze();
+        let properties = (0..crate::extractors::MAX_SIGNATURE_PROPERTIES)
+            .map(|index| {
+                (
+                    format!("Property{index:02}"),
+                    "x".repeat(crate::extractors::MAX_SIGNATURE_VALUE_LEN),
+                )
+            })
+            .collect::<Vec<_>>();
+        for pid in 0..learning_mode_core::MAX_DATA_LOOP_GROUPS as u32 {
+            accumulator.record_exclusion(
+                DataLoopProvider::KernelGeneral,
+                14,
+                DataLoopExclusionReason::CanonicalDenial,
+                pid,
+                properties.clone(),
+            );
+        }
+
+        assert!(accumulator.data_loop.aggregate_groups_truncated);
+        assert!(accumulator.data_loop.overflow_occurrences > 0);
+        assert!(accumulator.data_loop_signature_bytes <= MAX_DATA_LOOP_SIGNATURE_BYTES);
+    }
+
+    #[test]
+    fn unknown_event_id_signature_redacts_only_the_username_segment_of_a_path() {
+        let events = vec![kernel_event(
+            9999,
+            7,
+            1,
+            &[("ObjectName", "\"C:\\Users\\jsmith\\secret.txt\"")],
+        )];
+
+        let out = resources_from_events(&events);
+
+        let group = find_signature(&out.data_loop, 9999);
+        assert_eq!(
+            group.signature.reason,
+            DataLoopExclusionReason::UnsupportedEventSchema
+        );
+        assert_eq!(
+            property(&group.signature, "ObjectName"),
+            r"C:\Users\<redacted-user>\secret.txt",
+            "the rest of the path must survive redaction unchanged"
+        );
+    }
+
+    #[test]
+    fn unresolved_capability_signature_retains_sid_pid_and_provider_guid() {
+        let events = vec![kernel_event(
+            28,
+            42,
+            1,
+            &[
+                ("ProcessId", "0x2A"),
+                ("Denied", "true"),
+                ("CandidateSid", "\"S-1-15-3-1\""),
+            ],
+        )];
+
+        let out = resources_from_events(&events);
+
+        let group = find_signature(&out.data_loop, 28);
+        assert_eq!(
+            group.signature.reason,
+            DataLoopExclusionReason::UnresolvedCapability
+        );
+        assert_eq!(group.signature.provider, DataLoopProvider::KernelGeneral);
+        assert_eq!(
+            group.signature.provider_guid,
+            crate::extractors::provider_guid_string(DataLoopProvider::KernelGeneral)
+        );
+        assert_eq!(group.signature.pid, 42, "process identifier retained");
+        assert_eq!(
+            property(&group.signature, "CandidateSid"),
+            "S-1-15-3-1",
+            "capability SIDs are retained identifiers, never redacted"
+        );
+    }
+
+    #[test]
+    fn signatures_with_identical_properties_dedupe_across_differing_timestamps() {
+        // Same event id/pid/properties, only `filetime` differs: the
+        // signature must exclude the exact timestamp so both collapse into
+        // one group with an incremented count, rather than two singletons.
+        let events = vec![
+            kernel_event(9999, 7, 10, &[("Foo", "\"bar\"")]),
+            kernel_event(9999, 7, 20_000_000, &[("Foo", "\"bar\"")]),
+        ];
+
+        let out = resources_from_events(&events);
+
+        assert_eq!(
+            out.data_loop.signatures.len(),
+            1,
+            "differing only by timestamp must dedupe to a single signature"
+        );
+        assert_eq!(find_signature(&out.data_loop, 9999).count, 2);
+    }
+
+    #[test]
+    fn timestamp_like_properties_are_excluded_from_the_signature() {
+        let events = vec![kernel_event(
+            9999,
+            7,
+            1,
+            &[
+                ("Foo", "\"bar\""),
+                ("LastWriteTime", "\"132847890123456789\""),
+            ],
+        )];
+
+        let out = resources_from_events(&events);
+
+        let group = find_signature(&out.data_loop, 9999);
+        assert!(
+            group
+                .signature
+                .properties
+                .iter()
+                .all(|(name, _)| !name.to_ascii_lowercase().contains("time")),
+            "timestamp-like properties must never reach the signature: {:?}",
+            group.signature.properties
+        );
+    }
+
+    #[test]
+    fn event_decode_failures_use_closed_reasons_and_schema_names() {
+        let mut accumulator = Accumulator::analyze();
+        accumulator.record_event_decode_error(
+            crate::extractors::KERNEL_GENERAL_PROVIDER,
+            14,
+            9,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::PayloadMalformed,
+                "property payload is malformed".to_string(),
+                Some("AccessCheck".to_string()),
+            ),
+        );
+        accumulator.record_event_decode_error(
+            crate::extractors::KERNEL_GENERAL_PROVIDER,
+            27,
+            10,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::DecoderLimitReached,
+                "property decode work exceeds limit 100000".to_string(),
+                Some("LearningModeViolation".to_string()),
+            ),
+        );
+        accumulator.record_event_decode_error(
+            crate::extractors::KERNEL_GENERAL_PROVIDER,
+            28,
+            11,
+            tdh_decode::DecodeError::event(
+                tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding,
+                "property has unsupported variable length".to_string(),
+                Some("CapabilityDenial".to_string()),
+            ),
+        );
+        let out = accumulator
+            .into_analysis()
+            .expect("per-event decode failures are non-fatal in Analyze mode");
+
+        let malformed = find_signature(&out.data_loop, 14);
+        assert_eq!(
+            malformed.signature.reason,
+            DataLoopExclusionReason::EventPayloadMalformed
+        );
+        assert_eq!(malformed.signature.pid, 9);
+        assert_eq!(property(&malformed.signature, "EventName"), "AccessCheck");
+        assert_eq!(
+            find_signature(&out.data_loop, 27).signature.reason,
+            DataLoopExclusionReason::DecoderLimitReached
+        );
+        assert_eq!(
+            find_signature(&out.data_loop, 28).signature.reason,
+            DataLoopExclusionReason::UnsupportedPropertyEncoding
+        );
+        assert!(out.data_loop.signatures.iter().all(|aggregate| {
+            aggregate
+                .signature
+                .properties
+                .iter()
+                .all(|(name, _)| name == "EventName")
+        }));
     }
 }

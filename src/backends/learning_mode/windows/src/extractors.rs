@@ -20,7 +20,10 @@
 //!
 //! The learning-mode ETL carries a set of event IDs that map onto the
 //! resource types we surface. This list grows as more denial sources are
-//! decoded; unknown event IDs are discarded. The IDs handled today:
+//! decoded; event IDs outside this vocabulary are excluded rather than
+//! extracted, and (for the known providers below) that exclusion is
+//! aggregated into [`learning_mode_core::DataLoopSummary`] rather than
+//! silently dropped. The IDs handled today:
 //!
 //! - **14 / 4907 — access check** — the primary denial event
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
@@ -44,7 +47,7 @@
 //!   hashed capabilities fall back to the SID string). Records without a
 //!   decoded identifier are omitted.
 
-use learning_mode_core::{AccessType, ResourceType};
+use learning_mode_core::{AccessType, DataLoopExclusionReason, DataLoopProvider, ResourceType};
 use windows::core::GUID;
 
 /// Microsoft-Windows-Kernel-General provider.
@@ -103,23 +106,84 @@ pub struct RawDenial {
     pub filetime: u64,
     /// Originating ETW event ID (kept for diagnostics).
     pub event_id: u16,
+    /// Symbolic category of the originating provider, for Data Loop
+    /// aggregation. Never a raw provider GUID.
+    pub provider: DataLoopProvider,
+    /// Bounded username-redacted properties retained for Data Loop signatures.
+    pub data_loop_properties: Vec<(String, String)>,
 }
 
 /// Routes a decoded event to the matching extractor by its event ID.
 ///
-/// Returns `None` for events that are not learning-mode denials or that
-/// carry an object type we don't surface.
-pub fn extract_denial(parts: &DecodedEventParts, pid: u32, filetime: u64) -> Option<RawDenial> {
+/// Returns `Err` with a closed [`DataLoopExclusionReason`] for events that
+/// are not learning-mode denials, that carry an object type we don't
+/// surface, or that otherwise fail extraction. Callers aggregate the
+/// returned reason into [`learning_mode_core::DataLoopSummary`] rather than
+/// discarding it, except when a fallback extractor (e.g.
+/// [`crate::capability_dacl`]) recovers an equivalent denial from the same
+/// event.
+pub fn extract_denial(
+    parts: &DecodedEventParts,
+    pid: u32,
+    filetime: u64,
+) -> Result<RawDenial, DataLoopExclusionReason> {
+    // Callers on the real trace path gate on `is_learning_mode_event` before
+    // decoding via TDH at all, so this branch only matters for direct/test
+    // callers that skip that gate.
+    let provider =
+        provider_category(parts.provider).ok_or(DataLoopExclusionReason::UnsupportedEventSchema)?;
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        return None;
+        return Err(DataLoopExclusionReason::UnsupportedEventSchema);
     }
+
     match parts.event_id {
         ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
-            build_denial_from_access_check(parts, pid, filetime)
+            build_denial_from_access_check(parts, pid, filetime, provider)
         }
-        LEARNING_MODE_VIOLATION_EVENT_ID => build_denial_from_learning_mode(parts, pid, filetime),
-        CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime),
-        _ => None,
+        LEARNING_MODE_VIOLATION_EVENT_ID => {
+            build_denial_from_learning_mode(parts, pid, filetime, provider)
+        }
+        CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime, provider),
+        _ => Err(DataLoopExclusionReason::UnsupportedEventSchema),
+    }
+}
+
+/// Returns typed denial classifications that can be determined independently
+/// of whether the event contains every property required for canonical output.
+pub(crate) fn data_loop_classification(
+    parts: &DecodedEventParts,
+) -> (Option<AccessType>, Option<ResourceType>) {
+    match parts.event_id {
+        ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
+            let Some(object_type) = find_prop(&parts.props, "ObjectType") else {
+                return (None, None);
+            };
+            match object_type.trim_matches('"') {
+                "File" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| access_type_from_mask(mask, false))
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::File),
+                ),
+                "Key" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| access_type_from_mask(mask, true))
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::Other),
+                ),
+                "" => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
+                _ => (None, None),
+            }
+        }
+        LEARNING_MODE_VIOLATION_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Ui)),
+        CAPABILITY_DENIAL_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
+        _ => (None, None),
     }
 }
 
@@ -142,7 +206,266 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
     }
 }
 
-/// Builds a [`RawDenial`] from an access-check (event 14 / 4907) payload.
+pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> u32 {
+    if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
+        find_prop(&parts.props, "ProcessId")
+            .and_then(|value| parse_u32(value))
+            .unwrap_or(header_pid)
+    } else {
+        header_pid
+    }
+}
+
+/// Maps a raw ETW provider GUID to its symbolic Data Loop category.
+///
+/// Returns `None` for providers outside the Learning Mode vocabulary; those
+/// events are ignored entirely (not aggregated), since they are unrelated
+/// host traffic rather than an excluded Learning Mode outcome.
+pub(crate) fn provider_category(provider: GUID) -> Option<DataLoopProvider> {
+    if provider == KERNEL_GENERAL_PROVIDER {
+        Some(DataLoopProvider::KernelGeneral)
+    } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
+        Some(DataLoopProvider::PrivacyAuditingPermissiveLearningMode)
+    } else {
+        None
+    }
+}
+
+/// Renders a symbolic Data Loop provider category back to its raw ETW
+/// provider GUID, in canonical braced string form, for retention in a Data
+/// Loop signature. Provider GUIDs are stable component identifiers, not
+/// personal data, so unlike account/user values they are never redacted.
+pub(crate) fn provider_guid_string(provider: DataLoopProvider) -> String {
+    match provider {
+        DataLoopProvider::KernelGeneral => format_guid(KERNEL_GENERAL_PROVIDER),
+        DataLoopProvider::PrivacyAuditingPermissiveLearningMode => {
+            format_guid(PRIVACY_LEARNING_MODE_PROVIDER)
+        }
+    }
+}
+
+fn format_guid(guid: GUID) -> String {
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
+        guid.data1,
+        guid.data2,
+        guid.data3,
+        guid.data4[0],
+        guid.data4[1],
+        guid.data4[2],
+        guid.data4[3],
+        guid.data4[4],
+        guid.data4[5],
+        guid.data4[6],
+        guid.data4[7],
+    )
+}
+
+// ---- Data Loop signature sanitization -------------------------------------
+//
+// A Data Loop signature retains identifiers useful for triage (SIDs,
+// capability names, PIDs, provider/object GUIDs) but must never leak a
+// human account/user name, an exact timestamp, or a free-form decoder error
+// message. These bounds apply uniformly to every decoded property, in a
+// fixed order: drop timestamp-like properties outright, redact
+// account/user-identity content, *then* bound the surviving property count
+// and value length — sanitizing always happens before truncation so a
+// redaction is never chopped in half by a length cap.
+
+/// Fixed replacement for any redacted username/account-name value.
+pub(crate) const REDACTED_USER: &str = "<redacted-user>";
+/// Maximum number of `(name, value)` properties retained in one Data Loop
+/// signature. Bounds pathological/huge TDH property lists; sanitization
+/// (never raw decoding) determines which survive, via deterministic
+/// (sorted-by-name) truncation.
+pub(crate) const MAX_SIGNATURE_PROPERTIES: usize = 24;
+/// Maximum retained length (in `char`s) of one sanitized property value.
+pub(crate) const MAX_SIGNATURE_VALUE_LEN: usize = 256;
+
+/// Returns whether `name` looks like it carries a timestamp, so it is
+/// dropped from a Data Loop signature entirely (never redacted or
+/// truncated) — exact timestamps must not prevent otherwise-identical
+/// events from deduplicating.
+fn is_timestamp_like_property(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase().replace(['_', '-'], "");
+    matches!(
+        lower.as_str(),
+        "time"
+            | "timestamp"
+            | "filetime"
+            | "systemtime"
+            | "eventtime"
+            | "timecreated"
+            | "creationtime"
+            | "createtime"
+            | "starttime"
+            | "endtime"
+            | "exittime"
+            | "lastwritetime"
+    ) || lower.ends_with("timestamp")
+        || lower.ends_with("filetime")
+}
+
+/// Returns whether `name` is itself a standalone user/account-identity
+/// property (as opposed to a path that merely *contains* a username), so
+/// its value is replaced outright with [`REDACTED_USER`] regardless of
+/// content.
+fn is_identity_property(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase().replace(['_', '-'], "");
+    if lower.contains("sid")
+        || lower.contains("guid")
+        || lower.contains("identifier")
+        || lower.ends_with("id")
+    {
+        return false;
+    }
+    lower == "user"
+        || lower == "account"
+        || lower == "owner"
+        || lower.contains("username")
+        || lower.contains("accountname")
+        || lower.contains("ownername")
+        || lower.contains("principalname")
+        || lower.ends_with("account")
+        || lower == "upn"
+        || lower.ends_with("upn")
+}
+
+/// Redacts the user-profile segment of a Windows path, preserving
+/// everything else. Matches a `\Users\` or legacy `\Documents and
+/// Settings\` segment (case-insensitively, on an exact path-segment
+/// boundary so e.g. `usersdata` never matches) and replaces the segment
+/// immediately following it with [`REDACTED_USER`].
+///
+/// Values that aren't path-shaped (capability names, SIDs, GUIDs, small
+/// enums, ...) never contain a matching segment, so they pass through
+/// unchanged — this is intentionally a single sanitizer applied uniformly
+/// rather than a per-property-name allowlist.
+pub(crate) fn redact_username_in_path(value: &str) -> String {
+    const USER_PROFILE_MARKERS: [&str; 2] = ["users", "documents and settings"];
+    if !value.contains(['\\', '/']) {
+        return value.to_string();
+    }
+    let mut redact_next = false;
+    let mut result = String::with_capacity(value.len());
+    let mut segment_start = 0;
+    for (index, separator) in value
+        .char_indices()
+        .filter(|(_, character)| matches!(character, '\\' | '/'))
+    {
+        let segment = &value[segment_start..index];
+        if redact_next && !segment.is_empty() {
+            result.push_str(REDACTED_USER);
+            redact_next = false;
+        } else {
+            result.push_str(segment);
+            redact_next = USER_PROFILE_MARKERS
+                .iter()
+                .any(|marker| segment.eq_ignore_ascii_case(marker));
+        }
+        result.push(separator);
+        segment_start = index + separator.len_utf8();
+    }
+    let segment = &value[segment_start..];
+    if redact_next && !segment.is_empty() {
+        result.push_str(REDACTED_USER);
+    } else {
+        result.push_str(segment);
+    }
+    result
+}
+
+/// Bounds an already-sanitized property list to [`MAX_SIGNATURE_PROPERTIES`]
+/// entries and [`MAX_SIGNATURE_VALUE_LEN`] characters per value.
+///
+/// Callers must sanitize (redact) *before* calling this: truncation is a
+/// pure length cap and does not know how to avoid splitting a redaction
+/// marker or a still-sensitive suffix.
+pub(crate) fn bound_properties(mut properties: Vec<(String, String)>) -> Vec<(String, String)> {
+    properties.truncate(MAX_SIGNATURE_PROPERTIES);
+    for (_, value) in &mut properties {
+        if value.chars().count() > MAX_SIGNATURE_VALUE_LEN {
+            *value = value.chars().take(MAX_SIGNATURE_VALUE_LEN).collect();
+        }
+    }
+    properties
+}
+
+/// Produces the deterministic, sanitized, bounded property list for a Data
+/// Loop signature from one decoded event's raw TDH properties.
+///
+/// Never includes a free-form decoder error message (decode failures are
+/// recorded with an empty property list by the caller, before this
+/// function would ever run) and never includes a timestamp-like property,
+/// so exact-timestamp differences between otherwise-identical events don't
+/// prevent their signatures from deduplicating. SIDs, capability names,
+/// PIDs carried as properties, and GUID-shaped values are retained
+/// verbatim; only account/user-identity content is redacted.
+pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, String)> {
+    let usernames = props
+        .iter()
+        .filter(|(name, _)| is_identity_property(name))
+        .flat_map(|(_, value)| username_match_candidates(value.trim_matches('"')))
+        .collect::<Vec<_>>();
+    let mut sanitized = std::collections::BTreeMap::new();
+    for (name, raw_value) in props {
+        if is_timestamp_like_property(name) {
+            continue;
+        }
+        let value = raw_value.trim_matches('"');
+        let sanitized_value = if is_identity_property(name) {
+            REDACTED_USER.to_string()
+        } else {
+            redact_known_username_components(&redact_username_in_path(value), &usernames)
+        };
+        sanitized.insert(name.clone(), sanitized_value);
+    }
+
+    fn username_match_candidates(identity: &str) -> Vec<String> {
+        let mut candidates = Vec::new();
+        let account = identity
+            .rsplit_once('\\')
+            .map_or(identity, |(_, account)| account);
+        for candidate in [
+            identity,
+            account,
+            account.split_once('@').map_or(account, |(name, _)| name),
+        ] {
+            if !candidate.is_empty()
+                && !candidates
+                    .iter()
+                    .any(|existing: &String| windows_paths_equal_ignore_case(existing, candidate))
+            {
+                candidates.push(candidate.to_string());
+            }
+        }
+        candidates
+    }
+
+    fn redact_known_username_components(value: &str, usernames: &[String]) -> String {
+        value
+            .split_inclusive(['\\', '/'])
+            .map(|component| {
+                let (segment, separator) = if component.ends_with('\\') || component.ends_with('/')
+                {
+                    component.split_at(component.len() - 1)
+                } else {
+                    (component, "")
+                };
+                if usernames
+                    .iter()
+                    .any(|username| windows_paths_equal_ignore_case(segment, username))
+                {
+                    format!("{REDACTED_USER}{separator}")
+                } else {
+                    component.to_string()
+                }
+            })
+            .collect()
+    }
+    bound_properties(sanitized.into_iter().collect())
+}
+
 ///
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
@@ -156,12 +479,27 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
 /// the type falls back to [`AccessType::Unknown`] so a decode gap never
 /// drops the denial itself. Capability checks carry a mask that is not a
 /// read/write/execute verb, so their access type is left `Unknown`.
+///
+/// # Errors
+///
+/// Returns the closed [`DataLoopExclusionReason`] describing why no denial
+/// could be built: a missing `ObjectType` ([`DataLoopExclusionReason::MissingObjectType`]),
+/// an object type this model can't represent
+/// ([`DataLoopExclusionReason::UnsupportedObjectType`]), a missing/empty
+/// object name (registry/file:
+/// [`DataLoopExclusionReason::MissingObjectName`]; capability: an
+/// unidentified brokered check,
+/// [`DataLoopExclusionReason::UnresolvedCapability`] — [`crate::capability_dacl`]
+/// may still recover it from the event's DACL payload), or a self-access
+/// check that isn't actionable ([`DataLoopExclusionReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
-    let object_type = find_prop(&parts.props, "ObjectType")?;
+    provider: DataLoopProvider,
+) -> Result<RawDenial, DataLoopExclusionReason> {
+    let object_type =
+        find_prop(&parts.props, "ObjectType").ok_or(DataLoopExclusionReason::MissingObjectType)?;
     let object_type_str = object_type.trim_matches('"');
 
     let resource_type = match object_type_str {
@@ -169,19 +507,28 @@ pub fn build_denial_from_access_check(
         "Key" => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
-        _ => return None,
+        _ => return Err(DataLoopExclusionReason::UnsupportedObjectType),
     };
 
     let object_name = find_prop(&parts.props, "ObjectName")
         .map(|v| v.trim_matches('"').to_string())
-        .filter(|name| !name.is_empty())?;
+        .filter(|name| !name.is_empty());
+    let object_name = match (resource_type, object_name) {
+        // An unidentified brokered-capability check: the identifier may
+        // still be recoverable from the event's DACL payload.
+        (ResourceType::Capability, None) => {
+            return Err(DataLoopExclusionReason::UnresolvedCapability)
+        }
+        (_, None) => return Err(DataLoopExclusionReason::MissingObjectName),
+        (_, Some(name)) => name,
+    };
 
     if resource_type == ResourceType::File {
         let app_path = find_prop(&parts.props, "AppPath")
             .or_else(|| find_prop(&parts.props, "ApplicationPath"))
             .map(|value| value.trim_matches('"'));
         if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
-            return None;
+            return Err(DataLoopExclusionReason::NotActionable);
         }
     }
 
@@ -201,13 +548,15 @@ pub fn build_denial_from_access_check(
             .unwrap_or(AccessType::Unknown)
     };
 
-    Some(RawDenial {
+    Ok(RawDenial {
         pid,
         resource_type,
         object_name,
         access_type,
         filetime,
         event_id: parts.event_id,
+        provider,
+        data_loop_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -264,26 +613,40 @@ fn strip_dos_namespace_prefix(path: &str) -> &str {
 /// These represent UI-surface denials. `Category` identifies the class and
 /// `Detail` identifies the concrete UI operation; `ProcessName` is the caller
 /// and must not be emitted as the denied resource.
+///
+/// # Errors
+///
+/// Returns [`DataLoopExclusionReason::MissingObjectType`] when `Category` is
+/// absent or unparseable, [`DataLoopExclusionReason::MissingObjectName`]
+/// when the required `Detail` is absent or unparseable, and
+/// [`DataLoopExclusionReason::NotActionable`] when the category/detail pair
+/// describes no violation (`Category == 0`).
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
-    let category = find_prop(&parts.props, "Category").and_then(|value| parse_u32(value))?;
+    provider: DataLoopProvider,
+) -> Result<RawDenial, DataLoopExclusionReason> {
+    let category = find_prop(&parts.props, "Category")
+        .and_then(|value| parse_u32(value))
+        .ok_or(DataLoopExclusionReason::MissingObjectType)?;
     let detail = match find_prop(&parts.props, "Detail") {
-        Some(value) => parse_u32(value)?,
+        Some(value) => parse_u32(value).ok_or(DataLoopExclusionReason::MissingObjectName)?,
         None if category == crate::ui::CONVERT_TO_GUI => 0,
-        None => return None,
+        None => return Err(DataLoopExclusionReason::MissingObjectName),
     };
-    let object_name = crate::ui::resource_name(category, detail)?;
+    let object_name =
+        crate::ui::resource_name(category, detail).ok_or(DataLoopExclusionReason::NotActionable)?;
 
-    Some(RawDenial {
+    Ok(RawDenial {
         pid,
         resource_type: ResourceType::Ui,
         object_name,
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
+        provider,
+        data_loop_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -295,19 +658,24 @@ pub fn build_denial_from_learning_mode(
 /// brokered checks) when present, else the header pid. The capability name
 /// comes from the `PackageSid` capability SID, resolved to its friendly
 /// policy name via [`crate::capability_names`] (custom hashed capabilities
-/// fall back to the SID string). Records without a decoded identifier are
-/// omitted.
+/// fall back to the SID string).
+///
+/// # Errors
+///
+/// Returns [`DataLoopExclusionReason::NotActionable`] when `Denied` is
+/// absent or not `true`, and [`DataLoopExclusionReason::UnresolvedCapability`]
+/// when no usable capability identifier could be decoded.
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Option<RawDenial> {
+    provider: DataLoopProvider,
+) -> Result<RawDenial, DataLoopExclusionReason> {
     // A partially decoded event must not become a policy recommendation.
-    if !find_prop(&parts.props, "Denied")?
-        .trim_matches('"')
-        .eq_ignore_ascii_case("true")
-    {
-        return None;
+    let denied = find_prop(&parts.props, "Denied")
+        .is_some_and(|value| value.trim_matches('"').eq_ignore_ascii_case("true"));
+    if !denied {
+        return Err(DataLoopExclusionReason::NotActionable);
     }
 
     let pid = find_prop(&parts.props, "ProcessId")
@@ -332,15 +700,18 @@ pub fn build_denial_from_capability(
                 && name != "<unsupported>"
                 && name != "<invalid SID>"
                 && name != "<malformed-sid>"
-        })?;
+        })
+        .ok_or(DataLoopExclusionReason::UnresolvedCapability)?;
 
-    Some(RawDenial {
+    Ok(RawDenial {
         pid,
         resource_type: ResourceType::Capability,
         object_name,
         access_type: AccessType::Unknown,
         filetime,
         event_id: parts.event_id,
+        provider,
+        data_loop_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -555,7 +926,10 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             );
-            assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                DataLoopExclusionReason::NotActionable
+            );
         }
     }
 
@@ -581,7 +955,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -598,7 +972,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -620,7 +994,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -634,7 +1008,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -648,7 +1022,7 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_ok());
     }
 
     #[test]
@@ -681,7 +1055,10 @@ mod tests {
                 ("AccessMask", "0x1"),
             ],
         );
-        assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::UnresolvedCapability
+        );
     }
 
     #[test]
@@ -695,7 +1072,10 @@ mod tests {
                     ("AccessMask", "0x1"),
                 ],
             );
-            assert!(extract_denial(&p, 5900, FIXED_FILETIME).is_none());
+            assert_eq!(
+                extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
+                DataLoopExclusionReason::MissingObjectName
+            );
         }
     }
 
@@ -712,13 +1092,19 @@ mod tests {
     #[test]
     fn access_check_unknown_object_type_dropped() {
         let p = parts(14, &[("ObjectType", "\"Section\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::UnsupportedObjectType
+        );
     }
 
     #[test]
     fn access_check_absent_object_type_dropped() {
         let p = parts(14, &[("ObjectName", "\"x\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::MissingObjectType
+        );
     }
 
     // ---- event 27 UI ------------------------------------------------------
@@ -798,16 +1184,25 @@ mod tests {
     #[test]
     fn learning_mode_violation_rejects_invalid_required_numbers() {
         let invalid_category = parts(27, &[("Category", "not-a-number"), ("Detail", "4")]);
-        assert!(extract_denial(&invalid_category, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&invalid_category, 9999, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::MissingObjectType
+        );
 
         let invalid_detail = parts(27, &[("Category", "2"), ("Detail", "not-a-number")]);
-        assert!(extract_denial(&invalid_detail, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&invalid_detail, 9999, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::MissingObjectName
+        );
     }
 
     #[test]
     fn learning_mode_category_none_is_dropped() {
         let p = parts(27, &[("Category", "0"), ("Detail", "0")]);
-        assert!(extract_denial(&p, 9999, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 9999, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::NotActionable
+        );
     }
 
     // ---- event 28 capability denial ---------------------------------------
@@ -831,6 +1226,7 @@ mod tests {
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "internetClient");
+        assert_eq!(ev.provider, DataLoopProvider::KernelGeneral);
     }
 
     #[test]
@@ -871,13 +1267,28 @@ mod tests {
     #[test]
     fn capability_denial_not_denied_is_dropped() {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "false")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::NotActionable
+        );
     }
 
     #[test]
     fn capability_denial_without_denied_field_is_dropped() {
         let p = parts(28, &[("PackageSid", "S-1-15-3-1")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::NotActionable
+        );
+    }
+
+    #[test]
+    fn capability_denial_without_identifier_is_unresolved() {
+        let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "true")]);
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::UnresolvedCapability
+        );
     }
 
     #[test]
@@ -887,7 +1298,13 @@ mod tests {
             27,
             &[("Category", "2"), ("Detail", "4")],
         );
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::UnsupportedEventSchema
+        );
+        assert!(
+            provider_category(GUID::from_u128(0x12345678_1234_1234_1234_1234567890ab)).is_none()
+        );
     }
 
     #[test]
@@ -900,7 +1317,293 @@ mod tests {
     #[test]
     fn unrelated_event_ignored() {
         let p = parts(9999, &[("Foo", "\"bar\"")]);
-        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            DataLoopExclusionReason::UnsupportedEventSchema
+        );
+    }
+
+    #[test]
+    fn known_provider_category_is_symbolic_and_pii_free() {
+        assert_eq!(
+            provider_category(KERNEL_GENERAL_PROVIDER),
+            Some(DataLoopProvider::KernelGeneral)
+        );
+        assert_eq!(
+            provider_category(PRIVACY_LEARNING_MODE_PROVIDER),
+            Some(DataLoopProvider::PrivacyAuditingPermissiveLearningMode)
+        );
+        assert_eq!(provider_category(GUID::from_u128(0)), None);
+    }
+
+    #[test]
+    fn provider_guid_string_is_stable_and_round_trips_by_category() {
+        let kernel_guid = provider_guid_string(DataLoopProvider::KernelGeneral);
+        let privacy_guid =
+            provider_guid_string(DataLoopProvider::PrivacyAuditingPermissiveLearningMode);
+        assert_ne!(kernel_guid, privacy_guid);
+        assert_eq!(kernel_guid, format_guid(KERNEL_GENERAL_PROVIDER));
+        assert_eq!(privacy_guid, format_guid(PRIVACY_LEARNING_MODE_PROVIDER));
+        assert!(kernel_guid.starts_with('{') && kernel_guid.ends_with('}'));
+    }
+
+    // ---- Data Loop signature sanitization ----------------------------------
+
+    #[test]
+    fn redact_username_in_path_replaces_only_the_profile_segment() {
+        assert_eq!(
+            redact_username_in_path(r"C:\Users\jsmith\Documents\secret.txt"),
+            format!(r"C:\Users\{REDACTED_USER}\Documents\secret.txt")
+        );
+        assert_eq!(
+            redact_username_in_path(r"\Device\HarddiskVolume3\Users\jane.doe\AppData\x"),
+            format!(r"\Device\HarddiskVolume3\Users\{REDACTED_USER}\AppData\x")
+        );
+        assert_eq!(
+            redact_username_in_path(r"\??\C:\Documents and Settings\bob\Desktop\x"),
+            format!(r"\??\C:\Documents and Settings\{REDACTED_USER}\Desktop\x")
+        );
+        assert_eq!(
+            redact_username_in_path("C:/Users/alice/Documents/secret.txt"),
+            format!("C:/Users/{REDACTED_USER}/Documents/secret.txt")
+        );
+    }
+
+    #[test]
+    fn redact_username_in_path_is_case_insensitive_on_the_marker_only() {
+        assert_eq!(
+            redact_username_in_path(r"C:\USERS\Alice\file.txt"),
+            format!(r"C:\USERS\{REDACTED_USER}\file.txt")
+        );
+    }
+
+    #[test]
+    fn redact_username_in_path_leaves_unrelated_paths_untouched() {
+        // Registry hive segment "USER" (singular) must not be mistaken for
+        // the "Users" (plural) profile-directory marker.
+        let registry_path = r"\REGISTRY\USER\S-1-5-21-1-2-3-1000\Software\Test";
+        assert_eq!(redact_username_in_path(registry_path), registry_path);
+        assert_eq!(redact_username_in_path("internetClient"), "internetClient");
+        assert_eq!(
+            redact_username_in_path(r"C:\data\test\bin\"),
+            r"C:\data\test\bin\"
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_drops_timestamp_like_properties() {
+        let props = vec![
+            ("ObjectName".to_string(), "\"C:\\a.txt\"".to_string()),
+            ("Timestamp".to_string(), "132847890123456789".to_string()),
+            (
+                "LastWriteTime".to_string(),
+                "132847890123456789".to_string(),
+            ),
+            ("RuntimePolicy".to_string(), "\"retain\"".to_string()),
+            ("Timeout".to_string(), "\"30\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        assert!(out
+            .iter()
+            .all(|(name, _)| name != "Timestamp" && name != "LastWriteTime"));
+        assert!(out.iter().any(|(name, _)| name == "ObjectName"));
+        assert!(out.iter().any(|(name, _)| name == "RuntimePolicy"));
+        assert!(out.iter().any(|(name, _)| name == "Timeout"));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_standalone_identity_properties() {
+        let props = vec![
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "AccountName".to_string(),
+                "\"DOMAIN\\\\jsmith\"".to_string(),
+            ),
+            ("PackageSid".to_string(), "\"S-1-15-3-1\"".to_string()),
+            ("UserSid".to_string(), "\"S-1-5-21-123\"".to_string()),
+            ("AccountId".to_string(), "\"42\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(value_for("UserName"), Some(REDACTED_USER));
+        assert_eq!(value_for("AccountName"), Some(REDACTED_USER));
+        // SIDs are retained identifiers, never redacted.
+        assert_eq!(value_for("PackageSid"), Some("S-1-15-3-1"));
+        assert_eq!(value_for("UserSid"), Some("S-1-5-21-123"));
+        assert_eq!(value_for("AccountId"), Some("42"));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_username_segment_inside_a_path_value() {
+        let props = vec![(
+            "ObjectName".to_string(),
+            "\"C:\\Users\\jsmith\\secret.txt\"".to_string(),
+        )];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out,
+            vec![(
+                "ObjectName".to_string(),
+                format!(r"C:\Users\{REDACTED_USER}\secret.txt")
+            )]
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_known_username_in_arbitrary_resource_path() {
+        let props = vec![
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(value_for("UserName"), Some(REDACTED_USER));
+        assert_eq!(
+            value_for("ObjectName"),
+            Some(r"D:\profiles\<redacted-user>\secret.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_qualified_username_in_arbitrary_resource_path() {
+        for (property_name, identity) in [
+            ("UserName", r"CONTOSO\jsmith"),
+            ("UserPrincipalName", "jsmith@example.com"),
+        ] {
+            let props = vec![
+                (property_name.to_string(), format!("\"{identity}\"")),
+                (
+                    "ObjectName".to_string(),
+                    "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+                ),
+            ];
+            let out = sanitize_properties(&props);
+            let value_for = |name: &str| {
+                out.iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                value_for("ObjectName").map(String::as_str),
+                Some(r"D:\profiles\<redacted-user>\secret.txt")
+            );
+            assert_eq!(
+                value_for(property_name).map(String::as_str),
+                Some(REDACTED_USER)
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_standard_account_identity_fields() {
+        for (property_name, identity) in [
+            ("PrincipalName", "jsmith@example.com"),
+            ("TargetAccount", r"CONTOSO\jsmith"),
+            ("SubjectAccount", "jsmith"),
+        ] {
+            let props = vec![
+                (property_name.to_string(), format!("\"{identity}\"")),
+                (
+                    "ObjectName".to_string(),
+                    "\"D:\\profiles\\jsmith\\secret.txt\"".to_string(),
+                ),
+            ];
+            let out = sanitize_properties(&props);
+            let value_for = |name: &str| {
+                out.iter()
+                    .find(|(key, _)| key == name)
+                    .map(|(_, value)| value)
+            };
+            assert_eq!(
+                value_for(property_name).map(String::as_str),
+                Some(REDACTED_USER)
+            );
+            assert_eq!(
+                value_for("ObjectName").map(String::as_str),
+                Some(r"D:\profiles\<redacted-user>\secret.txt")
+            );
+        }
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_unicode_username_case_variants() {
+        let props = vec![
+            ("UserName".to_string(), "\"JÖRG\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"D:\\profiles\\jörg\\secret.txt\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out.iter()
+                .find(|(name, _)| name == "ObjectName")
+                .map(|(_, value)| value.as_str()),
+            Some(r"D:\profiles\<redacted-user>\secret.txt")
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_is_deterministically_sorted_by_name() {
+        let props = vec![
+            ("Zeta".to_string(), "\"z\"".to_string()),
+            ("Alpha".to_string(), "\"a\"".to_string()),
+        ];
+        let out = sanitize_properties(&props);
+        assert_eq!(
+            out,
+            vec![
+                ("Alpha".to_string(), "a".to_string()),
+                ("Zeta".to_string(), "z".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_properties_never_carries_a_decoder_error_message() {
+        // Decode-failure signatures are built by the caller with an empty
+        // property list (there is no decoded payload to sanitize), so a
+        // free-form TDH error string can never reach `sanitize_properties`
+        // in the first place.
+        let props: Vec<(String, String)> = Vec::new();
+        assert!(sanitize_properties(&props).is_empty());
+    }
+
+    #[test]
+    fn bound_properties_truncates_count_and_value_length_after_sanitizing() {
+        let long_value = format!(
+            r"C:\Users\{}\{}",
+            "jsmith",
+            "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2)
+        );
+        let mut props = vec![("ObjectName".to_string(), long_value)];
+        for i in 0..(MAX_SIGNATURE_PROPERTIES + 10) {
+            // `bound_properties` truncates in the given order (callers are
+            // expected to have already sorted deterministically); appending
+            // these after `ObjectName` keeps it within the retained prefix.
+            props.push((format!("Extra{i:03}"), "v".to_string()));
+        }
+        let sanitized: Vec<(String, String)> = props
+            .into_iter()
+            .map(|(name, value)| (name, redact_username_in_path(&value)))
+            .collect();
+
+        let out = bound_properties(sanitized);
+
+        assert_eq!(out.len(), MAX_SIGNATURE_PROPERTIES);
+        let object_name = out
+            .iter()
+            .find(|(name, _)| name == "ObjectName")
+            .expect("ObjectName retained (sorted first)");
+        assert!(
+            object_name.1.contains(REDACTED_USER),
+            "redaction must survive truncation: {}",
+            object_name.1
+        );
+        assert!(object_name.1.chars().count() <= MAX_SIGNATURE_VALUE_LEN);
     }
 
     // ---- parse_u32 --------------------------------------------------------

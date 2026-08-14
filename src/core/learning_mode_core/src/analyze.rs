@@ -16,6 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::data_loop::DataLoopSummary;
 use crate::model::DeniedResource;
 
 /// Result of decoding a capture source into bounded, de-duplicated denials.
@@ -27,6 +28,9 @@ pub struct AnalysisResult {
     /// Whether additional unique denials were observed after the result bound
     /// was reached.
     pub denied_resources_truncated: bool,
+    /// Username-redacted signatures for outcomes omitted from canonical denials.
+    #[serde(default)]
+    pub data_loop: DataLoopSummary,
 }
 
 /// Inclusive process-lifetime window used to scope a host-wide capture.
@@ -61,7 +65,61 @@ impl AnalysisResult {
         Self {
             denials,
             denied_resources_truncated: false,
+            data_loop: DataLoopSummary::default(),
         }
+    }
+
+    /// Trims Data Loop signatures so the complete compact JSON result fits.
+    ///
+    /// Returns `false` when the canonical denials and empty Data Loop envelope
+    /// alone exceed `max_bytes`; canonical denials are never discarded.
+    pub fn fit_data_loop_within_serialized_bytes(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<bool, serde_json::Error> {
+        if serde_json::to_vec(self)?.len() <= max_bytes {
+            return Ok(true);
+        }
+
+        let original = std::mem::take(&mut self.data_loop.signatures);
+        let mut retained_bytes = 0usize;
+        const ENVELOPE_HEADROOM: usize = 4 * 1024;
+        let base_len = serde_json::to_vec(self)?.len();
+        if base_len > max_bytes {
+            return Ok(false);
+        }
+        let signature_budget = max_bytes
+            .saturating_sub(base_len)
+            .saturating_sub(ENVELOPE_HEADROOM);
+        let mut original = original;
+        original.sort_by_key(|aggregate| !aggregate.signature.reason.is_canonical_denial());
+        for aggregate in original {
+            let aggregate_len = serde_json::to_vec(&aggregate)?.len().saturating_add(1);
+            if retained_bytes.saturating_add(aggregate_len) <= signature_budget {
+                retained_bytes += aggregate_len;
+                self.data_loop.signatures.push(aggregate);
+            } else {
+                self.data_loop.move_to_overflow(aggregate);
+            }
+        }
+        self.data_loop
+            .signatures
+            .sort_by(|left, right| left.signature.cmp(&right.signature));
+
+        while serde_json::to_vec(self)?.len() > max_bytes {
+            let index = self
+                .data_loop
+                .signatures
+                .iter()
+                .rposition(|aggregate| !aggregate.signature.reason.is_canonical_denial())
+                .or_else(|| self.data_loop.signatures.len().checked_sub(1));
+            let Some(index) = index else {
+                return Ok(false);
+            };
+            let aggregate = self.data_loop.signatures.remove(index);
+            self.data_loop.move_to_overflow(aggregate);
+        }
+        Ok(true)
     }
 }
 
@@ -107,6 +165,9 @@ pub trait DenialAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_loop::{
+        DataLoopAggregate, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
+    };
     use crate::model::{AccessType, ResourceType};
 
     /// A trivial analyzer returning a fixed set, proving the trait is
@@ -132,6 +193,14 @@ mod tests {
         let got = analyzer.analyze(Path::new("ignored.etl")).unwrap();
         assert_eq!(got.denials, denials);
         assert!(!got.denied_resources_truncated);
+        assert!(got.data_loop.is_empty());
+    }
+
+    #[test]
+    fn legacy_guarded_payload_defaults_data_loop_summary() {
+        let payload = br#"{"denials":[],"deniedResourcesTruncated":false}"#;
+        let result: AnalysisResult = serde_json::from_slice(payload).unwrap();
+        assert!(result.data_loop.is_empty());
     }
 
     #[test]
@@ -159,5 +228,60 @@ mod tests {
         assert!(!lifetime.contains(42, 99));
         assert!(!lifetime.contains(42, 201));
         assert!(!lifetime.contains(43, 150));
+    }
+
+    #[test]
+    fn serialized_size_limit_moves_data_loop_groups_to_overflow() {
+        let signature = |pid| DataLoopAggregate {
+            signature: DataLoopSignature {
+                provider: DataLoopProvider::KernelGeneral,
+                provider_guid: "provider".to_string(),
+                event_id: 14,
+                reason: DataLoopExclusionReason::CanonicalDenial,
+                pid,
+                access_type: Some(AccessType::Read),
+                resource_type: Some(ResourceType::File),
+                properties: vec![("ObjectName".to_string(), "x".repeat(4_096))],
+            },
+            count: 3,
+        };
+        let mut result = AnalysisResult {
+            denials: vec![DeniedResource {
+                resource: "canonical".repeat(512),
+                resource_type: ResourceType::File,
+                access_type: AccessType::Read,
+                pid: 1,
+                filetime: 2,
+            }],
+            denied_resources_truncated: false,
+            data_loop: DataLoopSummary {
+                signatures: vec![signature(1), signature(2)],
+                total_occurrences: 6,
+                ..Default::default()
+            },
+        };
+        let original_len = serde_json::to_vec(&result).unwrap().len();
+
+        assert!(result
+            .fit_data_loop_within_serialized_bytes(original_len - 1)
+            .unwrap());
+        assert!(serde_json::to_vec(&result).unwrap().len() < original_len);
+        assert!(result.data_loop.aggregate_groups_truncated);
+        assert_eq!(result.data_loop.total_occurrences, 6);
+        assert!(result.data_loop.overflow_occurrences > 0);
+    }
+
+    #[test]
+    fn serialized_size_limit_never_discards_canonical_denials() {
+        let mut result = AnalysisResult::complete(vec![DeniedResource {
+            resource: "canonical".repeat(512),
+            resource_type: ResourceType::File,
+            access_type: AccessType::Read,
+            pid: 1,
+            filetime: 2,
+        }]);
+
+        assert!(!result.fit_data_loop_within_serialized_bytes(1).unwrap());
+        assert_eq!(result.denials.len(), 1);
     }
 }

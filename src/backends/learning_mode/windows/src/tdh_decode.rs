@@ -91,19 +91,56 @@ pub(crate) struct EventSchemaCache {
 #[derive(Debug)]
 pub(crate) enum DecodeError {
     Schema(String),
-    Event(String),
+    Event {
+        kind: EventDecodeKind,
+        event_name: Option<String>,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventDecodeKind {
+    PayloadMalformed,
+    DecoderLimitReached,
+    UnsupportedPropertyEncoding,
 }
 
 impl DecodeError {
     pub(crate) fn is_schema_error(&self) -> bool {
         matches!(self, Self::Schema(_))
     }
+
+    pub(crate) fn event_kind(&self) -> Option<EventDecodeKind> {
+        match self {
+            Self::Event { kind, .. } => Some(*kind),
+            Self::Schema(_) => None,
+        }
+    }
+
+    pub(crate) fn event_name(&self) -> Option<&str> {
+        match self {
+            Self::Event { event_name, .. } => event_name.as_deref(),
+            Self::Schema(_) => None,
+        }
+    }
+
+    pub(crate) fn event(
+        kind: EventDecodeKind,
+        message: String,
+        event_name: Option<String>,
+    ) -> Self {
+        Self::Event {
+            kind,
+            event_name,
+            message,
+        }
+    }
 }
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Schema(message) | Self::Event(message) => f.write_str(message),
+            Self::Schema(message) | Self::Event { message, .. } => f.write_str(message),
         }
     }
 }
@@ -192,14 +229,38 @@ pub unsafe fn decode_event_parts(
     let header = event.EventHeader;
     let event_id = header.EventDescriptor.Id;
     let pointer_size = pointer_size_from_header_flags(header.Flags);
-    let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size)
-        .map_err(DecodeError::Event)?;
+    let event_name = schema_event_name(buffer.as_bytes(), info);
+    let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size).map_err(
+        |error| match error.kind {
+            PropertyDecodeErrorKind::Schema => DecodeError::Schema(error.message),
+            PropertyDecodeErrorKind::PayloadMalformed => {
+                DecodeError::event(EventDecodeKind::PayloadMalformed, error.message, event_name)
+            }
+            PropertyDecodeErrorKind::DecoderLimitReached => DecodeError::event(
+                EventDecodeKind::DecoderLimitReached,
+                error.message,
+                event_name,
+            ),
+            PropertyDecodeErrorKind::UnsupportedPropertyEncoding => DecodeError::event(
+                EventDecodeKind::UnsupportedPropertyEncoding,
+                error.message,
+                event_name,
+            ),
+        },
+    )?;
 
     Ok(DecodedEventParts {
         provider: header.ProviderId,
         event_id,
         props,
     })
+}
+
+fn schema_event_name(info_buf: &[u8], info: &TRACE_EVENT_INFO) -> Option<String> {
+    // SAFETY: `info` points into the TDH buffer and this union member is the
+    // event-name offset for the decoding sources used by these providers.
+    let event_name_offset = unsafe { info.Anonymous1.EventNameOffset };
+    wide_str_at(info_buf, event_name_offset).or_else(|| wide_str_at(info_buf, info.TaskNameOffset))
 }
 
 unsafe fn load_event_schema(event_record: *mut EVENT_RECORD) -> Result<TdhInfoBuffer, DecodeError> {
@@ -242,12 +303,56 @@ unsafe fn has_trace_logging_schema(event_record: &EVENT_RECORD) -> bool {
         .any(|item| u32::from(item.ExtType) == EVENT_HEADER_EXT_TYPE_EVENT_SCHEMA_TL)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyDecodeErrorKind {
+    Schema,
+    PayloadMalformed,
+    DecoderLimitReached,
+    UnsupportedPropertyEncoding,
+}
+
+#[derive(Debug)]
+struct PropertyDecodeError {
+    kind: PropertyDecodeErrorKind,
+    message: String,
+}
+
+impl PropertyDecodeError {
+    fn schema(message: String) -> Self {
+        Self {
+            kind: PropertyDecodeErrorKind::Schema,
+            message,
+        }
+    }
+
+    fn payload(message: String) -> Self {
+        Self {
+            kind: PropertyDecodeErrorKind::PayloadMalformed,
+            message,
+        }
+    }
+
+    fn limit(message: String) -> Self {
+        Self {
+            kind: PropertyDecodeErrorKind::DecoderLimitReached,
+            message,
+        }
+    }
+
+    fn unsupported(message: String) -> Self {
+        Self {
+            kind: PropertyDecodeErrorKind::UnsupportedPropertyEncoding,
+            message,
+        }
+    }
+}
+
 fn decode_properties(
     info_buf: &[u8],
     info: &TRACE_EVENT_INFO,
     event_record: *mut EVENT_RECORD,
     pointer_size: usize,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<(String, String)>, PropertyDecodeError> {
     // SAFETY: caller passes a valid EVENT_RECORD; the field accesses
     // are reads of POD fields.
     let event = unsafe { &*event_record };
@@ -261,10 +366,11 @@ fn decode_properties(
     let property_count = info.PropertyCount as usize;
     let prop_count = info.TopLevelPropertyCount as usize;
     if prop_count > property_count {
-        return Err(format!(
+        return Err(PropertyDecodeError::schema(format!(
             "top-level property count {prop_count} exceeds property count {property_count}"
-        ));
+        )));
     }
+
     let mut results = Vec::with_capacity(prop_count);
     let mut numeric_values = vec![None; property_count];
     let mut offset: usize = 0;
@@ -308,15 +414,21 @@ fn decode_property(
     depth: usize,
     work_remaining: &mut usize,
     results: &mut Vec<(String, String)>,
-) -> Result<(), String> {
-    *work_remaining = work_remaining
-        .checked_sub(1)
-        .ok_or_else(|| format!("property decode work exceeds limit {MAX_DECODE_WORK}"))?;
+) -> Result<(), PropertyDecodeError> {
+    *work_remaining = work_remaining.checked_sub(1).ok_or_else(|| {
+        PropertyDecodeError::limit(format!(
+            "property decode work exceeds limit {MAX_DECODE_WORK}"
+        ))
+    })?;
     if depth > MAX_STRUCT_DEPTH {
-        return Err(format!("property nesting exceeds limit {MAX_STRUCT_DEPTH}"));
+        return Err(PropertyDecodeError::limit(format!(
+            "property nesting exceeds limit {MAX_STRUCT_DEPTH}"
+        )));
     }
     if index >= context.info.PropertyCount as usize {
-        return Err(format!("property index {index} is out of range"));
+        return Err(PropertyDecodeError::schema(format!(
+            "property index {index} is out of range"
+        )));
     }
     let prop_info = event_property_info(context.info, index);
     let prop_name = wide_str_at(context.info_buf, prop_info.NameOffset)
@@ -324,25 +436,29 @@ fn decode_property(
     let flags = prop_info.Flags.0;
     let count = resolve_property_count(prop_info, flags, numeric_values, index)?;
     if count > MAX_PROPERTY_ELEMENTS {
-        return Err(format!(
+        return Err(PropertyDecodeError::limit(format!(
             "property '{prop_name}' count {count} exceeds limit {MAX_PROPERTY_ELEMENTS}"
-        ));
+        )));
     }
 
     if flags & PROPERTY_STRUCT != 0 {
         let start_index = unsafe { prop_info.Anonymous1.structType.StructStartIndex } as usize;
         let member_count = unsafe { prop_info.Anonymous1.structType.NumOfStructMembers } as usize;
-        let end_index = start_index
-            .checked_add(member_count)
-            .ok_or_else(|| format!("property '{prop_name}' struct member range overflows"))?;
+        let end_index = start_index.checked_add(member_count).ok_or_else(|| {
+            PropertyDecodeError::schema(format!(
+                "property '{prop_name}' struct member range overflows"
+            ))
+        })?;
         if end_index > context.info.PropertyCount as usize {
-            return Err(format!(
+            return Err(PropertyDecodeError::schema(format!(
                 "property '{prop_name}' struct member range {start_index}..{end_index} exceeds property count {}",
                 context.info.PropertyCount
-            ));
+            )));
         }
         if member_count == 0 {
-            return Err(format!("property '{prop_name}' has no struct members"));
+            return Err(PropertyDecodeError::schema(format!(
+                "property '{prop_name}' has no struct members"
+            )));
         }
         results.push((prop_name, "<struct>".to_string()));
         for _ in 0..count {
@@ -378,7 +494,9 @@ fn decode_property(
     for _ in 0..count {
         let remaining = context.user_data_len.saturating_sub(*offset);
         if remaining == 0 {
-            return Err(format!("property '{prop_name}' exceeds the event payload"));
+            return Err(PropertyDecodeError::payload(format!(
+                "property '{prop_name}' exceeds the event payload"
+            )));
         }
         let data_ptr = if remaining > 0 {
             unsafe { context.user_data.add(*offset) }
@@ -393,15 +511,17 @@ fn decode_property(
             context.pointer_size,
         );
         if consumed == 0 && remaining > 0 {
-            return Err(format!(
-                "property '{prop_name}' has unsupported variable length"
-            ));
+            return Err(zero_consumption_error(&prop_name, in_type));
         }
 
         *offset = offset
             .checked_add(consumed)
             .filter(|next| *next <= context.user_data_len)
-            .ok_or_else(|| format!("property '{prop_name}' exceeds the event payload"))?;
+            .ok_or_else(|| {
+                PropertyDecodeError::payload(format!(
+                    "property '{prop_name}' exceeds the event payload"
+                ))
+            })?;
         if count == 1 {
             numeric_value = parse_numeric_metadata(&value);
         }
@@ -423,7 +543,7 @@ fn resolve_property_count(
     flags: i32,
     numeric_values: &[Option<usize>],
     property_index: usize,
-) -> Result<usize, String> {
+) -> Result<usize, PropertyDecodeError> {
     if flags & PROPERTY_PARAM_COUNT != 0 {
         let count_index = unsafe { prop_info.Anonymous2.countPropertyIndex } as usize;
         resolved_metadata(numeric_values, count_index, "count", property_index)
@@ -465,15 +585,56 @@ fn resolved_metadata(
     metadata_index: usize,
     kind: &str,
     property_index: usize,
-) -> Result<usize, String> {
-    numeric_values
-        .get(metadata_index)
-        .and_then(|value| *value)
-        .ok_or_else(|| {
-            format!(
-                "property {property_index} references unresolved {kind} property {metadata_index}"
-            )
-        })
+) -> Result<usize, PropertyDecodeError> {
+    let Some(value) = numeric_values.get(metadata_index) else {
+        return Err(PropertyDecodeError::schema(format!(
+            "property {property_index} references out-of-range {kind} property {metadata_index}"
+        )));
+    };
+    value.ok_or_else(|| {
+        PropertyDecodeError::schema(format!(
+            "property {property_index} references unresolved {kind} property {metadata_index}"
+        ))
+    })
+}
+
+fn is_known_property_type(in_type: u16) -> bool {
+    matches!(
+        in_type,
+        TDH_INTYPE_UNICODESTRING
+            | TDH_INTYPE_ANSISTRING
+            | TDH_INTYPE_INT8
+            | TDH_INTYPE_UINT8
+            | TDH_INTYPE_INT16
+            | TDH_INTYPE_UINT16
+            | TDH_INTYPE_INT32
+            | TDH_INTYPE_UINT32
+            | TDH_INTYPE_INT64
+            | TDH_INTYPE_UINT64
+            | TDH_INTYPE_FLOAT
+            | TDH_INTYPE_DOUBLE
+            | TDH_INTYPE_BOOLEAN
+            | TDH_INTYPE_BINARY
+            | TDH_INTYPE_GUID
+            | TDH_INTYPE_POINTER
+            | TDH_INTYPE_FILETIME
+            | TDH_INTYPE_SYSTEMTIME
+            | TDH_INTYPE_SID
+            | TDH_INTYPE_HEXINT32
+            | TDH_INTYPE_HEXINT64
+            | TDH_INTYPE_UNICODECHAR
+            | TDH_INTYPE_ANSICHAR
+            | TDH_INTYPE_SIZET
+    )
+}
+
+fn zero_consumption_error(property_name: &str, in_type: u16) -> PropertyDecodeError {
+    let message = format!("property '{property_name}' could not be decoded");
+    if is_known_property_type(in_type) {
+        PropertyDecodeError::payload(message)
+    } else {
+        PropertyDecodeError::unsupported(message)
+    }
 }
 
 fn parse_numeric_metadata(value: &str) -> Option<usize> {
@@ -663,12 +824,12 @@ fn format_property_value(
 fn format_sid(data: *const u8, available: usize) -> (String, usize) {
     let header = unsafe { std::slice::from_raw_parts(data, available.min(8)) };
     if header.len() < 8 {
-        return ("<invalid SID>".to_string(), available);
+        return ("<invalid SID>".to_string(), 0);
     }
     let sub_authority_count = header[1] as usize;
     let length = 8usize.saturating_add(sub_authority_count.saturating_mul(4));
     if length > available {
-        return ("<invalid SID>".to_string(), available);
+        return ("<invalid SID>".to_string(), 0);
     }
     let bytes = unsafe { std::slice::from_raw_parts(data, length) };
     let authority = bytes[2..8]
@@ -815,7 +976,7 @@ mod tests {
     fn decode_single_property(
         buffer: &TdhInfoBuffer,
         payload: &[u8],
-    ) -> Result<Vec<(String, String)>, String> {
+    ) -> Result<Vec<(String, String)>, PropertyDecodeError> {
         let info = unsafe { &*buffer.as_ptr() };
         let context = PropertyDecodeContext {
             info_buf: buffer.as_bytes(),
@@ -860,7 +1021,8 @@ mod tests {
 
         let error = decode_single_property(&buffer, &[1]).unwrap_err();
 
-        assert!(error.contains("struct member range"));
+        assert_eq!(error.kind, PropertyDecodeErrorKind::Schema);
+        assert!(error.message.contains("struct member range"));
     }
 
     #[test]
@@ -883,7 +1045,8 @@ mod tests {
 
         let error = decode_single_property(&buffer, &[1]).unwrap_err();
 
-        assert!(error.contains("has no struct members"));
+        assert_eq!(error.kind, PropertyDecodeErrorKind::Schema);
+        assert!(error.message.contains("has no struct members"));
     }
 
     #[test]
@@ -906,17 +1069,29 @@ mod tests {
 
         let error = decode_single_property(&buffer, &[1]).unwrap_err();
 
-        assert!(error.contains("nesting exceeds limit"));
+        assert_eq!(error.kind, PropertyDecodeErrorKind::DecoderLimitReached);
+        assert!(error.message.contains("nesting exceeds limit"));
     }
 
     #[test]
     fn invalid_metadata_references_are_rejected() {
-        assert!(resolved_metadata(&[None], 3, "count", 0)
-            .unwrap_err()
-            .contains("unresolved count property 3"));
-        assert!(resolved_metadata(&[None], 2, "length", 0)
-            .unwrap_err()
-            .contains("unresolved length property 2"));
+        let count_error = resolved_metadata(&[None], 3, "count", 0).unwrap_err();
+        assert_eq!(count_error.kind, PropertyDecodeErrorKind::Schema);
+        assert!(count_error
+            .message
+            .contains("out-of-range count property 3"));
+
+        let length_error = resolved_metadata(&[None], 2, "length", 0).unwrap_err();
+        assert_eq!(length_error.kind, PropertyDecodeErrorKind::Schema);
+        assert!(length_error
+            .message
+            .contains("out-of-range length property 2"));
+
+        let unresolved_error = resolved_metadata(&[None], 0, "count", 1).unwrap_err();
+        assert_eq!(unresolved_error.kind, PropertyDecodeErrorKind::Schema);
+        assert!(unresolved_error
+            .message
+            .contains("unresolved count property 0"));
     }
 
     #[test]
@@ -960,7 +1135,8 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("decode work exceeds limit"));
+        assert_eq!(error.kind, PropertyDecodeErrorKind::DecoderLimitReached);
+        assert!(error.message.contains("decode work exceeds limit"));
     }
 
     #[test]
@@ -978,6 +1154,18 @@ mod tests {
         let buf = [0u8; 4];
         assert!(wide_str_at(&buf, 100).is_none());
         assert!(wide_str_at(&buf, 0).is_none());
+    }
+
+    #[test]
+    fn property_decode_errors_use_typed_categories() {
+        assert_eq!(
+            zero_consumption_error("Name", TDH_INTYPE_UNICODESTRING).kind,
+            PropertyDecodeErrorKind::PayloadMalformed
+        );
+        assert_eq!(
+            zero_consumption_error("Value", u16::MAX).kind,
+            PropertyDecodeErrorKind::UnsupportedPropertyEncoding
+        );
     }
 
     #[test]
@@ -1207,7 +1395,7 @@ mod tests {
         let bytes = [1u8, 3, 0, 0, 0, 0, 0, 15];
         let (val, consumed) = format_property_value(TDH_INTYPE_SID, 0, bytes.as_ptr(), bytes.len());
         assert_eq!(val, "<invalid SID>");
-        assert_eq!(consumed, bytes.len());
+        assert_eq!(consumed, 0);
     }
 
     #[test]

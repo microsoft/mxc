@@ -252,6 +252,11 @@ pub(crate) fn extract_denials(
     if !is_supported_event {
         return Vec::new();
     }
+    // `is_supported_event` above only matches the two known Learning Mode
+    // providers, so this always resolves.
+    let Some(provider) = crate::extractors::provider_category(parts.provider) else {
+        return Vec::new();
+    };
 
     let names = extract_names(parts, CAPABILITY_INDEX.get_or_init(build_capability_index));
     names
@@ -263,6 +268,8 @@ pub(crate) fn extract_denials(
             access_type: AccessType::Unknown,
             filetime,
             event_id: parts.event_id,
+            provider,
+            data_loop_properties: crate::extractors::sanitize_properties(&parts.props),
         })
         .collect()
 }

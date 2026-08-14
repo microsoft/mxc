@@ -105,9 +105,10 @@ stays enforced:
    hosts use native capture without PLM or UAC, while legacy or incompatible
    tiers use the session-scoped guarded-WPR fallback and elevate only its
    fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
-   relocates them to `denials.json` and `trace.etl`, and generates the source
-   snapshot and `Adjusted_*.json` from canonical denials without decoding ETL
-   again. Truncated analysis skips the adjusted config.
+   relocates the canonical output, its Data Loop sibling, and the trace to
+   `denials.json`, `denials.data-loop.json`, and `trace.etl`, and generates the
+   source snapshot and `Adjusted_*.json` from canonical denials without decoding
+   ETL again. Truncated analysis skips the adjusted config.
 
    ```
    wxc-exec --audit --config <config>
@@ -171,8 +172,8 @@ ungranted access is handled while it is recorded:
 ### Output file the caller consumes
 
 After the sandboxed workload exits, MXC decodes the captured denials and writes
-them to a **single JSON file** — the deliverable a host application reads to
-regenerate its sandbox policy:
+the canonical JSON deliverable a host application reads to regenerate its
+sandbox policy:
 
 ```json
 {
@@ -203,8 +204,9 @@ regenerate its sandbox policy:
 - `denials` is already de-duplicated per `(resource, accessType)`, so
   `summary.totalDenials` equals `denials.length`.
 - Analysis retains at most 10,000 unique denials and processes at most
-  1,000,000 ETW events. Reaching either bound stops further analysis and sets
-  `summary.deniedResourcesTruncated` to `true`.
+  1,000,000 ETW events. Reaching the unique-denial bound stops adding canonical
+  entries but continues bounded aggregate accounting; reaching either bound
+  sets `summary.deniedResourcesTruncated` to `true`.
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
@@ -219,6 +221,94 @@ regenerate its sandbox policy:
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
 
+### Data Loop event signatures
+
+Every successful decode also writes a deterministic sibling file:
+`denials.<run-id>.json` produces `denials.<run-id>.data-loop.json`. This Data
+Loop artifact is a bounded, username-redacted superset containing canonical
+denial occurrences plus outcomes omitted from canonical denials:
+
+```json
+{
+  "version": 1,
+  "signatures": [
+    {
+      "signature": {
+        "provider": "kernelGeneral",
+        "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
+        "eventId": 14,
+        "reason": "canonicalDenial",
+        "pid": 4321,
+        "accessType": "read",
+        "resourceType": "file",
+        "properties": [
+          ["PackageSid", "S-1-15-3-1"],
+          ["resource", "C:\\Users\\<redacted-user>\\data.txt"]
+        ]
+      },
+      "count": 37
+    }
+  ],
+  "summary": {
+    "totalOccurrences": 37,
+    "overflowOccurrences": 0,
+    "canonicalOverflowOccurrences": 0,
+    "aggregateGroupsTruncated": false,
+    "processedEventsTruncated": false,
+    "canonicalDenialLimitReached": false
+  }
+}
+```
+
+Signatures are keyed by symbolic provider category, provider GUID,
+provider-scoped event ID, closed exclusion reason, PID, and sorted sanitized
+properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
+resource values are retained. Standalone user/account names and username
+components inside paths or resource names are replaced with
+`<redacted-user>`; the rest of each value remains available for diagnostics.
+Exact header timestamps and timestamp-like properties are omitted so otherwise
+identical events deduplicate, and free-form decoder errors are never serialized.
+
+Every valid denial candidate is classified as `canonicalDenial`, including its
+first canonical occurrence, later duplicates, and candidates observed after
+the canonical unique-denial bound. Those occurrences deduplicate under the
+same signature and increment its count. `accessType` and `resourceType` are
+included when denial extraction determined them; diagnostic outcomes without
+those classifications omit the fields.
+Unknown event IDs from known Learning Mode providers are classified as
+`unsupportedEventSchema`; the real ETL path retains their provider GUID and
+PID without attempting an unsupported TDH payload decode.
+
+Per-event TDH failures use closed diagnostic reasons:
+`eventPayloadMalformed` means the payload conflicts with its declared schema,
+`decoderLimitReached` means a nesting/element/work safety bound stopped
+decoding, and `unsupportedPropertyEncoding` means the decoder cannot consume
+that property shape. When TDH exposes it, the schema-declared name is retained
+as the bounded `EventName` signature property. Free-form decoder errors are
+never serialized. Failure to obtain the event schema remains a fatal analysis
+error rather than being represented as a Data Loop signature.
+
+Data Loop retains at most 4,096 distinct signatures, 24 sorted properties per
+signature, 256 characters per property value, and 16 MiB of compact serialized
+signature data. Canonical-denial signatures take priority over diagnostic
+signatures at these bounds. Additional keys are collapsed into
+`overflowOccurrences`; `canonicalOverflowOccurrences` reports the subset of
+canonical occurrences that could not be represented even after diagnostic
+groups were evicted, and `aggregateGroupsTruncated` is set.
+Before returning analysis, the decoder also fits the complete canonical plus
+Data Loop result within the guarded 64 MiB transport limit by moving additional
+Data Loop groups into overflow; canonical denials are never discarded.
+`processedEventsTruncated` indicates that the 1,000,000-event bound prevented
+complete accounting. Counts are candidate-level when extraction identifies
+individual denial candidates and one event-level outcome when decoding cannot
+determine candidate cardinality.
+
+The canonical and Data Loop files fail together: MXC stages both and reports
+capture failure unless both final artifacts are committed. The Data Loop path
+is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
+metadata; callers derive it from the canonical path using the naming rule
+above.
+
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
 per-run identifier (process id plus random suffix) into the file stem
@@ -232,8 +322,8 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 {"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 ```
 
-The pointer echoes the file's `summary`; the authoritative record is the file
-itself. In-process Rust callers receive the same information through
+The pointer echoes the canonical file's `summary`; the authoritative policy
+record is that file. In-process Rust callers receive the same information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
 `MxcSandboxProcess.OutputMetadata`.

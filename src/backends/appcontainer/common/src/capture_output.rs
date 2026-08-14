@@ -7,9 +7,9 @@
 //! decoding its own sealed ETL) and the guarded-WPR legacy-tier fallback
 //! (`appcontainer_runner`, consuming an already-decoded [`AnalysisResult`]
 //! handed back by the elevated PLM guardian) must emit byte-for-byte the same
-//! [`DenialsDocument`] JSON shape, [`CaptureDenialsOutput`] summary, and
-//! resolved output-path convention. Centralizing that here is what guarantees
-//! the two paths can't drift.
+//! [`DenialsDocument`] JSON shape, username-redacted Data Loop sibling,
+//! [`CaptureDenialsOutput`] summary, and resolved output-path convention.
+//! Centralizing that here is what guarantees the two paths can't drift.
 //!
 //! Deliberately free of any Windows API or [`ScriptResponse`] coupling so it
 //! can be shared by both runner modules without either owning the other's
@@ -20,7 +20,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
-    write_document, AnalysisResult, DenialSummary, DenialsDocument, DenialsOutputPointer,
+    data_loop_sibling_path, write_data_loop_document, write_document, AnalysisResult,
+    DataLoopDocument, DenialSummary, DenialsDocument, DenialsOutputPointer,
 };
 use wxc_common::models::CaptureDenialsOutput;
 
@@ -30,8 +31,9 @@ pub struct DenialsOutputPaths {
     pub etl: Option<PathBuf>,
 }
 
-/// Writes a bounded [`AnalysisResult`] to `output_path` as the JSON denials
-/// document and returns the caller-facing [`CaptureDenialsOutput`] summary.
+/// Writes a bounded [`AnalysisResult`] as the canonical denials document and
+/// deterministic Data Loop sibling, then returns caller-facing metadata for
+/// the canonical document.
 ///
 /// Never overwrites an existing file: a run whose output path collides with a
 /// leftover file from a previous run fails loudly rather than clobbering it.
@@ -40,14 +42,21 @@ pub fn write_denials_document(
     exit_code: i32,
     output_path: &Path,
 ) -> std::io::Result<CaptureDenialsOutput> {
+    let data_loop_path = data_loop_output_path(output_path)?;
     let summary = DenialSummary::new(
         exit_code,
         analysis.denials.len(),
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials, summary);
+    let data_loop_document = DataLoopDocument::new(&analysis.data_loop);
 
-    write_denials_output_file(output_path, |writer| write_document(writer, &document))?;
+    write_paired_output_files(
+        output_path,
+        &data_loop_path,
+        |writer| write_document(writer, &document),
+        |writer| write_data_loop_document(writer, &data_loop_document),
+    )?;
 
     let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
     Ok(CaptureDenialsOutput {
@@ -58,6 +67,156 @@ pub fn write_denials_document(
         denied_resources_truncated: pointer.denied_resources_truncated,
         etl_path: None,
     })
+}
+
+/// Derives the deterministic Data Loop sibling path for a denials output.
+pub fn data_loop_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
+    data_loop_sibling_path(output_path)
+        .map_err(|error| std::io::Error::other(format!("captureDenials {error}")))
+}
+
+fn write_paired_output_files(
+    denials_path: &Path,
+    data_loop_path: &Path,
+    write_denials: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+    write_data_loop: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    ensure_output_absent(denials_path, "denials")?;
+    ensure_output_absent(data_loop_path, "Data Loop")?;
+
+    let denials_temp = stage_output_file(denials_path, "denials", write_denials)?;
+    let data_loop_temp = match stage_output_file(data_loop_path, "Data Loop", write_data_loop) {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(combine_error_with_cleanup(
+                error,
+                remove_if_present(&denials_temp),
+                &denials_temp,
+            ))
+        }
+    };
+
+    if let Err(error) = std::fs::rename(&data_loop_temp, data_loop_path) {
+        let error = std::io::Error::other(format!(
+            "captureDenials failed to promote Data Loop output file {}: {error}",
+            data_loop_path.display()
+        ));
+        let error =
+            combine_error_with_cleanup(error, remove_if_present(&data_loop_temp), &data_loop_temp);
+        return Err(combine_error_with_cleanup(
+            error,
+            remove_if_present(&denials_temp),
+            &denials_temp,
+        ));
+    }
+
+    if let Err(error) = std::fs::rename(&denials_temp, denials_path) {
+        let error = std::io::Error::other(format!(
+            "captureDenials failed to promote denials output file {}: {error}",
+            denials_path.display()
+        ));
+        let error =
+            combine_error_with_cleanup(error, remove_if_present(data_loop_path), data_loop_path);
+        return Err(combine_error_with_cleanup(
+            error,
+            remove_if_present(&denials_temp),
+            &denials_temp,
+        ));
+    }
+
+    Ok(())
+}
+
+fn ensure_output_absent(path: &Path, kind: &str) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "captureDenials {kind} output file already exists: {}",
+                path.display()
+            ),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(std::io::Error::other(format!(
+            "captureDenials failed to inspect {kind} output file {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn stage_output_file(
+    final_path: &Path,
+    kind: &str,
+    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+) -> std::io::Result<PathBuf> {
+    let temp_path = temporary_sibling_path(final_path)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .map_err(|error| {
+            std::io::Error::other(format!(
+                "captureDenials failed to create temporary {kind} output file {}: {error}",
+                temp_path.display()
+            ))
+        })?;
+    let mut writer = std::io::BufWriter::new(file);
+    if let Err(error) = write(&mut writer)
+        .and_then(|()| writer.flush())
+        .and_then(|()| writer.get_ref().sync_all())
+    {
+        let error = std::io::Error::other(format!(
+            "captureDenials failed to write temporary {kind} output file {}: {error}",
+            temp_path.display()
+        ));
+        drop(writer);
+        return Err(combine_error_with_cleanup(
+            error,
+            remove_if_present(&temp_path),
+            &temp_path,
+        ));
+    }
+    Ok(temp_path)
+}
+
+fn temporary_sibling_path(final_path: &Path) -> std::io::Result<PathBuf> {
+    let file_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            std::io::Error::other(format!(
+                "captureDenials output path has no usable file name: {}",
+                final_path.display()
+            ))
+        })?;
+    let suffix = random_capture_suffix().map_err(std::io::Error::other)?;
+    let temp_name = format!(".{file_name}.tmp.{}.{suffix}", std::process::id());
+    Ok(match final_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
+        _ => PathBuf::from(temp_name),
+    })
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn combine_error_with_cleanup(
+    error: std::io::Error,
+    cleanup: std::io::Result<()>,
+    cleanup_path: &Path,
+) -> std::io::Error {
+    match cleanup {
+        Ok(()) => error,
+        Err(cleanup_error) => std::io::Error::other(format!(
+            "{error}; additionally failed to remove {}: {cleanup_error}",
+            cleanup_path.display()
+        )),
+    }
 }
 
 /// Creates `output_path` (failing if it already exists) and writes through
@@ -286,7 +445,10 @@ pub fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{AccessType, DeniedResource, ResourceType};
+    use learning_mode_core::{
+        AccessType, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature, DeniedResource,
+        ResourceType,
+    };
 
     #[test]
     fn write_denials_document_writes_summary_and_document() {
@@ -308,8 +470,13 @@ mod tests {
         assert_eq!(metadata.total_denials, 1);
         assert!(!metadata.denied_resources_truncated);
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(output_path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(document.denials.len(), 1);
+        let data_loop: DataLoopDocument = serde_json::from_slice(
+            &std::fs::read(data_loop_output_path(&output_path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data_loop.version, DataLoopDocument::VERSION);
     }
 
     #[test]
@@ -323,6 +490,82 @@ mod tests {
 
         assert_eq!(metadata.total_denials, 0);
         assert!(output_path.exists());
+        assert!(data_loop_output_path(&output_path).unwrap().exists());
+    }
+
+    #[test]
+    fn write_denials_document_writes_data_loop_aggregates() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let mut analysis = AnalysisResult::complete(Vec::new());
+        analysis.data_loop.record(DataLoopSignature {
+            provider: DataLoopProvider::KernelGeneral,
+            provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
+            event_id: 14,
+            reason: DataLoopExclusionReason::CanonicalDenial,
+            pid: 42,
+            access_type: Some(learning_mode_core::AccessType::Read),
+            resource_type: Some(learning_mode_core::ResourceType::File),
+            properties: vec![("Sid".to_string(), "S-1-15-3-1".to_string())],
+        });
+
+        write_denials_document(analysis, 0, &output_path).expect("write should succeed");
+
+        let data_loop: DataLoopDocument = serde_json::from_slice(
+            &std::fs::read(data_loop_output_path(&output_path).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(data_loop.signatures.len(), 1);
+        assert_eq!(data_loop.signatures[0].count, 1);
+        assert_eq!(data_loop.signatures[0].signature.pid, 42);
+    }
+
+    #[test]
+    fn data_loop_path_is_a_deterministic_json_sibling() {
+        assert_eq!(
+            data_loop_output_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
+            PathBuf::from(r"C:\out\denials.123.data-loop.json")
+        );
+        assert_eq!(
+            data_loop_output_path(Path::new("denials")).unwrap(),
+            PathBuf::from("denials.data-loop.json")
+        );
+    }
+
+    #[test]
+    fn data_loop_collision_leaves_canonical_output_absent() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let data_loop_path = data_loop_output_path(&output_path).unwrap();
+        std::fs::write(&data_loop_path, b"existing").expect("seed Data Loop output");
+
+        write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
+            .expect_err("collision should fail");
+
+        assert!(!output_path.exists());
+        assert_eq!(std::fs::read(data_loop_path).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn second_staged_write_failure_leaves_no_final_output() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let output_path = directory.path().join("denials.json");
+        let data_loop_path = data_loop_output_path(&output_path).unwrap();
+
+        let error = write_paired_output_files(
+            &output_path,
+            &data_loop_path,
+            |writer| writer.write_all(b"denials"),
+            |writer| {
+                writer.write_all(b"partial")?;
+                Err(std::io::Error::other("simulated Data Loop failure"))
+            },
+        )
+        .expect_err("paired write should fail");
+
+        assert!(error.to_string().contains("simulated Data Loop failure"));
+        assert!(!output_path.exists());
+        assert!(!data_loop_path.exists());
     }
 
     #[test]

@@ -61,6 +61,13 @@ pub fn finalize(
         .as_mut()
         .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
     let source_denials = PathBuf::from(&capture.output_path);
+    let source_data_loop =
+        learning_mode_core::data_loop_sibling_path(&source_denials).map_err(|error| {
+            format!(
+                "failed to derive Data Loop path from {}: {error}",
+                source_denials.display()
+            )
+        })?;
     let source_etl = capture
         .etl_path
         .as_deref()
@@ -78,6 +85,12 @@ pub fn finalize(
             source_etl.display()
         ));
     }
+    if !source_data_loop.is_file() {
+        return Err(format!(
+            "captureDenials Data Loop output file is missing: {}",
+            source_data_loop.display()
+        ));
+    }
 
     let document: learning_mode_core::DenialsDocument =
         serde_json::from_slice(&std::fs::read(&source_denials).map_err(|error| {
@@ -93,13 +106,31 @@ pub fn finalize(
             )
         })?;
     validate_metadata(capture, &document)?;
+    let _: learning_mode_core::DataLoopDocument =
+        serde_json::from_slice(&std::fs::read(&source_data_loop).map_err(|error| {
+            format!(
+                "failed to read captureDenials Data Loop output {}: {error}",
+                source_data_loop.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "captureDenials Data Loop output {} is not valid JSON: {error}",
+                source_data_loop.display()
+            )
+        })?;
 
     let final_denials = context.log_dir.join("denials.json");
+    let final_data_loop = context.log_dir.join("denials.data-loop.json");
     let final_etl = context.log_dir.join("trace.etl");
     ensure_destination_available(&source_etl, &final_etl)?;
+    ensure_destination_available(&source_data_loop, &final_data_loop)?;
     ensure_destination_available(&source_denials, &final_denials)?;
-    move_new_file(&source_etl, &final_etl)?;
-    move_new_file(&source_denials, &final_denials)?;
+    move_new_files(&[
+        (&source_etl, &final_etl),
+        (&source_data_loop, &final_data_loop),
+        (&source_denials, &final_denials),
+    ])?;
     capture.output_path = final_denials.to_string_lossy().into_owned();
     capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
@@ -145,14 +176,26 @@ fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
     match std::fs::rename(source, destination) {
         Ok(()) => Ok(()),
         Err(rename_error) => {
-            std::fs::copy(source, destination).map_err(|copy_error| {
-                format!(
-                    "failed to move audit artifact {} to {}: {rename_error}; \
-                     copy fallback failed: {copy_error}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
+            if let Err(copy_error) = std::fs::copy(source, destination) {
+                let cleanup_error = std::fs::remove_file(destination)
+                    .err()
+                    .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
+                return Err(match cleanup_error {
+                    Some(cleanup_error) => format!(
+                        "failed to move audit artifact {} to {}: {rename_error}; \
+                         copy fallback failed: {copy_error}; partial destination cleanup failed: \
+                         {cleanup_error}",
+                        source.display(),
+                        destination.display()
+                    ),
+                    None => format!(
+                        "failed to move audit artifact {} to {}: {rename_error}; \
+                         copy fallback failed: {copy_error}",
+                        source.display(),
+                        destination.display()
+                    ),
+                });
+            }
             std::fs::remove_file(source).map_err(|remove_error| {
                 let _ = std::fs::remove_file(destination);
                 format!(
@@ -163,6 +206,31 @@ fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
             })
         }
     }
+}
+
+fn move_new_files(files: &[(&Path, &Path)]) -> Result<(), String> {
+    let mut moved = Vec::new();
+    for &(source, destination) in files {
+        if source == destination {
+            continue;
+        }
+        if let Err(error) = move_new_file(source, destination) {
+            let rollback_errors = moved
+                .into_iter()
+                .rev()
+                .filter_map(|(source, destination)| move_new_file(destination, source).err())
+                .collect::<Vec<_>>();
+            if rollback_errors.is_empty() {
+                return Err(error);
+            }
+            return Err(format!(
+                "{error}; audit artifact rollback also failed: {}",
+                rollback_errors.join("; ")
+            ));
+        }
+        moved.push((source, destination));
+    }
+    Ok(())
 }
 
 fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
@@ -209,7 +277,7 @@ fn remove_empty_managed_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{DenialSummary, DenialsDocument};
+    use learning_mode_core::{DataLoopDocument, DataLoopSummary, DenialSummary, DenialsDocument};
     use wxc_common::models::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
@@ -256,9 +324,13 @@ mod tests {
         finalize(&mut response, &context, directory.path(), false).unwrap();
 
         assert!(!source_denials.exists());
+        assert!(!learning_mode_core::data_loop_sibling_path(&source_denials)
+            .unwrap()
+            .exists());
         assert!(!source_etl.exists());
         assert!(!retained_dir.exists());
         assert_eq!(std::fs::read(log_dir.join("trace.etl")).unwrap(), b"etl");
+        assert!(log_dir.join("denials.data-loop.json").is_file());
         let capture = response
             .output_metadata
             .as_ref()
@@ -311,6 +383,7 @@ mod tests {
             Some(log_dir.join("trace.etl").as_path())
         );
         assert!(log_dir.join("denials.json").is_file());
+        assert!(log_dir.join("denials.data-loop.json").is_file());
         assert!(log_dir.join("trace.etl").is_file());
     }
 
@@ -360,6 +433,9 @@ mod tests {
 
         assert!(error.contains("canonical denials JSON"));
         assert!(source_denials.exists());
+        assert!(learning_mode_core::data_loop_sibling_path(&source_denials)
+            .unwrap()
+            .exists());
         assert!(source_etl.exists());
     }
 
@@ -384,8 +460,63 @@ mod tests {
 
         assert!(error.contains("destination already exists"));
         assert!(source_denials.exists());
+        assert!(learning_mode_core::data_loop_sibling_path(&source_denials)
+            .unwrap()
+            .exists());
         assert!(source_etl.exists());
         assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    #[test]
+    fn finalize_rejects_missing_data_loop_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::remove_file(learning_mode_core::data_loop_sibling_path(&source_denials).unwrap())
+            .unwrap();
+        let context = AuditContext {
+            log_dir,
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("Data Loop output file is missing"));
+        assert!(source_denials.exists());
+        assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn artifact_move_failure_rolls_back_prior_moves() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_one = directory.path().join("source-one");
+        let source_two = directory.path().join("source-two");
+        let missing_source = directory.path().join("missing");
+        let destination_one = directory.path().join("destination-one");
+        let destination_two = directory.path().join("destination-two");
+        let destination_three = directory.path().join("destination-three");
+        std::fs::write(&source_one, b"one").unwrap();
+        std::fs::write(&source_two, b"two").unwrap();
+
+        let error = move_new_files(&[
+            (&source_one, &destination_one),
+            (&source_two, &destination_two),
+            (&missing_source, &destination_three),
+        ])
+        .unwrap_err();
+
+        assert!(error.contains("failed to move audit artifact"));
+        assert_eq!(std::fs::read(&source_one).unwrap(), b"one");
+        assert_eq!(std::fs::read(&source_two).unwrap(), b"two");
+        assert!(!destination_one.exists());
+        assert!(!destination_two.exists());
+        assert!(!destination_three.exists());
     }
 
     fn response_with_capture(
@@ -393,6 +524,9 @@ mod tests {
         etl_path: &Path,
         exit_code: i32,
     ) -> ScriptResponse {
+        let data_loop_path = learning_mode_core::data_loop_sibling_path(denials_path).unwrap();
+        let data_loop = DataLoopDocument::new(&DataLoopSummary::default());
+        std::fs::write(data_loop_path, serde_json::to_vec(&data_loop).unwrap()).unwrap();
         ScriptResponse {
             exit_code,
             output_metadata: Some(Box::new(SandboxOutputMetadata {

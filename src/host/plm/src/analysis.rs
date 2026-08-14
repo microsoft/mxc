@@ -292,6 +292,7 @@ mod tests {
         let analysis = AnalysisResult {
             denials: vec![denial(r"C:\read.txt", ResourceType::File, AccessType::Read)],
             denied_resources_truncated: true,
+            data_loop: Default::default(),
         };
 
         write_denials(&path, &analysis, 7).unwrap();

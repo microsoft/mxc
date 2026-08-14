@@ -12,14 +12,15 @@
 //!    [`DeniedResource`] records. The per-OS decoder implements
 //!    [`DenialAnalyzer`]; this crate owns the trait and the model.
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
-//!    written to a single JSON output file that host applications read to
-//!    regenerate their sandbox policy. See [`emit`].
+//!    written to the canonical JSON output that host applications read to
+//!    regenerate policy. A deterministic Data Loop sibling contains bounded,
+//!    username-redacted signatures for excluded decoder outcomes.
 //!
 //! This crate is the cross-platform hinge between stages 2 and 3: it
 //! defines the public [`DeniedResource`] model, the [`DenialSummary`]
-//! terminator, the [`DenialsDocument`] output shape plus its [`emit`]ter,
-//! and the [`DenialAnalyzer`] decode trait. It carries no OS-specific code
-//! so the wire format never encodes a platform assumption.
+//! terminator, the [`DenialsDocument`] and [`DataLoopDocument`] output shapes,
+//! and the [`DenialAnalyzer`] decode trait. It carries no OS-specific code so
+//! the wire format never encodes a platform assumption.
 //!
 //! ## Mode caveat
 //!
@@ -32,11 +33,17 @@
 #![deny(missing_docs)]
 
 pub mod analyze;
+pub mod data_loop;
 pub mod emit;
 pub mod model;
 pub mod summary;
 
 pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
+pub use data_loop::{
+    data_loop_sibling_path, write_data_loop_document, DataLoopAggregate, DataLoopDocument,
+    DataLoopDocumentSummary, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
+    DataLoopSummary, MAX_DATA_LOOP_GROUPS, MAX_DATA_LOOP_SIGNATURE_BYTES,
+};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use summary::DenialSummary;
