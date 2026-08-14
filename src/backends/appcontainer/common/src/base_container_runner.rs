@@ -12,6 +12,7 @@
 use std::ffi::c_void;
 use std::fmt::Write;
 use std::io::IsTerminal;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::Arc;
@@ -48,9 +49,13 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, EndpointPolicy as PsecEndpointPolicy,
-    EndpointPolicyArgs as PsecEndpointPolicyArgs, FilterAction as PsecFilterAction,
+    finish_process_security_environment_buffer, DestinationRule as PsecDestinationRule,
+    DestinationRuleArgs as PsecDestinationRuleArgs, EndpointPolicy as PsecEndpointPolicy,
+    EndpointPolicyArgs as PsecEndpointPolicyArgs, EndpointRule as PsecEndpointRule,
+    EndpointRuleArgs as PsecEndpointRuleArgs, FilterAction as PsecFilterAction,
+    IpProtocol as PsecIpProtocol, IpSubnet as PsecIpSubnet, IpSubnetArgs as PsecIpSubnetArgs,
     NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
+    PortRule as PsecPortRule, PortRuleArgs as PsecPortRuleArgs,
     ProcessSecurityEnvironment as PsecProcessSecurityEnvironment,
     ProcessSecurityEnvironmentArgs as PsecProcessSecurityEnvironmentArgs,
     ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs, SchemaVersion,
@@ -66,8 +71,8 @@ use wxc_common::log_symbols::{
 use wxc_common::logger::Logger;
 use wxc_common::models::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainerPolicy, ExecutionRequest,
-    FailurePhase, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, SandboxOutputMetadata,
-    ScriptResponse,
+    FailurePhase, NetworkEnforcementMode, NetworkPolicy, NetworkProtocol, NetworkRuleAction,
+    ProxyAddress, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -617,6 +622,9 @@ impl BaseContainerRunner {
         request: &ExecutionRequest,
         queried_capabilities: Option<u64>,
     ) -> bool {
+        if !request.policy.egress_rules.is_empty() || request.policy.allowed_proxy_peer.is_some() {
+            return false;
+        }
         if !request.policy.network_proxy.is_enabled() {
             return true;
         }
@@ -763,6 +771,10 @@ impl BaseContainerRunner {
         builder: &mut flatbuffers::FlatBufferBuilder<'a>,
         policy: &ContainerPolicy,
     ) -> flatbuffers::WIPOffset<PsecNetworkPolicy<'a>> {
+        let allowed_appcontainer_peer = policy
+            .allowed_proxy_peer
+            .as_ref()
+            .map(|peer| builder.create_string(peer));
         match Self::resolved_network_policy(policy) {
             ResolvedNetworkPolicy::Proxy(address) => {
                 let proxy = address.map(|address| {
@@ -774,6 +786,7 @@ impl BaseContainerRunner {
                     builder,
                     &PsecNetworkPolicyArgs {
                         proxy,
+                        allowed_appcontainer_peer,
                         ..Default::default()
                     },
                 )
@@ -783,11 +796,16 @@ impl BaseContainerRunner {
                     NetworkPolicy::Allow => PsecFilterAction::allow,
                     NetworkPolicy::Block => PsecFilterAction::deny,
                 };
+                let allow =
+                    Self::build_psec_endpoint_rules(builder, policy, NetworkRuleAction::Allow);
+                let deny =
+                    Self::build_psec_endpoint_rules(builder, policy, NetworkRuleAction::Deny);
                 let egress = PsecEndpointPolicy::create(
                     builder,
                     &PsecEndpointPolicyArgs {
                         default_action,
-                        ..Default::default()
+                        allow,
+                        deny,
                     },
                 );
 
@@ -795,11 +813,157 @@ impl BaseContainerRunner {
                     builder,
                     &PsecNetworkPolicyArgs {
                         egress: Some(egress),
+                        allowed_appcontainer_peer,
                         ..Default::default()
                     },
                 )
             }
         }
+    }
+
+    fn build_psec_endpoint_rules<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        policy: &ContainerPolicy,
+        action: NetworkRuleAction,
+    ) -> Option<
+        flatbuffers::WIPOffset<
+            flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<PsecEndpointRule<'a>>>,
+        >,
+    > {
+        let mut endpoint_rules = Vec::new();
+        for rule in policy
+            .egress_rules
+            .iter()
+            .filter(|rule| rule.action == action)
+        {
+            for destination in &rule.destinations {
+                let subnet = Self::build_psec_subnet(builder, &destination.cidr);
+                let except = (!destination.except.is_empty()).then(|| {
+                    let subnets = destination
+                        .except
+                        .iter()
+                        .map(|cidr| Self::build_psec_subnet(builder, cidr))
+                        .collect::<Vec<_>>();
+                    builder.create_vector(&subnets)
+                });
+                let destination_rule = PsecDestinationRule::create(
+                    builder,
+                    &PsecDestinationRuleArgs {
+                        subnet: Some(subnet),
+                        except,
+                    },
+                );
+                let destinations = builder.create_vector(&[destination_rule]);
+                let ports = (!rule.ports.is_empty()).then(|| {
+                    let ipv6 = destination.cidr.contains(':');
+                    let port_rules = rule
+                        .ports
+                        .iter()
+                        .map(|port| {
+                            PsecPortRule::create(
+                                builder,
+                                &PsecPortRuleArgs {
+                                    protocol: match port.protocol {
+                                        NetworkProtocol::Tcp => PsecIpProtocol::tcp,
+                                        NetworkProtocol::Udp => PsecIpProtocol::udp,
+                                        NetworkProtocol::Icmp if ipv6 => PsecIpProtocol::icmpv6,
+                                        NetworkProtocol::Icmp => PsecIpProtocol::icmpv4,
+                                        NetworkProtocol::Any => PsecIpProtocol::any,
+                                    },
+                                    port: port.port.unwrap_or(0),
+                                    end_port: port.end_port.unwrap_or(0),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    builder.create_vector(&port_rules)
+                });
+                endpoint_rules.push(PsecEndpointRule::create(
+                    builder,
+                    &PsecEndpointRuleArgs {
+                        destinations: Some(destinations),
+                        ports,
+                    },
+                ));
+            }
+        }
+        (!endpoint_rules.is_empty()).then(|| builder.create_vector(&endpoint_rules))
+    }
+
+    fn build_psec_subnet<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        cidr: &str,
+    ) -> flatbuffers::WIPOffset<PsecIpSubnet<'a>> {
+        let (address, prefix_length) = cidr
+            .split_once('/')
+            .map(|(address, prefix)| {
+                (
+                    address,
+                    prefix
+                        .parse()
+                        .expect("network CIDRs must be validated before runner dispatch"),
+                )
+            })
+            .unwrap_or((cidr, if cidr.contains(':') { 128 } else { 32 }));
+        let address = builder.create_string(address);
+        PsecIpSubnet::create(
+            builder,
+            &PsecIpSubnetArgs {
+                address: Some(address),
+                prefix_length,
+            },
+        )
+    }
+
+    fn validate_network_rules(policy: &ContainerPolicy) -> Result<(), String> {
+        for rule in &policy.egress_rules {
+            if rule.destinations.is_empty() {
+                return Err("network egress rules require at least one destination".to_string());
+            }
+            for destination in &rule.destinations {
+                Self::validate_cidr(&destination.cidr)?;
+                for except in &destination.except {
+                    Self::validate_cidr(except)?;
+                }
+            }
+            for port in &rule.ports {
+                if port
+                    .end_port
+                    .is_some_and(|end| port.port.is_none_or(|start| end < start))
+                {
+                    return Err(
+                        "network egress endPort requires port and must be greater than or equal to it"
+                            .to_string(),
+                    );
+                }
+                if port.protocol == NetworkProtocol::Icmp
+                    && (port.port.is_some() || port.end_port.is_some())
+                {
+                    return Err("ICMP network rules cannot specify ports".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_cidr(cidr: &str) -> Result<(), String> {
+        let (address, prefix) = match cidr.split_once('/') {
+            Some((address, prefix)) => {
+                let prefix = prefix
+                    .parse::<u8>()
+                    .map_err(|_| format!("invalid network CIDR prefix: {cidr}"))?;
+                (address, Some(prefix))
+            }
+            None => (cidr, None),
+        };
+        let address = address
+            .parse::<IpAddr>()
+            .map_err(|_| format!("invalid network IP/CIDR: {cidr}"))?;
+        let max_prefix = if address.is_ipv4() { 32 } else { 128 };
+        if prefix.is_some_and(|prefix| prefix > max_prefix) {
+            return Err(format!("invalid network CIDR prefix: {cidr}"));
+        }
+        Ok(())
     }
 
     fn should_use_process_security_environment(
@@ -814,7 +978,9 @@ impl BaseContainerRunner {
             return true;
         }
         !request.policy.least_privilege_mode
-            && !request.policy.network_proxy.is_enabled()
+            && (!request.policy.network_proxy.is_enabled()
+                || request.policy.allowed_proxy_peer.is_some()
+                || request.policy.allow_host_loopback)
             && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
     }
 
@@ -881,18 +1047,11 @@ impl BaseContainerRunner {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
         let version = SchemaVersion::new(1, 0);
 
-        let needs_internet_client = Self::needs_internet_client(request);
-        let capabilities = if request.policy.capabilities.is_empty() && !needs_internet_client {
+        let capabilities = Self::effective_capabilities(request);
+        let capabilities = if capabilities.is_empty() {
             None
         } else {
-            let mut capabilities = request.policy.capabilities.join(",");
-            if needs_internet_client {
-                if !capabilities.is_empty() {
-                    capabilities.push(',');
-                }
-                capabilities.push_str("internetClient");
-            }
-            Some(builder.create_string(&capabilities))
+            Some(builder.create_string(&capabilities.join(",")))
         };
 
         let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
@@ -1025,7 +1184,12 @@ impl BaseContainerRunner {
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
         );
         use_caps_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
+            && (request.policy.default_network_policy == NetworkPolicy::Allow
+                || request
+                    .policy
+                    .egress_rules
+                    .iter()
+                    .any(|rule| rule.action == NetworkRuleAction::Allow))
             && !request
                 .policy
                 .capabilities
@@ -1040,6 +1204,20 @@ impl BaseContainerRunner {
         let mut caps = request.policy.capabilities.clone();
         if Self::needs_internet_client(request) {
             caps.push("internetClient".to_string());
+        }
+        if request.policy.allow_local_network
+            && !caps
+                .iter()
+                .any(|capability| capability == "privateNetworkClientServer")
+        {
+            caps.push("privateNetworkClientServer".to_string());
+        }
+        if request.policy.allow_host_loopback
+            && !caps
+                .iter()
+                .any(|capability| capability == "loopbackNetwork")
+        {
+            caps.push("loopbackNetwork".to_string());
         }
         caps
     }
@@ -2078,12 +2256,27 @@ impl SandboxBackend for BaseContainerRunner {
                  processContainer.leastPrivilege because it does not support LPAC tokens",
             ));
         }
-        if use_process_security_environment && request.policy.network_proxy.is_enabled() {
+        if request.policy.allowed_proxy_peer.is_some() && !request.policy.network_proxy.is_enabled()
+        {
             return Err(ScriptResponse::error(
-                "the process-security-environment path cannot be combined with network.proxy \
-                 until it can supply the required proxy AppContainer peer identity",
+                "processContainer.network.allowedProxyPeer requires runtime network proxy configuration",
             ));
         }
+        if request.policy.allowed_proxy_peer.is_some() && !request.policy.allow_local_network {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer requires ingress.default='allow'",
+            ));
+        }
+        if request.policy.allowed_proxy_peer.is_some() && request.policy.allow_host_loopback {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer cannot be combined with \
+                 ingress.hostLoopback='allow'",
+            ));
+        }
+        Self::validate_network_rules(&request.policy).map_err(|message| ScriptResponse {
+            failure_phase: FailurePhase::Rejected,
+            ..ScriptResponse::error(&message)
+        })?;
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
@@ -3022,7 +3215,9 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use sandbox_spec::base_container_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
+    use wxc_common::models::{
+        ClipboardPolicy, NetworkDestination, NetworkEgressRule, NetworkPort, ProxyConfig, UiPolicy,
+    };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
     struct FakeCaptureSession {
@@ -3878,6 +4073,73 @@ mod tests {
 
         assert_eq!(egress.default_action(), psec_layout::FilterAction::allow);
         assert_eq!(spec.capabilities(), Some("internetClient"));
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_serializes_egress_rules() {
+        let mut request = ExecutionRequest::default();
+        request.policy.egress_rules = vec![NetworkEgressRule {
+            destinations: vec![NetworkDestination {
+                cidr: "10.0.0.0/8".to_string(),
+                except: vec!["10.1.0.0/16".to_string()],
+            }],
+            ports: vec![NetworkPort {
+                protocol: NetworkProtocol::Tcp,
+                port: Some(443),
+                end_port: Some(445),
+            }],
+            action: NetworkRuleAction::Allow,
+        }];
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .unwrap();
+        let rule = egress.allow().unwrap().get(0);
+        let destination = rule.destinations().unwrap().get(0);
+        assert_eq!(destination.subnet().unwrap().address(), Some("10.0.0.0"));
+        assert_eq!(destination.subnet().unwrap().prefix_length(), 8);
+        assert_eq!(
+            destination.except().unwrap().get(0).address(),
+            Some("10.1.0.0")
+        );
+        let port = rule.ports().unwrap().get(0);
+        assert_eq!(port.protocol(), psec_layout::IpProtocol::tcp);
+        assert_eq!(port.port(), 443);
+        assert_eq!(port.end_port(), 445);
+        assert_eq!(spec.capabilities(), Some("internetClient"));
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_maps_ingress_capabilities_and_peer() {
+        let mut request = ExecutionRequest::default();
+        request.policy.allow_local_network = true;
+        request.policy.allowed_proxy_peer = Some("contoso.proxy_123".to_string());
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        assert_eq!(spec.capabilities(), Some("privateNetworkClientServer"));
+        assert_eq!(
+            spec.network_policy()
+                .and_then(|policy| policy.allowed_appcontainer_peer()),
+            Some("contoso.proxy_123")
+        );
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_maps_host_loopback_capability() {
+        let mut request = ExecutionRequest::default();
+        request.policy.allow_host_loopback = true;
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        assert_eq!(spec.capabilities(), Some("loopbackNetwork"));
     }
 
     #[test]
