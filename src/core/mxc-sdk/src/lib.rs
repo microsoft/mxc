@@ -50,6 +50,7 @@
 //! | Bubblewrap | Linux | [`Containment::Process`] |
 //! | Seatbelt | macOS | [`Containment::Process`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | Explicit ProcessContainer settings | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
@@ -74,6 +75,33 @@
 //! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 //! request.set_script("python3 -c 'print(42)'").set_experimental(true);
 //! let output = run(request)?;
+//! # Ok::<(), mxc_sdk::Error>(())
+//! ```
+//!
+//! Windows callers that need AppContainer-specific capabilities can select an
+//! explicit ProcessContainer configuration. The settings still pass through
+//! the canonical wire model and shared config parser:
+//!
+//! ```no_run
+//! use mxc_sdk::{
+//!     build_request_with_containment, Containment, ProcessContainerSection, SandboxPolicy,
+//! };
+//!
+//! # let policy = SandboxPolicy {
+//! #     version: "0.7.0-alpha".to_string(),
+//! #     filesystem: None, network: None, ui: None, timeout_ms: None,
+//! #     capture_denials: None,
+//! # };
+//! let process_container = ProcessContainerSection {
+//!     capabilities: vec!["registryRead".to_string()],
+//!     ..Default::default()
+//! };
+//! let mut request = build_request_with_containment(
+//!     &policy,
+//!     &Containment::ProcessContainer(process_container),
+//!     None,
+//! )?;
+//! request.set_script("reg query HKCU");
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
 //!
@@ -116,7 +144,7 @@ pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
     BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
-    SandboxPolicy, SandboxRequest, WslcSection,
+    ProcessContainerSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{

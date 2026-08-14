@@ -519,7 +519,6 @@ pub enum CaptureDenialsMode {
     Allow,
 }
 
-#[cfg(any(target_os = "windows", test))]
 impl CaptureDenialsMode {
     /// Wire-format value accepted by the config parser.
     fn wire(self) -> &'static str {
@@ -566,6 +565,8 @@ pub enum Containment {
     /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
     #[default]
     Process,
+    /// Windows ProcessContainer with AppContainer-specific settings.
+    ProcessContainer(ProcessContainerSection),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -573,6 +574,23 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
+}
+
+/// Windows ProcessContainer settings carried by
+/// [`Containment::ProcessContainer`].
+///
+/// Network-derived capabilities are added automatically. Values in
+/// [`capabilities`](Self::capabilities) are additional AppContainer
+/// capabilities and pass through the canonical wire model and shared config
+/// parser validation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessContainerSection {
+    /// Enforce least-privilege mode.
+    pub least_privilege: bool,
+    /// Enable deny-and-record AppContainer learning mode.
+    pub learning_mode: bool,
+    /// Additional AppContainer capabilities, such as `registryRead`.
+    pub capabilities: Vec<String>,
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -905,8 +923,11 @@ fn build_wire_config(
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
-    let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
-        || matches!(containment, Containment::Wslc(_));
+    let accepts_host_rules_without_outbound = match containment {
+        Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
+        Containment::ProcessContainer(_) => false,
+        Containment::Wslc(_) => true,
+    };
 
     if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
@@ -934,6 +955,9 @@ fn build_wire_config(
 
     match containment {
         Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
+        Containment::ProcessContainer(process_container) => {
+            apply_process_container_backend(&mut config, policy, process_container)
+        }
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -979,43 +1003,10 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "windows")]
     {
-        let mut capabilities: Vec<&str> = Vec::new();
-        if let Some(net) = &policy.network {
-            if net.allow_outbound {
-                capabilities.push("internetClient");
-            }
-            if net.allow_local_network {
-                capabilities.push("privateNetworkClientServer");
-            }
-        }
         // The container id is carried only at the top level (`containerId`); the
         // wire `processContainer` object intentionally has no `name` field.
         let _ = container_id;
-        config["processContainer"] = json!({
-            "leastPrivilege": false,
-            "capabilities": capabilities,
-            "ui": {
-                "isolation": "container",
-                "desktopSystemControl": false,
-                "systemSettings": "none",
-                "ime": false,
-            },
-        });
-        if let Some(cd) = &policy.capture_denials {
-            config["processContainer"]["captureDenials"] = json!({
-                "mode": cd.mode.wire(),
-                "outputPath": cd.output_path,
-                "retainEtl": cd.retain_etl,
-            });
-        }
-        if let Some(network) = config.get_mut("network") {
-            let mode = if has_host_rules(network) {
-                "both"
-            } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
-        }
+        apply_process_container_backend(config, policy, &ProcessContainerSection::default());
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1024,9 +1015,62 @@ fn apply_host_process_backend(
     }
 }
 
+fn apply_process_container_backend(
+    config: &mut serde_json::Value,
+    policy: &SandboxPolicy,
+    process_container: &ProcessContainerSection,
+) {
+    use serde_json::json;
+
+    config["containment"] = json!("processcontainer");
+    let mut capabilities = Vec::new();
+    if let Some(net) = &policy.network {
+        if net.allow_outbound {
+            capabilities.push("internetClient".to_string());
+        }
+        if net.allow_local_network {
+            capabilities.push("privateNetworkClientServer".to_string());
+        }
+    }
+    for capability in &process_container.capabilities {
+        if !capabilities
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(capability))
+        {
+            capabilities.push(capability.clone());
+        }
+    }
+
+    config["processContainer"] = json!({
+        "leastPrivilege": process_container.least_privilege,
+        "learningMode": process_container.learning_mode,
+        "capabilities": capabilities,
+        "ui": {
+            "isolation": "container",
+            "desktopSystemControl": false,
+            "systemSettings": "none",
+            "ime": false,
+        },
+    });
+    if let Some(cd) = &policy.capture_denials {
+        config["processContainer"]["captureDenials"] = json!({
+            "mode": cd.mode.wire(),
+            "outputPath": cd.output_path,
+            "retainEtl": cd.retain_etl,
+        });
+    }
+    if let Some(network) = config.get_mut("network") {
+        let mode = if has_host_rules(network) {
+            "both"
+        } else {
+            "capabilities"
+        };
+        network["enforcementMode"] = json!(mode);
+    }
+}
+
 /// True when the network section carries any host allow/deny rules, deciding
-/// whether host-level enforcement is engaged. (Linux + Windows only.)
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+/// whether host-level enforcement is engaged.
 fn has_host_rules(network: &serde_json::Value) -> bool {
     let non_empty = |key: &str| {
         network
@@ -1601,7 +1645,9 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, WslcSection};
+    use super::{
+        build_request_with_containment, Containment, ProcessContainerSection, WslcSection,
+    };
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1621,6 +1667,105 @@ mod tests {
         // WSLC selection is strictly opt-in and must not change the default.
         let request = build_request(&minimal_policy(), None).expect("build_request");
         assert_ne!(request.inner.containment, ContainmentBackend::Wslc);
+    }
+
+    #[test]
+    fn process_container_maps_custom_capabilities_through_the_shared_parser() {
+        let policy = policy_with_network(NetworkSection {
+            allow_outbound: true,
+            allow_local_network: true,
+            ..Default::default()
+        });
+        let process_container = ProcessContainerSection {
+            least_privilege: true,
+            learning_mode: true,
+            capabilities: vec!["registryRead".to_string(), "INTERNETCLIENT".to_string()],
+        };
+
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect("process-container settings should satisfy the wire contract");
+
+        assert_eq!(
+            request.inner.containment,
+            ContainmentBackend::ProcessContainer
+        );
+        assert!(request.inner.policy.least_privilege_mode);
+        assert_eq!(
+            request
+                .inner
+                .policy
+                .capabilities
+                .iter()
+                .filter(|capability| capability.eq_ignore_ascii_case("internetClient"))
+                .count(),
+            1,
+            "network-derived capabilities should be de-duplicated"
+        );
+        for expected in [
+            "internetClient",
+            "privateNetworkClientServer",
+            "registryRead",
+            "learningModeLogging",
+        ] {
+            assert!(
+                request
+                    .inner
+                    .policy
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability.eq_ignore_ascii_case(expected)),
+                "missing capability {expected}: {:?}",
+                request.inner.policy.capabilities
+            );
+        }
+    }
+
+    #[test]
+    fn process_container_capabilities_use_shared_parser_validation() {
+        let process_container = ProcessContainerSection {
+            capabilities: vec!["internetClient,registryRead".to_string()],
+            ..Default::default()
+        };
+
+        let error = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect_err("comma-packed capabilities must be rejected");
+
+        assert!(
+            error.message.contains("must not contain a comma"),
+            "got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn explicit_process_container_keeps_windows_host_rule_validation() {
+        let policy = policy_with_network(NetworkSection {
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+
+        let error = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            None,
+        )
+        .expect_err("ProcessContainer host rules require outbound access");
+
+        assert!(
+            error
+                .message
+                .contains("allowedHosts/blockedHosts require allowOutbound"),
+            "got: {}",
+            error.message
+        );
     }
 
     #[test]
