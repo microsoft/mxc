@@ -72,6 +72,42 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // `validate_common` (ahead of every `ScriptRunner::run`), so no
         // backend-local check is needed here.
 
+        // Refuse a credential-bearing proxy URL here as well as at parse time.
+        // The parser guard only covers requests it built; `ExecutionRequest`
+        // and `ProxyAddress::from_url` are public, so a caller can hand this
+        // runner a policy the parser never saw. `to_url` returns that URL
+        // verbatim and `build_args` emits it as a `bwrap --setenv HTTP_PROXY
+        // VALUE` argument (bwrap_command.rs), and a process's argv is readable
+        // through /proc/<pid>/cmdline by any local user for the lifetime of the
+        // command. This mirrors the same guard on the LXC runner, which reaches
+        // argv by a different route (`lxc-attach --set-var`).
+        //
+        // It sits with the input checks, ahead of the bwrap probe, for the
+        // reason above: a host without bwrap must still be told what is wrong
+        // with the request.
+        if let Some(url) = request
+            .policy
+            .network_proxy
+            .address
+            .as_ref()
+            .map(|address| address.to_url())
+        {
+            if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
+                // Built from the redacted form so the rejection cannot become
+                // the leak it is rejecting.
+                return Err(ScriptResponse::error(&format!(
+                    "Bubblewrap: network.proxy.url must not carry credentials ('{}'). \
+                     Bubblewrap passes the proxy URL to bwrap as a --setenv command-line \
+                     argument, and process arguments are world-readable through \
+                     /proc/<pid>/cmdline, so the password would be visible to every local \
+                     user while the command runs. Use a proxy that does not require inline \
+                     credentials, or supply them to the proxy itself rather than through \
+                     the URL.",
+                    wxc_common::proxy_env::redact_proxy_url(&url)
+                )));
+            }
+        }
+
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
@@ -646,13 +682,28 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ProxyConfig;
+    use wxc_common::models::{ProxyAddress, ProxyConfig};
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
             script_code: "echo hi".into(),
             ..Default::default()
         }
+    }
+
+    /// A request carrying `alice:hunter2@` in its proxy URL, built the way a
+    /// programmatic caller would rather than through the JSON parser.
+    fn request_with_a_credential_bearing_proxy() -> ExecutionRequest {
+        let mut req = base_request();
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                "http://alice:hunter2@proxy.example.com:3128",
+                "proxy.example.com".into(),
+                3128,
+            )),
+            builtin_test_server: false,
+        };
+        req
     }
 
     #[test]
@@ -697,6 +748,47 @@ mod tests {
         let runner = BubblewrapScriptRunner::new();
         let err = runner.validate(&req).unwrap_err();
         assert!(err.error_message.contains("script_code is empty"));
+    }
+
+    #[test]
+    fn validate_rejects_a_credential_bearing_proxy_url_before_the_environment_probe() {
+        // The parser's credential guard only covers requests the parser built.
+        // `ExecutionRequest` and `ProxyAddress::from_url` are both public, so a
+        // caller can hand this runner a proxy URL the parser never saw --
+        // `to_url` returns it verbatim and `build_args` turns it into a
+        // `bwrap --setenv HTTP_PROXY <url>` argument, which any local user can
+        // read out of /proc/<pid>/cmdline while the sandbox runs.
+        //
+        // Like the empty-script check this is user input, so it has to be
+        // reported ahead of the bwrap probe: on a host with no bwrap installed
+        // a later guard would return the probe's error instead of this one.
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner
+            .validate(&request_with_a_credential_bearing_proxy())
+            .unwrap_err();
+
+        assert!(
+            err.error_message.contains("must not carry credentials"),
+            "a credential-bearing proxy URL must be refused before it can reach \
+             `bwrap --setenv`, but validate said: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn the_credential_rejection_does_not_repeat_the_password_it_rejects() {
+        // An error message is logged and returned to the caller, so quoting the
+        // URL verbatim would publish the secret the guard exists to protect.
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner
+            .validate(&request_with_a_credential_bearing_proxy())
+            .unwrap_err();
+
+        assert!(
+            !err.error_message.contains("hunter2"),
+            "the rejection leaked the password it was rejecting: {}",
+            err.error_message
+        );
     }
 
     /// A denied symlink pointing at a **directory** is rewritten to its canonical
