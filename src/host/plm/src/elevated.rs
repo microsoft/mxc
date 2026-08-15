@@ -77,9 +77,12 @@ const PIPE_PREFIX: &str = r"\\.\pipe\mxc-plm-elevated-";
 const WAIT_TIMEOUT_DURATION: Duration = Duration::from_secs(10 * 60);
 const ATTACH_HANDOFF_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound on how long [`JobProcessTracker::stop_worker`] waits to join the
-/// job-tracker worker thread before detaching it, so a failed stop signal can
-/// never hang the guardian indefinitely.
+/// job-tracker worker thread after posting the stop message.
 const WORKER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Upper bound on the final escalation wait. If the worker still has not
+/// exited, the guardian fail-stops rather than release handles a live worker
+/// might use.
+const WORKER_ESCALATION_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TRANSFER_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const SW_HIDE: i32 = 0;
@@ -825,16 +828,24 @@ impl JobProcessTracker {
             root_pid,
         )));
         let worker_state = Arc::clone(&state);
-        let raw_port = completion_port.0 .0 as usize;
-        let raw_job = job.0 .0 as usize;
+        // The worker must own a job handle for its **entire** lifetime so that,
+        // even if a failed shutdown ever detached it, it could never call
+        // `TerminateJobObject` on a handle the tracker has already closed (or
+        // that the OS has since reused). Duplicate the job into an independent
+        // `OwnedHandle` and move it into the worker; the tracker keeps its own
+        // `job` handle for `finish`-time accounting queries.
+        let worker_job = duplicate_local_handle(job.0)
+            .context("failed to duplicate the sandbox job for the guarded WPR tracker worker")?;
+        // Give the worker its own completion-port handle as well. The tracker
+        // keeps the original only to post the stop message; neither side can
+        // close or reuse a handle value still owned by the other.
+        let worker_port = duplicate_local_handle(completion_port.0).context(
+            "failed to duplicate the completion port for the guarded WPR tracker worker",
+        )?;
         let worker = std::thread::Builder::new()
             .name("plm-job-tracker".to_string())
             .spawn(move || {
-                process_job_notifications(
-                    HANDLE(raw_port as *mut c_void),
-                    HANDLE(raw_job as *mut c_void),
-                    &worker_state,
-                );
+                process_job_notifications(worker_port, worker_job, &worker_state);
             })
             .context("failed to start guarded WPR job tracker")?;
         Ok(Self {
@@ -998,45 +1009,72 @@ impl JobProcessTracker {
         let Some(worker) = self.worker.take() else {
             return;
         };
-        // Signal the worker to return from its blocking
-        // `GetQueuedCompletionStatus`.
+        // Clean stop: ask the worker to return from its blocking
+        // `GetQueuedCompletionStatus` *without* an error, so `finish` does not
+        // observe a spurious failure.
         let post_result = unsafe {
             PostQueuedCompletionStatus(self.completion_port.0, TRACKER_STOP_MESSAGE, 0, None)
         };
+        let post_succeeded = post_result.is_ok();
         if let Err(error) = post_result {
-            // The stop signal could not be queued, so the worker may still be
-            // blocked in an INFINITE `GetQueuedCompletionStatus`. Do NOT enter
-            // the bounded wait below — that would guarantee a full
-            // `WORKER_JOIN_TIMEOUT` stall for no benefit. Record the failure and
-            // detach immediately; the completion port closes when `self` drops,
-            // which unblocks the worker as a fallback.
             self.fail_state(format!(
                 "failed to signal the guarded WPR job tracker to stop: {error}"
             ));
+        }
+
+        let clean_join = if post_succeeded {
+            bounded_join(
+                || worker.is_finished(),
+                Instant::now,
+                std::thread::sleep,
+                WORKER_JOIN_TIMEOUT,
+                POLL_INTERVAL,
+            )
+        } else {
+            // The stop message could not be queued, so skip the (pointless)
+            // clean wait and escalate immediately.
+            BoundedJoinOutcome::TimedOut
+        };
+
+        if !needs_escalation(post_succeeded, clean_join) {
+            if worker.join().is_err() {
+                self.fail_state("guarded WPR job tracker thread panicked".to_string());
+            }
             return;
         }
 
-        // Bounded join: on the stop message the worker returns promptly. If it
-        // does not, detach rather than hang the guardian indefinitely.
-        match bounded_join(
+        // Escalation: the worker did not return via the stop message. Do not
+        // close a completion-port handle from another thread: the worker may
+        // be processing a notification and could otherwise re-enter its wait
+        // with a stale/reused handle value. Both handles remain owned while we
+        // give the queued stop message one final bounded interval to complete.
+        // If the worker is truly wedged, fail-stop rather than detach or release
+        // either side's resources.
+        self.fail_state(
+            "guarded WPR job tracker did not stop on request; waiting one final bounded interval \
+             before fail-stop"
+                .to_string(),
+        );
+
+        let escalation_join = bounded_join(
             || worker.is_finished(),
             Instant::now,
             std::thread::sleep,
-            WORKER_JOIN_TIMEOUT,
+            WORKER_ESCALATION_TIMEOUT,
             POLL_INTERVAL,
-        ) {
-            BoundedJoinOutcome::TimedOut => {
-                self.fail_state(
-                    "guarded WPR job tracker did not shut down within the bounded timeout; \
-                     detaching the worker thread"
-                        .to_string(),
-                );
-            }
-            BoundedJoinOutcome::Finished => {
-                if worker.join().is_err() {
-                    self.fail_state("guarded WPR job tracker thread panicked".to_string());
-                }
-            }
+        );
+        if escalation_requires_abort(escalation_join) {
+            // The worker is wedged and may still hold a raw view of resources we
+            // are about to drop. Releasing handles now would risk a use-after-
+            // free / handle-reuse, so fail-stop the guardian instead.
+            eprintln!(
+                "[plm] guarded WPR job tracker worker could not be stopped; aborting the guardian \
+                 to avoid releasing handles while a live worker may still use them"
+            );
+            std::process::abort();
+        }
+        if worker.join().is_err() {
+            self.fail_state("guarded WPR job tracker thread panicked".to_string());
         }
     }
 
@@ -1049,6 +1087,19 @@ impl JobProcessTracker {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.fail(message);
     }
+}
+
+/// Whether `stop_worker` must enter its final bounded wait after the clean-stop
+/// attempt: escalate unless the stop message was posted **and** the worker then
+/// finished within the initial wait.
+fn needs_escalation(post_succeeded: bool, clean_join: BoundedJoinOutcome) -> bool {
+    !(post_succeeded && clean_join == BoundedJoinOutcome::Finished)
+}
+
+/// Whether, after the escalation wait, `stop_worker` must fail-stop the process
+/// rather than release handles: abort only if the worker still has not exited.
+fn escalation_requires_abort(escalation_join: BoundedJoinOutcome) -> bool {
+    escalation_join == BoundedJoinOutcome::TimedOut
 }
 
 /// Outcome of [`bounded_join`].
@@ -1096,6 +1147,26 @@ fn duplicate_owner_handle(owner: HANDLE, source_handle: usize) -> Result<OwnedHa
         DuplicateHandle(
             owner,
             HANDLE(source_handle as *mut c_void),
+            GetCurrentProcess(),
+            &mut duplicated,
+            0,
+            false,
+            DUPLICATE_SAME_ACCESS,
+        )
+    }?;
+    Ok(OwnedHandle(duplicated))
+}
+
+/// Duplicates a handle within the current process into an independent
+/// `OwnedHandle`. Used to give the tracker worker its own job handle whose
+/// lifetime it fully controls, so it can never operate on a handle the tracker
+/// has closed.
+fn duplicate_local_handle(handle: HANDLE) -> Result<OwnedHandle> {
+    let mut duplicated = HANDLE::default();
+    unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            handle,
             GetCurrentProcess(),
             &mut duplicated,
             0,
@@ -1171,14 +1242,24 @@ fn filetime_value(value: FILETIME) -> u64 {
 /// attestation race that fails the capture **analysis** closed at
 /// [`JobProcessTracker::finish`] — it never causes an unauthenticated PID to be
 /// trusted, and never terminates the running sandbox.
-fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<ProcessTrackerState>>) {
+///
+/// The worker takes **ownership** of its own `port` and `job` handle duplicates
+/// (separate `OwnedHandle`s from the tracker's) and holds them for its whole
+/// lifetime. Every wait and `TerminateJobObject` call therefore acts on handles
+/// it still owns — never handles the tracker has closed or the OS has reused.
+/// Both handles are dropped (closed) when this function returns.
+fn process_job_notifications(
+    port: OwnedHandle,
+    job: OwnedHandle,
+    state: &Arc<Mutex<ProcessTrackerState>>,
+) {
     loop {
         let mut message = 0u32;
         let mut completion_key = 0usize;
         let mut overlapped: *mut OVERLAPPED = ptr::null_mut();
         let result = unsafe {
             GetQueuedCompletionStatus(
-                port,
+                port.0,
                 &mut message,
                 &mut completion_key,
                 &mut overlapped,
@@ -1187,7 +1268,7 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
         };
         if let Err(error) = result {
             fail_tracker_and_terminate_job(
-                job,
+                job.0,
                 state,
                 format!("guarded WPR job tracker wait failed: {error}"),
             );
@@ -1205,7 +1286,7 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
         match message {
             JOB_OBJECT_MSG_NEW_PROCESS => {
                 tracker_state
-                    .process_started(pid, observed_filetime, || attest_job_process(job, pid));
+                    .process_started(pid, observed_filetime, || attest_job_process(job.0, pid));
             }
             JOB_OBJECT_MSG_EXIT_PROCESS | JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS => {
                 tracker_state.process_exited(pid, observed_filetime);
@@ -1218,7 +1299,7 @@ fn process_job_notifications(port: HANDLE, job: HANDLE, state: &Arc<Mutex<Proces
         let newly_failed = !was_failed && tracker_state.error.is_some();
         drop(tracker_state);
         if newly_failed {
-            terminate_failed_tracker_job(job, state);
+            terminate_failed_tracker_job(job.0, state);
         }
     }
 }
@@ -2368,9 +2449,26 @@ fn launch_elevated_child(
     pipe_name: &str,
     owner_pid: Option<u32>,
 ) -> Result<HANDLE> {
-    let working_directory = executable
+    // Trust gate: before elevating, prove the binary is Microsoft-signed and
+    // sits in a directory chain unprivileged users cannot modify, pin it open
+    // (deny write/delete) so it cannot be swapped before the loader maps it,
+    // and resolve its stable canonical path. `_integrity_guard` is held for the
+    // whole function — i.e. across `ShellExecuteExW` — closing the
+    // check-then-launch window.
+    let _integrity_guard =
+        crate::trust::verify_and_pin_launch_binary(executable).with_context(|| {
+            format!(
+                "refusing to elevate the guarded PLM binary at {}",
+                executable.display()
+            )
+        })?;
+    // Launch the RESOLVED stable path, never the caller's original (possibly
+    // aliased) path — this is the path GetFinalPathNameByHandleW produced for
+    // the pinned object.
+    let launch_path = _integrity_guard.launch_path().to_path_buf();
+    let working_directory = launch_path
         .parent()
-        .context("elevated PLM executable path has no parent directory")?;
+        .context("resolved elevated PLM executable path has no parent directory")?;
     let parameters = build_internal_parameters(
         operation,
         pipe_name,
@@ -2378,7 +2476,7 @@ fn launch_elevated_child(
         owner_pid,
     );
     let verb = to_wide("runas");
-    let executable = to_wide(executable.as_os_str());
+    let executable = to_wide(launch_path.as_os_str());
     let parameters = to_wide(parameters);
     let working_directory = to_wide(working_directory.as_os_str());
     let mut info = SHELLEXECUTEINFOW {
@@ -2911,6 +3009,67 @@ mod tests {
 
         assert_eq!(outcome, BoundedJoinOutcome::Finished);
         assert_eq!(sleeps, 1, "one poll between the two liveness checks");
+    }
+
+    #[test]
+    fn shutdown_escalates_unless_clean_stop_finished() {
+        // Only a posted stop message followed by a finished worker avoids
+        // escalation; every other combination needs the final bounded wait.
+        assert!(!needs_escalation(true, BoundedJoinOutcome::Finished));
+        assert!(needs_escalation(true, BoundedJoinOutcome::TimedOut));
+        assert!(needs_escalation(false, BoundedJoinOutcome::Finished));
+        assert!(needs_escalation(false, BoundedJoinOutcome::TimedOut));
+    }
+
+    #[test]
+    fn shutdown_aborts_only_when_escalation_times_out() {
+        // A worker that exits during the final bounded wait is joined; one that
+        // remains wedged forces a fail-stop rather than an unsafe detach.
+        assert!(!escalation_requires_abort(BoundedJoinOutcome::Finished));
+        assert!(escalation_requires_abort(BoundedJoinOutcome::TimedOut));
+    }
+
+    #[test]
+    fn worker_job_duplicate_survives_original_close() {
+        use windows::Win32::System::JobObjects::CreateJobObjectW;
+
+        // The worker holds its own job-handle duplicate. Closing the tracker's
+        // original handle must not invalidate the worker's — this is the
+        // property that makes a forced shutdown safe: the worker can still
+        // operate on (and terminate) the job via its own handle.
+        let job = OwnedHandle(unsafe { CreateJobObjectW(None, PCWSTR::null()) }.unwrap());
+        let worker_dup = duplicate_local_handle(job.0).expect("duplicate job handle");
+        drop(job);
+
+        let total = query_total_processes(worker_dup.0)
+            .expect("duplicated job handle remains valid after the original is closed");
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn worker_completion_port_duplicate_survives_original_close() {
+        let port = OwnedHandle(
+            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1) }.unwrap(),
+        );
+        let worker_dup = duplicate_local_handle(port.0).expect("duplicate completion port");
+        drop(port);
+
+        unsafe { PostQueuedCompletionStatus(worker_dup.0, TRACKER_STOP_MESSAGE, 0, None) }
+            .expect("post through duplicated completion-port handle");
+        let mut message = 0u32;
+        let mut completion_key = 0usize;
+        let mut overlapped = ptr::null_mut();
+        unsafe {
+            GetQueuedCompletionStatus(
+                worker_dup.0,
+                &mut message,
+                &mut completion_key,
+                &mut overlapped,
+                0,
+            )
+        }
+        .expect("wait through duplicated completion-port handle");
+        assert_eq!(message, TRACKER_STOP_MESSAGE);
     }
 
     #[test]

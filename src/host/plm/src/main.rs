@@ -105,6 +105,11 @@ fn exe_dir() -> Result<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn internal_operation(operation: InternalOperation) -> Result<()> {
+    // Harden the elevated child's DLL search order before doing any work, so a
+    // runtime LoadLibrary cannot side-load an adjacent DLL. The install
+    // directory is also verified non-user-writable by the launcher's trust
+    // gate; this is defense-in-depth.
+    plm::trust::harden_dll_search_path()?;
     match operation {
         InternalOperation::Start {
             pipe_name,

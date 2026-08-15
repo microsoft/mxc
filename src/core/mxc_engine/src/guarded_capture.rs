@@ -200,17 +200,17 @@ impl GuardedCaptureFactory for PlmGuardedCaptureFactory {
 /// rather than depending on whether `plm.exe` happens to already exist next to
 /// the current test binary in a given build/CI environment.
 ///
-/// Trust disposition (guarded-capture item 10): this PR resolves `plm.exe` via
-/// [`plm_exe_path`] as the module directory of the loaded MXC native binary
-/// (`wxc-exec.exe` / `mxc_ffi.dll`). **Co-location is a discovery mechanism, not
-/// a trust boundary** — it locates the guardian; it does not attest it. This PR
-/// does **not** yet enforce runtime integrity of `plm.exe` (no signature or
-/// directory-ACL check is performed here), so a writable install/asset
-/// directory remains an unaddressed elevation surface: `plm.exe` self-elevates,
-/// so a planted binary would run as administrator. Supplying that integrity —
-/// packaging and code-signing `plm.exe` alongside those binaries, and verifying
-/// it before launch — is required and is owned by #834. Until then this risk is
-/// not solved; it is only scoped and deferred.
+/// Trust: co-location (via [`plm_exe_path`]) is only a *discovery* mechanism.
+/// The authoritative pre-launch trust gate lives in `plm::trust` and runs
+/// inside the PLM launch path immediately before `ShellExecuteExW("runas")`:
+/// it verifies `plm.exe`'s Authenticode chain and Microsoft signer identity,
+/// rejects a containing directory any unprivileged principal could modify, and
+/// pins the file open (deny write/delete) across the launch to close the
+/// check-then-launch window. An unsigned, non-Microsoft, or user-replaceable
+/// `plm.exe` is refused before any elevation occurs. The existence check here
+/// is just a fast, friendly pre-check. Distribution of a signed, packaged
+/// `plm.exe` alongside `wxc-exec.exe` / `mxc_ffi.dll` is owned by #834; on
+/// unsigned local/dev builds the trust gate deliberately refuses to elevate.
 fn start_with_plm_path(
     plm_path: &std::path::Path,
     owner_pid: u32,

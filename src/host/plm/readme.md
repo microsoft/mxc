@@ -127,7 +127,7 @@ the native PSEC/V2 Learning Mode capture path is unavailable, MXC starts a
 guarded WPR session that is scoped to the sandbox's job object and its exact
 process generations, then stops/analyzes it after the sandbox exits.
 
-### Discovery (co-location, not trust)
+### Discovery and pre-launch trust gate
 
 MXC locates `plm.exe` **module-relative to the loaded MXC native binary** — the
 directory that holds `wxc-exec.exe` (the executor) and `mxc_ffi.dll` (the native
@@ -135,14 +135,65 @@ asset directory used by the FFI/C# SDK). `current_exe()` is deliberately not
 used, because a framework-dependent .NET host reports `dotnet.exe` rather than
 the loaded MXC module.
 
-Co-location is only a **discovery** mechanism; it is **not** a trust boundary.
-This PR does not yet enforce runtime integrity of `plm.exe` (no signature or
-directory-ACL check is performed before launch), so a writable install/asset
-directory remains an unaddressed elevation surface — `plm.exe` self-elevates, so
-a planted binary would run as administrator. Supplying that integrity
-(packaging + code-signing `plm.exe` alongside those binaries, and verifying it
-before launch) is required and is owned by **#834**. Until then the risk is
-scoped and deferred, not solved.
+Co-location only *discovers* the guardian; it does not attest it. Because
+`plm.exe` self-elevates, the PLM launch path enforces a **runtime trust gate**
+(`src/trust.rs`) immediately before `ShellExecuteExW("runas")`, failing closed
+on any of:
+
+1. **Authenticode trust** — `WinVerifyTrust` (generic verify-v2) must succeed
+   (signed, untampered, chaining to a trusted root). Revocation is checked
+   across the whole chain, excluding the self-signed root
+   (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`).
+2. **Microsoft signer identity** — the embedded PKCS#7 signer certificate's
+   Organization (`O`) must be `Microsoft Corporation`. This is keyed on the
+   organization name, not a fixed thumbprint, so it survives certificate
+   rollover.
+3. **Directory & ancestry integrity** — every directory from the one containing
+   `plm.exe` (the *leaf*) up through the volume root must be **owned** by a
+   privileged principal (SYSTEM, Administrators, or TrustedInstaller — an owner
+   has implicit `WRITE_DAC`), and its DACL must not grant a non-privileged
+   principal dangerous rights. The masks are differentiated: the leaf rejects
+   any *side-load/create/replace* right (create-file/create-subdir,
+   delete-child, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`, generic write/all);
+   ancestors reject only rights that let someone delete/rename/re-secure the
+   protected subtree (`FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`,
+   `GENERIC_ALL`) — harmless "create a sibling" rights at, say, a drive root are
+   deliberately *not* over-rejected. Broad principals (Everyone, Authenticated
+   Users, BUILTIN\Users) and ordinary users are non-privileged. Inherited ACEs
+   are honored; inherit-only ACEs are skipped; a NULL DACL or any ACE type that
+   is not a standard allow/deny **fails closed**.
+
+To close the check-then-launch (TOCTOU) window, the gate opens `plm.exe` first
+with a share mode that denies write and delete, resolves the pinned object's
+stable canonical local path with `GetFinalPathNameByHandleW` (collapsing SUBST /
+DOS-device / junction / symlink aliases, and rejecting UNC/remote or non-DOS
+paths), and **holds that handle across `ShellExecuteExW`** while launching the
+*resolved* path — never the caller's original, possibly-aliased string.
+Authenticode is verified against the pinned handle itself, and the signer/
+ancestor checks all run on the resolved path. So the exact object verified is
+the exact object launched: it cannot be renamed, deleted, overwritten, or
+alias-substituted in between.
+
+**DLL side-loading.** `plm.exe` is a self-contained Rust/MSVC binary with no
+private adjacent DLL dependencies (it links only system DLLs resolved from
+`System32`). As defense-in-depth atop the leaf/ancestor integrity checks, the
+elevated child additionally calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`
+at startup so runtime `LoadLibrary` calls cannot resolve a bare DLL name to an
+adjacent file.
+
+Runtime verification is therefore **enforced**; an unsigned, non-Microsoft, or
+user-replaceable `plm.exe` is refused before any elevation. On unsigned local/
+dev builds the gate deliberately refuses to elevate. Consequently, locally
+built `plm.exe` binaries cannot run guarded-WPR end-to-end scenarios; those
+validations must use a signed packaged binary in a protected directory.
+Producing that signed `plm.exe` alongside `wxc-exec.exe` / `mxc_ffi.dll` is
+owned by **#834**.
+
+The same constraint applies to Rust SDK consumers. `mxc-sdk` is compiled into
+the consuming executable, so module-relative discovery normally points at the
+consumer's local Cargo output directory. A locally built or user-writable
+adjacent `plm.exe` is intentionally rejected, which means native PSEC capture
+may remain available but the guarded-WPR legacy fallback is unavailable.
 
 ### Bounded discard-confirmation
 

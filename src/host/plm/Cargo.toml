@@ -33,8 +33,12 @@ windows = { workspace = true, features = [
     "Win32_System_IO",
     "Win32_System_Pipes",
     "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
     "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_Security_WinTrust",
 ] }
 wxc_common = { workspace = true }
 learning_mode_core = { workspace = true }
