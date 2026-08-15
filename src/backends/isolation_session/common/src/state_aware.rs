@@ -263,18 +263,17 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ///
     /// 1. It needs a host running the OS-side isolation-session service, which
     ///    CI and most dev machines do not have.
-    /// 2. More fundamentally, the path is unreachable through the public
-    ///    in-process entry points even *on* such a host:
-    ///    `mxc_engine::exec_state_aware` calls `require_experimental_optin`,
-    ///    and `config_parser` hardcodes `experimental_enabled: false` with the
-    ///    only setter sitting on the one-shot builder. Until the state-aware
-    ///    entry points take an `experimental` parameter, every in-process call
-    ///    against this backend is rejected before it reaches `exec`.
+    /// 2. The path additionally needs this crate's `isolation_session` feature
+    ///    to be forwarded by `mxc-sdk`, which does not declare it yet — so an
+    ///    in-process caller cannot select this backend even on such a host.
+    ///    The experimental gate is no longer the obstacle: the state-aware
+    ///    entry points now take an `experimental` parameter, so
+    ///    `require_experimental_optin` is satisfiable from a library caller.
     ///
     /// A test could fake its way past (2) by building the request in-crate with
-    /// the flag set, but that scaffolding would have to be deleted as soon as
-    /// the real opt-in lands. The end-to-end proof belongs with the change that
-    /// makes this path publicly reachable.
+    /// the feature forced, but that scaffolding would have to be deleted as soon
+    /// as the feature is forwarded for real. The end-to-end proof belongs with
+    /// the change that makes this path publicly reachable.
     ///
     /// What *is* pinned here: the consumer split itself
     /// (`wants_interactive_console`), and — in `wxc_common` — that

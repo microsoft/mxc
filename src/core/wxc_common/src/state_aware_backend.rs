@@ -310,7 +310,8 @@ pub trait StatefulSandboxBackend {
     ///   process with no streams — treat those two as executor-path only.
     ///
     /// Reaching any of this from an in-process caller additionally requires the
-    /// experimental opt-in, which the state-aware entry points do not yet expose.
+    /// experimental opt-in, which the state-aware entry points expose as an
+    /// `experimental` parameter.
     ///
     /// # Backends that cannot serve `Library`
     ///

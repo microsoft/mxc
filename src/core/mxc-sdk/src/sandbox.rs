@@ -36,11 +36,12 @@ pub enum WaitOutcome {
     /// confirms that process, and a descendant the workload backgrounded is
     /// reclaimed when the sandbox is stopped and deprovisioned rather than here.
     ///
-    /// That state-aware route is not reachable from this crate yet:
-    /// [`exec_sandbox`](crate::exec_sandbox) parses without the experimental
-    /// opt-in, so an experimental backend is refused before dispatch. The
-    /// distinction is documented here because it is what implementors build
-    /// against, and because it becomes observable the moment that opt-in lands.
+    /// That state-aware route is reachable from this crate once the caller
+    /// passes the `experimental` opt-in to
+    /// [`exec_sandbox`](crate::exec_sandbox) and the crate is built with the
+    /// `isolation_session` feature; without either, the backend is refused
+    /// before dispatch. The distinction is documented here because it is what
+    /// implementors build against.
     TimedOut,
 }
 

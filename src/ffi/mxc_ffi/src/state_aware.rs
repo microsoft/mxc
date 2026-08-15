@@ -91,6 +91,10 @@ impl MxcStateAwareResult {
 /// Returns the resulting status code (also stored in `out->status`). Returns
 /// [`MXC_STATUS_NULL_ARGUMENT`] without touching `*out` if `out` is null.
 ///
+/// `experimental` is non-zero to opt in to the experimental backends
+/// (WindowsSandbox, IsolationSession, WSLc); with zero they are refused with
+/// `backend_unavailable` before any work is done.
+///
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
 /// - `out` must be null or point to writable [`MxcStateAwareResult`]-sized storage.
@@ -99,10 +103,11 @@ impl MxcStateAwareResult {
 pub unsafe extern "C" fn mxc_state_aware(
     request_json_utf8: *const c_char,
     dry_run: i32,
+    experimental: i32,
     out: *mut MxcStateAwareResult,
 ) -> i32 {
     let result = catch_unwind(AssertUnwindSafe(|| {
-        state_aware_inner(request_json_utf8, dry_run != 0)
+        state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
     }))
     .unwrap_or_else(|_| MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
 
@@ -119,7 +124,11 @@ pub unsafe extern "C" fn mxc_state_aware(
     status
 }
 
-fn state_aware_inner(request_json_utf8: *const c_char, dry_run: bool) -> MxcStateAwareResult {
+fn state_aware_inner(
+    request_json_utf8: *const c_char,
+    dry_run: bool,
+    experimental: bool,
+) -> MxcStateAwareResult {
     // SAFETY: caller contract on `mxc_state_aware`; borrowed only within scope.
     let request_json = match unsafe { cstr_to_str(request_json_utf8) } {
         Some(s) => s,
@@ -134,7 +143,7 @@ fn state_aware_inner(request_json_utf8: *const c_char, dry_run: bool) -> MxcStat
         }
     };
 
-    match run_state_aware_json(request_json, dry_run) {
+    match run_state_aware_json(request_json, dry_run, experimental) {
         Ok(response_json) => MxcStateAwareResult {
             status: MXC_STATUS_SUCCESS,
             response_json_utf8: alloc_cstring(response_json.as_bytes()),
@@ -188,6 +197,7 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 #[no_mangle]
 pub unsafe extern "C" fn mxc_state_aware_exec(
     request_json_utf8: *const c_char,
+    experimental: i32,
     out_handle: *mut *mut MxcSandbox,
     out_error: *mut MxcErrorDetail,
 ) -> i32 {
@@ -222,7 +232,7 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
                 ))
             }
         };
-        exec_sandbox(request_json).map_err(|e| {
+        exec_sandbox(request_json, experimental != 0).map_err(|e| {
             (
                 status_from_error_code(e.code),
                 MxcErrorDetail::from_error(&e),
@@ -246,10 +256,15 @@ mod tests {
     use std::ffi::CString;
 
     fn call(json: &str, dry_run: bool) -> MxcStateAwareResult {
+        call_opt(json, dry_run, false)
+    }
+
+    fn call_opt(json: &str, dry_run: bool, experimental: bool) -> MxcStateAwareResult {
         let j = CString::new(json).unwrap();
         let mut out = MxcStateAwareResult::empty();
         // SAFETY: valid string and out pointer.
-        let status = unsafe { mxc_state_aware(j.as_ptr(), dry_run as i32, &mut out) };
+        let status =
+            unsafe { mxc_state_aware(j.as_ptr(), dry_run as i32, experimental as i32, &mut out) };
         assert_eq!(status, out.status);
         out
     }
@@ -338,7 +353,7 @@ mod tests {
     fn null_request_reports_null_argument() {
         let mut out = MxcStateAwareResult::empty();
         // SAFETY: null request is explicitly handled; valid out pointer.
-        let status = unsafe { mxc_state_aware(ptr::null(), 0, &mut out) };
+        let status = unsafe { mxc_state_aware(ptr::null(), 0, 0, &mut out) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
         assert!(!out.error.message_utf8.is_null());
         // SAFETY: filled by `mxc_state_aware`.
@@ -349,7 +364,7 @@ mod tests {
     fn null_out_reports_null_argument() {
         let j = CString::new(r#"{"phase":"provision","containment":"isolation_session"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out.
-        let status = unsafe { mxc_state_aware(j.as_ptr(), 0, ptr::null_mut()) };
+        let status = unsafe { mxc_state_aware(j.as_ptr(), 0, 0, ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
@@ -357,7 +372,8 @@ mod tests {
     fn exec_null_out_handle_is_null_argument() {
         let j = CString::new(r#"{"phase":"exec","sandboxId":"x:y"}"#).unwrap();
         // SAFETY: valid string, deliberately-null out_handle.
-        let status = unsafe { mxc_state_aware_exec(j.as_ptr(), ptr::null_mut(), ptr::null_mut()) };
+        let status =
+            unsafe { mxc_state_aware_exec(j.as_ptr(), 0, ptr::null_mut(), ptr::null_mut()) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
     }
 
@@ -367,11 +383,46 @@ mod tests {
         let mut handle: *mut MxcSandbox = ptr::null_mut();
         let mut err = MxcErrorDetail::none();
         // SAFETY: valid string and out pointers.
-        let status = unsafe { mxc_state_aware_exec(j.as_ptr(), &mut handle, &mut err) };
+        let status = unsafe { mxc_state_aware_exec(j.as_ptr(), 0, &mut handle, &mut err) };
         assert_eq!(status, crate::MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
         assert!(!err.message_utf8.is_null());
         // SAFETY: `err` was filled by `mxc_state_aware_exec` and not yet freed.
         unsafe { crate::mxc_error_detail_free(&mut err) };
+    }
+
+    /// Without the opt-in the C ABI refuses an experimental backend, and the
+    /// refusal crosses as a message with **no** API-call detail — nothing was in
+    /// flight when the gate fired.
+    #[test]
+    fn experimental_backend_is_refused_without_the_optin() {
+        let mut out = call_opt(
+            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            true,
+            false,
+        );
+        assert_eq!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+        assert!(!out.error.message_utf8.is_null());
+        assert!(out.error.operation_utf8.is_null());
+        assert!(out.error.native_code_utf8.is_null());
+        assert!(out.error.remediation_utf8.is_null());
+        // SAFETY: filled by `mxc_state_aware`.
+        unsafe { mxc_state_aware_result_free(&mut out) };
+    }
+
+    /// Passing the opt-in gets past the gate. Asserting "not
+    /// `BACKEND_UNAVAILABLE`" rather than a specific success keeps this
+    /// host-independent while still failing if the flag is dropped on the way
+    /// down; the dry run keeps it side-effect-free.
+    #[test]
+    fn the_optin_admits_an_experimental_backend() {
+        let mut out = call_opt(
+            r#"{"phase":"provision","containment":"windows_sandbox"}"#,
+            true,
+            true,
+        );
+        assert_ne!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+        // SAFETY: filled by `mxc_state_aware`.
+        unsafe { mxc_state_aware_result_free(&mut out) };
     }
 }
