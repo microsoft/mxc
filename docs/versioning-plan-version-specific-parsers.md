@@ -485,6 +485,13 @@ selects `dev::one_shot::Request`; a present valid phase selects one of five
 closed state-aware root types. Duplicate, null, non-string, and unknown phase
 declarations fail before root deserialization.
 
+Follow-up parser hardening: require an object root in both the version and
+phase probes. Serde's derived struct deserialization also accepts positional
+JSON arrays: a required-field probe rejects an empty array but can accept a
+populated positional array, while an all-optional probe can accept an empty
+array. Add a shared map-only probe mechanism and regression tests for empty and
+populated array roots rather than fixing only the phase probe.
+
 Provision defines a state-aware-specific containment enum. Initially it should
 contain only concrete backends with lifecycle implementations:
 
