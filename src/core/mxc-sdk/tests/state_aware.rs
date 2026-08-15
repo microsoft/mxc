@@ -5,11 +5,18 @@
 //! (`run_state_aware_json` / `exec_sandbox`).
 //!
 //! These exercise request parsing, phase routing, and error mapping without a
-//! live host backend. The only in-tree state-aware backend (IsolationSession)
-//! is Windows-only and needs the OS-side IsoSessionOps service, so the actual
-//! provision/exec paths are covered by the executor E2E suites; here we assert
-//! the SDK facade's contract (parse, reject one-shot, reject non-dry-run exec,
-//! surface unsupported_phase for a backend without a state-aware impl).
+//! live host backend. All three state-aware backends — IsolationSession, WSLc
+//! and Windows Sandbox — are Windows-only, and IsolationSession additionally
+//! needs the OS-side IsoSessionOps service, so the real lifecycle paths are
+//! exercised by the executor E2E suites instead.
+//!
+//! Those suites drive the `ExecConsumer::Executor` path, **not** the
+//! `ExecConsumer::Library` path [`exec_sandbox`] uses — that one has no
+//! end-to-end coverage yet, as the testing-gap note on IsolationSession's `exec`
+//! records. So the assertions here deliberately stop at the facade's contract:
+//! parse, reject one-shot, reject non-dry-run exec, surface unsupported_phase
+//! for a backend without a state-aware impl, and honour the experimental opt-in
+//! — which stays host-independent because the gate runs before backend dispatch.
 
 use mxc_sdk::{exec_sandbox, run_state_aware_json, ErrorCode};
 

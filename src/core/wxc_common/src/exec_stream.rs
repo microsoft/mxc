@@ -27,10 +27,11 @@
 //! [`ExecConsumer::Library`]: it is the only state-aware backend that returns
 //! real pipe handles, and it closes its own ends when its process object drops.
 //! Under [`ExecConsumer::Executor`] it relays internally and returns null
-//! handles, and the other state-aware backends (Windows Sandbox, WSLc) return
-//! null handles on every path. A handle with *all three* streams null is
-//! refused here rather than wrapped: it means the backend has not implemented
-//! the `Library` contract, and a stream-less `SandboxProcess` would hide that.
+//! handles, as do Windows Sandbox and WSLc — which under [`ExecConsumer::Library`]
+//! return no handle at all, refusing it up front. A handle with *all three*
+//! streams null is refused here rather than wrapped: it means the backend has
+//! not implemented the `Library` contract, and a stream-less `SandboxProcess`
+//! would hide that.
 //!
 //! Each readable duplicate is wrapped as a **cancellable** reader, so a read on
 //! it can be made to return EOF on demand. That is what lets

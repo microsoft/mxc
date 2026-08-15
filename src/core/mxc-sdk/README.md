@@ -294,15 +294,20 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 Every state-aware backend is experimental, so `experimental` is the in-process
 equivalent of the executor's `--experimental` flag: without it the request is
 refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
-API parameter rather than a field in the request JSON, so that a config cannot
-grant itself experimental access.
+API parameter, not a field in the request JSON.
+
+The example below is illustrative: it selects IsolationSession, which needs
+`mxc_engine/isolation_session`, and this crate does not forward that feature
+today — so it returns `ErrorCode::UnsupportedPhase` as written.
 
 ```rust,no_run
 use mxc_sdk::{run_state_aware_json, exec_sandbox};
 
-// Envelope phase: provision returns { "result": { "sandboxId": ... } }.
+// Provision. IsolationSession accepts only the canonical unrestricted-network
+// acknowledgment; an absent policy defaults to `block`, which it refuses.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session"}"#,
+    r#"{"phase":"provision","containment":"isolation_session",
+        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
     false, // dry_run
     true,  // experimental
 )?;
@@ -317,10 +322,10 @@ let _ = proc.wait();
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox — and the first two also serve a streaming `exec`. Each is
-Windows-only and needs the engine feature that compiles it in, which this crate
-forwards only for WSLc today; on a host or build without the selected backend
-these return an `Error` with `ErrorCode::UnsupportedPhase`.
+Windows Sandbox — all Windows-only, and only IsolationSession serves a streaming
+`exec` in-process. Branch on the error code: a backend whose feature is not
+compiled in answers `ErrorCode::BackendUnavailable`, and one with no arm on the
+path you called answers `ErrorCode::UnsupportedPhase`.
 
 ## Supported backends
 

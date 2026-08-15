@@ -126,21 +126,14 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                // `experimental` is 0 deliberately, so this call keeps failing at
-                // the engine's experimental gate with a clean `backend_unavailable`.
-                //
-                // Passing 1 would let it reach the backend, where it would fail
-                // anyway — this type's request shape predates the IsolationSession
-                // Preview migration on three counts: provision sends no `network`
-                // (an absent policy defaults to Block, which that backend refuses),
-                // it can send `filesystem` (rejected outright at every phase), and
-                // start sends `configurationId` (no longer in the wire model). The
-                // resulting `policy_validation` errors would read as backend bugs
-                // rather than as a stale binding.
-                //
-                // Flip this to 1 in the change that fixes the request shape — the
-                // dedicated C# workstream — so the surface starts working and
-                // stops lying in the same commit.
+                // `experimental` is 0 deliberately. Two things are missing: the engine's
+                // `isolation_session` feature is not enabled in the library this project
+                // builds, so that backend has no dispatch arm and the request ends at
+                // `unsupported_phase`; and the request shape emitted here predates that
+                // backend's Preview migration. Passing 1 without fixing both trades
+                // `backend_unavailable` for `unsupported_phase`, which
+                // `AssertNoUsableBackend` already tolerates — the tests would stay green
+                // while nothing worked. Change it together with the feature and the shape.
                 var status = NativeMethods.mxc_state_aware_exec(
                     requestPtr, /*experimental*/ 0, &handle, &error);
                 if (status != (int)ErrorCode.Success)
@@ -266,9 +259,9 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                // `experimental` is 0 for the reason given in ExecInSandbox: this
-                // type's request shape predates the Preview migration, so opting
-                // in would trade a clean refusal for a misleading one.
+                // `experimental` is 0 for the reason given in ExecInSandbox: the backend
+                // is not compiled into this build and the request shape is stale, so
+                // opting in would only change which error surfaces.
                 var status = NativeMethods.mxc_state_aware(
                     requestPtr, /*dry_run*/ 0, /*experimental*/ 0, &result);
                 try

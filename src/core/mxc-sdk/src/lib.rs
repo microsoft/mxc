@@ -112,8 +112,11 @@
 //! `stop`, `deprovision` (and a dry run of any phase) — taking the wire-format
 //! request JSON and returning the response-envelope JSON. [`exec_sandbox`] runs
 //! the `exec` phase as a live streaming [`Sandbox`], the same handle
-//! [`spawn_sandbox`] returns. The only in-tree state-aware backend
-//! (IsolationSession) is Windows-only and needs its OS-side service.
+//! [`spawn_sandbox`] returns. Three backends implement the lifecycle —
+//! IsolationSession, WSLc and Windows Sandbox, all Windows-only — but only
+//! IsolationSession serves a streaming `exec` in-process; see [`exec_sandbox`]
+//! for what the other two return there, and the crate README for how each one
+//! is compiled in.
 //!
 //! ## No pty
 //!
@@ -213,10 +216,13 @@ pub fn run_state_aware_json(
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]. The backends that serve a streaming `exec` are
-/// IsolationSession and WSLc; each additionally needs the engine feature that
-/// compiles it in (`mxc_engine/isolation_session`, `mxc_engine/wslc` — this
-/// crate forwards only the latter today, as `wslc`).
+/// [`run_state_aware_json`]. **IsolationSession is the only backend that serves
+/// a streaming `exec` in-process**: the streaming dispatcher asks for
+/// `ExecConsumer::Library`, which WSLc refuses outright because it relays to the
+/// executor's stdio, and Windows Sandbox has no streaming arm at all
+/// (`unsupported_phase`). IsolationSession's arm additionally needs
+/// `mxc_engine/isolation_session`, which this crate does not forward yet — so
+/// today this entry point cannot return a live handle from a stock build.
 pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
     mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
 }
