@@ -1981,6 +1981,20 @@ impl BaseContainerRunner {
             }
         };
 
+        // `--wait-for-debugger` never reaches this point: `spawn()` (the only
+        // caller of `spawn_base`) runs `self.validate(request)?` first, and
+        // `validate()` unconditionally rejects the flag for this backend
+        // (BaseContainer cannot guarantee CREATE_SUSPENDED is honored on
+        // every OS build -- see `debugger_wait` module docs for what that
+        // guarantee protects). Asserted rather than handled with a second,
+        // untested parallel error path: if a future refactor of `spawn()`
+        // ever drops the `validate()` call, this fires instead of silently
+        // resuming a child the operator expected to stay suspended.
+        debug_assert!(
+            !request.wait_for_debugger,
+            "wait_for_debugger must be rejected by validate() before reaching spawn_base"
+        );
+
         // The child was created suspended; now that it is in the job object (so
         // every descendant it spawns is captured), resume its main thread. If the
         // create API ignored CREATE_SUSPENDED the thread is already running and
@@ -2060,6 +2074,25 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        // `Experimental_CreateProcessInSandbox` is not guaranteed to honor
+        // CREATE_SUSPENDED on every OS build (see the creation-flags comment
+        // above), so this backend cannot guarantee the sandboxed process has
+        // run no code before a debugger attaches -- the core contract
+        // `--wait-for-debugger` promises. The dispatcher already routes
+        // `--wait-for-debugger` requests to an AppContainer tier
+        // automatically (its `CreateProcess*` contract always honors
+        // CREATE_SUSPENDED); this only fails closed for direct callers of
+        // this backend.
+        if request.wait_for_debugger {
+            return Err(ScriptResponse::error(
+                "--wait-for-debugger is not supported by the BaseContainer backend: \
+                 Experimental_CreateProcessInSandbox is not guaranteed to honor \
+                 CREATE_SUSPENDED on every OS build, so it cannot guarantee the \
+                 sandboxed process has run no code before a debugger attaches. Use \
+                 the AppContainer tier instead (the dispatcher does this \
+                 automatically for --wait-for-debugger).",
+            ));
+        }
         let capture_denials = request.policy.capture_denials.is_some();
         let use_process_security_environment = self.uses_process_security_environment(request);
         if capture_denials && !use_process_security_environment {
@@ -4191,6 +4224,27 @@ mod tests {
             "expected the capability-gate message, got: {}",
             err.error_message
         );
+    }
+
+    #[test]
+    fn validate_runner_rejects_wait_for_debugger() {
+        // BaseContainer's `Experimental_CreateProcessInSandbox` cannot
+        // guarantee CREATE_SUSPENDED is honored on every OS build, so this
+        // backend must fail closed for `--wait-for-debugger` rather than
+        // silently risk running code before a debugger attaches. The
+        // dispatcher already routes this flag to an AppContainer tier (see
+        // `dispatcher::tests::wait_for_debugger_skips_base_container_even_when_usable`);
+        // this covers a direct/test caller that bypasses the dispatcher.
+        let runner = BaseContainerRunner::new();
+        let request = ExecutionRequest {
+            wait_for_debugger: true,
+            ..ExecutionRequest::default()
+        };
+
+        let err = runner
+            .validate(&request)
+            .expect_err("--wait-for-debugger must be rejected by the BaseContainer backend");
+        assert!(err.error_message.contains("wait-for-debugger"));
     }
 
     #[test]

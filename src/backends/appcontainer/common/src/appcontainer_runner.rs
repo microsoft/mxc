@@ -1046,6 +1046,22 @@ impl AppContainerScriptRunner {
                 &request.policy.base_process_ui,
             );
             job.set_ui_limits(&restrictions)?;
+            if request.wait_for_debugger {
+                // The child is about to be held suspended (no code run at
+                // all, not even loader init) until a debugger attaches --
+                // see `debugger_wait`. If `wxc-exec` itself dies before that
+                // happens (Ctrl-C, console close, an unhandled panic, or
+                // being killed by its own parent), nothing else can ever
+                // resume or reap this child, so it would otherwise survive
+                // as a permanently-suspended orphan. Kill-on-close makes the
+                // OS terminate it the instant the last handle to this job
+                // closes, which happens on every one of those exit paths
+                // (including the ones that bypass every Rust destructor).
+                // Not set for normal runs: their children are expected to
+                // keep running to their own completion independent of
+                // wxc-exec's lifetime.
+                job.set_kill_on_job_close()?;
+            }
             job.assign_process(process_handle.get())?;
             Ok(job)
         })() {
@@ -1346,7 +1362,23 @@ impl SandboxBackend for AppContainerScriptRunner {
                 return Err(ScriptResponse::error(&e.to_string()));
             }
         };
-        if let Err(e) = child.resume() {
+
+        // `--wait-for-debugger`: block (no timeout) until an external
+        // debugger attaches to the real sandboxed PID, then clear only
+        // wxc-exec's own CREATE_SUSPENDED hold — see `debugger_wait` module
+        // docs for why this leaves the debugger's own attach-time freeze in
+        // place (so a plain `g` is enough, no `~0 m` needed).
+        if request.wait_for_debugger {
+            if let Err(e) = crate::debugger_wait::wait_for_debugger_then_resume(
+                child.process.get(),
+                child.thread.get(),
+                child.pid,
+                logger,
+            ) {
+                self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
+                return Err(ScriptResponse::error(&e.to_string()));
+            }
+        } else if let Err(e) = child.resume() {
             self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
             return Err(ScriptResponse::error(&e.to_string()));
         }

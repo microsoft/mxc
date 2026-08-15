@@ -1,13 +1,30 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, ScriptResponse};
+use crate::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use crate::mxc_error::MxcError;
 
 /// Validates non-backend-specific parts of the request (e.g. non-empty script).
 pub fn validate_common(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
     if request.script_code.is_empty() {
         return Err(ScriptResponse::error("Script content must not be empty."));
+    }
+
+    // `--wait-for-debugger` only has a pre-execution suspend point on the
+    // `processcontainer` backend (and only the AppContainer tier of it — the
+    // dispatcher/`BaseContainerRunner::validate` handle that narrower case).
+    // Every other backend (Windows Sandbox, WSLC, IsolationSession,
+    // Hyperlight, MicroVM, LXC, Bubblewrap, Seatbelt) would otherwise accept
+    // the flag and silently run the workload immediately, defeating the
+    // flag's contract. Enforced centrally so it applies uniformly to every
+    // backend and every present/future one, rather than requiring each
+    // runner to remember to check it.
+    if request.wait_for_debugger && request.containment != ContainmentBackend::ProcessContainer {
+        return Err(ScriptResponse::error(&format!(
+            "--wait-for-debugger is only supported by the processcontainer backend \
+             (AppContainer tier); {} provides no pre-execution suspend point.",
+            request.containment.wire_name()
+        )));
     }
 
     // Enforce the testing-only-features gate centrally so it applies uniformly
@@ -128,6 +145,44 @@ mod tests {
         req.policy.network_proxy.builtin_test_server = true;
         req.testing_features_enabled = true;
 
+        assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn rejects_wait_for_debugger_on_non_processcontainer_backend() {
+        let req = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            containment: crate::models::ContainmentBackend::Lxc,
+            wait_for_debugger: true,
+            ..Default::default()
+        };
+        let err = validate_common(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("--wait-for-debugger") && err.error_message.contains("lxc"),
+            "expected wait-for-debugger gate error, got: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn accepts_wait_for_debugger_on_processcontainer_backend() {
+        let req = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            containment: crate::models::ContainmentBackend::ProcessContainer,
+            wait_for_debugger: true,
+            ..Default::default()
+        };
+        assert!(validate_common(&req).is_ok());
+    }
+
+    #[test]
+    fn accepts_wait_for_debugger_false_on_any_backend() {
+        let req = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            containment: crate::models::ContainmentBackend::Seatbelt,
+            wait_for_debugger: false,
+            ..Default::default()
+        };
         assert!(validate_common(&req).is_ok());
     }
 }

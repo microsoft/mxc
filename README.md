@@ -229,6 +229,16 @@ Use `--audit-verbose` to also stream PLM lifecycle diagnostics to stderr. Succes
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
+### Wait for Debugger
+
+`--wait-for-debugger` holds the sandboxed child suspended right after creation — before it has run any code, including its own loader initialization — instead of resuming it immediately. This lets an external, unsandboxed debugger attach to the *real* sandboxed process by PID at its own pace (there's no timeout, since nothing can run until a debugger attaches):
+
+```bash
+wxc-exec.exe --wait-for-debugger config.json
+```
+
+Attach a debugger to the printed PID and set breakpoints (necessarily deferred/pending ones, since no dependent DLL past the main image has loaded yet). The instant `wxc-exec` detects the attach it automatically clears its own suspend hold, so a plain `g` is all you need afterward — no `~0 m` ("Resume Thread") required. Windows-only; only the AppContainer tier of the `processcontainer` backend implements the suspend point (BaseContainer is skipped automatically, since it cannot guarantee `CREATE_SUSPENDED` is honored on every OS build). Combining `--wait-for-debugger` with any other `containment` backend (Windows Sandbox, WSLC, IsolationSession, Hyperlight, MicroVM, LXC, Bubblewrap, Seatbelt) is rejected up front, since none of them expose a pre-execution suspend point.
+
 ## Telemetry (Experimental)
 
 MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.

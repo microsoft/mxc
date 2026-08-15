@@ -1474,6 +1474,7 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
+        wait_for_debugger: false,
     })
 }
 
@@ -5557,6 +5558,16 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.experimental_enabled);
+    }
+
+    #[test]
+    fn wait_for_debugger_defaults_to_false() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.wait_for_debugger);
     }
 
     #[test]

@@ -19,11 +19,12 @@ use std::sync::OnceLock;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS,
-    JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
-    JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
-    JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
-    JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
 use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
 use windows_core::PCWSTR;
@@ -275,6 +276,35 @@ impl UiJobObject {
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
     }
 
+    /// Sets `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` so the OS itself terminates
+    /// every process assigned to this job the moment the *last* handle to
+    /// the job closes — including the implicit close that happens when
+    /// `wxc-exec` exits abnormally (Ctrl-C/Ctrl-Break/console-close/logoff,
+    /// whose default handler calls `ExitProcess` directly and skips every
+    /// Rust destructor, or an unhandled panic). Used only for
+    /// `--wait-for-debugger`: a child left suspended at `CREATE_SUSPENDED`
+    /// (having run no code at all, not even loader init) has no thread of
+    /// its own that could ever notice `wxc-exec` is gone, so without this it
+    /// survives as an orphan until someone finds it in Task Manager. Not set
+    /// for normal runs, whose children are expected to keep running to
+    /// their own completion independent of `wxc-exec`'s lifetime.
+    pub fn set_kill_on_job_close(&self) -> Result<(), WxcError> {
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `info` is a valid, fully-initialized struct living on the
+        // stack for the duration of the call, matching the size of the type
+        // `JobObjectExtendedLimitInformation` expects.
+        unsafe {
+            SetInformationJobObject(
+                self.handle,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        }
+        .map_err(|e| WxcError::Process(format!("SetInformationJobObject(KillOnClose): {e}")))
+    }
+
     /// Terminate every process currently assigned to this job (the sandboxed
     /// child and all of its descendants) with the given exit code. Used to
     /// tree-kill a running sandbox. Best-effort: errors are ignored since the
@@ -315,6 +345,16 @@ mod tests {
             ..Default::default()
         })
         .expect("set global-namespace block");
+        drop(job);
+    }
+
+    #[test]
+    fn set_kill_on_job_close_succeeds_with_no_assigned_process() {
+        // No process ever gets assigned in this test, so dropping the job
+        // right after must not kill anything real -- this only pins that
+        // the `SetInformationJobObject` call itself succeeds.
+        let job = UiJobObject::new().expect("create");
+        job.set_kill_on_job_close().expect("set kill-on-close");
         drop(job);
     }
 
