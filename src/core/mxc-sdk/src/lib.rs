@@ -213,9 +213,10 @@ pub fn run_state_aware_json(
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 ///
 /// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]. IsolationSession — the one backend that serves a
-/// streaming `exec` — additionally requires this crate to be built with its
-/// `isolation_session` feature.
+/// [`run_state_aware_json`]. The backends that serve a streaming `exec` are
+/// IsolationSession and WSLc; each additionally needs the engine feature that
+/// compiles it in (`mxc_engine/isolation_session`, `mxc_engine/wslc` — this
+/// crate forwards only the latter today, as `wslc`).
 pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
     mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
 }

@@ -121,3 +121,33 @@ fn the_refusal_carries_no_api_call_detail() {
     assert_eq!(err.native_code, None);
     assert_eq!(err.remediation, None);
 }
+
+/// The **streaming** entry point honours the opt-in too, not just the envelope
+/// one.
+///
+/// Both are needed: they take separate paths to the same gate, so a change that
+/// hardcoded the flag in only one of them would leave the other's tests green.
+/// A `wsb:` id routes to Windows Sandbox, which has no streaming-exec arm — so
+/// once past the gate it lands on `unsupported_phase`, and the two outcomes are
+/// distinguishable without a host, a feature, or any backend work. (A `wslc:`
+/// id would not discriminate: its feature-off arm also answers
+/// `backend_unavailable`, which is the very code the gate returns.)
+#[test]
+fn exec_honours_the_optin_on_its_own_path() {
+    let json = r#"{"phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#;
+
+    match exec_sandbox(json, false) {
+        Ok(_) => panic!("without the opt-in the gate must refuse"),
+        Err(err) => assert_eq!(err.code, ErrorCode::BackendUnavailable),
+    }
+
+    match exec_sandbox(json, true) {
+        Ok(_) => panic!("windows_sandbox serves no streaming exec"),
+        Err(err) => assert_ne!(
+            err.code,
+            ErrorCode::BackendUnavailable,
+            "the opt-in was passed, so the gate must not refuse: {}",
+            err.message
+        ),
+    }
+}

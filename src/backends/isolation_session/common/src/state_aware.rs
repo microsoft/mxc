@@ -263,11 +263,11 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
     ///
     /// 1. It needs a host running the OS-side isolation-session service, which
     ///    CI and most dev machines do not have.
-    /// 2. The path additionally needs this crate's `isolation_session` feature
-    ///    to be forwarded by `mxc-sdk`, which does not declare it yet — so an
-    ///    in-process caller cannot select this backend even on such a host.
-    ///    The experimental gate is no longer the obstacle: the state-aware
-    ///    entry points now take an `experimental` parameter, so
+    /// 2. The path additionally needs the `mxc_engine/isolation_session`
+    ///    feature to be forwarded by `mxc-sdk`, which declares only `wslc`
+    ///    today — so an in-process caller cannot select this backend even on
+    ///    such a host. The experimental gate is no longer the obstacle: the
+    ///    state-aware entry points now take an `experimental` parameter, so
     ///    `require_experimental_optin` is satisfiable from a library caller.
     ///
     /// A test could fake its way past (2) by building the request in-crate with

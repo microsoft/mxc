@@ -285,11 +285,17 @@ backend the library supports.
 Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
 state-aware sandbox lifecycle from a wire-format request JSON string:
 
-- `run_state_aware_json(request_json, dry_run)` drives the **envelope phases** —
-  `provision`, `start`, `stop`, `deprovision` (and a dry run of any phase) — and
-  returns the response-envelope JSON string.
-- `exec_sandbox(request_json)` runs the `exec` phase as a **live streaming**
-  `Sandbox` (the same handle `spawn_sandbox` returns).
+- `run_state_aware_json(request_json, dry_run, experimental)` drives the
+  **envelope phases** — `provision`, `start`, `stop`, `deprovision` (and a dry
+  run of any phase) — and returns the response-envelope JSON string.
+- `exec_sandbox(request_json, experimental)` runs the `exec` phase as a **live
+  streaming** `Sandbox` (the same handle `spawn_sandbox` returns).
+
+Every state-aware backend is experimental, so `experimental` is the in-process
+equivalent of the executor's `--experimental` flag: without it the request is
+refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
+API parameter rather than a field in the request JSON, so that a config cannot
+grant itself experimental access.
 
 ```rust,no_run
 use mxc_sdk::{run_state_aware_json, exec_sandbox};
@@ -297,20 +303,24 @@ use mxc_sdk::{run_state_aware_json, exec_sandbox};
 // Envelope phase: provision returns { "result": { "sandboxId": ... } }.
 let provisioned = run_state_aware_json(
     r#"{"phase":"provision","containment":"isolation_session"}"#,
-    false,
+    false, // dry_run
+    true,  // experimental
 )?;
 
 // Exec phase: a live streaming handle.
 let mut proc = exec_sandbox(
     r#"{"phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
+    true, // experimental
 )?;
 let _ = proc.wait();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The only in-tree state-aware backend, IsolationSession, is Windows-only and
-experimental (it needs its OS-side service); on a host/build without it these
-return an `Error` with `ErrorCode::UnsupportedPhase`.
+Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
+Windows Sandbox — and the first two also serve a streaming `exec`. Each is
+Windows-only and needs the engine feature that compiles it in, which this crate
+forwards only for WSLc today; on a host or build without the selected backend
+these return an `Error` with `ErrorCode::UnsupportedPhase`.
 
 ## Supported backends
 

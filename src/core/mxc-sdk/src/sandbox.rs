@@ -38,10 +38,10 @@ pub enum WaitOutcome {
     ///
     /// That state-aware route is reachable from this crate once the caller
     /// passes the `experimental` opt-in to
-    /// [`exec_sandbox`](crate::exec_sandbox) and the crate is built with the
-    /// `isolation_session` feature; without either, the backend is refused
-    /// before dispatch. The distinction is documented here because it is what
-    /// implementors build against.
+    /// [`exec_sandbox`](crate::exec_sandbox) and the backend is compiled in via
+    /// `mxc_engine/isolation_session`, which this crate does not forward yet;
+    /// without either, the backend is refused before dispatch. The distinction
+    /// is documented here because it is what implementors build against.
     TimedOut,
 }
 

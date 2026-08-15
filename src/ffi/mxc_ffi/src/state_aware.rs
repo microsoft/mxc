@@ -89,7 +89,11 @@ impl MxcStateAwareResult {
 /// `exec` streams and is rejected here — use [`mxc_state_aware_exec`].
 ///
 /// Returns the resulting status code (also stored in `out->status`). Returns
-/// [`MXC_STATUS_NULL_ARGUMENT`] without touching `*out` if `out` is null.
+/// [`MXC_STATUS_NULL_ARGUMENT`] **without running the phase** if `out` is null:
+/// the caller has nowhere to receive a sandbox id, so provisioning one would
+/// strand it — nothing else can reclaim a sandbox whose only handle was
+/// discarded. [`mxc_state_aware_exec`] checks its out-parameter first for the
+/// same reason.
 ///
 /// `experimental` is non-zero to opt in to the experimental backends
 /// (WindowsSandbox, IsolationSession, WSLc); with zero they are refused with
@@ -106,16 +110,14 @@ pub unsafe extern "C" fn mxc_state_aware(
     experimental: i32,
     out: *mut MxcStateAwareResult,
 ) -> i32 {
+    if out.is_null() {
+        return MXC_STATUS_NULL_ARGUMENT;
+    }
+
     let result = catch_unwind(AssertUnwindSafe(|| {
         state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
     }))
     .unwrap_or_else(|_| MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
-
-    if out.is_null() {
-        let mut orphan = result;
-        orphan.free_strings();
-        return MXC_STATUS_NULL_ARGUMENT;
-    }
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable; ownership of the
@@ -180,6 +182,9 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
 /// with the message plus the failing API call when there was one (release it
 /// with [`mxc_error_detail_free`](crate::mxc_error_detail_free));
 /// `*out_handle` is set to null.
+///
+/// `experimental` opts in to the experimental backends, as for
+/// [`mxc_state_aware`].
 ///
 /// # Safety
 /// - `request_json_utf8` must be null or a valid NUL-terminated UTF-8 C string.
@@ -424,5 +429,35 @@ mod tests {
         assert_ne!(out.status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
         // SAFETY: filled by `mxc_state_aware`.
         unsafe { mxc_state_aware_result_free(&mut out) };
+    }
+
+    /// The streaming entry point carries the opt-in on its own path, which the
+    /// envelope tests above cannot cover: the two reach the same gate by
+    /// different routes, so hardcoding the flag in one would leave the other
+    /// green. A `wsb:` id lands on `unsupported_phase` once past the gate, which
+    /// is distinguishable from the gate's own refusal without a host or a
+    /// backend.
+    #[test]
+    fn exec_honours_the_optin_on_its_own_path() {
+        let j = CString::new(
+            r#"{"phase":"exec","sandboxId":"wsb:0a1b2c3d","process":{"commandLine":"echo hi"}}"#,
+        )
+        .unwrap();
+
+        for (experimental, expect_refused) in [(0, true), (1, false)] {
+            let mut handle: *mut MxcSandbox = ptr::null_mut();
+            let mut err = MxcErrorDetail::none();
+            // SAFETY: valid string and out pointers.
+            let status =
+                unsafe { mxc_state_aware_exec(j.as_ptr(), experimental, &mut handle, &mut err) };
+            assert!(handle.is_null(), "no handle is produced either way");
+            if expect_refused {
+                assert_eq!(status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+            } else {
+                assert_ne!(status, crate::MXC_STATUS_BACKEND_UNAVAILABLE);
+            }
+            // SAFETY: filled by `mxc_state_aware_exec` and not yet freed.
+            unsafe { crate::mxc_error_detail_free(&mut err) };
+        }
     }
 }
