@@ -126,7 +126,23 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                var status = NativeMethods.mxc_state_aware_exec(requestPtr, &handle, &error);
+                // `experimental` is 0 deliberately, so this call keeps failing at
+                // the engine's experimental gate with a clean `backend_unavailable`.
+                //
+                // Passing 1 would let it reach the backend, where it would fail
+                // anyway — this type's request shape predates the IsolationSession
+                // Preview migration on three counts: provision sends no `network`
+                // (an absent policy defaults to Block, which that backend refuses),
+                // it can send `filesystem` (rejected outright at every phase), and
+                // start sends `configurationId` (no longer in the wire model). The
+                // resulting `policy_validation` errors would read as backend bugs
+                // rather than as a stale binding.
+                //
+                // Flip this to 1 in the change that fixes the request shape — the
+                // dedicated C# workstream — so the surface starts working and
+                // stops lying in the same commit.
+                var status = NativeMethods.mxc_state_aware_exec(
+                    requestPtr, /*experimental*/ 0, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     // See MxcSandbox.Spawn: the release belongs in `finally` so a throw
@@ -250,7 +266,11 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_state_aware(requestPtr, /*dry_run*/ 0, &result);
+                // `experimental` is 0 for the reason given in ExecInSandbox: this
+                // type's request shape predates the Preview migration, so opting
+                // in would trade a clean refusal for a misleading one.
+                var status = NativeMethods.mxc_state_aware(
+                    requestPtr, /*dry_run*/ 0, /*experimental*/ 0, &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)
