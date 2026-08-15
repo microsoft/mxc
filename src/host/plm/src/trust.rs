@@ -56,7 +56,7 @@ use windows::Win32::Security::WinTrust::{
     WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
 };
 use windows::Win32::Security::{
-    AclSizeInformation, GetAce, GetAclInformation, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
+    AclSizeInformation, GetAclInformation, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL,
     ACL_SIZE_INFORMATION, DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
     PSECURITY_DESCRIPTOR, PSID,
 };
@@ -68,6 +68,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::LibraryLoader::{
     SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
+use windows::Win32::System::{Diagnostics::Debug::ReadProcessMemory, Threading::GetCurrentProcess};
 
 /// Authenticode revocation policy: check revocation across the whole chain, but
 /// exclude the (self-signed) root — the standard, network-robust policy used by
@@ -778,50 +779,49 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
     }
     .context("GetAclInformation failed")?;
 
-    let acl_start = dacl as usize;
     let acl_len = info.AclBytesInUse as usize;
     if acl_len < std::mem::size_of::<ACL>() {
         bail!("the DACL is shorter than its fixed header");
     }
-    let acl_end = acl_start
-        .checked_add(acl_len)
-        .context("the DACL address range overflowed")?;
+    let acl_bytes = read_current_process_memory(dacl.cast(), acl_len)
+        .context("failed to copy the DACL into bounded local storage")?;
 
     let mut entries = Vec::with_capacity(info.AceCount as usize);
+    let mut ace_offset = std::mem::size_of::<ACL>();
     for index in 0..info.AceCount {
-        let mut ace_ptr: *mut c_void = ptr::null_mut();
-        // A failure to read any ACE is treated as fail-closed corruption.
-        unsafe { GetAce(dacl, index, &mut ace_ptr) }
-            .with_context(|| format!("GetAce({index}) failed"))?;
-        if ace_ptr.is_null() {
-            bail!("GetAce({index}) succeeded without returning an ACE pointer");
-        }
-        let ace_start = ace_ptr as usize;
-        let header_end = ace_start
+        let header_end = ace_offset
             .checked_add(std::mem::size_of::<ACE_HEADER>())
             .context("the ACE header address range overflowed")?;
-        if ace_start < acl_start || header_end > acl_end {
-            bail!("ACE {index} has a header outside the DACL bounds");
-        }
-        // SAFETY: the fixed-size header range was proven to lie within the DACL.
-        let header = unsafe { ptr::read_unaligned(ace_ptr as *const ACE_HEADER) };
-        let ace_len = header.AceSize as usize;
-        let ace_end = ace_start
+        let header = acl_bytes
+            .get(ace_offset..header_end)
+            .with_context(|| format!("ACE {index} has a header outside the DACL bounds"))?;
+        let ace_type = header[0];
+        let ace_flags = header[1];
+        let ace_len = u16::from_le_bytes([header[2], header[3]]) as usize;
+        let ace_end = ace_offset
             .checked_add(ace_len)
             .context("the ACE address range overflowed")?;
-        if ace_len < std::mem::size_of::<ACE_HEADER>() || ace_end > acl_end {
+        if ace_len < std::mem::size_of::<ACE_HEADER>() || ace_end > acl_bytes.len() {
             bail!("ACE {index} has an invalid size ({ace_len} bytes)");
         }
-        if header.AceFlags & INHERIT_ONLY_ACE != 0 {
+        let ace_bytes = acl_bytes
+            .get(ace_offset..ace_end)
+            .with_context(|| format!("ACE {index} extends outside the DACL bounds"))?;
+        ace_offset = ace_end;
+
+        if header_end > acl_bytes.len() {
+            bail!("ACE {index} has a header outside the DACL bounds");
+        }
+        if ace_flags & INHERIT_ONLY_ACE != 0 {
             // Inherit-only ACEs do not apply to this directory.
             continue;
         }
-        let allow = match ace_type_kind(header.AceType) {
+        let allow = match ace_type_kind(ace_type) {
             Some(kind) => kind,
             None => bail!(
                 "the DACL contains an unsupported ACE type {:#04x} (object/callback/conditional); \
                  failing closed because its effect cannot be classified",
-                header.AceType
+                ace_type
             ),
         };
         // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share layout through SidStart.
@@ -834,11 +834,16 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
         if ace_len < minimum_len {
             bail!("ACE {index} is too short to contain a SID");
         }
-        // SAFETY: the complete mask and fixed SID header lie within the
-        // validated ACE range.
-        let mask = unsafe { ptr::read_unaligned((ace_start + mask_offset) as *const u32) };
-        let sid_start = (ace_start + sid_offset) as *const u8;
-        let subauthority_count = unsafe { ptr::read(sid_start.add(1)) } as usize;
+        let mask_bytes: [u8; std::mem::size_of::<u32>()] = ace_bytes
+            .get(mask_offset..mask_offset + std::mem::size_of::<u32>())
+            .context("the ACE mask extends beyond the ACE bounds")?
+            .try_into()
+            .context("the ACE mask has an invalid length")?;
+        let mask = u32::from_le_bytes(mask_bytes);
+        let sid_header = ace_bytes
+            .get(sid_offset..sid_offset + SID_FIXED_HEADER_LEN)
+            .context("the SID header extends beyond the ACE bounds")?;
+        let subauthority_count = sid_header[1] as usize;
         let sid_len = SID_FIXED_HEADER_LEN
             .checked_add(
                 subauthority_count
@@ -852,8 +857,10 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
         {
             bail!("ACE {index} contains a SID that extends beyond the ACE bounds");
         }
-        let sid = PSID(sid_start as *mut c_void);
-        let sid_string = sid_to_string(sid)?;
+        let sid_bytes = ace_bytes
+            .get(sid_offset..sid_offset + sid_len)
+            .context("the SID extends beyond the ACE bounds")?;
+        let sid_string = sid_bytes_to_string(sid_bytes)?;
         entries.push(DaclEntry {
             sid: sid_string,
             mask,
@@ -861,6 +868,44 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
         });
     }
     Ok(entries)
+}
+
+fn read_current_process_memory(address: *const c_void, len: usize) -> Result<Vec<u8>> {
+    let mut bytes = vec![0u8; len];
+    let mut bytes_read = 0usize;
+    // SAFETY: `ReadProcessMemory` validates the source range in the current
+    // process and writes into the fully allocated destination buffer.
+    unsafe {
+        ReadProcessMemory(
+            GetCurrentProcess(),
+            address,
+            bytes.as_mut_ptr().cast(),
+            len,
+            Some(&mut bytes_read),
+        )
+    }
+    .context("ReadProcessMemory failed")?;
+    if bytes_read != len {
+        bail!("ReadProcessMemory returned {bytes_read} of {len} requested bytes");
+    }
+    Ok(bytes)
+}
+
+fn sid_bytes_to_string(bytes: &[u8]) -> Result<String> {
+    if bytes.len() < 8 {
+        bail!("the SID is shorter than its fixed header");
+    }
+    let required_len = 8usize
+        .checked_add(
+            (bytes[1] as usize)
+                .checked_mul(std::mem::size_of::<u32>())
+                .context("the SID subauthority length overflowed")?,
+        )
+        .context("the SID length overflowed")?;
+    if required_len > bytes.len() {
+        bail!("the SID extends beyond its bounded buffer");
+    }
+    sid_to_string(PSID(bytes.as_ptr() as *mut c_void))
 }
 
 struct SecurityDescriptorGuard(PSECURITY_DESCRIPTOR);

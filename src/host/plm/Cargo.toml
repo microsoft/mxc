@@ -32,6 +32,7 @@ windows = { workspace = true, features = [
     "Win32_System_JobObjects",
     "Win32_System_IO",
     "Win32_System_Pipes",
+    "Win32_System_Diagnostics_Debug",
     "Win32_Storage_FileSystem",
     "Win32_System_LibraryLoader",
     "Win32_UI_Shell",
