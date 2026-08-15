@@ -763,6 +763,9 @@ fn read_directory_security(dir: &Path) -> Result<DirectorySecurity> {
 /// Walks a non-NULL DACL into `(sid, mask, allow)` entries, failing closed on
 /// any ACE we do not fully understand.
 fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
+    if dacl.is_null() {
+        bail!("cannot parse a NULL DACL");
+    }
     let mut info = ACL_SIZE_INFORMATION::default();
     // SAFETY: `dacl` is a valid non-NULL ACL pointer.
     unsafe {
@@ -775,14 +778,40 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
     }
     .context("GetAclInformation failed")?;
 
+    let acl_start = dacl as usize;
+    let acl_len = info.AclBytesInUse as usize;
+    if acl_len < std::mem::size_of::<ACL>() {
+        bail!("the DACL is shorter than its fixed header");
+    }
+    let acl_end = acl_start
+        .checked_add(acl_len)
+        .context("the DACL address range overflowed")?;
+
     let mut entries = Vec::with_capacity(info.AceCount as usize);
     for index in 0..info.AceCount {
         let mut ace_ptr: *mut c_void = ptr::null_mut();
         // A failure to read any ACE is treated as fail-closed corruption.
         unsafe { GetAce(dacl, index, &mut ace_ptr) }
             .with_context(|| format!("GetAce({index}) failed"))?;
-        // SAFETY: `ace_ptr` points to a valid ACE within the DACL.
-        let header = unsafe { &*(ace_ptr as *const ACE_HEADER) };
+        if ace_ptr.is_null() {
+            bail!("GetAce({index}) succeeded without returning an ACE pointer");
+        }
+        let ace_start = ace_ptr as usize;
+        let header_end = ace_start
+            .checked_add(std::mem::size_of::<ACE_HEADER>())
+            .context("the ACE header address range overflowed")?;
+        if ace_start < acl_start || header_end > acl_end {
+            bail!("ACE {index} has a header outside the DACL bounds");
+        }
+        // SAFETY: the fixed-size header range was proven to lie within the DACL.
+        let header = unsafe { ptr::read_unaligned(ace_ptr as *const ACE_HEADER) };
+        let ace_len = header.AceSize as usize;
+        let ace_end = ace_start
+            .checked_add(ace_len)
+            .context("the ACE address range overflowed")?;
+        if ace_len < std::mem::size_of::<ACE_HEADER>() || ace_end > acl_end {
+            bail!("ACE {index} has an invalid size ({ace_len} bytes)");
+        }
         if header.AceFlags & INHERIT_ONLY_ACE != 0 {
             // Inherit-only ACEs do not apply to this directory.
             continue;
@@ -796,9 +825,34 @@ fn parse_dacl(dacl: *const ACL) -> Result<Vec<DaclEntry>> {
             ),
         };
         // ACCESS_ALLOWED_ACE and ACCESS_DENIED_ACE share layout through SidStart.
-        let ace = ace_ptr as *const ACCESS_ALLOWED_ACE;
-        let mask = unsafe { (*ace).Mask };
-        let sid = PSID(unsafe { &(*ace).SidStart } as *const _ as *mut c_void);
+        let mask_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, Mask);
+        let sid_offset = std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        const SID_FIXED_HEADER_LEN: usize = 8;
+        let minimum_len = sid_offset
+            .checked_add(SID_FIXED_HEADER_LEN)
+            .context("the minimum ACE size overflowed")?;
+        if ace_len < minimum_len {
+            bail!("ACE {index} is too short to contain a SID");
+        }
+        // SAFETY: the complete mask and fixed SID header lie within the
+        // validated ACE range.
+        let mask = unsafe { ptr::read_unaligned((ace_start + mask_offset) as *const u32) };
+        let sid_start = (ace_start + sid_offset) as *const u8;
+        let subauthority_count = unsafe { ptr::read(sid_start.add(1)) } as usize;
+        let sid_len = SID_FIXED_HEADER_LEN
+            .checked_add(
+                subauthority_count
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .context("the SID subauthority length overflowed")?,
+            )
+            .context("the SID length overflowed")?;
+        if sid_offset
+            .checked_add(sid_len)
+            .is_none_or(|required_len| required_len > ace_len)
+        {
+            bail!("ACE {index} contains a SID that extends beyond the ACE bounds");
+        }
+        let sid = PSID(sid_start as *mut c_void);
         let sid_string = sid_to_string(sid)?;
         entries.push(DaclEntry {
             sid: sid_string,
