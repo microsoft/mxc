@@ -241,6 +241,7 @@ pub trait StatefulSandboxBackend {
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError>;
 
     fn stop(
@@ -357,7 +358,7 @@ const r = await execInSandboxAsync(
 ```rust
 // Parser populates request.script_code = "echo hello" from the wire-format `process`
 // block (same path as one-shot). The dispatcher then calls:
-backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecConsumer::Executor)
 // returns Ok(ExecHandle { stdout, stderr, stdin, waiter, terminator })
 ```
 

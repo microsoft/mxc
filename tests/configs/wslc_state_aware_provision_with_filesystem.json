@@ -1,0 +1,19 @@
+{
+    "version": "0.8.0-alpha",
+    "phase": "provision",
+    "containment": "wslc",
+    "filesystem": {
+        "readwritePaths": ["C:\\mxc_wslc_sa_test\\rw"],
+        "readonlyPaths": ["C:\\mxc_wslc_sa_test\\ro"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    },
+    "experimental": {
+        "wslc": {
+            "provision": {
+                "image": "alpine:latest"
+            }
+        }
+    }
+}

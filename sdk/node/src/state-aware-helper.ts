@@ -10,6 +10,13 @@ import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
+// WSLc's state-aware surface shipped at a later schema version than the
+// `STATE_AWARE_VERSION` default above (the shared default for IsolationSession
+// and Windows Sandbox). WSLc is intentionally NOT gate-locked to it: the
+// backends were promoted independently, so WSLc carries its own later default.
+// See `DEFAULT_STATE_AWARE_VERSION`.
+export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
+
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
@@ -21,13 +28,38 @@ export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] a
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
+export const WSLC_ID_PREFIX = 'wslc';
 
-// Mapping from a sandboxId's leading prefix segment to the wire-format
-// backend key. Extended as more state-aware backends opt in.
-export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = {
-  [ISOLATION_SESSION_ID_PREFIX]: 'isolation_session',
-  [WINDOWS_SANDBOX_ID_PREFIX]: 'windows_sandbox',
+// Per-backend default schema version stamped onto an envelope when the caller
+// supplies none. Each backend's state-aware surface was promoted at its own
+// schema version, so the default is backend-specific rather than a single
+// global constant.
+const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
+  isolation_session: STATE_AWARE_VERSION,
+  windows_sandbox: STATE_AWARE_VERSION,
+  wslc: WSLC_STATE_AWARE_VERSION,
 };
+
+// Exhaustive backend→prefix map. Typed `Record<StateAwareContainmentBackend,
+// string>` so adding a backend to the union without registering a prefix here
+// is a compile error — the same exhaustiveness guarantee the config, metadata,
+// and default-version registries carry. Without it a new backend would compile
+// with no prefix and fail every non-provision call at runtime with
+// `malformed_id`.
+export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
+  isolation_session: ISOLATION_SESSION_ID_PREFIX,
+  windows_sandbox: WINDOWS_SANDBOX_ID_PREFIX,
+  wslc: WSLC_ID_PREFIX,
+};
+
+// Reverse lookup (prefix → backend), derived from the exhaustive map above so
+// the two can never drift. Used to route a sandboxId's leading prefix segment
+// to its wire-format backend key.
+export const PREFIX_TO_BACKEND: Record<string, StateAwareContainmentBackend> = Object.fromEntries(
+  (Object.entries(BACKEND_TO_PREFIX) as [StateAwareContainmentBackend, string][]).map(
+    ([backend, prefix]) => [prefix, backend],
+  ),
+);
 
 /**
  * Resolves the wire-format backend key for a sandbox id by reading its
@@ -67,7 +99,8 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
-  const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || STATE_AWARE_VERSION;
+  const defaultVersion = DEFAULT_STATE_AWARE_VERSION[backendKey] ?? STATE_AWARE_VERSION;
+  const version = (typeof backendSpecific.version === 'string' && backendSpecific.version) || defaultVersion;
   delete backendSpecific.version;
 
   const envelope: Record<string, unknown> = { version, phase };

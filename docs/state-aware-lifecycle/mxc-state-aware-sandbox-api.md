@@ -945,7 +945,7 @@ const r = await execInSandboxAsync(
 // Parser populates request.script_code = "echo hello", request.script_timeout =
 // 5000 from the wire-format `process` block (same path as one-shot). The
 // dispatcher then calls:
-backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None)
+backend.exec("iso:eyJ2ZXJzaW9uIjoxLCJhZ2VudFVzZXJOYW1lIjoiX2lzb19hYmNfMTIzIn0", &request, /* config */ None, ExecConsumer::Executor)
 // returns Ok(ExecHandle { ... pipe handles + waiter ... })
 ```
 
@@ -1212,11 +1212,37 @@ pub trait StatefulSandboxBackend {
     }
 
     /// Required. Must execute the workload and return a handle.
+    ///
+    /// `consumer` is the caller's intent and is authoritative. This is
+    /// deliberately not `StdioMode`: that enum's `Inherit` means the OS hands
+    /// the child the executor's own handles, which no state-aware backend can
+    /// do, since the workload runs inside an isolation session, a VM, or
+    /// behind an SDK callback. What matters here is who is on the other end,
+    /// because that fixes the topology of the returned streams.
+    ///
+    /// `Library` (the library / FFI streaming path) means the caller drives
+    /// the streams itself, so an implementation must surface separate raw pipe
+    /// handles, allocate no pseudo-console, and not touch the host console.
+    /// `Executor` (the executor path) means the handle is relayed to the
+    /// binary's own stdio, where a pseudo-console is legitimate — and where
+    /// stderr may therefore arrive merged into stdout, leaving
+    /// `ExecHandle::stderr` null. A backend that probes the host to decide how
+    /// to wire stdio must confine that probe to the `Executor` case.
+    ///
+    /// A backend that cannot serve `Library` at all — because it relays the
+    /// workload's output to the *host process's* own stdio rather than
+    /// returning streams — must refuse **before running anything**. The
+    /// workload is arbitrary and may not be idempotent, so a refusal issued
+    /// after the fact reports "unsupported" for something that has already
+    /// taken effect and whose output has already gone somewhere the caller
+    /// never asked for. `wxc_common::state_aware_backend::unsupported_library_exec`
+    /// is the shared refusal.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -1311,12 +1337,28 @@ pub struct ExecHandle {
     pub stdout: PipeHandle,
     /// Stderr pipe handle from the running process. Executor relays to its own stderr.
     pub stderr: PipeHandle,
-    /// Stdin pipe handle. Executor relays from its own stdin.
+    /// Stdin pipe handle. Not consumed by the executor relay, which forwards
+    /// no input; the streaming path hands it to an in-process caller.
     pub stdin: PipeHandle,
-    /// Function to wait for exit; returns the exit code.
-    pub waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    /// Function to terminate the process (called on AbortSignal).
-    pub terminator: Box<dyn FnOnce() + Send>,
+    /// Function to wait for exit; returns how the exec finished.
+    pub waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    /// Function to terminate the process (called on AbortSignal). Fallible: a
+    /// platform that refuses the request must be able to say so, because a
+    /// caller that assumes a refused kill succeeded can block forever waiting
+    /// on a process that is still running.
+    pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+}
+
+/// How an exec finished, as distinct from why a wait failed. A timeout is an
+/// outcome — the deadline was spent while the process ran, and the process is
+/// no longer running — whereas `Err` means the exit could not be determined.
+/// Deliberately not "the backend killed it": a workload that overruns its
+/// deadline and then exits on its own has still missed it, and how far the
+/// termination reaches is the backend's to state. Only `ExecConsumer::Library`
+/// can observe `TimedOut`; the executor relay has no field to carry it.
+pub enum ExecOutcome {
+    Exited(i32),
+    TimedOut,
 }
 ```
 
@@ -1334,8 +1376,10 @@ dispatcher from `experimental.<backend>.<phase>` and passed as the `config` para
 `MxcError` is the typed Rust equivalent of its SDK counterpart. `PipeHandle` is a
 platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
 descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` /
-`stderr` and writes to `stdin`, awaits exit via `waiter`, and calls `terminator` on
-cancellation signals.
+`stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
+It does **not** write to `stdin`: forwarding input needs an ownership model
+`ExecHandle` does not have yet, since a pipe reaches EOF only once every write
+handle is closed and the relay can only duplicate the backend's handle.
 
 `mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
@@ -1466,9 +1510,9 @@ fn dispatch_state_aware<B: StatefulSandboxBackend>(
             validate_exec_common(request)?;
             backend.validate_exec(sandbox_id, request, config.as_ref())?;
             if dry_run { return Ok(DispatchOutcome::Envelope(empty_envelope())); }
-            let handle = backend.exec(sandbox_id, request, config)?;
+            let handle = backend.exec(sandbox_id, request, config, ExecConsumer::Executor)?;
             // relay_exec_to_stdio streams the script's pipes to the executor's
-            // stdout/stderr/stdin live, awaits exit, and returns the script's exit code.
+            // stdout/stderr live, awaits exit, and returns the script's exit code.
             let exit_code = relay_exec_to_stdio(handle)?;
             Ok(DispatchOutcome::ExecCompleted { exit_code })
         }

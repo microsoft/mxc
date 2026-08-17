@@ -282,7 +282,7 @@ fn normalize_path(p: &str) -> Option<String> {
     // 1. Strip verbatim / device prefix (`\\?\`, `\\.\`, and the
     //    NT-object `\??\` prefix). UNC verbatim is rejected because
     //    we don't grant policy to network shares. The `\??\` prefix
-    //    must be stripped here too (not only in `event_parser`), so
+    //    must be stripped here too (not only by the ETL analyzer), so
     //    events that bypass that layer don't leak the literal prefix
     //    into config storage.
     let stripped = strip_verbatim_or_device_prefix(p)?;
@@ -1138,7 +1138,7 @@ mod tests {
         // ETW occasionally emits. `config::normalize_path` now
         // explicitly strips the `\??\` prefix (mirroring `\\?\` /
         // `\\.\` handling) so call sites that bypass
-        // `event_parser::normalize_file_path` still get a comparable
+        // the canonical ETL analyzer still gives us a comparable
         // drive-letter form. Without this, the self-event filter
         // would miss `\??\C:\plm\plm.exe`.
         assert_eq!(normalize_path("\\??\\C:\\foo").as_deref(), Some("c:\\foo"));

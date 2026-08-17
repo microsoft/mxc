@@ -6,24 +6,25 @@
 //! plus the Windows-specific encoder that maps a platform-agnostic
 //! [`wxc_common::ui_policy::EffectiveUiRestrictions`] to the corresponding bitmask.
 //!
-//! The wrapper owns the underlying job HANDLE and closes it on drop. Once a
-//! process has been assigned to a job, the kernel keeps the restrictions
-//! attached for the process lifetime regardless of whether the job HANDLE is
-//! still open in the creator, so dropping a `UiJobObject` after assignment is
-//! safe and does not relax the restrictions on the running process.
+//! The wrapper owns the underlying job HANDLE and closes it on drop. Jobs are
+//! configured with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so an abandoned
+//! sandbox cannot outlive the process that owns its enforcement state.
 
 use core::ffi::c_void;
 use std::mem::size_of;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
-    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_UI_RESTRICTIONS,
-    JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP, JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
-    JOB_OBJECT_UILIMIT_EXITWINDOWS, JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES,
-    JOB_OBJECT_UILIMIT_READCLIPBOARD, JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
-    JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+    JobObjectBasicUIRestrictions, JobObjectExtendedLimitInformation, QueryInformationJobObject,
+    SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_UILIMIT, JOB_OBJECT_UILIMIT_DESKTOP,
+    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS, JOB_OBJECT_UILIMIT_EXITWINDOWS,
+    JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
+    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS, JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
 };
 use windows::Win32::System::SystemServices::JOB_OBJECT_UILIMIT_IME;
 use windows_core::PCWSTR;
@@ -109,6 +110,8 @@ const MIN_BUILD_FOR_IME_LIMIT: u32 = 22621;
 /// with `ERROR_INVALID_PARAMETER`, so it is excluded from the supported
 /// UI-limit set on those builds.
 const MIN_BUILD_FOR_INJECTION_LIMIT: u32 = 26100;
+const JOB_EMPTY_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const JOB_EMPTY_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Cached OS build number (queried once via `RtlGetVersion`).
 static OS_BUILD_NUMBER: OnceLock<u32> = OnceLock::new();
@@ -234,6 +237,23 @@ impl UiJobObject {
         // is documented to either return a valid HANDLE or an error.
         let handle = unsafe { CreateJobObjectW(None, PCWSTR::null()) }
             .map_err(|e| WxcError::Process(format!("CreateJobObjectW: {e}")))?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(error) = unsafe {
+            SetInformationJobObject(
+                handle,
+                JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const c_void,
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } {
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(WxcError::Process(format!(
+                "SetInformationJobObject(KILL_ON_JOB_CLOSE): {error}"
+            )));
+        }
         Ok(Self { handle })
     }
 
@@ -275,15 +295,114 @@ impl UiJobObject {
             .map_err(|e| WxcError::Process(format!("AssignProcessToJobObject: {e}")))
     }
 
-    /// Terminate every process currently assigned to this job (the sandboxed
-    /// child and all of its descendants) with the given exit code. Used to
-    /// tree-kill a running sandbox. Best-effort: errors are ignored since the
-    /// processes may already have exited.
-    pub fn terminate(&self, exit_code: u32) {
+    /// Returns this process's numeric HANDLE value for authenticated
+    /// cross-process duplication by the elevated guarded-WPR guardian.
+    pub fn handle_value(&self) -> usize {
+        self.handle.0 as usize
+    }
+
+    /// Terminates every process currently assigned to this job (the sandboxed
+    /// child and all of its descendants) with the given exit code.
+    pub fn terminate(&self, exit_code: u32) -> Result<(), WxcError> {
         // SAFETY: `self.handle` is a valid job handle owned by this struct.
-        unsafe {
-            let _ = TerminateJobObject(self.handle, exit_code);
+        unsafe { TerminateJobObject(self.handle, exit_code) }
+            .map_err(|error| WxcError::Process(format!("TerminateJobObject: {error}")))
+    }
+
+    /// Waits until no processes remain assigned to the job.
+    pub fn wait_for_empty(&self) -> Result<(), WxcError> {
+        self.wait_for_empty_within(JOB_EMPTY_WAIT_TIMEOUT, JOB_EMPTY_POLL_INTERVAL)
+    }
+
+    /// Waits up to `timeout` for the job to reach zero active processes, polling
+    /// job accounting every `poll_interval`. Extracted from [`Self::wait_for_empty`]
+    /// so callers (and tests) can supply an explicit bound; `Duration::ZERO`
+    /// performs exactly one accounting probe with no sleep. The timeout message
+    /// reports the configured `timeout`.
+    fn wait_for_empty_within(
+        &self,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(), WxcError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            // SAFETY: `self.handle` is a valid job handle and `accounting`
+            // matches the requested information class and buffer length.
+            unsafe {
+                QueryInformationJobObject(
+                    Some(self.handle),
+                    JobObjectBasicAccountingInformation,
+                    &mut accounting as *mut _ as *mut c_void,
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    None,
+                )
+            }
+            .map_err(|error| {
+                WxcError::Process(format!(
+                    "QueryInformationJobObject(BasicAccounting): {error}"
+                ))
+            })?;
+            if accounting.ActiveProcesses == 0 {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(WxcError::Process(format!(
+                    "timed out after {}ms waiting for sandbox job to become empty; {} process(es) \
+                     remain active",
+                    timeout.as_millis(),
+                    accounting.ActiveProcesses
+                )));
+            }
+            std::thread::sleep(poll_interval);
         }
+    }
+
+    /// Terminates the complete process tree and confirms that the job is empty.
+    ///
+    /// This is the **strict** drain: a failure to observe the job reach zero
+    /// active processes within [`JOB_EMPTY_WAIT_TIMEOUT`] is returned as an
+    /// error. Use it only where full drain certainty is a correctness
+    /// requirement — notably the guarded-WPR `captureDenials` paths, where ETL
+    /// scoping is only sound if nothing can still be running unobserved.
+    /// Ordinary (non-capture) teardown should prefer
+    /// [`Self::terminate_best_effort`], which does not fail an otherwise-valid
+    /// run just because the kernel had not finished tearing the tree down
+    /// within the window.
+    pub fn terminate_and_wait(&self, exit_code: u32) -> Result<(), WxcError> {
+        self.terminate(exit_code)?;
+        self.wait_for_empty()
+    }
+
+    /// Terminates the complete process tree, treating a drain-observation
+    /// timeout as a recoverable warning rather than a hard failure.
+    ///
+    /// A failure of [`Self::terminate`] itself (the actual `TerminateJobObject`
+    /// call) is still returned as an error. But if the job does not reach zero
+    /// active processes within the window, this returns `Ok(Some(error))` so
+    /// the caller can surface a warning while preserving the run's result — the
+    /// kernel continues tearing the tree down, and
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` guarantees eventual teardown when
+    /// the handle closes. Returns `Ok(None)` when the job drained cleanly.
+    pub fn terminate_best_effort(&self, exit_code: u32) -> Result<Option<WxcError>, WxcError> {
+        self.terminate_best_effort_within(
+            exit_code,
+            JOB_EMPTY_WAIT_TIMEOUT,
+            JOB_EMPTY_POLL_INTERVAL,
+        )
+    }
+
+    /// [`Self::terminate_best_effort`] with an explicit drain bound. Factored
+    /// out so the warning (drain-timeout) path is unit-testable with
+    /// `Duration::ZERO` instead of the multi-second production window.
+    fn terminate_best_effort_within(
+        &self,
+        exit_code: u32,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Option<WxcError>, WxcError> {
+        self.terminate(exit_code)?;
+        Ok(self.wait_for_empty_within(timeout, poll_interval).err())
     }
 }
 
@@ -302,6 +421,9 @@ impl Drop for UiJobObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::windows::io::AsRawHandle;
+    use std::process::Command;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn create_set_limits_drop() {
@@ -316,6 +438,90 @@ mod tests {
         })
         .expect("set global-namespace block");
         drop(job);
+    }
+
+    #[test]
+    fn dropping_job_terminates_assigned_process() {
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().expect("query child").is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "job-owned process survived job-handle close"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    #[test]
+    fn terminate_and_wait_observes_job_accounting_reach_zero() {
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        job.terminate_and_wait(u32::MAX)
+            .expect("terminated job should become empty");
+        assert!(child.wait().expect("reap child").code().is_some());
+    }
+
+    #[test]
+    fn terminate_best_effort_reports_clean_drain() {
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let drain_warning = job
+            .terminate_best_effort(u32::MAX)
+            .expect("terminate itself must succeed");
+        assert!(
+            drain_warning.is_none(),
+            "a terminated job that drains cleanly yields no warning: {drain_warning:?}"
+        );
+        assert!(child.wait().expect("reap child").code().is_some());
+    }
+
+    #[test]
+    fn wait_for_empty_within_zero_timeout_reports_active_processes() {
+        // A single-probe (`Duration::ZERO`) wait against a still-running job
+        // deterministically reports the drain timeout without any real sleep.
+        // This is exactly the `WxcError` `terminate_best_effort` surfaces as its
+        // `Some(warning)` when a job has not drained within the window — testing
+        // it here keeps the coverage deterministic (a real `TerminateJobObject`
+        // followed by an immediate probe can race the async kernel teardown and
+        // observe the job already empty).
+        let job = UiJobObject::new().expect("create job");
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 999 127.0.0.1 >nul"])
+            .spawn()
+            .expect("spawn child");
+        job.assign_process(HANDLE(child.as_raw_handle()))
+            .expect("assign child");
+
+        let error = job
+            .wait_for_empty_within(Duration::ZERO, Duration::ZERO)
+            .expect_err("a live job must not be observed empty with a zero timeout");
+        let message = error.to_string();
+        assert!(message.contains("timed out"), "got: {message}");
+        assert!(message.contains("remain active"), "got: {message}");
+
+        job.terminate_and_wait(u32::MAX).expect("cleanup terminate");
+        child.wait().expect("reap child");
     }
 
     #[test]

@@ -1,0 +1,22 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Net-Preserve",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"echo MXC_PRESERVE_RAN\""
+  },
+  "lifecycle": {
+    "destroyOnExit": false,
+    "preservePolicy": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": [],
+    "blockedHosts": []
+  }
+}

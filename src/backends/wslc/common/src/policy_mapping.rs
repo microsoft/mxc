@@ -11,6 +11,8 @@
 
 use crate::wslc_bindings::WslcContainerNetworkingMode;
 use wxc_common::filesystem_canonical::{canonicalize_allowing_absent_tail, PathCanonical};
+use wxc_common::logger::Logger;
+use wxc_common::models::{ContainerPolicy, ExecutionRequest};
 
 /// A resolved volume mount ready to be passed to `WslcSetContainerSettingsVolumes`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -274,6 +276,46 @@ pub fn validate_denied_path_overlap(
         denied_paths,
         canonicalize_allowing_absent_tail,
     )
+}
+
+/// The complete WSLc provision-time filesystem-policy gate, shared by the
+/// one-shot runner (`wsl_container_runner::start_container`) and the state-aware
+/// provision path (`state_aware::build_provision_config`). Keeping the three
+/// ordered steps in one place stops the two runners drifting apart when a policy
+/// check or its ordering changes.
+///
+/// The steps, in the order both paths must run them:
+/// 1. **Object-identity normalization (D6)** — tighten rw/ro/denied aliases of
+///    the same host object to the strictest intent (deny > ro > rw) via
+///    [`wxc_common::filesystem_object::normalize_object_conflicts`]. A path moved
+///    to `denied` is simply not mounted (unmounted = invisible).
+/// 2. **Delegation (D3)** — reject any path the invoking user cannot access via
+///    [`wxc_common::filesystem_access::check_delegation`], evaluated against the
+///    already-tightened intents so the sandbox never gains access the caller lacks.
+/// 3. **Denied-path overlap** — reject a `denied` entry nested under a still-mounted
+///    parent (WSLc's flat volume surface has no overlay primitive), again against
+///    the tightened lists, so a deny that only becomes nested after normalization
+///    cannot slip through unenforced.
+///
+/// Returns the tightened policy when normalization changed something (the caller
+/// rebuilds the request around it) or `None` when the policy was already
+/// conflict-free. Any failure is returned as a `String`; callers map it to their
+/// own error envelope (`ScriptResponse` / `MxcError`). Normalization diagnostics
+/// are written to `logger`; callers decide how to surface them.
+pub fn apply_provision_policy_gate(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Option<ContainerPolicy>, String> {
+    let normalized =
+        wxc_common::filesystem_object::normalize_object_conflicts(&request.policy, logger)?;
+    let effective = normalized.as_ref().unwrap_or(&request.policy);
+    wxc_common::filesystem_access::check_delegation(effective)?;
+    validate_denied_path_overlap(
+        &effective.readwrite_paths,
+        &effective.readonly_paths,
+        &effective.denied_paths,
+    )?;
+    Ok(normalized)
 }
 
 /// Overlap message for a denied path nested under a mounted parent.

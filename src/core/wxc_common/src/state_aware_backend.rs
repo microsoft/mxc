@@ -72,17 +72,147 @@ pub struct DeprovisionResult<M> {
     pub metadata: Option<M>,
 }
 
+/// Who will consume an exec's streams — the state-aware counterpart to
+/// [`StdioMode`](crate::sandbox_process::StdioMode).
+///
+/// This is deliberately **not** `StdioMode`. That enum offers `Inherit`,
+/// meaning the OS hands the child the executor's own stdin/stdout/stderr. No
+/// state-aware backend can do that: the workload runs inside an isolation
+/// session, inside a VM, or behind an SDK callback, so its streams always have
+/// to be materialised on this side of the boundary and copied across. For this
+/// contract `Inherit` is not merely ambiguous, it is unimplementable.
+///
+/// What a state-aware backend needs to know is who is on the other end, because
+/// that decides the **topology** of the streams it returns:
+///
+/// * [`Executor`](Self::Executor) — the executor binary relays onto its own
+///   stdio for a human. The backend may allocate a pseudo-console inside the
+///   sandbox when the executor is itself on a TTY. A pseudo-console has a
+///   single output stream, so stderr is then merged into stdout and
+///   [`ExecHandle::stderr`] is null. That is a correct result, not a failure.
+///
+///   Under this variant the relay forwards **no** input, so the backend must
+///   not give the child a stdin pipe whose write end it retains: nothing would
+///   ever write to it or close it, and a workload that reads stdin would block
+///   forever. Give the child a stdin already at EOF, and return a null
+///   [`ExecHandle::stdin`].
+/// * [`Library`](Self::Library) — an in-process caller (the Rust SDK, the FFI)
+///   drives the streams itself. The backend must return separate raw stdout and
+///   stderr pipes, allocate no pseudo-console, and leave the host's console
+///   untouched.
+///
+/// The value is **authoritative**. A backend that probes the host to shape
+/// stdio ("is my stdout a terminal?") may consult that probe only within
+/// `Executor`. Under `Library` the probe is meaningless — an embedded host's
+/// stdout says nothing about the sandbox — and acting on it risks mutating
+/// console state the caller owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecConsumer {
+    /// The executor binary, relaying the streams to its own stdio.
+    Executor,
+    /// An in-process caller, driving the returned streams itself.
+    Library,
+}
+
+/// The error a backend returns when it is asked to serve
+/// [`ExecConsumer::Library`] and cannot.
+///
+/// A backend that relays the workload's output internally — to the *host
+/// process's* own stdout and stderr — has no streams to hand back. It must
+/// refuse **before running anything**: the workload is arbitrary and may not be
+/// idempotent, so a refusal issued after the fact has already caused the
+/// side effects the caller is being told did not happen, and has already
+/// written its output somewhere the caller never asked for.
+///
+/// Shared so the refusal reads identically whichever backend raises it, and so
+/// the check cannot drift into a per-backend spelling.
+pub fn unsupported_library_exec(backend: &str) -> MxcError {
+    MxcError::backend_error(format!(
+        "the {backend} backend does not support exec for an in-process caller: it relays the \
+         sandbox's output to this process's own stdout and stderr rather than returning streams. \
+         Nothing has been run."
+    ))
+}
+
+/// How an exec finished — as distinct from *why a wait failed*.
+///
+/// A timeout is an **outcome**, not an error: the backend observed the deadline
+/// and the workload is no longer running. Reserving `Err` for a genuine
+/// inability to determine the exit is what lets a caller tell "it ran too long"
+/// apart from "I could not find out what happened", which are different problems
+/// with different responses.
+///
+/// # Which consumers can see `TimedOut`
+///
+/// Only [`ExecConsumer::Library`]. The executor path has nowhere to put it:
+/// `ScriptResponse` carries an `exit_code` and no timeout field, so `wxc-exec`
+/// reports a timed-out workload as the exit code its killed process produced.
+/// A backend serving `ExecConsumer::Executor` therefore keeps returning
+/// [`Exited`](Self::Exited) exactly as before — giving the CLI a timeout channel
+/// is a change to its output contract, and belongs with that work rather than
+/// here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecOutcome {
+    /// The process exited with this code.
+    Exited(i32),
+    /// The request's timeout elapsed while the process was running, and the
+    /// process is no longer running when this is reported.
+    ///
+    /// **Deadline spent, and the process is gone** — deliberately not "the
+    /// backend killed it". A workload that overruns its deadline and then exits
+    /// on its own a moment later has still missed the deadline, and reporting
+    /// the exit code it happened to produce would hide that from a caller who
+    /// asked for one. What killed it is not the caller's question; whether the
+    /// deadline held is.
+    ///
+    /// The exit code is deliberately absent: on the killed path it would
+    /// describe the kill rather than the workload, and on the late-exit path
+    /// reporting it is exactly the confusion this variant exists to prevent.
+    ///
+    /// **How far "gone" reaches is the backend's to state.** Backends that own
+    /// a process tree or a container kill the whole thing; a backend whose only
+    /// primitive is the foreground process confirms that process and leaves
+    /// descendants to whatever owns the sandbox's lifetime. Neither is implied
+    /// here — see the backend's own documentation.
+    TimedOut,
+}
+
 /// Streaming exec handle. The dispatcher relays `stdout` / `stderr` to the
-/// executor's own streams, forwards executor stdin into `stdin`, awaits exit
-/// via `waiter`, and calls `terminator` on cancellation signals. Pipe-handle
-/// ownership stays with the underlying process object; the relay does not
-/// close them.
+/// executor's own streams, awaits exit via `waiter`, and calls `terminator` to
+/// tear the exec down.
+///
+/// # Handle ownership
+///
+/// Ownership of `stdout` and `stderr` stays with the underlying process object:
+/// consumers duplicate them and never close the originals.
+///
+/// `stdin` is **not consumed by the executor relay**, which forwards no input.
+/// The streaming path does hand it to an in-process caller, but with a caveat
+/// that is a known gap rather than a contract: because the handle is duplicated
+/// rather than taken, dropping the writer a caller obtained does not close the
+/// child's stdin, so a workload reading to EOF will not see one. Closing it
+/// needs an ownership model this type does not have yet — a pipe reaches EOF
+/// only once *every* write handle is closed, and nothing here can close the
+/// backend's original.
+///
+/// # Reporting failure
+///
+/// Both closures are fallible, and for the same reason: the backend is the only
+/// layer that knows, and a consumer that cannot be told has to guess.
+///
+/// - `waiter` returns an [`ExecOutcome`], so a timeout is reported as one rather
+///   than disguised as the exit code of a killed process. `Err` means the exit
+///   could not be determined — **not** that the process is gone.
+/// - `terminator` returns `Result`, so a kill that the platform refused reaches
+///   the caller instead of being swallowed. It reports whether the request was
+///   *accepted*; a backend that can also confirm the process died should say so
+///   in its own documentation, because this type cannot express the difference.
 pub struct ExecHandle {
     pub stdout: PipeHandle,
     pub stderr: PipeHandle,
     pub stdin: PipeHandle,
-    pub waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    pub terminator: Box<dyn FnOnce() + Send>,
+    pub waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
 }
 
 // Manual Debug impl: the boxed closures can't derive Debug. Pipe handles are
@@ -149,11 +279,54 @@ pub trait StatefulSandboxBackend {
     }
 
     /// Required. Executes the workload and returns a streaming handle.
+    ///
+    /// `consumer` carries the **caller's** intent and is authoritative — see
+    /// [`ExecConsumer`] for the full contract, including why this is not
+    /// [`StdioMode`](crate::sandbox_process::StdioMode) and what each variant
+    /// implies for the topology of the returned streams.
+    ///
+    /// In short: [`ExecConsumer::Library`] means an in-process caller drives
+    /// the returned handle, so the backend must surface separate real pipe
+    /// handles and must not touch the host's console;
+    /// [`ExecConsumer::Executor`] means the executor binary is relaying to its
+    /// own stdio, where a pseudo-console is legitimate and stderr may therefore
+    /// arrive merged into stdout.
+    ///
+    /// # Honored by one backend so far
+    ///
+    /// The above states what an implementation must satisfy to be driven
+    /// through the streaming entry points. It is not yet a description of every
+    /// backend's behaviour:
+    ///
+    /// - **IsolationSession** honors both variants. Under `Library` it starts
+    ///   the process without waiting, hands back its real pipe handles, a waiter
+    ///   that blocks on exit and a terminator that kills, and does not touch the
+    ///   host console. Under `Executor` it relays internally and returns null
+    ///   handles.
+    /// - **Windows Sandbox** and **WSLc** relay internally and return null
+    ///   handles whatever the caller asked for. Under `Library` the streaming
+    ///   adapter now **refuses** such a handle rather than wrapping it, so an
+    ///   in-process caller gets a typed error naming the reason instead of a
+    ///   process with no streams — treat those two as executor-path only.
+    ///
+    /// Reaching any of this from an in-process caller additionally requires the
+    /// experimental opt-in, which the state-aware entry points do not yet expose.
+    ///
+    /// # Backends that cannot serve `Library`
+    ///
+    /// A backend that relays the workload's output to the *host process's* own
+    /// stdio, rather than returning streams, must refuse [`ExecConsumer::Library`]
+    /// **before running anything** — see [`unsupported_library_exec`], which is
+    /// the shared refusal. Returning a handle with no streams instead is a
+    /// contract violation: by then the workload has run, so the refusal the
+    /// caller eventually receives describes side effects that have already
+    /// happened and output that has already gone somewhere it never asked for.
     fn exec(
         &mut self,
         sandbox_id: &str,
         request: &ExecutionRequest,
         config: Option<Self::ExecConfig>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError>;
 
     /// Optional. Default returns success with no metadata.
@@ -254,6 +427,7 @@ mod tests {
             _sandbox_id: &str,
             _request: &ExecutionRequest,
             _config: Option<()>,
+            _consumer: ExecConsumer,
         ) -> Result<ExecHandle, MxcError> {
             Err(MxcError::backend_error("StubBackend::exec not implemented"))
         }
@@ -335,7 +509,12 @@ mod tests {
         // surface this code rather than aborting the test binary.
         let mut b = StubBackend;
         let err = b
-            .exec("stub:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "stub:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
     }

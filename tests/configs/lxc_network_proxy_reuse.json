@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Proxy-Reuse",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"if grep -q '#mxc-proxy-pin' /etc/hosts; then echo PIN_PRESENT_DURING_RUN; else echo PIN_ABSENT_DURING_RUN; fi\""
+  },
+  "lifecycle": {
+    "destroyOnExit": false
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "proxy": { "url": "http://proxy.mxc.test:3128" }
+  }
+}

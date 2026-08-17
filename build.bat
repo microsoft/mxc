@@ -158,6 +158,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
         copy /Y "!BIN_DIR!\mxc_ffi.dll" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
         echo   Copied !RID!\native\mxc_ffi.dll
+        if exist "!BIN_DIR!\plm.exe" (
+            copy /Y "!BIN_DIR!\plm.exe" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+            echo   Copied !RID!\native\plm.exe
+        )
     )
 )
 

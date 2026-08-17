@@ -548,6 +548,9 @@ pub struct CaptureDenialsSection {
     /// a managed per-run temporary file is used. The parent directory must
     /// already exist.
     pub output_path: Option<String>,
+    /// Preserve the sealed ETL trace after analysis and report its path in
+    /// output metadata. Defaults to `false`.
+    pub retain_etl: bool,
 }
 
 /// The containment backend [`build_request_with_containment`] targets — the
@@ -1002,6 +1005,7 @@ fn apply_host_process_backend(
             config["processContainer"]["captureDenials"] = json!({
                 "mode": cd.mode.wire(),
                 "outputPath": cd.output_path,
+                "retainEtl": cd.retain_etl,
             });
         }
         if let Some(network) = config.get_mut("network") {
@@ -1420,11 +1424,13 @@ mod tests {
         let section: CaptureDenialsSection = serde_json::from_value(serde_json::json!({
             "mode": "allow",
             "outputPath": "/tmp/denials.json",
+            "retainEtl": true,
         }))
         .expect("section deserializes");
 
         assert_eq!(section.mode, CaptureDenialsMode::Allow);
         assert_eq!(section.output_path.as_deref(), Some("/tmp/denials.json"));
+        assert!(section.retain_etl);
     }
 
     #[test]
@@ -1434,6 +1440,7 @@ mod tests {
 
         assert_eq!(section.mode, CaptureDenialsMode::Block);
         assert!(section.output_path.is_none());
+        assert!(!section.retain_etl);
     }
 
     #[cfg(target_os = "windows")]
@@ -1448,6 +1455,7 @@ mod tests {
         let policy = policy_with_capture_denials(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
+            retain_etl: true,
         });
         let request = build_request(&policy, None).expect("build_request");
 
@@ -1459,6 +1467,7 @@ mod tests {
             .expect("captureDenials enabled");
         assert_eq!(captured.mode, DomainMode::Allow);
         assert_eq!(captured.output_path.as_deref(), Some(expected.as_str()));
+        assert!(captured.retain_etl);
     }
 
     #[cfg(target_os = "windows")]
@@ -1482,6 +1491,7 @@ mod tests {
         let policy = policy_with_capture_denials(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some("/tmp/denials.json".to_string()),
+            retain_etl: true,
         });
         let request = build_request(&policy, None).expect("build_request");
         assert!(request.inner.policy.capture_denials.is_none());
@@ -1500,21 +1510,25 @@ mod tests {
             let emitted = serde_json::json!({
                 "mode": mode.wire(),
                 "outputPath": Some("/tmp/denials.json"),
+                "retainEtl": true,
             });
             let parsed: wire::CaptureDenials =
                 serde_json::from_value(emitted).expect("emitted object satisfies the wire type");
 
             assert_eq!(parsed.mode, Some(expected));
             assert_eq!(parsed.output_path.as_deref(), Some("/tmp/denials.json"));
+            assert_eq!(parsed.retain_etl, Some(true));
         }
 
         let omitted = serde_json::json!({
             "mode": CaptureDenialsMode::Block.wire(),
             "outputPath": Option::<String>::None,
+            "retainEtl": Option::<bool>::None,
         });
         let parsed: wire::CaptureDenials =
             serde_json::from_value(omitted).expect("null outputPath satisfies the wire type");
         assert!(parsed.output_path.is_none());
+        assert!(parsed.retain_etl.is_none());
     }
 
     // `captureDenials` and `network.proxy` are independent: capture records
@@ -1570,6 +1584,7 @@ mod tests {
         policy.capture_denials = Some(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
+            retain_etl: true,
         });
 
         let request = build_request(&policy, None)
@@ -1582,6 +1597,7 @@ mod tests {
             .as_ref()
             .expect("captureDenials enabled");
         assert_eq!(captured.output_path.as_deref(), Some(expected.as_str()));
+        assert!(captured.retain_etl);
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 

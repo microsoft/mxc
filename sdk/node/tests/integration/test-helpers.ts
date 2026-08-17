@@ -47,6 +47,7 @@ export function getSdkBinDir(): string {
 
 export const EXPECTED_WINDOWS_BINARIES = [
   'wxc-exec.exe',
+  'plm.exe',
   'wxc-host-prep.exe',
   'winhttp-proxy-shim.exe',
   'wxc-test-proxy.exe',
@@ -266,6 +267,12 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
         }
         case 'windows_sandbox': {
           const result = await provisionSandbox('windows_sandbox', undefined, {
+            experimental: true,
+          });
+          return result.sandboxId;
+        }
+        case 'wslc': {
+          const result = await provisionSandbox('wslc', undefined, {
             experimental: true,
           });
           return result.sandboxId;

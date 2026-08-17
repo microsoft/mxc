@@ -92,7 +92,6 @@ dependencies = [
  "learning_mode_windows",
  "process_security_environment_spec",
  "sandbox_spec",
- "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1490,6 +1489,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_config_contract"
+version = "0.7.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "mxc_darwin"
 version = "0.7.0"
 dependencies = [
@@ -1521,11 +1529,14 @@ dependencies = [
  "hyperlight_common",
  "isolation_session_bindings",
  "isolation_session_common",
+ "learning_mode_core",
  "lxc_common",
  "nanvix_runner",
+ "plm",
  "seatbelt_common",
  "serde",
  "serde_json",
+ "windows",
  "windows_sandbox_lifecycle",
  "wslc_common",
  "wxc_common",
@@ -1739,9 +1750,12 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
- "embed-manifest",
+ "getrandom 0.2.17",
+ "learning_mode_core",
+ "learning_mode_windows",
  "mxc_build_common",
  "quick-xml",
+ "serde",
  "serde_json",
  "tempfile",
  "windows",
@@ -3118,6 +3132,7 @@ name = "wslc_common"
 version = "0.7.0"
 dependencies = [
  "anyhow",
+ "base64",
  "libloading",
  "serde",
  "serde_json",
@@ -3157,6 +3172,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
+ "mxc_config_contract",
  "mxc_telemetry",
  "nanvix_common",
  "schemars",

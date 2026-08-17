@@ -18,7 +18,8 @@ use wxc_common::mxc_error::MxcError;
 use wxc_common::process_util::resolve_sibling_binary;
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::state_aware_backend::{
-    DeprovisionResult, ExecHandle, ProvisionResult, StartResult, StatefulSandboxBackend, StopResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
+    StatefulSandboxBackend, StopResult,
 };
 
 use windows::Win32::Foundation::HANDLE;
@@ -755,7 +756,17 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
+        // Before any work: this backend relays to the executor's stdio, so it
+        // cannot serve an in-process caller, and running the workload first
+        // would make the refusal a lie about what has already happened.
+        if consumer == ExecConsumer::Library {
+            return Err(wxc_common::state_aware_backend::unsupported_library_exec(
+                "Windows Sandbox",
+            ));
+        }
+
         extract_token(sandbox_id)?;
 
         // Locate the live daemon holding this sandbox and confirm it is ready
@@ -792,8 +803,13 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             stdout: null,
             stderr: null,
             stdin: null,
-            waiter: Box::new(move || Ok(exit_code)),
-            terminator: Box::new(|| {}),
+            // `Exited`, not `TimedOut`: this backend runs the workload to
+            // completion inside `exec` and reports what the guest returned, so
+            // there is no live process left to have timed out. A `Library` path
+            // that could distinguish the two does not exist here yet.
+            waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+            // Nothing to terminate: the workload is already gone.
+            terminator: Box::new(|| Ok(())),
         })
     }
 
@@ -1032,6 +1048,35 @@ mod tests {
     use super::*;
     use wxc_common::models::{ContainerPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
+
+    /// A `Library` exec is refused before the backend looks for the daemon.
+    ///
+    /// This backend relays the workload's output to *this process's* stdio, so
+    /// it cannot serve an in-process caller. The refusal has to precede any
+    /// work: refusing after the workload ran would report "unsupported" for
+    /// something that already took effect.
+    ///
+    /// `extract_token` would reject this id, and there is no live daemon behind
+    /// it either — so any error other than the refusal means the consumer check
+    /// came too late.
+    #[test]
+    fn a_library_exec_is_refused_before_the_workload_runs() {
+        let mut runner = WindowsSandboxRunner::new();
+        let err = runner
+            .exec(
+                "not-a-valid-sandbox-id",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Library,
+            )
+            .expect_err("an in-process caller must be refused");
+        assert!(
+            err.message
+                .contains("does not support exec for an in-process caller"),
+            "expected the shared refusal ahead of id and daemon checks, got: {}",
+            err.message
+        );
+    }
 
     #[test]
     fn backend_key_matches_wire_format() {
@@ -1273,7 +1318,12 @@ mod tests {
     fn exec_without_live_daemon_is_not_started() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:abcd1234", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:abcd1234",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         // With no daemon holding the sandbox, exec reports NotStarted rather
         // than running anything.
@@ -1284,7 +1334,12 @@ mod tests {
     fn exec_rejects_malformed_id_first() {
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("iso:abc", &ExecutionRequest::default(), None)
+            .exec(
+                "iso:abc",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::MalformedId);
     }
@@ -1496,7 +1551,12 @@ mod tests {
         let _g = StateAwareRootGuard::new();
         let mut backend = WindowsSandboxRunner::new();
         let err = backend
-            .exec("wsb:cccc3333", &ExecutionRequest::default(), None)
+            .exec(
+                "wsb:cccc3333",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Executor,
+            )
             .unwrap_err();
         assert_eq!(err.code, MxcErrorCode::NotStarted);
     }

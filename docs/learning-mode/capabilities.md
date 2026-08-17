@@ -39,10 +39,20 @@ it answers "what would this workload touch if nothing were blocked?" but it does
 so by **not enforcing deny-by-default** for the duration of the run.
 
 Because it relaxes containment, `permissiveLearningMode` is **security-sensitive**:
-whenever it is present, both the AppContainer and BaseContainer runners emit an
-always-visible **security warning** on the host's stderr. In-process Rust callers
-can also inspect it through `Sandbox::warnings()` or `Output::warnings`. It is a
-reserved internal capability enabled by the dedicated audit/capture entry points.
+whenever it is present, both the AppContainer and BaseContainer runners record a
+**security warning**. The library does not write it to the host's stderr — it
+must not write to an embedding process's terminal behind its back — so each
+surface delivers it explicitly:
+
+| Surface | How the warning is delivered |
+|---------|------------------------------|
+| Rust | `Sandbox::warnings()` / `Output::warnings` |
+| C# | `RunResult.Warnings` |
+| C ABI (`mxc_ffi`) | `MxcRunResult::warnings_json_utf8` (JSON array of strings) |
+| `wxc-exec` | printed to stderr after the run — the CLI owns its terminal |
+
+It is a reserved internal capability enabled by the dedicated audit/capture
+entry points.
 
 The parser rejects both learning-mode capability names in
 `processContainer.capabilities`, case-insensitively. This prevents a policy from
@@ -69,8 +79,8 @@ wxc-exec --audit --config <config>
 These entry points inject the reserved capability strings internally; users
 must not add them directly to `processContainer.capabilities`.
 When either learning-mode capability is in effect the runner emits a diagnostic
-describing the mode (informational logging for `learningModeLogging`, an
-always-visible stderr security warning for `permissiveLearningMode`).
+describing the mode (informational logging for `learningModeLogging`, a retained
+security warning for `permissiveLearningMode`, readable via `warnings()`).
 
 ## Three learning-mode flows
 
@@ -117,34 +127,35 @@ Windows-only `captureDenials` config switch drives collecting those events and
 surfacing the resulting denials to the caller. Its `mode` selects how each
 ungranted access is handled while it is recorded:
 
-> **Host requirement.** `captureDenials` requires a feature-enabled Windows
+> **Host selection.** MXC prefers native capture on a feature-enabled Windows
 > build exposing the complete official V2 API set:
 > `StartLearningModeTrace`, `StopLearningModeTrace`,
 > `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
 > `QueryProcessSecurityEnvironmentSupport`, and
-> `CloseProcessSecurityEnvironment`. It is not supported by the AppContainer
-> fallback tiers; unsupported hosts return `backend_unavailable`.
+> `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
+> fully honor the requested policy, MXC retains the highest compatible legacy
+> containment tier (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it
+> with the guarded WPR capture provider. Unsupported hosts return
+> `backend_unavailable` only when neither path can preserve the full policy.
 >
 > Internal validation confirmed that build `26657.1002` exposes only the
 > incompatible earlier contract and is rejected, while build `26663.1000`
 > exposes the complete V2 contract. These are validation points, not a public
 > Windows release-floor commitment; callers should rely on the runtime probe.
 >
-> `captureDenials` cannot be combined with `processContainer.leastPrivilege`;
-> the Windows process security-environment API used for capture does not expose
-> an LPAC token option, so MXC rejects that combination rather than silently
-> weakening the requested policy.
+> Native PSEC capture cannot represent `processContainer.leastPrivilege`
+> because the process security-environment API does not expose an LPAC token
+> option. MXC therefore retains a compatible legacy containment tier and uses
+> guarded WPR instead of weakening or rejecting the requested policy.
 >
-> `captureDenials` also cannot currently be combined with `network.proxy`.
-> The V2 process security-environment proxy contract requires a separate proxy
-> AppContainer peer identity; MXC rejects the combination until that peer is
-> provisioned by the capture launch path.
+> Native PSEC capture also cannot currently represent `network.proxy` without a
+> separate proxy AppContainer peer identity. Compatible requests use guarded
+> WPR with the legacy tier that can enforce the proxy contract.
 >
-> `filesystem.deniedPaths` requires
-> `QueryProcessSecurityEnvironmentSupport` to advertise
-> `PSE_SUPPORT_FS_DENY`. When the bit is absent, capture fails as
-> `backend_unavailable`; it cannot fall back to AppContainer or host-DACL
-> enforcement.
+> Native capture uses `filesystem.deniedPaths` only when
+> `QueryProcessSecurityEnvironmentSupport` advertises `PSE_SUPPORT_FS_DENY`.
+> Otherwise MXC selects a compatible legacy SBOX, AppContainer+BFS, or
+> AppContainer+DACL tier and uses guarded WPR.
 
 - `mode: "block"` (default) maps onto `learningModeLogging`
   (deny-and-record) — the app / user-configurable flow.
@@ -219,6 +230,27 @@ The pointer echoes the file's `summary`; the authoritative record is the file
 itself. In-process Rust callers receive the same information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
-`MxcSandboxProcess.OutputMetadata`. The intermediate ETW `.etl` trace is an
-internal, runner-managed temp file that MXC decodes and then deletes — callers
-never see it.
+`MxcSandboxProcess.OutputMetadata`.
+
+By default, the intermediate ETW `.etl` trace is an internal, runner-managed
+file in a protected per-run temporary directory that MXC deletes after
+analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
+for diagnostics after a terminal wait when native PSEC/V2 capture is selected.
+Guarded-WPR fallback rejects `retainEtl: true` with `backend_unavailable`
+rather than returning its raw host-wide trace. Retention-enabled captures begin under
+`%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and move to a protected
+per-run directory under `capture-denials\retained` only after sealing succeeds.
+Abandoning or disposing a process without a terminal wait deletes the internal
+trace because no caller can observe its structured path. When retention
+succeeds, the structured pointer and in-process metadata include its absolute
+`etlPath`:
+
+```json
+{"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false,"etlPath":"C:\\Users\\runneradmin\\AppData\\Local\\Microsoft\\MXC\\capture-denials\\retained\\4321_0123456789abcdef0123456789abcdef\\capture.etl"}
+```
+
+If analysis fails while retention is enabled, MXC preserves the ETL, includes
+its path in the returned error, and exposes `captureDenialsError` through
+in-process output metadata. ETL traces can contain sensitive resource paths
+and identifiers; callers that retain them are responsible for deleting the ETL
+and its now-empty per-run parent directory when they are no longer needed.

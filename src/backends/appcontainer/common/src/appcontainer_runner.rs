@@ -3,6 +3,7 @@
 
 use std::io::IsTerminal;
 use std::ptr;
+use std::sync::Arc;
 
 use windows::Win32::Foundation::{
     CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
@@ -30,12 +31,15 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::capture_output;
+use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, ScriptResponse,
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, SandboxOutputMetadata,
+    ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -49,7 +53,9 @@ use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
-    "captureDenials requires the BaseContainer learning-mode APIs and is not supported by the AppContainer fallback tier";
+    "captureDenials requires either the native BaseContainer learning-mode APIs or an \
+     AppContainer runner explicitly configured with the guarded-WPR capture fallback \
+     (see AppContainerScriptRunner::with_guarded_capture_factory)";
 
 /// `UpdateProcThreadAttribute` value for
 /// `PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY` that opts the
@@ -518,6 +524,7 @@ pub struct AppContainerScriptRunner {
     app_container_sid: PSID,
     proxy_address: Option<wxc_common::models::ProxyAddress>,
     filesystem_mode: FilesystemMode,
+    denied_paths_enforced_externally: bool,
     /// Optional pre-derived SID string supplied by the dispatcher.
     ///
     /// When `Some`, the runner uses this value for the firewall
@@ -529,6 +536,16 @@ pub struct AppContainerScriptRunner {
     /// [`DeriveAppContainerSidFromAppContainerName`] / `FreeSid`; that
     /// duplicate Win32 call is documented and left as a follow-up.
     preset_sid_string: Option<String>,
+    /// Opts this runner into the guarded-WPR `captureDenials` fallback.
+    ///
+    /// `None` (the default for every plain constructor) means the
+    /// runner behaves exactly as it always has: `captureDenials` is
+    /// rejected in [`SandboxBackend::validate`]. Only a caller that
+    /// explicitly chains [`Self::with_guarded_capture_factory`] (the
+    /// dispatcher, when it selects a legacy tier for a request that
+    /// asked for `captureDenials`) opts a runner into accepting it — see
+    /// the module-level fallback docs on [`crate::guarded_capture`].
+    guarded_capture_factory: Option<Arc<dyn GuardedCaptureFactory>>,
 }
 
 impl AppContainerScriptRunner {
@@ -538,7 +555,9 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: FilesystemMode::Bfs,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
+            guarded_capture_factory: None,
         }
     }
 
@@ -552,7 +571,9 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: None,
+            guarded_capture_factory: None,
         }
     }
 
@@ -570,8 +591,33 @@ impl AppContainerScriptRunner {
             app_container_sid: PSID(ptr::null_mut()),
             proxy_address: None,
             filesystem_mode: mode,
+            denied_paths_enforced_externally: false,
             preset_sid_string: Some(sid_string),
+            guarded_capture_factory: None,
         }
+    }
+
+    /// Opts this runner into the guarded-WPR `captureDenials` legacy-tier
+    /// fallback, using `factory` to start an elevated, process-scoped WPR
+    /// capture for each run.
+    ///
+    /// Must be called explicitly by the caller that selects this runner for
+    /// a `captureDenials` request (the dispatcher, when the native
+    /// BaseContainer tier is unavailable) — an `AppContainerScriptRunner`
+    /// constructed any other way keeps rejecting `captureDenials` in
+    /// [`SandboxBackend::validate`]. See [`crate::guarded_capture`] for the
+    /// full rationale: `appcontainer_common` never depends on `plm`
+    /// directly, so `factory` is a trait object implemented by a higher
+    /// layer (`mxc_engine`) that does.
+    pub fn with_guarded_capture_factory(mut self, factory: Arc<dyn GuardedCaptureFactory>) -> Self {
+        self.guarded_capture_factory = Some(factory);
+        self
+    }
+
+    /// Marks `deniedPaths` as enforced by the dispatcher's per-run DACL guard.
+    pub(crate) fn with_external_denied_paths(mut self) -> Self {
+        self.denied_paths_enforced_externally = true;
+        self
     }
 
     /// Create or derive an AppContainer SID for the given container name.
@@ -1061,6 +1107,81 @@ impl AppContainerScriptRunner {
             }
         };
 
+        // --- Guarded WPR captureDenials session (legacy-tier fallback) ---
+        //
+        // Started only now — after the job has been created, UI-limited,
+        // and the still-suspended child assigned to it — but before the
+        // caller resumes the child (`SpawnedChild::resume`, called by
+        // `SandboxBackend::spawn` right after this function returns). That
+        // ordering means a guardian-start failure can terminate the
+        // still-suspended child without ever leaving an active host-wide
+        // WPR trace running.
+        let (capture_session, capture_output_path): (
+            Option<Box<dyn GuardedCaptureSession>>,
+            Option<std::path::PathBuf>,
+        ) = match (
+            self.guarded_capture_factory.as_ref(),
+            request.policy.capture_denials.as_ref(),
+        ) {
+            (Some(factory), Some(capture_config)) => {
+                let output_path = match capture_output::unique_denials_output_path(
+                    capture_config.output_path.as_deref(),
+                ) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                "captureDenials failed to resolve the denials output path: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                            ))
+                            })?;
+                        return Err(WxcError::Process(format!(
+                            "captureDenials failed to resolve the denials output path: {e}"
+                        )));
+                    }
+                };
+                match factory.start(std::process::id()) {
+                    Ok(session) => {
+                        let session = attach_guarded_capture_or_cleanup(
+                            session,
+                            job.handle_value(),
+                            process_handle.get().0 as usize,
+                            || {
+                                job.terminate_and_wait(u32::MAX)
+                                    .err()
+                                    .map(|error| error.to_string())
+                            },
+                        )
+                        .map_err(WxcError::Process)?;
+                        logger.log_line(&format!(
+                            "guarded WPR captureDenials session started (output: {})",
+                            output_path.display()
+                        ));
+                        (Some(session), Some(output_path))
+                    }
+                    Err(e) => {
+                        // No active trace exists yet -- terminate the
+                        // still-suspended child now, before it is ever
+                        // resumed, so nothing runs unobserved.
+                        job.terminate_and_wait(u32::MAX)
+                            .map_err(|terminate_error| {
+                                WxcError::Process(format!(
+                                    "captureDenials guarded WPR session failed to start: {e}; \
+                                 additionally failed to terminate the suspended sandbox: \
+                                 {terminate_error}"
+                                ))
+                            })?;
+                        return Err(WxcError::Process(format!(
+                            "captureDenials guarded WPR session failed to start: {e}"
+                        )));
+                    }
+                }
+            }
+            _ => (None, None),
+        };
+
         let (stdout_read, stderr_read) = match capture_reads {
             Some((out, err)) => (Some(out), Some(err)),
             None => (None, None),
@@ -1073,6 +1194,8 @@ impl AppContainerScriptRunner {
             thread: thread_handle,
             job,
             pid: pi.dwProcessId,
+            capture_session,
+            capture_output_path,
             stdin_write: captured_stdin_write,
             stdout_read,
             stderr_read,
@@ -1118,6 +1241,15 @@ struct SpawnedChild {
     job: UiJobObject,
     /// OS process id of the child.
     pid: u32,
+    /// Live guarded WPR capture session for `captureDenials`, started
+    /// (while still suspended) by [`AppContainerScriptRunner::spawn_suspended`].
+    /// `Some` only when the runner was configured via
+    /// [`AppContainerScriptRunner::with_guarded_capture_factory`] and the
+    /// request asked for `captureDenials`.
+    capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
+    /// is `Some`.
+    capture_output_path: Option<std::path::PathBuf>,
     /// Parent's stdin write-end (Some only when spawned for streaming).
     stdin_write: Option<OwnedHandle>,
     /// Parent's stdout/stderr read-ends (Some only in streaming mode).
@@ -1128,17 +1260,76 @@ struct SpawnedChild {
 
 impl SpawnedChild {
     /// Resume the suspended child, terminating it on failure.
-    fn resume(&self) -> Result<(), WxcError> {
+    ///
+    /// If a guarded WPR capture was started for this child, a resume
+    /// failure also discards it (see
+    /// [`Self::discard_capture_session_after_launch_failure`]) before
+    /// returning the resume error, so the elevated guardian is never left
+    /// tracing a child that never ran.
+    fn resume(&mut self) -> Result<(), WxcError> {
         let r = unsafe { ResumeThread(self.thread.get()) };
         if r == u32::MAX {
             let err = unsafe { GetLastError() };
             unsafe {
                 let _ = TerminateProcess(self.process.get(), u32::MAX);
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
             }
+            self.discard_capture_session_after_launch_failure();
             return Err(WxcError::Process(format!("ResumeThread failed: {:?}", err)));
         }
         Ok(())
     }
+
+    /// Best-effort teardown of an armed-but-abandoned guarded WPR capture
+    /// session, used when the sandboxed child failed to launch after the
+    /// session was already started.
+    ///
+    /// The child never ran successfully, so there is no analysis result to
+    /// preserve. Stop the trace through the authenticated discard protocol.
+    fn discard_capture_session_after_launch_failure(&mut self) {
+        let Some(mut session) = self.capture_session.take() else {
+            return;
+        };
+        let _ = session.discard();
+    }
+}
+
+/// Attach `session` to the sandbox job / root process, or perform the
+/// security-sensitive abandonment cleanup on failure.
+///
+/// On attach failure the job is terminated (via `terminate_job`, which returns
+/// `Some(message)` if termination failed) **before** the guarded session is
+/// discarded — nothing may keep running once the trace is about to be torn
+/// down — and the returned error reports the attach failure plus any
+/// termination/discard failures, in that order. Returns the live session on
+/// success. Extracted so the orchestration ordering can be unit-tested with a
+/// fake session and a fake job terminator, without a real suspended process.
+fn attach_guarded_capture_or_cleanup(
+    mut session: Box<dyn GuardedCaptureSession>,
+    job_handle: usize,
+    root_process_handle: usize,
+    terminate_job: impl FnOnce() -> Option<String>,
+) -> Result<Box<dyn GuardedCaptureSession>, String> {
+    let Err(attach_error) = session.attach_process_tree(job_handle, root_process_handle) else {
+        return Ok(session);
+    };
+    let termination_error = terminate_job();
+    let discard_error = session.discard().err();
+    let mut message = format!(
+        "captureDenials guarded WPR session failed to attach the sandbox process tree: \
+         {attach_error}"
+    );
+    if let Some(terminate_error) = termination_error {
+        message.push_str(&format!(
+            "; additionally failed to terminate the suspended sandbox: {terminate_error}"
+        ));
+    }
+    if let Some(discard_error) = discard_error {
+        message.push_str(&format!(
+            "; additionally failed to stop and discard guarded WPR: {discard_error}"
+        ));
+    }
+    Err(message)
 }
 
 impl Default for AppContainerScriptRunner {
@@ -1304,13 +1495,27 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request.policy.capture_denials.is_some() {
+        if request
+            .policy
+            .capture_denials
+            .as_ref()
+            .is_some_and(|config| config.retain_etl)
+        {
+            return Err(ScriptResponse {
+                failure_phase: FailurePhase::BackendUnavailable,
+                ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
+            });
+        }
+        if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
                 ..ScriptResponse::error(CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG)
             });
         }
-        if !request.policy.denied_paths.is_empty() && self.filesystem_mode != FilesystemMode::Dacl {
+        if !request.policy.denied_paths.is_empty()
+            && self.filesystem_mode != FilesystemMode::Dacl
+            && !self.denied_paths_enforced_externally
+        {
             return Err(ScriptResponse::error(
                 wxc_common::error::DENIED_PATHS_NOT_SUPPORTED_MSG,
             ));
@@ -1339,7 +1544,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         // Pipes → capture pipes the caller drives; Inherit → the child inherits
         // the binary's own std handles / console (a TTY when the binary has one).
         let capture = stdio == StdioMode::Pipes;
-        let child = match self.spawn_suspended(request, logger, capture) {
+        let mut child = match self.spawn_suspended(request, logger, capture) {
             Ok(c) => c,
             Err(e) => {
                 self.teardown(&mut prepared, request.lifecycle.preserve_policy, logger);
@@ -1389,7 +1594,19 @@ struct AppContainerSandboxProcess {
     filesystem_mode: FilesystemMode,
     preserve_policy: bool,
     timeout_ms: u32,
-    teardown_done: bool,
+    teardown_result: Option<Result<(), String>>,
+    /// Live guarded WPR capture session, moved from the `SpawnedChild`.
+    /// Stopped and analyzed in `run_teardown` once the child has exited and
+    /// been reaped.
+    capture_session: Option<Box<dyn GuardedCaptureSession>>,
+    /// Resolved JSON denials deliverable path. `Some` iff `capture_session`
+    /// is `Some`.
+    capture_output_path: Option<std::path::PathBuf>,
+    /// Exit code of the child, recorded by `wait` before teardown so the
+    /// denials summary can carry it. `None` on the `Drop`/early-exit path.
+    last_exit_code: Option<i32>,
+    /// Structured output published after capture teardown succeeds.
+    output_metadata: Option<SandboxOutputMetadata>,
 }
 
 // SAFETY: the fields are Windows HANDLEs / handle-owning managers and owned
@@ -1438,15 +1655,18 @@ impl AppContainerSandboxProcess {
             filesystem_mode,
             preserve_policy: request.lifecycle.preserve_policy,
             timeout_ms: child.timeout_ms,
-            teardown_done: false,
+            teardown_result: None,
+            capture_session: child.capture_session.take(),
+            capture_output_path: child.capture_output_path.take(),
+            last_exit_code: None,
+            output_metadata: None,
         }
     }
 
-    fn run_teardown(&mut self) {
-        if self.teardown_done {
-            return;
+    fn run_teardown(&mut self) -> std::io::Result<()> {
+        if let Some(result) = &self.teardown_result {
+            return result.clone().map_err(std::io::Error::other);
         }
-        self.teardown_done = true;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         self.prepared
             .network_manager
@@ -1457,10 +1677,68 @@ impl AppContainerSandboxProcess {
         {
             self.prepared.bfs_manager.remove_configuration(&mut logger);
         }
+
+        // Stop and analyze the guarded WPR capture now that the child has
+        // exited and been reaped (both `wait` and `Drop` kill + reap before
+        // calling this). `stop_analyzed` returns only the bounded,
+        // process-scoped `AnalysisResult` -- the raw host-wide ETL never
+        // crosses back into this process. Write it through the same shared
+        // `capture_output` plumbing the native BaseContainer path uses, so
+        // the two paths emit byte-identical JSON.
+        let result: std::io::Result<()> = if let Some(mut session) = self.capture_session.take() {
+            let output_path = self.capture_output_path.take();
+            let exit_code = self.last_exit_code.unwrap_or(-1);
+            let capture_result = match session.stop_analyzed() {
+                Ok(analysis) => match output_path {
+                    Some(output_path) => {
+                        capture_output::write_denials_document(analysis, exit_code, &output_path)
+                    }
+                    None => Err(std::io::Error::other(
+                        "captureDenials internal output path was not initialized",
+                    )),
+                },
+                Err(error) => Err(std::io::Error::other(format!(
+                    "captureDenials failed to stop and analyze the guarded WPR session: {error}"
+                ))),
+            };
+            match capture_result {
+                Ok(metadata) => {
+                    self.output_metadata = Some(SandboxOutputMetadata {
+                        capture_denials: Some(metadata),
+                        capture_denials_error: None,
+                    });
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        } else {
+            Ok(())
+        };
+        let result = result.map_err(|error| error.to_string());
+        self.teardown_result = Some(result.clone());
+        result.map_err(std::io::Error::other)
+    }
+
+    fn release_guarded_capture_after_termination_failure(&mut self) {
+        let Some(session) = self.capture_session.take() else {
+            return;
+        };
+        // The trait contract keeps this call blocked until the elevated
+        // guardian has released its duplicate job handle, even when discard
+        // itself fails. Only then may Drop return and release enforcement.
+        if let Err(error) = crate::guarded_capture::release_after_termination_failure(session) {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to discard guarded WPR capture after sandbox termination failure: {error}"
+            ));
+        }
     }
 }
 
 impl SandboxProcess for AppContainerSandboxProcess {
+    fn output_metadata(&self) -> Option<&SandboxOutputMetadata> {
+        self.output_metadata.as_ref()
+    }
+
     fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
         take_boxed_write(&mut self.stdin)
     }
@@ -1502,8 +1780,27 @@ impl SandboxProcess for AppContainerSandboxProcess {
     fn kill(&mut self) -> std::io::Result<()> {
         // Terminate the whole job: the child and every descendant assigned to
         // it die together (tree-kill).
-        self.job.terminate(u32::MAX);
-        Ok(())
+        if self.capture_session.is_some() {
+            // Guarded-WPR capture needs strict drain certainty before the trace
+            // is stopped/discarded; a failure to drain is a hard error here.
+            return self
+                .job
+                .terminate_and_wait(u32::MAX)
+                .map_err(|error| std::io::Error::other(error.to_string()));
+        }
+        // Ordinary run: terminate the tree, but downgrade a slow drain to a
+        // warning so it does not fail an otherwise valid result.
+        match self.job.terminate_best_effort(u32::MAX) {
+            Ok(Some(drain_warning)) => {
+                capture_output::write_stderr_line_best_effort(format_args!(
+                    "sandbox job did not fully drain within the teardown window (continuing): \
+                     {drain_warning}"
+                ));
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        }
     }
 
     fn wait(&mut self) -> std::io::Result<i32> {
@@ -1541,14 +1838,20 @@ impl SandboxProcess for AppContainerSandboxProcess {
         // (immediate once it has exited) before releasing the pipe drains — and
         // killing the tree closes the descendant's pipe write-ends, so the drains
         // can finish.
-        let _ = self.kill();
-        unsafe {
-            let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+        let termination_result = self.kill();
+        if termination_result.is_ok() {
+            unsafe {
+                let _ = WaitForSingleObject(self.process.get(), u32::MAX);
+            }
         }
         cancel_and_join_discard(stdout_thread, &self.stdout_canceller);
         cancel_and_join_discard(stderr_thread, &self.stderr_canceller);
-        self.run_teardown();
-        result
+        termination_result?;
+        // Record the child's exit code so `run_teardown` can stamp it into the
+        // denials summary. On a timeout / wait failure there is no exit code.
+        self.last_exit_code = result.as_ref().ok().copied();
+        let teardown_result = self.run_teardown();
+        capture_output::combine_process_and_teardown_results(result, teardown_result)
     }
 }
 
@@ -1557,11 +1860,21 @@ impl Drop for AppContainerSandboxProcess {
         // Kill the tree and reap before tearing down firewall/filesystem
         // policy, so an abandoned-but-running sandbox cannot outlive its
         // enforcement (or leak as an orphan). `kill()` terminates the job.
-        let _ = self.kill();
+        if let Err(error) = self.kill() {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "failed to terminate sandbox job during drop: {error}"
+            ));
+            self.release_guarded_capture_after_termination_failure();
+            return;
+        }
         unsafe {
             let _ = WaitForSingleObject(self.process.get(), u32::MAX);
         }
-        self.run_teardown();
+        if let Err(error) = self.run_teardown() {
+            capture_output::write_stderr_line_best_effort(format_args!(
+                "captureDenials teardown failed during drop: {error}"
+            ));
+        }
     }
 }
 
@@ -1833,8 +2146,39 @@ mod tests {
     use super::{
         AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
     };
+    use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
+    use learning_mode_core::AnalysisResult;
+    use std::sync::Arc;
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
+
+    /// A fake [`GuardedCaptureFactory`] used only to exercise `validate()`'s
+    /// factory-presence gate — its `start` is never called by these tests.
+    struct FakeGuardedCaptureFactory;
+
+    impl GuardedCaptureFactory for FakeGuardedCaptureFactory {
+        fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
+            struct FakeSession;
+            impl GuardedCaptureSession for FakeSession {
+                fn attach_process_tree(
+                    &mut self,
+                    _job_handle: usize,
+                    _root_process_handle: usize,
+                ) -> Result<(), String> {
+                    Ok(())
+                }
+
+                fn discard(&mut self) -> Result<(), String> {
+                    Ok(())
+                }
+
+                fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+                    Ok(AnalysisResult::complete(Vec::new()))
+                }
+            }
+            Ok(Box::new(FakeSession))
+        }
+    }
 
     #[test]
     fn validate_runner_rejects_denied_paths_in_bfs_mode() {
@@ -1862,6 +2206,150 @@ mod tests {
             runner.validate(&request).is_ok(),
             "DACL mode supports deniedPaths and should not error"
         );
+    }
+
+    #[test]
+    fn validate_runner_accepts_dispatcher_enforced_denied_paths_in_bfs_mode() {
+        let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs)
+            .with_external_denied_paths();
+        let mut request = ExecutionRequest::default();
+        request.policy.denied_paths = vec!["C:\\secret".into()];
+
+        assert!(runner.validate(&request).is_ok());
+    }
+
+    /// Records the order of guarded-capture callbacks so orchestration tests can
+    /// assert the security-sensitive teardown ordering explicitly.
+    struct RecordingSession {
+        events: Arc<std::sync::Mutex<Vec<String>>>,
+        attach_result: Result<(), String>,
+        discard_result: Result<(), String>,
+    }
+
+    impl GuardedCaptureSession for RecordingSession {
+        fn attach_process_tree(
+            &mut self,
+            _job_handle: usize,
+            _root_process_handle: usize,
+        ) -> Result<(), String> {
+            self.events.lock().unwrap().push("attach".to_string());
+            self.attach_result.clone()
+        }
+
+        fn discard(&mut self) -> Result<(), String> {
+            self.events.lock().unwrap().push("discard".to_string());
+            self.discard_result.clone()
+        }
+
+        fn stop_analyzed(&mut self) -> Result<AnalysisResult, String> {
+            self.events
+                .lock()
+                .unwrap()
+                .push("stop_analyzed".to_string());
+            Ok(AnalysisResult::complete(Vec::new()))
+        }
+    }
+
+    #[test]
+    fn attach_failure_terminates_job_before_discarding_and_composes_message() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Err("discard boom".to_string()),
+        });
+        let events_for_kill = Arc::clone(&events);
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            events_for_kill
+                .lock()
+                .unwrap()
+                .push("terminate".to_string());
+            Some("terminate boom".to_string())
+        }) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        // Ordering is load-bearing: attach is attempted, then the job is
+        // terminated, and only then is the session discarded — nothing may keep
+        // running once the trace is about to be torn down.
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "attach".to_string(),
+                "terminate".to_string(),
+                "discard".to_string()
+            ]
+        );
+        // The composed message reports all three failures, terminate before
+        // discard.
+        assert!(error.contains("attach boom"), "got: {error}");
+        let terminate_at = error.find("terminate boom").expect("terminate reported");
+        let discard_at = error.find("discard boom").expect("discard reported");
+        assert!(
+            terminate_at < discard_at,
+            "terminate must be reported before discard: {error}"
+        );
+    }
+
+    #[test]
+    fn attach_failure_reports_only_attach_when_cleanup_succeeds() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Err("attach boom".to_string()),
+            discard_result: Ok(()),
+        });
+
+        let error = match super::attach_guarded_capture_or_cleanup(session, 1, 2, || None) {
+            Ok(_) => panic!("attach failure must abandon the launch"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("attach boom"), "got: {error}");
+        assert!(
+            !error.contains("additionally"),
+            "clean cleanup must not append failure suffixes: {error}"
+        );
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["attach".to_string(), "discard".to_string()]
+        );
+    }
+
+    #[test]
+    fn attach_success_returns_the_live_session_without_cleanup() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let session = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+
+        let session = super::attach_guarded_capture_or_cleanup(session, 1, 2, || {
+            panic!("the job must not be terminated when attach succeeds")
+        })
+        .expect("attach success returns the live session");
+
+        // The live session is returned undisturbed (no discard on success).
+        assert_eq!(*events.lock().unwrap(), vec!["attach".to_string()]);
+        drop(session);
+    }
+
+    #[test]
+    fn discard_after_launch_failure_stops_the_trace_once() {
+        // The resume-failure path abandons an already-started capture via
+        // `discard`. Model that discard contract directly: it must be invoked
+        // exactly once to stop the trace, with no analysis attempted.
+        let events = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut session: Box<dyn GuardedCaptureSession> = Box::new(RecordingSession {
+            events: Arc::clone(&events),
+            attach_result: Ok(()),
+            discard_result: Ok(()),
+        });
+        let _ = session.discard();
+        assert_eq!(*events.lock().unwrap(), vec!["discard".to_string()]);
     }
 
     #[test]
@@ -1908,6 +2396,41 @@ mod tests {
         assert_eq!(
             error.error_message,
             CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG
+        );
+    }
+
+    #[test]
+    fn validate_runner_accepts_capture_denials_with_guarded_factory() {
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(Default::default());
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "a runner explicitly configured with a guarded capture factory must accept \
+             captureDenials"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_etl_retention_with_guarded_capture() {
+        let runner = AppContainerScriptRunner::new()
+            .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
+        let mut request = ExecutionRequest::default();
+        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
+            retain_etl: true,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("guarded capture must not expose its host-wide ETL");
+
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert_eq!(
+            error.error_message,
+            crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
         );
     }
 }
