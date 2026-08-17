@@ -56,6 +56,7 @@ jobs:
             -Backend '${{ matrix.backend }}' `
             -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') *>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run backend tests
         # A backend that hangs (rather than failing) would otherwise burn the
@@ -68,6 +69,7 @@ jobs:
             -BinaryDirectory (Join-Path $env:GITHUB_WORKSPACE 'artifacts\bin') `
             -Architecture '${{ matrix.architecture }}' *>&1 |
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload failure logs
         if: failure() || cancelled()

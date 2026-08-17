@@ -37,7 +37,7 @@ the individual local test scripts are documented in
 ### Flow
 
 ```
-Validation.Tests.Scheduled.yml (or Validation.Infra.Testing.yml)
+Validation.Tests.Scheduled.yml
   └─ dependency-feed-check
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
@@ -147,7 +147,7 @@ backend **and** has a non-empty pool.
 
 | Plan | Wired to | Contents today |
 |------|----------|----------------|
-| `nightly` | scheduled Mon–Sun, plus `Validation.Infra.Testing.yml` | 4 Windows platforms, 4 Linux platforms |
+| `nightly` | scheduled Mon–Sun | 4 Windows platforms, 4 Linux platforms |
 | `weekly` | scheduled Sunday | empty |
 | `pr` | *(nothing — `Build.yml` does not call the matrix job)* | empty; reserved for a potential future PR-time subset |
 | `enabled` | *(nothing — resolvable locally only)* | reserved for testing this infrastructure and rapid iteration |
@@ -279,8 +279,8 @@ passing a distinguishing argument later without touching the matrix.
 ### Wire an unwired backend to a suite
 
 Replace the explicit failure in the dispatcher with the suite invocation, add
-any host prerequisites, then add the OS/backend pair to a trigger. Verify via
-`Validation.Infra.Testing.yml` on your own branch before touching the schedule.
+any host prerequisites, then add the OS/backend pair to a trigger. Always verify 
+by testing it ahead of time. 
 
 ### Change the schedule
 
@@ -303,6 +303,53 @@ Set the ARM64 `pool` for the platform *and* remove or narrow
 `suppressNonMacArm64` in the resolver. Note that the resolver rejects
 `hyperlight` and `microvm` on ARM64 outright (x64-only runtimes), and the WSLC
 dispatcher still refuses non-x64.
+
+## Testing Your Changes to the Validation Infrastructure
+
+1. Pick a pre-existing trigger or make a custom trigger with the tests you plan 
+   to run in `scripts/ci/validation-test-matrix.json`. 
+2. Create a workflow file in your branch with the following code, replacing the 
+   branch name and plan name with your branch name and trigger name respectively.
+3. Push your changes.
+
+```yml
+name: Validation Infrastructure Testing
+
+on:
+  push:
+    branches:
+      - # BRANCH NAME HERE
+
+concurrency:
+  group: validation-infra-pr-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  dependency-feed-check:
+    uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
+
+  windows:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Job.yml
+
+  linux:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  macos:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.MacOS.Job.yml
+
+  test:
+    needs: [windows, linux, macos]
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
+    with:
+      plan: # YOUR PLAN HERE
+```
 
 ## Important to Note
 
