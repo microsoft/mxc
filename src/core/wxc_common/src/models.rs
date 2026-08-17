@@ -308,6 +308,82 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
+/// Transport protocol for a GA egress port selector.
+///
+/// `Ord` is derived so selectors can be emitted in a stable order; the firewall
+/// argv is asserted byte-for-byte by the LXC spec tests, so iteration order is
+/// part of the contract rather than an implementation detail.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum Protocol {
+    Tcp,
+    Udp,
+    Icmp,
+}
+
+impl From<crate::wire::NetworkProtocol> for Protocol {
+    fn from(p: crate::wire::NetworkProtocol) -> Self {
+        match p {
+            crate::wire::NetworkProtocol::Tcp => Self::Tcp,
+            crate::wire::NetworkProtocol::Udp => Self::Udp,
+            crate::wire::NetworkProtocol::Icmp => Self::Icmp,
+        }
+    }
+}
+
+impl Protocol {
+    /// The `-p` argument value iptables expects for this protocol.
+    pub fn iptables_arg(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::Icmp => "icmp",
+        }
+    }
+}
+
+/// What an egress rule does with traffic it matches.
+///
+/// Deliberately not named `RuleAction`: the LXC firewall emitter already has a
+/// crate-private `RuleAction`, and importing a second identically-named type
+/// into that module would compile while silently reading as the local one.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EgressAction {
+    Allow,
+    Deny,
+}
+
+/// One protocol/port pair from a GA egress rule.
+///
+/// The pair is kept intact all the way to the firewall emitter.  Splitting it
+/// into parallel `protocols` and `ports` lists — the obvious flattening — makes
+/// the emitter cross-product them, so `[(tcp,443), (udp,53)]` would also permit
+/// `tcp:53` and `udp:443`.  That widening fails open, is invisible to schema
+/// validation, and produces no symptom until traffic that should have been
+/// denied is allowed, so the pairing is enforced by the type rather than by
+/// convention.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PortSelector {
+    pub protocol: Protocol,
+    /// `None` matches every port for `protocol`.  Always `None` for `icmp`,
+    /// which the parser enforces.
+    pub port: Option<u16>,
+}
+
+/// A GA egress rule, normalized from the wire into the form the firewall
+/// emitter consumes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EgressRule {
+    /// CIDR ranges or bare IP addresses.  Never DNS names — the parser rejects
+    /// those rather than resolving them.
+    pub destinations: Vec<String>,
+    /// Protocol/port pairs this rule matches.  Empty matches all protocols and
+    /// all ports to `destinations`.
+    pub selectors: Vec<PortSelector>,
+    pub action: EgressAction,
+}
+
 impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     fn from(m: crate::wire::NetworkEnforcement) -> Self {
         match m {
@@ -625,6 +701,13 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    /// GA egress rules, in the order the emitter must apply them: every rule
+    /// derived from `egress.deny` precedes every rule derived from
+    /// `egress.allow`, because the firewall chain is first-match-wins and that
+    /// ordering is the only thing that makes a deny beat an overlapping allow.
+    /// Empty when the config used the legacy `allowedHosts`/`blockedHosts`
+    /// shape, which continues to flow through those fields instead.
+    pub egress_rules: Vec<EgressRule>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Whether the caller supplied a `network` block on the wire (any field

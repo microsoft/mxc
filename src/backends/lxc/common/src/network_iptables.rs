@@ -14,7 +14,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ProxyHostPin,
+    ContainerPolicy, EgressAction, NetworkEnforcementMode, NetworkPolicy, PortSelector,
+    ProxyAddress, ProxyHostPin,
 };
 
 /// One destination the container is allowed to reach when the policy routes
@@ -53,6 +54,11 @@ enum RuleAction {
     Allow,
     Deny,
 }
+
+/// The selector list for a rule that matches every protocol and every port,
+/// which is what both a legacy host-list entry and a GA rule with no `ports`
+/// mean.
+const NO_SELECTORS: &[PortSelector] = &[];
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ResolvedDestinations {
@@ -1164,39 +1170,92 @@ impl NetworkIptablesManager {
     fn build_resolved_destination_rule_args(
         chain_name: &str,
         destinations: &ResolvedDestinations,
+        selectors: &[PortSelector],
         action: &RuleAction,
     ) -> FirewallRuleArgs {
         let mut args = FirewallRuleArgs::default();
         for destination in &destinations.ipv4 {
-            args.ipv4.push(Self::build_single_rule_args(
-                chain_name,
-                destination,
-                action,
-            ));
+            args.ipv4
+                .extend(Self::build_destination_rules(
+                    chain_name,
+                    destination,
+                    selectors,
+                    action,
+                ));
         }
         for destination in &destinations.ipv6 {
-            args.ipv6.push(Self::build_single_rule_args(
-                chain_name,
-                destination,
-                action,
-            ));
+            args.ipv6
+                .extend(Self::build_destination_rules(
+                    chain_name,
+                    destination,
+                    selectors,
+                    action,
+                ));
         }
         args
+    }
+
+    /// Expand one destination into one rule per protocol/port selector.
+    ///
+    /// An empty `selectors` yields exactly one rule carrying no `-p`, which is
+    /// both the legacy `allowedHosts`/`blockedHosts` shape and the GA rule that
+    /// omits `ports`. That single-rule case must stay byte-identical to the
+    /// pre-GA argv, because the spec tests pin the emitted command sequence
+    /// exactly and any extra match would silently narrow every existing policy.
+    ///
+    /// Each selector is a `(protocol, port)` pair and is emitted as one rule.
+    /// Iterating protocols and ports as two independent lists instead would
+    /// cross-product them, so `[(tcp,443), (udp,53)]` would also open `tcp:53`
+    /// and `udp:443` — a widening that fails open and that no schema check can
+    /// see.
+    fn build_destination_rules(
+        chain_name: &str,
+        destination: &str,
+        selectors: &[PortSelector],
+        action: &RuleAction,
+    ) -> Vec<Vec<String>> {
+        if selectors.is_empty() {
+            return vec![Self::build_single_rule_args(
+                chain_name,
+                destination,
+                None,
+                action,
+            )];
+        }
+        selectors
+            .iter()
+            .map(|selector| {
+                Self::build_single_rule_args(chain_name, destination, Some(*selector), action)
+            })
+            .collect()
     }
 
     fn build_single_rule_args(
         chain_name: &str,
         destination: &str,
+        selector: Option<PortSelector>,
         action: &RuleAction,
     ) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "-A".to_string(),
             chain_name.to_string(),
             "-d".to_string(),
             destination.to_string(),
-            "-j".to_string(),
-            Self::rule_action_arg(action).to_string(),
-        ]
+        ];
+        if let Some(selector) = selector {
+            args.push("-p".to_string());
+            args.push(selector.protocol.iptables_arg().to_string());
+            // `icmp` carries no ports, so the parser guarantees `port` is None
+            // there; emitting `--dport` for it would make iptables reject the
+            // whole rule at apply time.
+            if let Some(port) = selector.port {
+                args.push("--dport".to_string());
+                args.push(port.to_string());
+            }
+        }
+        args.push("-j".to_string());
+        args.push(Self::rule_action_arg(action).to_string());
+        args
     }
 
     /// Build the allow/deny rule args for a single host by resolving it once.
@@ -1206,7 +1265,7 @@ impl NetworkIptablesManager {
     #[cfg(test)]
     fn build_host_rule_args(chain_name: &str, host: &str, action: &RuleAction) -> FirewallRuleArgs {
         let destinations = Self::resolve_host(host);
-        Self::build_resolved_destination_rule_args(chain_name, &destinations, action)
+        Self::build_resolved_destination_rule_args(chain_name, &destinations, &[], action)
     }
 
     /// Build the allow/deny rule args for a container policy.
@@ -1268,14 +1327,29 @@ impl NetworkIptablesManager {
         let entries = policy
             .blocked_hosts
             .iter()
-            .map(|host| (host, RuleAction::Deny))
+            .map(|host| (host, NO_SELECTORS, RuleAction::Deny))
             .chain(
                 policy
                     .allowed_hosts
                     .iter()
-                    .map(|host| (host, RuleAction::Allow)),
-            );
-        for (host, action) in entries {
+                    .map(|host| (host, NO_SELECTORS, RuleAction::Allow)),
+            )
+            // GA egress rules arrive from the parser already ordered
+            // deny-before-allow, so chaining them preserves the same
+            // first-match-wins deny precedence the legacy lists rely on. GA and
+            // legacy are mutually exclusive per config, so in practice only one
+            // side of this chain is ever non-empty.
+            .chain(policy.egress_rules.iter().flat_map(|rule| {
+                let action = match rule.action {
+                    EgressAction::Deny => RuleAction::Deny,
+                    EgressAction::Allow => RuleAction::Allow,
+                };
+                let selectors = rule.selectors.as_slice();
+                rule.destinations
+                    .iter()
+                    .map(move |destination| (destination, selectors, action))
+            }));
+        for (host, selectors, action) in entries {
             let destinations = Self::resolve_host(host);
             if destinations.is_empty() {
                 if default_permits && matches!(action, RuleAction::Deny) {
@@ -1292,6 +1366,15 @@ impl NetworkIptablesManager {
                 }
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
             } else if matches!(action, RuleAction::Allow)
+                // A port-scoped allow is deliberately not counted here. The
+                // catch-all test exists to detect an ACCEPT that provably
+                // defeats an unwritten deny, and only a selector-less rule
+                // accepts every port and protocol to every address. A
+                // `0.0.0.0/0` allow restricted to, say, tcp:443 is the
+                // "narrower allow" the paragraph below leaves as a warning:
+                // the closing DROP still covers everything outside it, and
+                // nothing here can show the missing deny falls inside it.
+                && selectors.is_empty()
                 && destinations
                     .ipv4
                     .iter()
@@ -1300,8 +1383,12 @@ impl NetworkIptablesManager {
             {
                 catch_all_allows.push(host);
             }
-            let rule_args =
-                Self::build_resolved_destination_rule_args(chain_name, &destinations, &action);
+            let rule_args = Self::build_resolved_destination_rule_args(
+                chain_name,
+                &destinations,
+                selectors,
+                &action,
+            );
             // Log each destination rule that will be programmed, derived from
             // the built args rather than from `destinations`, so that removing
             // destination-rule emission also removes these lines. This is the
@@ -3929,6 +4016,7 @@ mod tests {
         let rule = NetworkIptablesManager::build_single_rule_args(
             chain_name,
             destination,
+            None,
             &RuleAction::Deny,
         );
 
@@ -3967,6 +4055,7 @@ mod tests {
         let rules = NetworkIptablesManager::build_resolved_destination_rule_args(
             "MXC-resolved",
             &destinations,
+            &[],
             &RuleAction::Allow,
         );
 
@@ -4000,6 +4089,156 @@ mod tests {
                 "IPv6 destination {destination} must not appear in IPv4 rules; actual: {rules:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_rule_without_selectors_emits_the_pre_ga_argv_unchanged() {
+        // Every legacy host-list entry lands here. Any extra match token would
+        // silently narrow policies that predate GA egress.
+        let rules = NetworkIptablesManager::build_destination_rules(
+            "MXC-legacy",
+            "192.0.2.10",
+            &[],
+            &RuleAction::Allow,
+        );
+
+        assert_eq!(
+            rules,
+            vec![strings(&[
+                "-A",
+                "MXC-legacy",
+                "-d",
+                "192.0.2.10",
+                "-j",
+                "ACCEPT"
+            ])],
+            "a selector-less rule should emit exactly the pre-GA argv; actual: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn a_tcp_selector_emits_the_protocol_and_destination_port() {
+        use wxc_common::models::Protocol;
+        let selectors = vec![PortSelector {
+            protocol: Protocol::Tcp,
+            port: Some(443),
+        }];
+        let rules = NetworkIptablesManager::build_destination_rules(
+            "MXC-tcp",
+            "192.0.2.10",
+            &selectors,
+            &RuleAction::Allow,
+        );
+
+        assert_eq!(
+            rules,
+            vec![strings(&[
+                "-A", "MXC-tcp", "-d", "192.0.2.10", "-p", "tcp", "--dport", "443", "-j", "ACCEPT"
+            ])],
+            "a tcp selector should emit -p and --dport between the destination and the \
+             jump target; actual: {rules:?}"
+        );
+    }
+
+    #[test]
+    fn a_protocol_selector_without_a_port_matches_every_port_for_that_protocol() {
+        use wxc_common::models::Protocol;
+        let selectors = vec![PortSelector {
+            protocol: Protocol::Udp,
+            port: None,
+        }];
+        let rules = NetworkIptablesManager::build_destination_rules(
+            "MXC-anyport",
+            "192.0.2.10",
+            &selectors,
+            &RuleAction::Allow,
+        );
+        let rendered = joined(&rules[0]);
+
+        assert!(
+            rendered.contains("-p udp"),
+            "a port-less selector should still constrain the protocol; actual: {rendered}"
+        );
+        assert!(
+            !rendered.contains("--dport"),
+            "a port-less selector must not constrain the port; actual: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_icmp_selector_emits_a_protocol_match_and_no_port() {
+        use wxc_common::models::Protocol;
+        let selectors = vec![PortSelector {
+            protocol: Protocol::Icmp,
+            port: None,
+        }];
+        let rules = NetworkIptablesManager::build_destination_rules(
+            "MXC-icmp",
+            "192.0.2.10",
+            &selectors,
+            &RuleAction::Deny,
+        );
+        let rendered = joined(&rules[0]);
+
+        assert!(
+            rendered.contains("-p icmp"),
+            "an icmp selector should emit the protocol match; actual: {rendered}"
+        );
+        assert!(
+            !rendered.contains("--dport"),
+            "icmp has no ports, and --dport would make iptables reject the rule; \
+             actual: {rendered}"
+        );
+    }
+
+    #[test]
+    fn each_protocol_port_pair_becomes_one_rule_and_no_cross_product_is_emitted() {
+        use wxc_common::models::Protocol;
+        // The widening defect this pins: flattening the wire's (protocol, port)
+        // pairs into two independent lists makes the emitter cross-product
+        // them, so a policy allowing tcp:443 and udp:53 would also open tcp:53
+        // and udp:443. It fails open, and no schema check can see it.
+        let selectors = vec![
+            PortSelector {
+                protocol: Protocol::Tcp,
+                port: Some(443),
+            },
+            PortSelector {
+                protocol: Protocol::Udp,
+                port: Some(53),
+            },
+        ];
+        let rules = NetworkIptablesManager::build_destination_rules(
+            "MXC-pairs",
+            "203.0.113.5",
+            &selectors,
+            &RuleAction::Allow,
+        );
+        let rendered: Vec<String> = rules.iter().map(|rule| joined(rule)).collect();
+
+        assert_eq!(
+            rules.len(),
+            2,
+            "two pairs should emit exactly two rules; actual: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|r| r.contains("-p tcp --dport 443")),
+            "the tcp:443 pair should be programmed; actual: {rendered:?}"
+        );
+        assert!(
+            rendered.iter().any(|r| r.contains("-p udp --dport 53")),
+            "the udp:53 pair should be programmed; actual: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|r| r.contains("-p tcp --dport 53")),
+            "tcp:53 was never requested and must not be opened by cross-producting \
+             the selectors; actual: {rendered:?}"
+        );
+        assert!(
+            !rendered.iter().any(|r| r.contains("-p udp --dport 443")),
+            "udp:443 was never requested and must not be opened by cross-producting \
+             the selectors; actual: {rendered:?}"
+        );
     }
 
     #[test]

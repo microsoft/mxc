@@ -104,6 +104,9 @@ fn convert_network(value: contract::Network) -> wire::Network {
         allow_local_network: allow_local_network.into_option(),
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
+        // The 0.6 contract predates GA egress/ingress, so there is nothing to carry over.
+        egress: None,
+        ingress: None,
         proxy: proxy.into_option().map(convert_proxy),
     }
 }
@@ -114,16 +117,19 @@ fn convert_proxy(value: contract::NetworkProxy) -> wire::Proxy {
             localhost: Some(port.get()),
             builtin_test_server: None,
             url: None,
+            http: None,
         },
         contract::NetworkProxy::BuiltinTestServer(contract::True) => wire::Proxy {
             localhost: None,
             builtin_test_server: Some(true),
             url: None,
+            http: None,
         },
         contract::NetworkProxy::Url(url) => wire::Proxy {
             localhost: None,
             builtin_test_server: None,
             url: Some(url),
+            http: None,
         },
     }
 }

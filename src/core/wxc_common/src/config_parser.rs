@@ -8,10 +8,11 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend, EgressAction,
+    EgressRule, ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, PortSelector, Protocol, ProxyAddress,
+    ProxyConfig, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig,
+    WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -469,14 +470,33 @@ fn host_is_loopback(host: &str) -> bool {
 }
 
 /// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
-/// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
+/// Exactly one of `builtinTestServer` / `localhost` / `url` / `http` may be set.
 fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     // Destructure (no `..`) so a new wire field fails to compile until handled.
     let wire::Proxy {
         builtin_test_server,
         localhost,
         url,
+        http,
     } = proxy;
+
+    // GA `http` and legacy `url` name the same thing, so they are merged here
+    // rather than given a second parser: everything below — credential
+    // redaction, the scheme check, and the mandatory port — must apply to both,
+    // and a separate GA path is how one of those guards gets missed. Accepting
+    // both at once is rejected instead of picking a winner, since either choice
+    // would silently discard a proxy the caller asked for.
+    let (url, url_field) = match (url, http) {
+        (Some(_), Some(_)) => {
+            return Err(WxcError::ConfigParse(
+                "network.proxy may specify only one of url or http".to_string(),
+            ));
+        }
+        (Some(u), None) => (Some(u), "network.proxy.url"),
+        (None, Some(h)) => (Some(h), "network.proxy.http"),
+        (None, None) => (None, "network.proxy.url"),
+    };
+
     let mut proxy_addr = ProxyAddress::new("127.0.0.1".to_string(), 0);
 
     if let Some(builtin) = builtin_test_server {
@@ -517,8 +537,9 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         // these errors all fire before the LXC credential guard downstream
         // runs.
         let redacted = crate::proxy_env::redact_proxy_url(&url_str);
-        let parsed = url::Url::parse(&url_str)
-            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+        let parsed = url::Url::parse(&url_str).map_err(|e| {
+            WxcError::ConfigParse(format!("{url_field} is invalid: {e}"))
+        })?;
 
         // Only http/https are meaningful for the HTTP(S)_PROXY env vars we
         // inject. A non-HTTP scheme (ftp://, socks5://, …) is silently ignored
@@ -526,7 +547,7 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(WxcError::ConfigParse(format!(
-                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+                "{url_field} must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
             )));
         }
 
@@ -534,13 +555,13 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
             .host_str()
             .ok_or_else(|| {
                 WxcError::ConfigParse(format!(
-                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {redacted}"
+                    "{url_field} must include a host (e.g., http://localhost:8080), got: {redacted}"
                 ))
             })?
             .to_string();
         let port = parsed.port().ok_or_else(|| {
             WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {redacted}"
+                "{url_field} must include a port (e.g., http://localhost:8080), got: {redacted}"
             ))
         })?;
 
@@ -551,8 +572,91 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     }
 
     Err(WxcError::ConfigParse(
-        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
+        "network.proxy must specify builtinTestServer, localhost, url, or http".to_string(),
     ))
+}
+
+/// Whether a string is a bare IP address or an IP address with a CIDR prefix.
+///
+/// Deliberately stricter than a permissive parse: the prefix must be ASCII
+/// digits only, so `10.0.0.0/+8` is rejected rather than accepted as `/8`.
+fn is_ip_or_cidr(value: &str) -> bool {
+    let (address, prefix) = match value.split_once('/') {
+        Some((address, prefix)) => (address, Some(prefix)),
+        None => (value, None),
+    };
+    let Ok(ip) = address.parse::<std::net::IpAddr>() else {
+        return false;
+    };
+    let Some(prefix) = prefix else {
+        return true;
+    };
+    if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let Ok(bits) = prefix.parse::<u32>() else {
+        return false;
+    };
+    match ip {
+        std::net::IpAddr::V4(_) => bits <= 32,
+        std::net::IpAddr::V6(_) => bits <= 128,
+    }
+}
+
+/// Convert one GA egress rule into its internal form, rejecting the elements
+/// the Linux firewall path cannot honour.
+fn convert_egress_rule(
+    rule: wire::EgressRuleWire,
+    action: EgressAction,
+    field: &str,
+) -> Result<EgressRule, WxcError> {
+    if rule.to.is_empty() {
+        return Err(WxcError::ConfigParse(format!(
+            "{field}: 'to' must name at least one destination"
+        )));
+    }
+
+    let mut destinations = Vec::with_capacity(rule.to.len());
+    for destination in rule.to {
+        // DNS names are refused rather than resolved. A name resolved at apply
+        // time can answer differently on the next apply -- round-robin, or a
+        // TTL expiring -- so the rule installed would stop matching the rule
+        // the author reviewed, and for a deny that silently unblocks traffic.
+        if !is_ip_or_cidr(&destination.cidr) {
+            return Err(WxcError::ConfigParse(format!(
+                "{field}: 'to.cidr' must be an IP address or CIDR range, got '{}'; \
+                 DNS names are not accepted",
+                destination.cidr
+            )));
+        }
+        destinations.push(destination.cidr);
+    }
+
+    let mut selectors = Vec::with_capacity(rule.ports.len());
+    for port in rule.ports {
+        let protocol = Protocol::from(port.protocol);
+        if protocol == Protocol::Icmp && port.port.is_some() {
+            return Err(WxcError::ConfigParse(format!(
+                "{field}: 'ports.port' cannot be set when 'protocol' is 'icmp', \
+                 which has no ports"
+            )));
+        }
+        if port.port == Some(0) {
+            return Err(WxcError::ConfigParse(format!(
+                "{field}: 'ports.port' must be between 1 and 65535"
+            )));
+        }
+        selectors.push(PortSelector {
+            protocol,
+            port: port.port,
+        });
+    }
+
+    Ok(EgressRule {
+        destinations,
+        selectors,
+        action,
+    })
 }
 
 fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
@@ -1003,7 +1107,13 @@ fn convert_wire_config(
             || net.enforcement_mode.is_some()
             || net.allow_local_network.is_some()
             || net.allowed_hosts.is_some()
-            || net.blocked_hosts.is_some();
+            || net.blocked_hosts.is_some()
+            // GA egress/ingress are network mode fields too. Omitting them here
+            // would let a GA-only network block read as "no mode specified", so
+            // a phase whose network posture is immutable would accept it and
+            // then drop it on the floor.
+            || net.egress.is_some()
+            || net.ingress.is_some();
         if let Some(proxy) = net.proxy {
             // Capture which shorthand was used before the wire proxy is
             // consumed — LXC can't reach a localhost/loopback proxy.
@@ -1111,6 +1221,70 @@ fn convert_wire_config(
         }
         if let Some(v) = net.blocked_hosts {
             policy.blocked_hosts = v;
+        }
+
+        // GA ingress and egress are mapped after the legacy fields so that a GA
+        // block wins wherever the two shapes overlap, which is what the 0.8.0
+        // contract specifies.
+        if let Some(ingress) = net.ingress {
+            if let Some(host_loopback) = ingress.host_loopback {
+                let allow = matches!(host_loopback, wire::HostLoopbackPolicy::Allow);
+                // LXC cannot honour `allow`. Admitting host loopback into the
+                // sandbox needs an MXC-owned forwarder scoped to particular
+                // ports, and the GA contract carries no ports to scope one
+                // with. The firewall path already refuses this at apply time
+                // rather than install an accept that would also admit LAN and
+                // WAN; rejecting it here turns a container-start failure into a
+                // config error that names the field responsible.
+                if allow && containment == ContainmentBackend::Lxc {
+                    let msg = "LXC: network.ingress.hostLoopback 'allow' is not supported; \
+                               admitting inbound connections from host loopback requires a \
+                               port-scoped forwarder, and the schema provides no ports to \
+                               scope it with. Use 'deny'";
+                    logger.log_line(msg);
+                    return Err(WxcError::ConfigParse(msg.to_string()));
+                }
+                policy.allow_local_network = allow;
+            }
+        }
+
+        if let Some(egress) = net.egress {
+            // Mixing the two shapes is refused rather than resolved. Dropping a
+            // `blockedHosts` entry in favour of the GA rules would widen the
+            // policy silently, and there is no reading of the combination that
+            // is obviously the one the author meant.
+            if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+                let msg = "network.egress cannot be combined with network.allowedHosts or \
+                           network.blockedHosts; express every rule under network.egress";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // An omitted `default` is deny, so a GA block listing only allow
+            // rules cannot inherit an accepting legacy `defaultPolicy`.
+            policy.default_network_policy = match egress.default_action {
+                Some(wire::EgressDefault::Allow) => NetworkPolicy::Allow,
+                Some(wire::EgressDefault::Deny) | None => NetworkPolicy::Block,
+            };
+
+            // Deny rules are converted first so that the firewall emitter,
+            // which is first-match-wins, evaluates them ahead of every allow.
+            let mut egress_rules = Vec::with_capacity(egress.deny.len() + egress.allow.len());
+            for rule in egress.deny {
+                egress_rules.push(convert_egress_rule(
+                    rule,
+                    EgressAction::Deny,
+                    "network.egress.deny",
+                )?);
+            }
+            for rule in egress.allow {
+                egress_rules.push(convert_egress_rule(
+                    rule,
+                    EgressAction::Allow,
+                    "network.egress.allow",
+                )?);
+            }
+            policy.egress_rules = egress_rules;
         }
 
         // WSLc routes egress through the cooperative proxy but does not forward
@@ -3160,6 +3334,224 @@ mod tests {
         assert_eq!(req.policy.blocked_hosts.len(), 2);
         assert_eq!(req.policy.blocked_hosts[0], "malicious.com");
         assert_eq!(req.policy.blocked_hosts[1], "tracker.net");
+    }
+
+    #[test]
+    fn ga_egress_pairs_each_protocol_with_its_own_port() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "allow": [{
+                        "to": [{"cidr": "203.0.113.0/24"}],
+                        "ports": [
+                            {"protocol": "tcp", "port": 443},
+                            {"protocol": "udp", "port": 53}
+                        ]
+                    }]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.egress_rules.len(), 1);
+        let rule = &req.policy.egress_rules[0];
+        assert_eq!(rule.destinations, vec!["203.0.113.0/24".to_string()]);
+        assert_eq!(
+            rule.selectors,
+            vec![
+                PortSelector {
+                    protocol: Protocol::Tcp,
+                    port: Some(443)
+                },
+                PortSelector {
+                    protocol: Protocol::Udp,
+                    port: Some(53)
+                },
+            ],
+            "each protocol must keep its own port; a flattened representation would let \
+             the emitter open tcp:53 and udp:443 as well"
+        );
+    }
+
+    #[test]
+    fn ga_egress_deny_rules_precede_allow_rules() {
+        // The firewall chain is first-match-wins, so this ordering is the only
+        // thing that makes a deny beat an overlapping allow.
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {
+                    "default": "allow",
+                    "allow": [{"to": [{"cidr": "10.0.0.0/8"}]}],
+                    "deny": [{"to": [{"cidr": "10.1.2.3"}]}]
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.egress_rules.len(), 2);
+        assert_eq!(req.policy.egress_rules[0].action, EgressAction::Deny);
+        assert_eq!(req.policy.egress_rules[0].destinations[0], "10.1.2.3");
+        assert_eq!(req.policy.egress_rules[1].action, EgressAction::Allow);
+    }
+
+    #[test]
+    fn ga_egress_default_omitted_denies() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "defaultPolicy": "allow",
+                "egress": {"allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(
+            req.policy.default_network_policy,
+            NetworkPolicy::Block,
+            "an omitted GA default must fail closed and must supersede the legacy \
+             defaultPolicy rather than inherit it"
+        );
+    }
+
+    #[test]
+    fn ga_egress_default_allow_permits_unmatched_traffic() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {"egress": {"default": "allow", "deny": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Allow);
+    }
+
+    #[test]
+    fn ga_egress_rejects_a_dns_name_destination() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {"egress": {"allow": [{"to": [{"cidr": "example.com"}]}]}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("DNS names are not accepted"),
+            "expected the GA destination rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ga_egress_rejects_a_port_paired_with_icmp() {
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "egress": {"allow": [{
+                    "to": [{"cidr": "203.0.113.0/24"}],
+                    "ports": [{"protocol": "icmp", "port": 8}]
+                }]}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("cannot be set when 'protocol' is 'icmp'"),
+            "expected the icmp port rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ga_egress_cannot_be_combined_with_legacy_host_lists() {
+        // Resolving the overlap silently would drop a blockedHosts entry the
+        // author wrote, which widens the policy.
+        let json = r#"{
+            "process": {"commandLine": "print('test')"},
+            "network": {
+                "blockedHosts": ["malicious.com"],
+                "egress": {"allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("cannot be combined with"),
+            "expected the mixed-shape rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ga_ingress_host_loopback_allow_is_rejected_for_lxc() {
+        // LXC has no port-scoped host-loopback forwarder, and the GA schema
+        // carries no ports to scope one with, so this is refused at parse time
+        // rather than at container start.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"ingress":{"hostLoopback":"allow"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("network.ingress.hostLoopback 'allow' is not supported"),
+            "expected the LXC host-loopback rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn ga_ingress_host_loopback_deny_is_accepted_for_lxc() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"ingress":{"hostLoopback":"deny"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(!req.policy.allow_local_network);
+    }
+
+    #[test]
+    fn a_ga_only_network_block_still_marks_the_network_mode_as_specified() {
+        // Backends that refuse a network-posture change on an immutable phase
+        // key off this flag; leaving it false would let a GA block through and
+        // then drop it.
+        for fragment in [
+            r#""egress": {"allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}"#,
+            r#""ingress": {"hostLoopback": "deny"}"#,
+        ] {
+            let json = format!(
+                r#"{{"process":{{"commandLine":"x"}},"network":{{{fragment}}}}}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let req = load_request(&encoded, &mut logger, true).unwrap();
+            assert!(
+                req.policy.network_mode_specified,
+                "a GA-only network block should count as a network mode; fragment: {fragment}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cidr_prefix_with_a_sign_is_not_accepted() {
+        assert!(is_ip_or_cidr("10.0.0.0/8"));
+        assert!(is_ip_or_cidr("2001:db8::1"));
+        assert!(!is_ip_or_cidr("10.0.0.0/+8"));
+        assert!(!is_ip_or_cidr("10.0.0.0/33"));
+        assert!(!is_ip_or_cidr("example.com"));
     }
 
     #[test]
