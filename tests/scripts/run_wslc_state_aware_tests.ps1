@@ -283,6 +283,50 @@ function Envelope-Arm {
     '<unknown>'
 }
 
+# StrictMode-safe property read; returns $null when the object or property is
+# absent. run_ci_backend_tests.ps1 imposes Set-StrictMode -Version Latest, under
+# which touching a missing property on a PSCustomObject is a terminating error --
+# and an envelope carries exactly one of `result` / `error`, so the other arm is
+# always missing.
+function Get-JsonProperty {
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Object) { return $null }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
+# The envelope's `error` object, or $null when the envelope is absent/succeeded.
+function Get-EnvelopeError {
+    param($Envelope)
+    Get-JsonProperty $Envelope 'error'
+}
+
+# The envelope's error code, or '<no envelope>' / '<no error>' when absent.
+function Get-EnvelopeErrorCode {
+    param($Envelope)
+    if ($null -eq $Envelope) { return '<no envelope>' }
+    $err = Get-JsonProperty $Envelope 'error'
+    if ($null -eq $err) { return '<no error>' }
+    $code = Get-JsonProperty $err 'code'
+    if ($null -eq $code) { return '<no code>' }
+    return [string]$code
+}
+
+# A property of the envelope's `result` object, or $null when absent.
+function Get-EnvelopeResultProperty {
+    param($Envelope, [Parameter(Mandatory)][string]$Name)
+    Get-JsonProperty (Get-JsonProperty $Envelope 'result') $Name
+}
+
+# The envelope's `result.sandboxId` as a string, or $null when absent.
+function Get-EnvelopeSandboxId {
+    param($Envelope)
+    $id = Get-EnvelopeResultProperty $Envelope 'sandboxId'
+    if ($null -eq $id) { return $null }
+    return [string]$id
+}
+
 # Is the daemon process currently running?
 function Test-DaemonRunning {
     $null -ne (Get-Process -Name $DaemonProcName -ErrorAction SilentlyContinue)
@@ -345,7 +389,7 @@ function Provision-Sandbox {
     $r = Invoke-StateAware -ConfigFile $ConfigFile
     $envObj = Parse-Envelope -Stdout $r.Stdout
     if ((Envelope-Arm $envObj) -ne 'result') { return $null }
-    [string]$envObj.result.sandboxId
+    Get-EnvelopeSandboxId $envObj
 }
 
 # ---------------- Backend-availability probe ----------------
@@ -363,16 +407,17 @@ if ($script:PreExistingDaemon) {
 
 $probe = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
 $probeEnv = Parse-Envelope -Stdout $probe.Stdout
-if ($null -ne $probeEnv -and $probeEnv.error.code -eq 'backend_unavailable') {
+$probeError = Get-EnvelopeError $probeEnv
+if ((Get-EnvelopeErrorCode $probeEnv) -eq 'backend_unavailable') {
     Write-Host "SKIPPED: wxc-exec reports backend_unavailable (built without --features wslc, or no WSLC runtime)" -ForegroundColor Yellow
     exit 0
 }
-if ($null -ne $probeEnv -and $null -ne $probeEnv.result -and $null -ne $probeEnv.result.sandboxId) {
-    $probeSandboxId = [string]$probeEnv.result.sandboxId
+$probeSandboxId = Get-EnvelopeSandboxId $probeEnv
+if ($null -ne $probeSandboxId) {
     Write-Host "Backend probe: provisioned $probeSandboxId, deprovisioning ..." -ForegroundColor DarkGray
     $null = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $probeSandboxId
-} elseif ($null -ne $probeEnv -and $null -ne $probeEnv.error) {
-    Write-Host "WARN: probe provision errored (code=$($probeEnv.error.code)): $($probeEnv.error.message)" -ForegroundColor Yellow
+} elseif ($null -ne $probeError) {
+    Write-Host "WARN: probe provision errored (code=$(Get-EnvelopeErrorCode $probeEnv)): $(Get-JsonProperty $probeError 'message')" -ForegroundColor Yellow
     Write-Host "  Continuing -- individual tests will report specific failures." -ForegroundColor Yellow
 }
 
@@ -386,7 +431,7 @@ try {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "provision"
         if ($envObj) {
-            $script:sandboxId = [string]$envObj.result.sandboxId
+            $script:sandboxId = Get-EnvelopeSandboxId $envObj
             Assert-True ($script:sandboxId -match '^wslc:[0-9a-f]{32}$') `
                 "sandbox_id matches wslc:<32-hex> ($script:sandboxId)"
         }
@@ -399,7 +444,7 @@ try {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_start.json' -SandboxId $script:sandboxId
             $envObj = Assert-ResultEnvelope $r "start"
             if ($envObj) {
-                Assert-True ($null -eq $envObj.result.metadata) "result.metadata absent (no start metadata in v1)"
+                Assert-True ($null -eq (Get-EnvelopeResultProperty $envObj 'metadata')) "result.metadata absent (no start metadata in v1)"
             }
         }
     }
@@ -413,7 +458,7 @@ try {
             Assert-True ($r.Stdout -match 'wslc-state-aware-exec-marker') `
                 "stdout contains the script's output (relayed live, not enveloped)"
             $maybeEnv = Parse-Envelope -Stdout $r.Stdout
-            Assert-True ($null -eq $maybeEnv -or $null -eq $maybeEnv.error) `
+            Assert-True ($null -eq (Get-EnvelopeError $maybeEnv)) `
                 "stdout is not a state-aware error envelope on success"
         }
     }
@@ -500,7 +545,7 @@ try {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_exec_rejected_filesystem.json' -SandboxId $script:sandboxId
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $code = Get-EnvelopeErrorCode $envObj
             Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
         } | Out-Null
     }
@@ -530,7 +575,7 @@ try {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_stop.json' -SandboxId $script:sandboxId
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (stop on stale sandbox failed as expected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $code = Get-EnvelopeErrorCode $envObj
             Assert-True ($code -eq 'not_provisioned') "error.code is 'not_provisioned' (got '$code')"
         } | Out-Null
     }
@@ -559,7 +604,7 @@ try {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_with_filesystem.json'
         $envObj = Assert-ResultEnvelope $r "filesystem provision"
         if ($envObj) {
-            $script:fsSandboxId = [string]$envObj.result.sandboxId
+            $script:fsSandboxId = Get-EnvelopeSandboxId $envObj
             Assert-True ($script:fsSandboxId -match '^wslc:[0-9a-f]{32}$') `
                 "sandbox_id matches wslc:<32-hex> ($script:fsSandboxId)"
         }
@@ -645,7 +690,7 @@ try {
     $netProvisionedOk = Run-StateAwareTest "C: provision (bridged network)" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_bridged.json'
         $envObj = Assert-ResultEnvelope $r "bridged provision"
-        if ($envObj) { $script:netSandboxId = [string]$envObj.result.sandboxId }
+        if ($envObj) { $script:netSandboxId = Get-EnvelopeSandboxId $envObj }
     }
 
     $netStartedOk = $false
@@ -696,7 +741,7 @@ Run-StateAwareTest "D: provision (deniedPaths nested under mount rejected)" {
     $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_denied.json'
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -704,7 +749,7 @@ Run-StateAwareTest "D: provision (host filtering rejected)" {
     $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_hosts.json'
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -712,7 +757,7 @@ Run-StateAwareTest "D: provision (proxy at provision rejected)" {
     $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_rejected_proxy.json'
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -721,7 +766,7 @@ Run-StateAwareTest "D: start (filesystem policy rejected)" {
     $r = Invoke-StateAware -Request $req
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -735,7 +780,7 @@ Run-StateAwareTest "D: start (network.proxy rejected post-provision)" {
     $r = Invoke-StateAware -Request $req
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -744,7 +789,7 @@ Run-StateAwareTest "D: stop (network.proxy rejected post-provision)" {
     $r = Invoke-StateAware -Request $req
     Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (policy rejected)"
     $envObj = Parse-Envelope -Stdout $r.Stdout
-    $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+    $code = Get-EnvelopeErrorCode $envObj
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 } | Out-Null
 
@@ -763,7 +808,7 @@ try {
     $reProvisionedOk = Run-StateAwareTest "E: provision (restart cycle)" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "restart provision"
-        if ($envObj) { $script:reSandboxId = [string]$envObj.result.sandboxId }
+        if ($envObj) { $script:reSandboxId = Get-EnvelopeSandboxId $envObj }
     }
 
     $reStartedOk = $false
@@ -801,7 +846,7 @@ try {
                     $script:reRestartSucceeded = $true
                     Write-Host "  INFO: WSLc supports restart-after-stop on the same sandbox" -ForegroundColor DarkGray
                 } elseif ($arm -eq 'error') {
-                    Write-Host "  INFO: WSLc does NOT support restart-after-stop (error.code=$($envObj.error.code)) -- documented limitation" -ForegroundColor DarkGray
+                    Write-Host "  INFO: WSLc does NOT support restart-after-stop (error.code=$(Get-EnvelopeErrorCode $envObj)) -- documented limitation" -ForegroundColor DarkGray
                 }
             } | Out-Null
 
@@ -843,7 +888,7 @@ try {
     $edgeProvisionedOk = Run-StateAwareTest "F: provision (exec-edge sandbox)" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "edge provision"
-        if ($envObj) { $script:edgeSandboxId = [string]$envObj.result.sandboxId }
+        if ($envObj) { $script:edgeSandboxId = Get-EnvelopeSandboxId $envObj }
     }
 
     # F1: exec BEFORE start -> not_started (the daemon knows the id but the
@@ -854,7 +899,7 @@ try {
             $r = Invoke-StateAware -Request $req
             Assert-True ($r.ExitCode -ne 0) "exit code is non-zero (exec before start rejected)"
             $envObj = Parse-Envelope -Stdout $r.Stdout
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $code = Get-EnvelopeErrorCode $envObj
             Assert-True ($code -eq 'not_started') "error.code is 'not_started' (got '$code')"
         } | Out-Null
     }
@@ -876,7 +921,7 @@ try {
             $r = Invoke-StateAware -Request $slow
             Assert-True ($r.ExitCode -ne 0) "timed-out exec exits non-zero"
             $envObj = Parse-Envelope -Stdout $r.Stdout
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $code = Get-EnvelopeErrorCode $envObj
             Assert-True ($code -eq 'backend_error') "timeout maps to 'backend_error' (got '$code')"
 
             $after = @{ phase = 'exec'; sandboxId = $script:edgeSandboxId; process = @{ commandLine = 'echo survived-timeout'; timeout = 30000 } }
@@ -912,7 +957,7 @@ try {
             $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_deprovision.json' -SandboxId $script:edgeSandboxId
             Assert-True ($r.ExitCode -ne 0) "second deprovision exits non-zero"
             $envObj = Parse-Envelope -Stdout $r.Stdout
-            $code = if ($envObj) { $envObj.error.code } else { '<no envelope>' }
+            $code = Get-EnvelopeErrorCode $envObj
             Assert-True ($code -eq 'not_provisioned') "error.code is 'not_provisioned' (got '$code')"
         } | Out-Null
     }
@@ -937,12 +982,12 @@ try {
     $mcAProvOk = Run-StateAwareTest "G: provision sandbox A" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "multi-container A provision"
-        if ($envObj) { $script:mcSandboxA = [string]$envObj.result.sandboxId }
+        if ($envObj) { $script:mcSandboxA = Get-EnvelopeSandboxId $envObj }
     }
     $mcBProvOk = Run-StateAwareTest "G: provision sandbox B" {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "multi-container B provision"
-        if ($envObj) { $script:mcSandboxB = [string]$envObj.result.sandboxId }
+        if ($envObj) { $script:mcSandboxB = Get-EnvelopeSandboxId $envObj }
     }
 
     if ($mcAProvOk -and $mcBProvOk) {
@@ -1057,7 +1102,7 @@ try {
         $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision.json'
         $envObj = Assert-ResultEnvelope $r "post-teardown provision"
         if ($envObj) {
-            $script:recSandboxId = [string]$envObj.result.sandboxId
+            $script:recSandboxId = Get-EnvelopeSandboxId $envObj
             Assert-True ($script:recSandboxId -match '^wslc:[0-9a-f]{32}$') `
                 "sandbox_id matches wslc:<32-hex> ($script:recSandboxId)"
         }
