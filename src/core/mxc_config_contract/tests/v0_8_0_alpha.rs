@@ -17,5 +17,9 @@ mod network;
 mod one_shot;
 #[path = "v0_8_0_alpha/optional_fields.rs"]
 mod optional_fields;
+#[path = "v0_8_0_alpha/request.rs"]
+mod request;
 #[path = "v0_8_0_alpha/seatbelt.rs"]
 mod seatbelt;
+#[path = "v0_8_0_alpha/state_aware.rs"]
+mod state_aware;
