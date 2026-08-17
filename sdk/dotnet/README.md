@@ -36,6 +36,25 @@ catch (MxcException ex)
 }
 ```
 
+When the failure came from an underlying platform API, `MxcException` also
+carries which call failed and why: `Operation` names the call and `NativeCode`
+carries its status (e.g. `0x80070490`), with `Remediation` holding an
+actionable hint whenever the failure has one. `Operation` and `NativeCode` are
+`null` for failures raised before any API call — a malformed policy, say — and
+`NativeCode` is non-null only when `Operation` is. `ToString()` appends the
+operation and status, so logging the exception alone keeps the diagnosis:
+
+```csharp
+catch (MxcException ex) when (ex.Operation is not null)
+{
+    Console.Error.WriteLine($"{ex.Operation} failed with {ex.NativeCode}: {ex.Message}");
+    if (ex.Remediation is not null)
+    {
+        Console.Error.WriteLine($"  try: {ex.Remediation}");
+    }
+}
+```
+
 `MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for

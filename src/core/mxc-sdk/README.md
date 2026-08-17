@@ -53,6 +53,52 @@ Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
+## Diagnosing a failure
+
+Every fallible **entry point** — [`build_request`],
+[`build_request_with_containment`], [`run`], [`spawn_sandbox`],
+[`exec_sandbox`], [`run_state_aware_json`] — returns an [`Error`] carrying a
+closed [`ErrorCode`] and a message, plus, when the failure came from an
+underlying platform API, the call that failed and its status.
+
+The live [`Sandbox`] handle is the deliberate exception: `wait`, `try_wait`,
+`wait_with_output` and `kill` return [`std::io::Result`], mirroring
+[`std::process::Child`]. An `Err` from those is an actual OS wait or signal
+failure — a timeout is [`WaitOutcome::TimedOut`], not an error.
+
+```rust,no_run
+# fn report(error: mxc_sdk::Error) {
+if let Some(operation) = &error.operation {
+    eprintln!("{operation} failed with {:?}", error.native_code);
+}
+if let Some(hint) = &error.remediation {
+    eprintln!("  try: {hint}");
+}
+# }
+```
+
+[`Error::operation`] and [`Error::native_code`] are **absent** for a failure
+raised before any API call was reached — a malformed policy, say — so their
+presence tells you which side of the boundary the failure came from. A native
+code only ever appears alongside the operation it belongs to, and an API that
+names the call it failed in without supplying a status is a normal, tested
+shape. [`Error::remediation`] carries no such coupling: it is present whenever
+the failure has an actionable hint.
+
+[`Error`] is `#[non_exhaustive]` — read its fields freely, but build one with
+[`Error::new`] rather than by literal, so a field added later costs you nothing.
+
+`Display` appends the operation — and the status when there is one — to the
+message, so a consumer that only logs the error does not silently lose them:
+
+```text
+backend_error: The provision was not found. [IsoSessionOps.StopSessionAsync 0x80070490]
+```
+
+The same three fields cross the C ABI (`mxc_ffi`) and surface on the C# SDK's
+`MxcException` as `Operation` / `NativeCode` / `Remediation`, so a diagnosis
+made here reads the same from every binding.
+
 ## Discovering host backends
 
 Two read-only probes answer "what can I run here?" — for two different
