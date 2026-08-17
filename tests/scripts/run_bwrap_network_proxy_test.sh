@@ -216,4 +216,20 @@ if [ "$SUPERVISOR_REAPED" -ne 1 ]; then
 fi
 echo "PASS: supervisor orphan reaping"
 
+echo "Running Bubblewrap proxy-only egress enforcement test..."
+if ! EGRESS_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_egress_denied.json" 2>&1); then
+    echo "$EGRESS_OUT"
+    echo "FAIL: proxy-only egress (lxc-exec returned non-zero)"
+    exit 1
+fi
+for sentinel in DIRECT_EGRESS_BLOCKED_OK LOOPBACK_EXEMPT_OK TAMPER_INEFFECTIVE_OK PROXY_STILL_OK; do
+    if ! grep -q "$sentinel" <<<"$EGRESS_OUT"; then
+        echo "$EGRESS_OUT"
+        echo "FAIL: proxy-only egress (sentinel '$sentinel' not found in output)"
+        exit 1
+    fi
+done
+echo "PASS: proxy-only egress enforcement"
+
 echo "Bubblewrap network proxy tests complete."

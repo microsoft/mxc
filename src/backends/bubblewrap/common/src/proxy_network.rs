@@ -4,10 +4,10 @@
 //! Rootless private networking for Bubblewrap proxy mode.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Read, Write};
+use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -20,13 +20,29 @@ use wxc_common::models::ProxyAddress;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+/// Ceiling for a single dependency probe. Generous next to a `--version` call,
+/// which returns in milliseconds, so only a genuinely wedged binary trips it.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
+/// Egress chain installed inside the sandbox's own network namespace.
+const EGRESS_CHAIN: &str = "MXC_EGRESS";
+/// Brings up the private network, then closes it down to the proxy before the
+/// workload runs.
+///
+/// Ordering is the security property: the readiness signal is written only
+/// after every rule is installed, and `set -e` turns a failed rule into
+/// supervisor death rather than an unenforced sandbox. Rules are applied here
+/// because that needs `CAP_NET_ADMIN` in the owning user namespace, which the
+/// supervisor holds (`--keep-caps`) and the caller does not.
 const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
 ready_fd="$2"
 exit_fd="$3"
 pid_fd="$4"
+proxy_ip="$5"
+proxy_port="$6"
+chain="$7"
 printf ready > "$state_dir/userns.ready"
 # Block on the parent-owned PID pipe rather than polling for a file: if the
 # parent dies before it can publish the PID, the read ends at EOF and this
@@ -40,10 +56,77 @@ if [ -z "$child_pid" ]; then
     echo "mxc: parent exited before publishing the sandbox PID" >&2
     exit 1
 fi
-exec slirp4netns --configure --mtu=65520 \
-    --ready-fd "$ready_fd" --exit-fd "$exit_fd" \
-    "$child_pid" tap0
+
+# slirp signals readiness internally so the supervisor, not slirp, decides when
+# the sandbox is ready -- the rules below must be in place first.
+exec 9> "$state_dir/slirp.internal"
+slirp4netns --configure --mtu=65520 \
+    --ready-fd 9 --exit-fd "$exit_fd" \
+    "$child_pid" tap0 &
+slirp_pid=$!
+trap 'kill "$slirp_pid" 2>/dev/null || true' TERM INT
+while [ ! -s "$state_dir/slirp.internal" ]; do
+    if ! kill -0 "$slirp_pid" 2>/dev/null; then
+        echo "slirp4netns exited before signalling readiness" >&2
+        exit 1
+    fi
+    sleep 0.01
+done
+
+ns="/proc/$child_pid/ns/net"
+# Deny-all-except-proxy. Loopback is exempt: it is the sandbox's own isolated
+# loopback, so it never leaves the sandbox. Port 53 is deliberately not opened
+# -- the proxy resolves on the workload's behalf, so an accept would only be a
+# DNS-tunnel exfil path out of a proxy-only posture.
+nsenter --net="$ns" -- iptables -N "$chain"
+nsenter --net="$ns" -- iptables -A "$chain" -o lo -j ACCEPT
+nsenter --net="$ns" -- iptables -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
+nsenter --net="$ns" -- iptables -A "$chain" -j DROP
+nsenter --net="$ns" -- iptables -A OUTPUT -j "$chain"
+# The proxy rule is IPv4 only, so v6 carries its closing DROP alone: IPv6
+# egress fails closed rather than being left open.
+nsenter --net="$ns" -- ip6tables -N "$chain"
+nsenter --net="$ns" -- ip6tables -A "$chain" -o lo -j ACCEPT
+nsenter --net="$ns" -- ip6tables -A "$chain" -j DROP
+nsenter --net="$ns" -- ip6tables -A OUTPUT -j "$chain"
+
+eval "printf ready >&$ready_fd"
+wait "$slirp_pid"
 "#;
+
+/// The single destination a proxy-only sandbox may reach.
+///
+/// Must be an IPv4 literal: rules are IPv4 `iptables`, and DNS is closed inside
+/// the sandbox, so a hostname could not be resolved even if a rule existed for
+/// its address. LXC solves that with a hosts-file pin; Bubblewrap has no
+/// equivalent yet and fails closed instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProxyEgress {
+    ip: std::net::Ipv4Addr,
+    port: u16,
+}
+
+impl ProxyEgress {
+    /// Derive the permitted endpoint from the sandbox-visible proxy address.
+    pub(crate) fn from_address(address: &ProxyAddress) -> Result<Self, String> {
+        let host = address.host().trim_matches(['[', ']']);
+        let ip = host.parse::<std::net::Ipv4Addr>().map_err(|_| {
+            format!(
+                "Bubblewrap: proxy-only egress requires an IPv4 proxy endpoint, but the \
+                 sandbox-visible proxy host is '{host}'. Proxy-only egress is enforced with \
+                 IPv4 iptables rules and DNS is closed inside the sandbox, so a hostname or \
+                 IPv6 endpoint cannot be reached. Use a loopback or IPv4 proxy address."
+            )
+        })?;
+        if address.port() == 0 {
+            return Err("Bubblewrap: proxy-only egress requires a non-zero proxy port".to_string());
+        }
+        Ok(Self {
+            ip,
+            port: address.port(),
+        })
+    }
+}
 
 /// Runtime file descriptors Bubblewrap needs while establishing its child.
 pub(crate) struct BwrapStartup {
@@ -142,9 +225,12 @@ pub(crate) struct ProxyNetworkNamespace {
 impl ProxyNetworkNamespace {
     /// Create the capability-retaining namespace supervisor.
     ///
+    /// `egress` is the only destination the sandbox can reach once the
+    /// supervisor signals readiness; everything else is dropped.
+    ///
     /// Callers reach this only after `BwrapRunner::validate` has already run
     /// [`probe_dependencies`], so the probe is not repeated here.
-    pub(crate) fn start(logger: &mut Logger) -> Result<Self, String> {
+    pub(crate) fn start(egress: &ProxyEgress, logger: &mut Logger) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
             .tempdir()
@@ -184,6 +270,9 @@ impl ProxyNetworkNamespace {
             .arg(ready.as_raw_fd().to_string())
             .arg(exit_reader.as_raw_fd().to_string())
             .arg(pid_reader.as_raw_fd().to_string())
+            .arg(egress.ip.to_string())
+            .arg(egress.port.to_string())
+            .arg(EGRESS_CHAIN)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
@@ -299,7 +388,10 @@ impl ProxyNetworkNamespace {
             &self.state_dir.path().join("supervisor.stderr"),
             "slirp4netns",
         )?;
-        logger.log_line("Bubblewrap: slirp4netns configured the private proxy namespace");
+        logger.log_line(
+            "Bubblewrap: slirp4netns configured the private proxy namespace and proxy-only \
+             egress rules are in force",
+        );
         Ok(())
     }
 
@@ -312,14 +404,30 @@ impl ProxyNetworkNamespace {
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         loop {
             match self.supervisor.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(status)) => {
+                    // A clean teardown closes the exit pipe and slirp leaves
+                    // with success. Anything else means it died on its own --
+                    // and since slirp carries the sandbox's only route, that
+                    // is otherwise indistinguishable from the workload's own
+                    // network calls failing. Say so, with whatever it wrote.
+                    if !status.success() {
+                        logger.log_line(&format!(
+                            "WARNING: Bubblewrap: proxy network supervisor exited with {status} \
+                             ({})",
+                            stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
+                        ));
+                    }
+                    return;
+                }
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Ok(None) => {
-                    logger.log_line(
-                        "WARNING: Bubblewrap: slirp4netns did not stop promptly; terminating it",
-                    );
+                    logger.log_line(&format!(
+                        "WARNING: Bubblewrap: slirp4netns did not stop promptly; terminating it \
+                         ({})",
+                        stderr_detail(&self.state_dir.path().join("supervisor.stderr"))
+                    ));
                     terminate_child(&mut self.supervisor);
                     return;
                 }
@@ -376,8 +484,64 @@ pub(crate) fn sandbox_proxy_address(address: &ProxyAddress) -> Result<ProxyAddre
     ))
 }
 
+/// Outcome of a bounded dependency probe.
+#[derive(Debug)]
+struct ProbeOutput {
+    status: ExitStatus,
+    stdout: String,
+}
+
+/// Run `command` to completion, killing it if it outlives [`PROBE_TIMEOUT`].
+///
+/// `Command::output()` waits forever. These probes run inside `validate`, so a
+/// single wedged binary would stall every proxy-mode execution on the host with
+/// no diagnostic -- a hang is far harder to chase than a failure, so bound it
+/// and name the tool that stalled.
+///
+/// stdout is collected only after the child exits. That is safe for probes that
+/// print a version banner or a help page (kilobytes, against a 64 KiB pipe
+/// buffer); a probe whose output could fill the pipe would deadlock against
+/// this wait and must drain the pipe concurrently instead.
+fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("{error}"))?;
+
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                // Leaving it running would keep the pipe open and strand the
+                // process for the lifetime of the host process.
+                terminate_child(&mut child);
+                return Err(format!(
+                    "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
+                     the host's {label} installation appears to be hung"
+                ));
+            }
+            Err(error) => {
+                terminate_child(&mut child);
+                return Err(format!("failed to inspect '{label}': {error}"));
+            }
+        }
+    };
+
+    let mut stdout = String::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        let _ = pipe.read_to_string(&mut stdout);
+    }
+    Ok(ProbeOutput { status, stdout })
+}
+
 pub(crate) fn probe_dependencies() -> Result<(), String> {
-    // Probing costs two subprocess spawns, and the host's tooling does not
+    // Probing costs five subprocess spawns, and the host's tooling does not
     // change under a running process often enough to pay that on every
     // sandbox. Cache the *success* only: a failure is usually "the operator
     // has not installed slirp4netns yet", and caching that would keep failing
@@ -392,15 +556,14 @@ pub(crate) fn probe_dependencies() -> Result<(), String> {
 }
 
 fn probe_dependencies_uncached() -> Result<(), String> {
-    let slirp = Command::new("slirp4netns")
-        .arg("--version")
-        .output()
-        .map_err(|error| {
-            format!(
-                "Bubblewrap: network.proxy requires 'slirp4netns' on PATH: {error}. \
-                 Install slirp4netns or omit network.proxy."
-            )
-        })?;
+    let mut slirp_command = Command::new("slirp4netns");
+    slirp_command.arg("--version");
+    let slirp = run_probe(slirp_command, "slirp4netns").map_err(|error| {
+        format!(
+            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH: {error}. \
+             Install slirp4netns or omit network.proxy."
+        )
+    })?;
     if !slirp.status.success() {
         return Err(format!(
             "Bubblewrap: network.proxy requires a working slirp4netns installation \
@@ -409,16 +572,14 @@ fn probe_dependencies_uncached() -> Result<(), String> {
         ));
     }
 
-    let unshare = Command::new("unshare")
-        .arg("--help")
-        .output()
-        .map_err(|error| {
-            format!("Bubblewrap: proxy networking requires util-linux 'unshare' on PATH: {error}")
-        })?;
-    let help = String::from_utf8_lossy(&unshare.stdout);
+    let mut unshare_command = Command::new("unshare");
+    unshare_command.arg("--help");
+    let unshare = run_probe(unshare_command, "unshare").map_err(|error| {
+        format!("Bubblewrap: proxy networking requires util-linux 'unshare' on PATH: {error}")
+    })?;
     if !unshare.status.success()
-        || !help.contains("--map-current-user")
-        || !help.contains("--keep-caps")
+        || !unshare.stdout.contains("--map-current-user")
+        || !unshare.stdout.contains("--keep-caps")
     {
         return Err(
             "Bubblewrap: proxy networking requires util-linux unshare with \
@@ -426,7 +587,67 @@ fn probe_dependencies_uncached() -> Result<(), String> {
                 .into(),
         );
     }
+
+    // Proxy-only egress is programmed with these, so a host missing them must
+    // fail here rather than deep inside supervisor startup.
+    for (binary, probe) in [
+        ("nsenter", "--version"),
+        ("iptables", "--version"),
+        ("ip6tables", "--version"),
+    ] {
+        let mut command = Command::new(binary);
+        command.arg(probe);
+        let output = run_probe(command, binary).map_err(|error| {
+            format!(
+                "Bubblewrap: network.proxy requires '{binary}' on PATH to enforce proxy-only \
+                 egress: {error}"
+            )
+        })?;
+        if !output.status.success() {
+            return Err(format!(
+                "Bubblewrap: network.proxy requires a working '{binary}' installation \
+                 ({binary} {probe} exited with {})",
+                output.status
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Cap on how much component stderr is quoted into a diagnostic.
+///
+/// A wedged component can write without bound, and this is read from `Drop`, so
+/// the read itself must be bounded rather than trimmed after the fact.
+const MAX_STDERR_TAIL: u64 = 2048;
+
+/// Last [`MAX_STDERR_TAIL`] bytes of `path`, phrased for an error message.
+///
+/// The tail, not the head: whatever actually killed the component is written
+/// last, and a truncated head would quote its startup banner instead.
+fn stderr_detail(path: &std::path::Path) -> String {
+    let text = read_stderr_tail(path);
+    let text = text.trim();
+    if text.is_empty() {
+        return "no stderr output".to_string();
+    }
+    format!("stderr: {text}")
+}
+
+fn read_stderr_tail(path: &std::path::Path) -> String {
+    let Ok(mut file) = File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    if len > MAX_STDERR_TAIL && file.seek(SeekFrom::End(-(MAX_STDERR_TAIL as i64))).is_err() {
+        return String::new();
+    }
+    let mut buffer = Vec::new();
+    if file.take(MAX_STDERR_TAIL).read_to_end(&mut buffer).is_err() {
+        return String::new();
+    }
+    // Seeking to a byte offset can land mid-character; lossy keeps the rest
+    // readable instead of discarding the whole tail.
+    String::from_utf8_lossy(&buffer).into_owned()
 }
 
 fn wait_for_file(
@@ -444,26 +665,19 @@ fn wait_for_file(
         if let Some(status) = child.try_wait().map_err(|error| {
             format!("Bubblewrap: failed to inspect {component} startup: {error}")
         })? {
-            let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
             return Err(format!(
                 "Bubblewrap: {component} exited during startup ({status}): {}",
-                stderr.trim()
+                stderr_detail(stderr_path)
             ));
         }
         if Instant::now() >= deadline {
             // Include whatever the component wrote to stderr: on a timeout it
             // is usually the only evidence of *why* startup stalled, and the
             // process is still alive so no exit status will explain it.
-            let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
-            let stderr = stderr.trim();
-            let detail = if stderr.is_empty() {
-                "no stderr output".to_string()
-            } else {
-                format!("stderr: {stderr}")
-            };
             return Err(format!(
                 "Bubblewrap: timed out waiting for {component} startup after {STARTUP_TIMEOUT:?} \
-                 ({detail})"
+                 ({})",
+                stderr_detail(stderr_path)
             ));
         }
         thread::sleep(Duration::from_millis(10));
@@ -508,6 +722,164 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn egress_opens_the_translated_loopback_proxy() {
+        // Rules must open the translated address, not the original loopback.
+        let address = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let translated = sandbox_proxy_address(&address).unwrap();
+        let egress = ProxyEgress::from_address(&translated).unwrap();
+
+        assert_eq!(egress.ip.to_string(), SLIRP_HOST_GATEWAY);
+        assert_eq!(egress.port, 8080);
+    }
+
+    #[test]
+    fn egress_accepts_a_routable_ipv4_proxy() {
+        let address = ProxyAddress::new("10.1.2.3".into(), 3128);
+        let egress = ProxyEgress::from_address(&address).unwrap();
+
+        assert_eq!(egress.ip.to_string(), "10.1.2.3");
+        assert_eq!(egress.port, 3128);
+    }
+
+    #[test]
+    fn egress_rejects_a_hostname_proxy() {
+        // DNS is closed, so a name the workload cannot resolve must fail loudly
+        // rather than yield a rule that is never reachable.
+        let address = ProxyAddress::from_url(
+            "http://proxy.corp.example:3128",
+            "proxy.corp.example".into(),
+            3128,
+        );
+        let error = ProxyEgress::from_address(&address).unwrap_err();
+
+        assert!(
+            error.contains("proxy.corp.example"),
+            "error should name the offending host: {error}"
+        );
+        assert!(
+            error.contains("IPv4"),
+            "error should explain the IPv4 requirement: {error}"
+        );
+    }
+
+    #[test]
+    fn egress_rejects_an_ipv6_proxy() {
+        // Rules are IPv4-only, so an IPv6 endpoint would never be opened.
+        let address = ProxyAddress::new("[::1]".into(), 8080);
+        let translated = sandbox_proxy_address(&address).unwrap();
+
+        // ::1 is loopback, so translation already yields the IPv4 gateway.
+        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
+
+        let routable = ProxyAddress::new("2001:db8::1".into(), 8080);
+        assert!(ProxyEgress::from_address(&routable).is_err());
+    }
+
+    #[test]
+    fn egress_rejects_a_zero_port() {
+        let address = ProxyAddress::new("10.0.2.2".into(), 0);
+        let error = ProxyEgress::from_address(&address).unwrap_err();
+
+        assert!(
+            error.contains("non-zero"),
+            "error should explain the port requirement: {error}"
+        );
+    }
+
+    /// Byte offset of `needle` in the supervisor script.
+    fn script_offset(needle: &str) -> usize {
+        SUPERVISOR_SCRIPT
+            .find(needle)
+            .unwrap_or_else(|| panic!("supervisor script should contain {needle:?}"))
+    }
+
+    #[test]
+    fn script_accepts_the_proxy_before_dropping() {
+        // iptables is first-match: a DROP appended ahead of the proxy ACCEPT
+        // would black-hole the proxy itself.
+        let accept = script_offset(r#"-p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT"#);
+        let loopback = script_offset(r#"iptables -A "$chain" -o lo -j ACCEPT"#);
+        let drop = script_offset(r#"iptables -A "$chain" -j DROP"#);
+
+        assert!(loopback < accept, "loopback accept must come first");
+        assert!(accept < drop, "proxy accept must precede the closing drop");
+    }
+
+    #[test]
+    fn script_signals_readiness_only_after_rules_are_installed() {
+        // The caller releases the workload on this signal, so emitting it early
+        // would let the workload run with egress wide open.
+        let last_rule = script_offset(r#"ip6tables -A OUTPUT -j "$chain""#);
+        let ready = script_offset(r#"eval "printf ready >&$ready_fd""#);
+
+        assert!(
+            last_rule < ready,
+            "readiness must be signalled after the final rule"
+        );
+    }
+
+    #[test]
+    fn script_does_not_open_dns() {
+        // Deliberate: the proxy resolves on the workload's behalf, so an
+        // unscoped port 53 accept would only be an exfil path. Pinning the full
+        // accept set catches any widening, not just DNS.
+        let accepts: Vec<&str> = SUPERVISOR_SCRIPT
+            .lines()
+            .filter(|line| line.contains("-j ACCEPT"))
+            .collect();
+
+        assert_eq!(
+            accepts,
+            vec![
+                r#"nsenter --net="$ns" -- iptables -A "$chain" -o lo -j ACCEPT"#,
+                r#"nsenter --net="$ns" -- iptables -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT"#,
+                r#"nsenter --net="$ns" -- ip6tables -A "$chain" -o lo -j ACCEPT"#,
+            ],
+            "only loopback and the proxy endpoint may be accepted"
+        );
+    }
+
+    #[test]
+    fn script_fails_ipv6_closed() {
+        let v6_drop = script_offset(r#"ip6tables -A "$chain" -j DROP"#);
+        let v6_hook = script_offset(r#"ip6tables -A OUTPUT -j "$chain""#);
+
+        assert!(v6_drop < v6_hook, "v6 chain must drop before being hooked");
+        assert!(
+            !SUPERVISOR_SCRIPT.contains(r#"ip6tables -A "$chain" -p tcp"#),
+            "v6 must not carry a proxy accept"
+        );
+    }
+
+    #[test]
+    fn script_hooks_both_chains_into_output() {
+        // An unhooked chain is never consulted and enforces nothing.
+        script_offset(r#"iptables -A OUTPUT -j "$chain""#);
+        script_offset(r#"ip6tables -A OUTPUT -j "$chain""#);
+    }
+
+    #[test]
+    fn script_installs_rules_synchronously() {
+        // Offset-based ordering assertions only hold if the rules run inline.
+        // Backgrounding any of them would satisfy those tests while destroying
+        // the guarantee that rules precede readiness.
+        let rules_start = script_offset(r#"nsenter --net="$ns" -- iptables -N "$chain""#);
+        let ready = script_offset(r#"eval "printf ready >&$ready_fd""#);
+        let region = &SUPERVISOR_SCRIPT[rules_start..ready];
+
+        for line in region.lines().filter(|line| line.contains("nsenter")) {
+            assert!(
+                !line.trim_end().ends_with('&'),
+                "rule must not be backgrounded: {line}"
+            );
+            assert!(
+                !line.contains('('),
+                "rule must not run in a subshell: {line}"
+            );
+        }
+    }
 
     #[test]
     fn translates_loopback_proxy_to_slirp_gateway() {
@@ -596,5 +968,89 @@ mod tests {
             flags.contains(FdFlag::FD_CLOEXEC),
             "the parent's own descriptor was left inheritable"
         );
+    }
+
+    #[test]
+    fn probe_gives_up_on_a_hung_binary_instead_of_blocking_forever() {
+        let mut command = Command::new("sleep");
+        command.arg("120");
+
+        let started = Instant::now();
+        let error = run_probe(command, "wedged-tool").expect_err("a hung probe must not succeed");
+        let elapsed = started.elapsed();
+
+        assert!(
+            error.contains("wedged-tool"),
+            "the error must name the tool that hung, got: {error}"
+        );
+        // The point of the change: bounded, not merely eventual. `sleep 120`
+        // would blow this budget by two orders of magnitude if unbounded.
+        assert!(
+            elapsed < PROBE_TIMEOUT * 3,
+            "probe took {elapsed:?}, expected to give up near {PROBE_TIMEOUT:?}"
+        );
+    }
+
+    #[test]
+    fn probe_returns_stdout_of_a_well_behaved_binary() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "echo probe-stdout-marker"]);
+
+        let probe = run_probe(command, "echo").expect("a fast probe must succeed");
+
+        assert!(
+            probe.status.success(),
+            "expected success, got {:?}",
+            probe.status
+        );
+        assert!(
+            probe.stdout.contains("probe-stdout-marker"),
+            "stdout was not captured, got: {:?}",
+            probe.stdout
+        );
+    }
+
+    #[test]
+    fn probe_reports_a_failing_binary_without_treating_it_as_a_hang() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 3"]);
+
+        let probe = run_probe(command, "failing").expect("a clean non-zero exit is not an error");
+
+        assert!(!probe.status.success(), "expected a non-zero exit status");
+    }
+
+    #[test]
+    fn stderr_detail_keeps_the_tail_and_stays_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("supervisor.stderr");
+        // The interesting line is last; everything before it is noise that must
+        // not push it out of the quoted region.
+        let mut noise = "x".repeat(MAX_STDERR_TAIL as usize * 4);
+        noise.push_str("\nfatal: the-actual-failure\n");
+        fs::write(&path, &noise).expect("write stderr");
+
+        let detail = stderr_detail(&path);
+
+        assert!(
+            detail.contains("fatal: the-actual-failure"),
+            "the tail (where the failure is) was dropped: {detail}"
+        );
+        assert!(
+            detail.len() <= MAX_STDERR_TAIL as usize + 64,
+            "quoted stderr was not bounded, got {} bytes",
+            detail.len()
+        );
+    }
+
+    #[test]
+    fn stderr_detail_reports_absence_rather_than_an_empty_string() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(stderr_detail(&missing), "no stderr output");
+
+        let empty = dir.path().join("empty.stderr");
+        fs::write(&empty, "   \n").expect("write stderr");
+        assert_eq!(stderr_detail(&empty), "no stderr output");
     }
 }

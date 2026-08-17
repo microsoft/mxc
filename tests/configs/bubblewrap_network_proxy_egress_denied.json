@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Egress-Denied",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; rc=$?; if [ \"$rc\" = 0 ]; then echo DIRECT_EGRESS_LEAKED; exit 1; fi; echo DIRECT_EGRESS_BLOCKED_OK; timeout 4 bash -c \"exec 3<>/dev/tcp/127.0.0.1/9\" >/dev/null 2>&1; lrc=$?; if [ \"$lrc\" = 124 ]; then echo LOOPBACK_DROPPED; exit 1; fi; echo LOOPBACK_EXEMPT_OK; iptables -F MXC_EGRESS >/dev/null 2>&1 || true; iptables -D OUTPUT -j MXC_EGRESS >/dev/null 2>&1 || true; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; trc=$?; if [ \"$trc\" = 0 ]; then echo TAMPER_DISABLED_EGRESS; exit 1; fi; echo TAMPER_INEFFECTIVE_OK; if ! curl -fsSL --max-time 15 https://api.github.com/zen >/dev/null; then echo PROXY_UNREACHABLE; exit 1; fi; echo PROXY_STILL_OK'"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "builtinTestServer": true }
+  }
+}

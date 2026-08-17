@@ -247,7 +247,23 @@ impl BubblewrapScriptRunner {
         let proxy_address = sandbox_proxy_address.as_ref().or_else(|| proxy.address());
 
         let mut proxy_network = if network_mode == ResolvedNetworkMode::ProxyOnly {
-            match proxy_network::ProxyNetworkNamespace::start(logger) {
+            // The workload dials the sandbox-visible address, so that is what
+            // the egress rule must open.
+            let egress = match sandbox_proxy_address
+                .as_ref()
+                .ok_or_else(|| {
+                    "Bubblewrap: proxy-only networking requires a resolved proxy address"
+                        .to_string()
+                })
+                .and_then(proxy_network::ProxyEgress::from_address)
+            {
+                Ok(egress) => egress,
+                Err(error) => {
+                    proxy.stop(logger);
+                    return Err(ScriptResponse::error(&error));
+                }
+            };
+            match proxy_network::ProxyNetworkNamespace::start(&egress, logger) {
                 Ok(network) => Some(network),
                 Err(error) => {
                     proxy.stop(logger);
@@ -289,10 +305,10 @@ impl BubblewrapScriptRunner {
             args.len()
         );
 
-        // 3. Determine whether iptables network rules are needed. When the
-        //    cooperative proxy is active we skip iptables entirely (host
-        //    enforcement happens at the proxy layer).
-        let needs_iptables = network_mode.requires_iptables();
+        // 3. Determine whether the host-side firewall manager is needed. Proxy
+        //    mode does not use it: it programs its own rules inside the
+        //    sandbox's network namespace instead (see proxy_network).
+        let needs_iptables = network_mode.requires_host_firewall_manager();
         let container_name = if request.container_id.is_empty() {
             format!("bwrap-{:08x}", std::process::id())
         } else {

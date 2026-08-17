@@ -98,8 +98,8 @@ pub(crate) enum ResolvedNetworkMode {
     LegacyProxy,
     /// The host network namespace with per-destination iptables filtering.
     FirewallFiltered,
-    /// Cooperative proxy routing inside a slirp-backed private namespace.
-    /// Later work adds proxy-only egress enforcement.
+    /// Cooperative proxy routing inside a slirp-backed private namespace, with
+    /// egress closed to everything but the proxy.
     ProxyOnly,
 }
 
@@ -152,9 +152,13 @@ impl ResolvedNetworkMode {
         matches!(self, Self::ProxyOnly)
     }
 
-    /// Whether current behavior installs iptables filtering rules.
+    /// Whether the mode uses the host-side firewall manager.
+    ///
+    /// False for `ProxyOnly`, which is *not* iptables-free: it programs rules
+    /// directly into the sandbox's own network namespace from the supervisor
+    /// (see `proxy_network`) rather than going through the host manager.
     #[cfg(any(target_os = "linux", test))]
-    pub(crate) fn requires_iptables(self) -> bool {
+    pub(crate) fn requires_host_firewall_manager(self) -> bool {
         matches!(self, Self::FirewallFiltered)
     }
 }
@@ -566,8 +570,10 @@ mod tests {
         assert!(ResolvedNetworkMode::ProxyOnly.uses_external_userns());
         assert!(!ResolvedNetworkMode::Isolated.uses_external_userns());
         assert!(!ResolvedNetworkMode::LegacyProxy.uses_private_netns());
-        assert!(ResolvedNetworkMode::FirewallFiltered.requires_iptables());
-        assert!(!ResolvedNetworkMode::Shared.requires_iptables());
+        assert!(ResolvedNetworkMode::FirewallFiltered.requires_host_firewall_manager());
+        assert!(!ResolvedNetworkMode::Shared.requires_host_firewall_manager());
+        // ProxyOnly enforces via in-netns rules, not the host manager.
+        assert!(!ResolvedNetworkMode::ProxyOnly.requires_host_firewall_manager());
     }
 
     #[test]
