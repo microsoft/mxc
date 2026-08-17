@@ -103,12 +103,15 @@ pub enum Version {
 }
 }
 
-/// The development `0.8.0-alpha` configuration contract.
 mod experimental;
 mod network;
+/// The development `0.8.0-alpha` one-shot configuration contract.
 mod one_shot;
 mod primitives;
+mod request;
 mod stable;
+/// The development `0.8.0-alpha` state-aware configuration contract.
+mod state_aware;
 
 pub use experimental::{
     OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
@@ -117,8 +120,27 @@ pub use experimental::{
 pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, NetworkProxy};
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, OptionalField, True};
+pub use request::{parse_request, Request, RequestParseError};
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt, Ui,
     UiClipboard,
+};
+pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
+pub use state_aware::{probe_phase, Phase, PhaseProbeError};
+pub use state_aware::{DeprovisionExperimental, DeprovisionPhase, DeprovisionRequest};
+pub use state_aware::{ExecExperimental, ExecPhase, ExecRequest};
+pub use state_aware::{
+    IsolationSessionContainment, IsolationSessionNetwork, IsolationSessionNetworkDefaultPolicy,
+    IsolationSessionProvision, IsolationSessionProvisionExperimental,
+    IsolationSessionProvisionRequest, StateAwareIsolationSession,
+};
+pub use state_aware::{ProvisionPhase, ProvisionRequest};
+pub use state_aware::{StartExperimental, StartPhase, StartRequest};
+pub use state_aware::{
+    StateAwareWslc, WslcContainment, WslcProvision, WslcProvisionExperimental, WslcProvisionRequest,
+};
+pub use state_aware::{StopExperimental, StopPhase, StopRequest};
+pub use state_aware::{
+    WindowsSandboxContainment, WindowsSandboxExperimental, WindowsSandboxProvisionRequest,
 };

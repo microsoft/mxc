@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 use crate::common::{assert_invalid_cases, assert_valid};
-use mxc_config_contract::dev::OneShotRequest;
 
 #[test]
 fn accepts_empty_optional_objects() {
@@ -69,7 +68,7 @@ fn accepts_absent_optional_fields() {
             "process": {"commandLine": "echo"}
         }"#;
 
-    serde_json::from_str::<OneShotRequest>(json).unwrap();
+    assert_valid(json);
 }
 
 #[test]
