@@ -203,8 +203,10 @@ administrator-protected directory, and remove the certificate after testing.
 This exercises the production trust gate without adding an unsigned-build
 bypass; production packages still require the normal Microsoft-signed binary.
 
-`signtool.exe` is a public tool included with the Windows SDK; it is not
-Microsoft-internal. The following PowerShell example creates a one-day,
+`signtool.exe` is included with the Windows SDK. If it is not available on the
+development machine, install the SDK from the
+[official Windows SDK downloads](https://learn.microsoft.com/windows/apps/windows-sdk/downloads)
+before running the example. The following PowerShell creates a one-day,
 non-exportable local certificate, signs a development build, and exports only
 its public certificate:
 
