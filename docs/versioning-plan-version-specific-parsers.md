@@ -1,11 +1,11 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 merged in PR #907, and the Phase 4.2 test-alignment follow-up is
-under review in PR #912. Phase 5A and Phase 5B are under review as GitHub stack
-#911 in PRs #909 and #910. Phase 5C and Phase 5D remain to be implemented.
+#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5A and
+Phase 5B are under review as GitHub stack #911 in PRs #909 and #910. Phase 5C
+is in progress; Phase 5D remains to be implemented.
 
-Base: `origin/main` at `2bbd0345b88c46e9e1e3d5f2eab3a460825be6c7`
+Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
 
 ## Goals
@@ -357,7 +357,7 @@ Status:
 - **Phase 5A** — one-shot development contract, under review in PR #909
 - **Phase 5B** — one-shot development adapter, stacked on 5A in PR #910
 - **Phase 5C** — phase discriminator and state-aware development contracts,
-  not started
+  in progress on `user/gudge/version_specific_config_parsers_phase5c`
 - **Phase 5D** — state-aware adapter and convergence tests, not started
 
 Separate the mutable development contract into:
@@ -372,11 +372,16 @@ dev/
   one_shot.rs
   state_aware/
     mod.rs
-    provision.rs
+    phase.rs
     start.rs
     exec.rs
     stop.rs
     deprovision.rs
+    provision/
+      mod.rs
+      windows_sandbox.rs
+      isolation_session.rs
+      wslc.rs
 ```
 
 Add mutable development adapters outside the contract crate:
@@ -480,9 +485,13 @@ not share test fixtures or conversion helpers.
 
 #### Phase 5C: State-aware development contracts
 
-Add a source-text phase probe after the exact version probe. An absent phase
-selects `dev::one_shot::Request`; a present valid phase selects one of five
-closed state-aware root types. Duplicate, null, non-string, and unknown phase
+The source-text phase probe and the closed `start`, `stop`, and `deprovision`
+roots are implemented. The `exec` root and its structural tests are in
+progress. Provision contracts and typed root selection remain.
+
+The phase probe runs after the exact version probe. An absent phase selects
+`dev::one_shot::Request`; a present valid phase selects the matching
+state-aware root family. Duplicate, null, non-string, and unknown phase
 declarations fail before root deserialization.
 
 Follow-up parser hardening: require an object root in both the version and
@@ -492,8 +501,43 @@ populated positional array, while an all-optional probe can accept an empty
 array. Add a shared map-only probe mechanism and regression tests for empty and
 populated array roots rather than fixing only the phase probe.
 
-Provision defines a state-aware-specific containment enum. Initially it should
-contain only concrete backends with lifecycle implementations:
+Exact phase fields use private-macro-generated zero-sized string markers
+(`StartPhase`, `ExecPhase`, `StopPhase`, `DeprovisionPhase`, and
+`ProvisionPhase`) rather than the broad `Phase` enum. This makes a request with
+the wrong valid phase fail structurally. The private `string_marker!` macro is
+also used for exact provision containment markers; it adds no public `TryFrom`
+surface.
+
+Start, stop, and deprovision each own independent closed experimental wrapper
+types. They currently contain only optional telemetry, but are not shared so a
+future phase-specific field cannot accidentally widen the other contracts.
+Their roots require `sandboxId`, optionally accept annotations and a relayed
+correlation vector, and reject containment, process, policy, lifecycle,
+one-shot backend sections, and backend-specific experimental payloads.
+
+Exec follows the same envelope pattern but additionally requires the process
+block and accepts the top-level network field used for WSLC's cooperative
+per-exec proxy. It rejects containment, provision-time filesystem/UI policy,
+lifecycle, one-shot backend sections, and backend-specific experimental
+payloads.
+
+Provision uses a second discrimination step. After `phase` selects the
+provision family, probe the required exact `containment` value and deserialize
+one of three backend-specific roots:
+
+```text
+phase == provision
+    |
+    +-- containment == windows_sandbox
+    |       --> WindowsSandboxProvisionRequest
+    +-- containment == isolation_session
+    |       --> IsolationSessionProvisionRequest
+    `-- containment == wslc
+            --> WslcProvisionRequest
+```
+
+The public provision discriminator contains only concrete backends with
+lifecycle implementations:
 
 - `windows_sandbox`
 - `isolation_session`
@@ -503,19 +547,65 @@ Do not reuse the one-shot containment enum. In particular, do not accept the
 abstract `vm` intent for state-aware provision unless abstract state-aware
 backend selection is made an explicit requirement.
 
-Each phase root must encode its field matrix structurally:
+Each concrete provision root uses its own exact zero-sized containment marker,
+not the broad provision discriminator enum. Therefore a Windows Sandbox root
+cannot deserialize a request declaring `containment: "wslc"`, and no custom
+cross-field `Deserialize` validation is required.
 
-- provision accepts containment, provision-time policy, and only the selected
-  backend's provision configuration
-- start, stop, and deprovision require `sandboxId` and accept no process block
-- exec requires `sandboxId` and the process block
-- post-provision phases reject containment and immutable provision-time policy
-- correlation-vector and telemetry fields appear only on the phases where the
-  existing state-aware protocol accepts them
+Expose the selected result as:
+
+```rust
+pub enum ProvisionRequest {
+    WindowsSandbox(WindowsSandboxProvisionRequest),
+    IsolationSession(IsolationSessionProvisionRequest),
+    Wslc(WslcProvisionRequest),
+}
+```
+
+The provision containment probe rejects missing, duplicate, null, non-string,
+unknown, abstract, one-shot-only, and non-state-aware containment values.
+
+The backend-specific provision roots encode their field matrices
+structurally:
+
+- Windows Sandbox accepts provision-time filesystem policy and no
+  backend-specific provision payload (`ProvisionConfig = ()`)
+- IsolationSession accepts the top-level network acknowledgment and optional
+  `experimental.isolation_session.provision.appId`
+- WSLC accepts provision-time filesystem and network policy plus optional
+  `experimental.wslc.provision.image` and `imageTarPath`
+- all three accept annotations and optional telemetry
+- all three reject `sandboxId`, `correlationVector`, process, lifecycle,
+  one-shot backend sections, foreign backend payloads, and fields belonging to
+  another provision backend
 
 Every experimental object and nested phase/backend object is recursively
 closed. The contract crate defines its own backend payload types and retains
 its dependency boundary; it does not import backend crates.
+
+After all phase/backend roots exist, add a typed development request selector:
+
+```rust
+pub enum Request {
+    OneShot(OneShotRequest),
+    Provision(ProvisionRequest),
+    Start(StartRequest),
+    Exec(ExecRequest),
+    Stop(StopRequest),
+    Deprovision(DeprovisionRequest),
+}
+```
+
+Selection is source-text driven: probe phase, use one-shot when absent, probe
+containment only for provision, then deserialize exactly one closed root.
+
+Contract tests use phase-specific files. Start, stop, and deprovision have
+complete acceptance, required-field, type, null, duplicate, recursive-closure,
+forbidden-field, annotation, correlation-vector, and telemetry matrices. Exec
+uses the same baseline plus process and exec-time network coverage. Provision
+tests must additionally prove containment discrimination, exact marker
+enforcement, backend-key/phase-key closure, and rejection of foreign backend
+fields.
 
 #### Phase 5D: State-aware development adapter and convergence
 
