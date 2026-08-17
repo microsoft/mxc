@@ -18,7 +18,7 @@
 
 Read these in order:
 
-1. [Sandbox Policy spec](sandbox-policy/v1/policy.md): what
+1. [Sandbox Policy spec](sandbox-policy/0.7.0/policy.md): what
 Policy and ContainerConfig are, design principles.
 2. [Versioning Design](versioning.md): how policy/schema/SDK
 versions relate and when to bump.
@@ -101,7 +101,7 @@ If your feature touches SandboxPolicy, update
 If your feature adds policy or config fields, you will need
 to plumb them through `createConfigFromPolicy()` in
 `sdk/node/src/sandbox.ts`. See the
-[worked example in the Sandbox Policy spec](sandbox-policy/v1/policy.md#10-worked-example-ui-policy)
+[worked example in the Sandbox Policy spec](sandbox-policy/0.7.0/policy.md#10-worked-example-ui-policy)
 for a walkthrough.
 
 ---

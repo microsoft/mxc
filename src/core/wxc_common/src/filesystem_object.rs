@@ -36,6 +36,7 @@
 
 use crate::logger::Logger;
 use crate::models::ContainerPolicy;
+use std::path::Path;
 
 /// Intent class for a policy path, ordered least → most restrictive so that
 /// `max()` yields the strictest intent in a group of aliases.
@@ -94,6 +95,18 @@ enum PathResolution {
     Unknown,
 }
 
+/// Result of comparing two paths by filesystem-object identity.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExistingObjectComparison {
+    /// Both paths resolved to the same object.
+    Same,
+    /// At least one path is absent (on Windows, with neither path unknown), or
+    /// both resolved to different objects.
+    Different,
+    /// At least one existing or potentially existing path could not be examined.
+    Unknown,
+}
+
 /// Resolve a path to its filesystem-object identity, following symlinks so two
 /// names for the same target collide.
 ///
@@ -102,7 +115,7 @@ enum PathResolution {
 /// ([`PathResolution::Unknown`]), so the caller can fail closed on the latter
 /// without rejecting the common "path created at mount time" case.
 #[cfg(unix)]
-fn resolve_object(path: &str) -> PathResolution {
+fn resolve_object(path: &Path) -> PathResolution {
     use std::os::unix::fs::MetadataExt;
     // `metadata` follows symlinks, giving the target object's identity.
     match std::fs::metadata(path) {
@@ -121,7 +134,8 @@ fn resolve_object(path: &str) -> PathResolution {
 }
 
 #[cfg(windows)]
-fn resolve_object(path: &str) -> PathResolution {
+fn resolve_object(path: &Path) -> PathResolution {
+    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND,
@@ -132,7 +146,11 @@ fn resolve_object(path: &str) -> PathResolution {
         OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let share = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 
     // FILE_READ_ATTRIBUTES is the minimum access GetFileInformationByHandleEx
@@ -159,7 +177,7 @@ fn resolve_object(path: &str) -> PathResolution {
             // SAFETY: reads the thread-local last error set by the failed call.
             let err = unsafe { GetLastError() };
             return if err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND {
-                PathResolution::Absent
+                classify_not_found_leaf_windows(path)
             } else {
                 PathResolution::Unknown
             };
@@ -191,11 +209,60 @@ fn resolve_object(path: &str) -> PathResolution {
     })
 }
 
+#[cfg(windows)]
+fn classify_not_found_leaf_windows(path: &Path) -> PathResolution {
+    use windows::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND};
+
+    match std::fs::symlink_metadata(path) {
+        // `symlink_metadata` examines the leaf without following its reparse
+        // point. Success here means the followed open may have failed because
+        // the leaf is a dangling symlink/junction, which must fail closed.
+        Ok(_) => PathResolution::Unknown,
+        Err(error) => match error.raw_os_error() {
+            Some(code)
+                if code == ERROR_FILE_NOT_FOUND.0 as i32
+                    || code == ERROR_PATH_NOT_FOUND.0 as i32 =>
+            {
+                PathResolution::Absent
+            }
+            _ => PathResolution::Unknown,
+        },
+    }
+}
+
 #[cfg(not(any(unix, windows)))]
-fn resolve_object(_path: &str) -> PathResolution {
+fn resolve_object(_path: &Path) -> PathResolution {
     // No way to determine object identity on unsupported platforms; treat as
     // unexaminable so the fail-closed path applies when deniedPaths are present.
     PathResolution::Unknown
+}
+
+/// Compare two paths by filesystem-object identity.
+pub fn compare_existing_filesystem_objects(a: &Path, b: &Path) -> ExistingObjectComparison {
+    compare_resolved_filesystem_objects(resolve_object(a), resolve_object(b))
+}
+
+fn compare_resolved_filesystem_objects(
+    a: PathResolution,
+    b: PathResolution,
+) -> ExistingObjectComparison {
+    match (a, b) {
+        (PathResolution::Object(a), PathResolution::Object(b)) if a == b => {
+            ExistingObjectComparison::Same
+        }
+        // Unknown must take precedence over Absent on every platform. Treating
+        // an unexaminable path as merely different would let callers proceed
+        // without proving that the policy paths refer to distinct objects.
+        (PathResolution::Unknown, _) | (_, PathResolution::Unknown) => {
+            ExistingObjectComparison::Unknown
+        }
+        (PathResolution::Absent, _) | (_, PathResolution::Absent) => {
+            ExistingObjectComparison::Different
+        }
+        (PathResolution::Object(_), PathResolution::Object(_)) => {
+            ExistingObjectComparison::Different
+        }
+    }
 }
 
 /// Detect cross-path object conflicts and return a tightened copy of `policy`.
@@ -254,7 +321,7 @@ pub fn normalize_object_conflicts(
     let has_denied = !policy.denied_paths.is_empty();
     let mut groups: HashMap<ObjectId, Vec<usize>> = HashMap::new();
     for (i, (path, intent)) in entries.iter().enumerate() {
-        match resolve_object(path) {
+        match resolve_object(Path::new(path)) {
             PathResolution::Object(id) => {
                 groups.entry(id).or_default().push(i);
             }
@@ -366,6 +433,18 @@ pub fn normalize_object_conflicts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_resolution_takes_precedence_over_absent() {
+        assert_eq!(
+            compare_resolved_filesystem_objects(PathResolution::Absent, PathResolution::Unknown),
+            ExistingObjectComparison::Unknown
+        );
+        assert_eq!(
+            compare_resolved_filesystem_objects(PathResolution::Unknown, PathResolution::Absent),
+            ExistingObjectComparison::Unknown
+        );
+    }
     use crate::logger::{Logger, Mode};
 
     fn policy(rw: &[&str], ro: &[&str], dn: &[&str]) -> ContainerPolicy {
@@ -509,6 +588,30 @@ mod tests {
         );
         assert!(out.readonly_paths.contains(&a.to_string()));
         assert!(out.readonly_paths.contains(&b.to_string()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn dangling_symlink_is_unknown_even_when_target_is_absent() {
+        use std::os::windows::fs::symlink_file;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("missing-target");
+        let link = dir.path().join("dangling-link");
+        if let Err(error) = symlink_file(&target, &link) {
+            // Creating symlinks requires Developer Mode or SeCreateSymbolicLink
+            // privilege on some supported Windows hosts.
+            if error.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("failed to create dangling symlink: {error}");
+        }
+
+        assert!(matches!(resolve_object(&link), PathResolution::Unknown));
+        assert_eq!(
+            compare_existing_filesystem_objects(&link, &target),
+            ExistingObjectComparison::Unknown
+        );
     }
 
     #[cfg(unix)]

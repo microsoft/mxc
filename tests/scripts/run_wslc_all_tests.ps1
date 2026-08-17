@@ -5,6 +5,11 @@
 # Requires: Windows 11, WSL2 enabled, WSLC SDK installed, pre-pulled images.
 # Cannot run in GitHub Actions CI (needs WSL2 + WSLC runtime).
 #
+# Runs the one-shot WSLC configs directly, then delegates to
+# run_wslc_state_aware_tests.ps1 for the state-aware lifecycle suite, folding its
+# result into the overall summary (so this is the single entry point for all
+# WSLC E2E coverage).
+#
 # Usage:
 #   .\run_wslc_all_tests.ps1              # release build (default), pulls images first
 #   .\run_wslc_all_tests.ps1 -Debug       # debug build
@@ -333,6 +338,23 @@ $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
     -OutputContains "PASS: container ran (destroyOnExit=true)"))
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false.json" `
     -OutputContains "PASS: container ran (destroyOnExit=false)"))
+
+Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
+# Delegate the multi-invocation provision/start/exec/stop/deprovision lifecycle
+# to its owning harness (it needs the daemon binary, mints + threads sandbox ids,
+# and drives the idle-teardown watchdog). Images are already pre-pulled above, so
+# skip its redundant preflight. Fold its exit code into the summary.
+$saScript = Join-Path $PSScriptRoot "run_wslc_state_aware_tests.ps1"
+$saArgs = @{ WxcExecPath = $WxcExec; SkipSetup = $true }
+if ($Debug) { $saArgs.Debug = $true }
+& $saScript @saArgs
+$saPass = ($LASTEXITCODE -eq 0)
+$null = $results.Add(@{
+    Name    = "run_wslc_state_aware_tests.ps1 (lifecycle suite)"
+    Pass    = $saPass
+    Skipped = $false
+    Reason  = $(if ($saPass) { "" } else { "state-aware lifecycle suite failed" })
+})
 
 # Summary
 $passed = @($results | Where-Object { $_.Pass -and -not $_.Skipped }).Count

@@ -41,11 +41,17 @@ import type {
   IsolationSessionExecConfig,
   IsolationSessionStopConfig,
   IsolationSessionDeprovisionConfig,
+  WslcProvisionConfig,
+  WslcStartConfig,
+  WslcExecConfig,
+  WslcStopConfig,
+  WslcDeprovisionConfig,
 } from '../../src/state-aware-types.js';
 
 import type {
   Phase as WirePhase,
   IsolationSessionProvisionPhase as WireProvisionPhase,
+  WslcProvisionPhase as WireWslcProvisionPhase,
 } from '../../src/generated/wire.js';
 
 import type {
@@ -74,7 +80,12 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // per-phase rather than a single pooled key set. That is strictly stronger: a
 // field legal only on provision cannot satisfy the oracle by appearing
 // on the start config, or vice versa.
-type LiftedPhaseKey = 'version' | 'process' | 'network';
+//
+// `filesystem` is a lifted top-level wire field (like `network`): WSLc provision
+// surfaces it publicly but it maps to the envelope's top-level `filesystem`, not
+// under `experimental.wslc.provision`. Listing it here keeps the backend-key set
+// limited to genuinely per-phase wire fields.
+type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;
@@ -123,6 +134,44 @@ type _ProvisionWireKeysNonVacuous = AssertTrue<
   Equivalent<WireKeys<WireProvisionPhase>, 'appId'>
 >;
 
+// --- WSLc per-phase wire field-set conformance -----------------------------
+
+// WSLc is the second state-aware backend, so the oracle must cover it too or a
+// wire-model change to the WSLc surface would regenerate `wire.ts`, pass the
+// codegen gate, and leave the SDK silently lagging with no CI signal. WSLc's
+// only per-phase wire object is provision (`image` / `imageTarPath`); start,
+// exec, stop, and deprovision have wire associated type `()` and must expose no
+// backend-specific field. `filesystem` and `network` are lifted top-level wire
+// fields (see `LiftedPhaseKey`), so they are excluded from the backend-key sets.
+type _WslcProvisionPublicKeys = AssertTrue<
+  Equivalent<Exclude<BackendKeys<WslcProvisionConfig>, WireKeys<WireWslcProvisionPhase>>, never>
+>;
+type _WslcProvisionWireKeys = AssertTrue<
+  Equivalent<Exclude<WireKeys<WireWslcProvisionPhase>, BackendKeys<WslcProvisionConfig>>, never>
+>;
+type _WslcProvisionFieldValueTypes = AssertTrue<
+  Equivalent<
+    PublicFieldValues<WslcProvisionConfig>,
+    WireFieldValues<WireWslcProvisionPhase>
+  >
+>;
+
+type _WslcStartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcStartConfig>, never>>;
+type _WslcExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcExecConfig>, never>>;
+type _WslcStopNoBackendKeys = AssertTrue<Equivalent<BackendKeys<WslcStopConfig>, never>>;
+type _WslcDeprovisionNoBackendKeys = AssertTrue<
+  Equivalent<BackendKeys<WslcDeprovisionConfig>, never>
+>;
+
+// Non-vacuity guards (see the isolation_session pins above): pin the derived key
+// sets so a derivation bug fails the oracle rather than silently disabling it.
+type _WslcProvisionKeysNonVacuous = AssertTrue<
+  Equivalent<BackendKeys<WslcProvisionConfig>, 'image' | 'imageTarPath'>
+>;
+type _WslcProvisionWireKeysNonVacuous = AssertTrue<
+  Equivalent<WireKeys<WireWslcProvisionPhase>, 'image' | 'imageTarPath'>
+>;
+
 // --- delegation to the one-shot oracle (documented, asserted) --------------
 
 // The per-phase configs must REUSE the public one-shot leaf types for their
@@ -130,6 +179,7 @@ type _ProvisionWireKeysNonVacuous = AssertTrue<
 // re-declared an inline shape instead, it would escape that coverage — these
 // assertions fail if that ever happens.
 type _ExecProcessReuse = AssertTrue<Equivalent<IsolationSessionExecConfig['process'], ProcessConfig>>;
+type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecConfig['process'], ProcessConfig>>;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
@@ -144,6 +194,16 @@ export type StateAwareWireConformanceAssertions = [
   _ProvisionKeysNonVacuous,
   _ProvisionWireKeysNonVacuous,
   _ExecProcessReuse,
+  _WslcProvisionPublicKeys,
+  _WslcProvisionWireKeys,
+  _WslcProvisionFieldValueTypes,
+  _WslcStartNoBackendKeys,
+  _WslcExecNoBackendKeys,
+  _WslcStopNoBackendKeys,
+  _WslcDeprovisionNoBackendKeys,
+  _WslcProvisionKeysNonVacuous,
+  _WslcProvisionWireKeysNonVacuous,
+  _WslcExecProcessReuse,
 ];
 
 test('public state-aware SDK types conform to the generated wire schema (compile-time)', () => {

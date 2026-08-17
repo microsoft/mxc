@@ -5,8 +5,8 @@
 //!
 //! `Command::new("wpr")` is unsafe: on Windows it resolves via
 //! `CreateProcessW`'s implicit DLL/EXE search order — and that order
-//! starts with the **current working directory**. Because PLM runs as
-//! administrator (required to start the NT Kernel Logger), an
+//! starts with the **current working directory**. Because PLM's restricted
+//! WPR-control child runs as administrator, an
 //! unprivileged user who can drop a `wpr.exe` into a directory an
 //! admin later runs PLM from would gain code execution as that admin.
 //!
@@ -111,7 +111,13 @@ pub fn verify_wpr_present() -> Result<(), String> {
 pub fn wpr_command() -> Command {
     let slot = WPR_PATH.get_or_init(resolve_wpr_path);
     let mut cmd = match slot {
-        Some(p) => Command::new(p),
+        Some(p) => {
+            let mut cmd = Command::new(p);
+            if let Some(system_directory) = p.parent() {
+                cmd.current_dir(system_directory);
+            }
+            cmd
+        }
         None => Command::new("wpr.exe"),
     };
     #[cfg(target_os = "windows")]
@@ -148,6 +154,14 @@ mod tests {
             "wpr path must be under a system directory; got: {}",
             p.display()
         );
+    }
+
+    #[test]
+    fn wpr_command_uses_system_directory_as_working_directory() {
+        verify_wpr_present().expect("wpr.exe should be available on Windows CI");
+        let command = wpr_command();
+        let program = PathBuf::from(command.get_program());
+        assert_eq!(command.get_current_dir(), program.parent());
     }
 
     /// setting `SystemRoot` in the

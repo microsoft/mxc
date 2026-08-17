@@ -49,26 +49,31 @@ sudo mkdir -p "$DIR"
 echo "VISIBLE_SECRET" | sudo tee "$VISIBLE" > /dev/null
 echo "FILE_SECRET" | sudo tee "$FILE" > /dev/null
 echo "DIR_SECRET" | sudo tee "$DIR/inner.txt" > /dev/null
-# The parent is delegated as read-write, so the invoking user must own it.
 sudo chown -R "$(id -u):$(id -g)" "$BASE"
 
-# Sanity: all fixtures are readable on the host.
-if ! sudo cat "$VISIBLE" | grep -q "VISIBLE_SECRET"; then
+# Sanity: all fixtures are accessible to the invoking user. The filesystem
+# delegation check intentionally rejects a read-write path the caller cannot
+# write, so root-owned fixtures would prevent the sandbox from starting.
+if ! cat "$VISIBLE" | grep -q "VISIBLE_SECRET"; then
     echo "FAIL: fixture setup — visible.txt not readable on host."
     exit 1
 fi
-if ! sudo cat "$FILE" | grep -q "FILE_SECRET"; then
+if ! cat "$FILE" | grep -q "FILE_SECRET"; then
     echo "FAIL: fixture setup — secret_file.txt not readable on host."
     exit 1
 fi
-if ! sudo cat "$DIR/inner.txt" | grep -q "DIR_SECRET"; then
+if ! cat "$DIR/inner.txt" | grep -q "DIR_SECRET"; then
     echo "FAIL: fixture setup — secret_dir/inner.txt not readable on host."
     exit 1
 fi
 
 echo "Running Bubblewrap denied-path masking test (denied file + denied dir)..."
-OUTPUT=$("$LXC_EXEC" --experimental \
-    "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1 || true)
+if ! OUTPUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_masking.json" 2>&1); then
+    echo "$OUTPUT"
+    echo "FAIL: denied-path masking sandbox did not start."
+    exit 1
+fi
 echo "$OUTPUT"
 
 FAIL=0
@@ -118,12 +123,15 @@ echo "DIR_TARGET_SECRET" | sudo tee "$SYMBASE/real_dir/inner.txt" > /dev/null
 echo "FILE_TARGET_SECRET" | sudo tee "$SYMBASE/real_file.txt" > /dev/null
 sudo ln -s "$SYMBASE/real_dir" "$SYMBASE/link_to_dir"
 sudo ln -s "$SYMBASE/real_file.txt" "$SYMBASE/link_to_file"
-# Keep the canonical symlink targets and their read-write parent delegable.
 sudo chown -R "$(id -u):$(id -g)" "$SYMBASE"
 
 echo "Running Bubblewrap denied-symlink -> dir masking test..."
-DIR_OUT=$("$LXC_EXEC" --experimental \
-    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_dir.json" 2>&1 || true)
+if ! DIR_OUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_dir.json" 2>&1); then
+    echo "$DIR_OUT"
+    echo "FAIL: denied-symlink -> dir sandbox did not start."
+    exit 1
+fi
 echo "$DIR_OUT"
 if echo "$DIR_OUT" | grep -q "CONTROL_OK" \
     && echo "$DIR_OUT" | grep -q "SYMDIR_MASKED_OK" \
@@ -135,8 +143,12 @@ else
 fi
 
 echo "Running Bubblewrap denied-symlink -> file masking test..."
-FILE_OUT=$("$LXC_EXEC" --experimental \
-    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_file.json" 2>&1 || true)
+if ! FILE_OUT=$("$LXC_EXEC" --experimental \
+    "$REPO_DIR/tests/configs/bubblewrap_denied_symlink_file.json" 2>&1); then
+    echo "$FILE_OUT"
+    echo "FAIL: denied-symlink -> file sandbox did not start."
+    exit 1
+fi
 echo "$FILE_OUT"
 if echo "$FILE_OUT" | grep -q "CONTROL_OK" \
     && echo "$FILE_OUT" | grep -q "SYMFILE_MASKED_OK" \

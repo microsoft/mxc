@@ -147,20 +147,27 @@ fn spawn_process_container(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
-    use appcontainer_common::dispatcher::{spawn_with_fallback, DispatchError, SpawnDispatchError};
+    use appcontainer_common::dispatcher::{
+        spawn_with_fallback_and_capture, DispatchError, SpawnDispatchError,
+    };
     use std::fmt::Write;
     use wxc_common::sandbox_process::StdioMode;
 
     // ProcessContainer resolves to a concrete backend + isolation tier purely
-    // by host capability, via the shared `spawn_with_fallback` dispatcher — the
-    // streaming counterpart of the run-to-completion `dispatch_with_fallback`
-    // the executor binaries use. Both share `select_backend_with_fallback`, so
-    // the streaming and run-to-completion paths agree on tier selection and the
-    // streaming path gets the full three-tier fallback: BaseContainer (Tier 1),
-    // AppContainer + BFS (Tier 2), and AppContainer + DACL (Tier 3). The
-    // returned handle owns any DACL guard, so host-ACE restore outlives the
-    // child (see issue #643).
-    match spawn_with_fallback(request, logger, StdioMode::Pipes) {
+    // by host capability, via the shared `spawn_with_fallback_and_capture`
+    // dispatcher — the streaming counterpart of the run-to-completion
+    // `dispatch_with_fallback_and_capture` the executor binaries use. Both
+    // share `select_backend_with_fallback`, so the streaming and
+    // run-to-completion paths agree on tier selection and the streaming path
+    // gets the full three-tier fallback: BaseContainer (Tier 1), AppContainer
+    // + BFS (Tier 2), and AppContainer + DACL (Tier 3). The returned handle
+    // owns any DACL guard, so host-ACE restore outlives the child (see issue
+    // #643). When the request sets `captureDenials`, `factory_for_request`
+    // hands the guarded WPR fallback factory to the dispatcher so an
+    // AppContainer fallback tier can still honor it instead of failing
+    // closed.
+    let capture_factory = crate::guarded_capture::factory_for_request(request);
+    match spawn_with_fallback_and_capture(request, logger, StdioMode::Pipes, capture_factory) {
         Ok(dispatched) => {
             for w in &dispatched.warnings {
                 let _ = writeln!(logger, "warning: {w}");

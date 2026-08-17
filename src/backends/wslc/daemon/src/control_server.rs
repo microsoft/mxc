@@ -17,7 +17,7 @@
 //! connect to the control plane.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,11 +40,12 @@ use windows::Win32::Security::{
 };
 use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+use wslc_common::container_steps::OutStream;
 use wslc_common::daemon_protocol::{
     encode_frame, DaemonRequest, DaemonResponse, StreamFrame, MAX_FRAME_SIZE,
 };
 
-use crate::session_manager::{SessionHandle, WorkerError};
+use crate::session_manager::{ExecStream, SessionHandle, WorkerError};
 
 /// Upper bound on concurrently-serviced client connections. At capacity the
 /// accept loop applies backpressure (a new connection waits for a slot) instead
@@ -407,7 +408,8 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
     Ok(())
 }
 
-/// Exec: validate-then-admit, then stream the run's outcome as [`StreamFrame`]s.
+/// Exec: validate-then-admit, then stream the run's stdout/stderr live as
+/// [`StreamFrame`]s, followed by a terminal frame.
 ///
 /// The sandbox is validated (exists + started) *before* the `Ok` admission is
 /// written, and — critically — admission is **atomic** with the start of the
@@ -417,9 +419,13 @@ async fn handle_client(mut pipe: NamedPipeServer, session: SessionHandle) -> Res
 /// unknown/not-started sandbox therefore comes back as a pre-admission typed
 /// [`DaemonResponse::Err`] rather than a post-admission stream `Error` frame.
 ///
-/// TODO(fill-in): bidirectional live stdio (client `Stdin` frames -> process,
-/// process stdout/stderr -> `Stdout`/`Stderr` frames). The skeleton runs the
-/// command to completion and emits only the terminal frame.
+/// Output streaming (process -> `Stdout`/`Stderr`) is live. Client `Stdin`
+/// frames are NOT forwarded: the WSLc SDK consumes all process IO handles once
+/// any `WslcSetProcessSettingsCallbacks` is registered (the callback path this
+/// live output streaming depends on), so `WslcGetProcessIOHandle(STDIN)` is
+/// unavailable. Piped stdin would require a handle-mode rearchitecture (no
+/// callbacks; `ReadFile` threads for stdout/stderr + `WriteFile` for stdin) and
+/// is deferred; stdin forwarding is tracked in issue #804.
 async fn handle_exec(
     mut pipe: NamedPipeServer,
     session: SessionHandle,
@@ -433,22 +439,101 @@ async fn handle_exec(
 /// Turn an exec **admission** outcome into the client's frame sequence, generic
 /// over the transport so the protocol can be exercised over an in-memory duplex
 /// in tests. On rejection it writes a single typed [`DaemonResponse::Err`]; on
-/// admission it writes `Ok` then awaits completion and writes exactly one
-/// terminal [`StreamFrame`] — `Exit` on success, `Error` on a run failure or a
-/// dropped completion channel.
+/// admission it writes `Ok`, then pumps live `Stdout`/`Stderr` frames as output
+/// arrives, and finally writes exactly one terminal [`StreamFrame`] — `Exit` on
+/// success, `Error` on a run failure or a dropped completion channel.
 async fn write_exec_result<S: AsyncWrite + Unpin>(
     pipe: &mut S,
-    admission: Result<oneshot::Receiver<Result<i32, WorkerError>>, WorkerError>,
+    admission: Result<ExecStream, WorkerError>,
 ) -> Result<()> {
-    let done = match admission {
-        Ok(done) => done,
+    let ExecStream {
+        done,
+        mut output,
+        overflowed,
+    } = match admission {
+        Ok(stream) => stream,
         Err(e) => {
             write_frame(pipe, &worker_err_response(e)).await?;
             return Ok(());
         }
     };
     write_frame(pipe, &DaemonResponse::Ok).await?;
-    let terminal = match done.await {
+
+    // Pump live output until the run completes, then write exactly one terminal
+    // frame. The select is **biased toward `done`** so a completed run always
+    // makes progress to termination: on the deliberate kill/leak path the sink's
+    // sender stays alive and can keep producing forever, and a biased-toward-
+    // output loop would let that continuously non-empty queue starve the ready
+    // `done` branch — the terminal frame would never be written and the client
+    // would stream forever. While the run is in flight `done` is not ready, so
+    // the fall-through streams live output as it arrives.
+    //
+    // Once `done` resolves we `close()` the receiver (so any leaked producer can
+    // enqueue nothing further), drain only the already-queued bounded tail with
+    // non-blocking `try_recv`, and terminate. On the normal path the run has
+    // already stopped producing, so that tail is exactly the remaining real
+    // output; the sink's sender also drops as the run returns, so `output` may
+    // instead close first — the `None` arm handles that and awaits the exit code.
+    let mut done = done;
+    let terminal = loop {
+        tokio::select! {
+            biased;
+            result = &mut done => {
+                output.close();
+                while let Ok(chunk) = output.try_recv() {
+                    write_frame(pipe, &output_frame(chunk)).await?;
+                }
+                break terminal_frame(result, &overflowed);
+            }
+            chunk = output.recv() => match chunk {
+                Some(chunk) => {
+                    write_frame(pipe, &output_frame(chunk)).await?;
+                }
+                // Senders dropped before `done` fired (normal path): the run has
+                // completed and every chunk is flushed. Await the exit code.
+                None => break terminal_frame(done.await, &overflowed),
+            },
+        }
+    };
+    write_frame(pipe, &terminal).await?;
+    Ok(())
+}
+
+/// Map a live-output chunk to its wire frame.
+fn output_frame((kind, data): (OutStream, Vec<u8>)) -> StreamFrame {
+    match kind {
+        OutStream::Stdout => StreamFrame::Stdout { data },
+        OutStream::Stderr => StreamFrame::Stderr { data },
+    }
+}
+
+/// Choose the exec's terminal [`StreamFrame`]. A latched `overflowed` means the
+/// sink had to drop live output because the client did not drain the daemon's
+/// bounded queue fast enough, so a would-be clean [`StreamFrame::Exit`] is
+/// reported as a truncation [`StreamFrame::Error`] instead — the client must not
+/// treat a short stream as a successful, complete run. A genuine run failure
+/// (already an `Error`) is strictly more informative and passes through
+/// unchanged.
+fn terminal_frame(
+    result: Result<Result<i32, WorkerError>, oneshot::error::RecvError>,
+    overflowed: &AtomicBool,
+) -> StreamFrame {
+    match exit_terminal(result) {
+        StreamFrame::Exit { .. } if overflowed.load(Ordering::Relaxed) => StreamFrame::Error {
+            message: "WSLc: live output was truncated — the client did not read the exec stream \
+                      fast enough and the daemon's bounded output queue overflowed"
+                .to_string(),
+        },
+        other => other,
+    }
+}
+
+/// Map a completed exec's result (or a dropped completion channel) to its
+/// terminal [`StreamFrame`].
+fn exit_terminal(
+    result: Result<Result<i32, WorkerError>, oneshot::error::RecvError>,
+) -> StreamFrame {
+    match result {
         Ok(Ok(code)) => StreamFrame::Exit { code },
         Ok(Err(e)) => StreamFrame::Error {
             message: e.to_string(),
@@ -456,9 +541,7 @@ async fn write_exec_result<S: AsyncWrite + Unpin>(
         Err(_) => StreamFrame::Error {
             message: "WSLc worker dropped the exec reply channel".to_string(),
         },
-    };
-    write_frame(pipe, &terminal).await?;
-    Ok(())
+    }
 }
 
 /// Map a worker `Result<()>` to an `Ok` / typed `Err` response.
@@ -502,7 +585,22 @@ async fn write_frame<S: AsyncWrite + Unpin, T: Serialize>(pipe: &mut S, msg: &T)
 mod tests {
     use super::*;
     use tokio::io::duplex;
+    use tokio::sync::mpsc;
     use wslc_common::daemon_protocol::ErrKind;
+
+    /// Admit an exec whose output channel is already closed (no live output),
+    /// so `write_exec_result` goes straight from `Ok` to the terminal frame.
+    fn admitted_no_output(
+        done: oneshot::Receiver<Result<i32, WorkerError>>,
+    ) -> Result<ExecStream, WorkerError> {
+        let (tx, output) = mpsc::channel(16);
+        drop(tx);
+        Ok(ExecStream {
+            done,
+            output,
+            overflowed: Arc::new(AtomicBool::new(false)),
+        })
+    }
 
     /// A rejected admission (unknown sandbox) round-trips as a single typed
     /// `DaemonResponse::Err { NotProvisioned }` through frame encode → transport
@@ -556,7 +654,9 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
         drop(done_tx);
 
-        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        write_exec_result(&mut server, admitted_no_output(done_rx))
+            .await
+            .unwrap();
         drop(server);
 
         let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
@@ -583,12 +683,252 @@ mod tests {
         let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
         done_tx.send(Ok(7)).unwrap();
 
-        write_exec_result(&mut server, Ok(done_rx)).await.unwrap();
+        write_exec_result(&mut server, admitted_no_output(done_rx))
+            .await
+            .unwrap();
         drop(server);
 
         let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
         assert_eq!(admit, DaemonResponse::Ok);
         let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
         assert_eq!(terminal, StreamFrame::Exit { code: 7 });
+    }
+
+    /// Live output is streamed as `Stdout`/`Stderr` frames — in the order the
+    /// worker enqueued them — before the terminal `Exit`, so the client sees the
+    /// run's output incrementally rather than as one buffered blob.
+    #[tokio::test]
+    async fn live_output_streams_before_exit() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+
+        // Enqueue interleaved output, then the exit code, then close the channel
+        // (mirrors the worker: the sink's sender drops as the run returns).
+        out_tx
+            .try_send((OutStream::Stdout, b"hello ".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stderr, b"warn".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stdout, b"world".to_vec()))
+            .unwrap();
+        done_tx.send(Ok(0)).unwrap();
+        drop(out_tx);
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+                overflowed: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"hello ".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stderr {
+                data: b"warn".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"world".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 0 }
+        );
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    /// Leak path: the run completes (`done` fires) while the sink's sender is
+    /// still alive and would keep producing. `write_exec_result` must close the
+    /// receiver, flush only what was already queued, and write the terminal
+    /// frame — it must not stream chunks enqueued after completion nor hang.
+    #[tokio::test]
+    async fn leak_path_drains_queued_then_terminates() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+
+        // Two chunks already queued, the run reports its exit, and the sender is
+        // deliberately kept alive (the leaked `IoContext`).
+        out_tx
+            .try_send((OutStream::Stdout, b"queued".to_vec()))
+            .unwrap();
+        out_tx
+            .try_send((OutStream::Stderr, b"tail".to_vec()))
+            .unwrap();
+        done_tx.send(Ok(3)).unwrap();
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+                overflowed: Arc::new(AtomicBool::new(false)),
+            }),
+        )
+        .await
+        .unwrap();
+
+        // A post-completion enqueue attempt must fail because the receiver was
+        // closed, proving a leaked producer cannot extend the stream.
+        assert!(out_tx
+            .try_send((OutStream::Stdout, b"after".to_vec()))
+            .is_err());
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"queued".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stderr {
+                data: b"tail".to_vec()
+            }
+        );
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Exit { code: 3 }
+        );
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
+    }
+
+    /// Starvation regression: completion (`done`) must terminate the stream even
+    /// when a leaked producer keeps the queue continuously non-empty. A task
+    /// enqueues forever while `done` is already resolved; because the select is
+    /// biased toward `done`, the handler closes the receiver, drains the bounded
+    /// tail, and writes the terminal frame instead of streaming the infinite
+    /// producer forever. (A biased-toward-output loop would hang here.)
+    #[tokio::test]
+    async fn continuous_producer_does_not_starve_terminal() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        // Small queue so a fast producer keeps it perpetually non-empty.
+        let (out_tx, output) = mpsc::channel(4);
+
+        // Completion is already ready before the handler runs.
+        done_tx.send(Ok(5)).unwrap();
+        // A producer that keeps enqueuing (the leaked `IoContext` on the kill
+        // path). It races the handler; `send` errors once the receiver closes,
+        // ending the task — so this never leaks past the test.
+        let producer = tokio::spawn(async move {
+            loop {
+                if out_tx
+                    .send((OutStream::Stdout, b"x".to_vec()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Must complete (not hang). A generous timeout guards a regression to a
+        // starving loop, which would never return.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            write_exec_result(
+                &mut server,
+                Ok(ExecStream {
+                    done: done_rx,
+                    output,
+                    overflowed: Arc::new(AtomicBool::new(false)),
+                }),
+            ),
+        )
+        .await
+        .expect("write_exec_result must terminate, not starve on continuous output");
+        result.unwrap();
+        drop(server);
+        let _ = producer.await;
+
+        // The stream ends with a single `Exit` terminal after some prefix of
+        // `Stdout` frames; it must not stream indefinitely.
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        let mut saw_exit = false;
+        while let Ok(frame) = read_frame::<_, StreamFrame>(&mut client).await {
+            match frame {
+                StreamFrame::Stdout { .. } => {}
+                StreamFrame::Exit { code } => {
+                    assert_eq!(code, 5);
+                    saw_exit = true;
+                    break;
+                }
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        }
+        assert!(saw_exit, "the stream must end with an Exit terminal");
+    }
+
+    /// Overflow regression: when the sink latched `overflowed` (it dropped live
+    /// output because the client did not drain fast enough), the terminal frame
+    /// must be a truncation `Error` — never a clean `Exit` the client would
+    /// mistake for a complete run.
+    #[tokio::test]
+    async fn overflow_yields_truncation_error_terminal() {
+        let (mut server, mut client) = duplex(64 * 1024);
+        let (done_tx, done_rx) = oneshot::channel::<Result<i32, WorkerError>>();
+        let (out_tx, output) = mpsc::channel(16);
+
+        // Some output made it through before the drop, then a clean exit, but the
+        // sink signalled truncation.
+        out_tx
+            .try_send((OutStream::Stdout, b"partial".to_vec()))
+            .unwrap();
+        done_tx.send(Ok(0)).unwrap();
+        drop(out_tx);
+        let overflowed = Arc::new(AtomicBool::new(true));
+
+        write_exec_result(
+            &mut server,
+            Ok(ExecStream {
+                done: done_rx,
+                output,
+                overflowed,
+            }),
+        )
+        .await
+        .unwrap();
+        drop(server);
+
+        let admit: DaemonResponse = read_frame(&mut client).await.unwrap();
+        assert_eq!(admit, DaemonResponse::Ok);
+        assert_eq!(
+            read_frame::<_, StreamFrame>(&mut client).await.unwrap(),
+            StreamFrame::Stdout {
+                data: b"partial".to_vec()
+            }
+        );
+        let terminal: StreamFrame = read_frame(&mut client).await.unwrap();
+        match terminal {
+            StreamFrame::Error { message } => {
+                assert!(message.contains("truncated"), "message was {message:?}");
+            }
+            other => panic!("expected a truncation Error terminal, got {other:?}"),
+        }
+        assert!(read_frame::<_, StreamFrame>(&mut client).await.is_err());
     }
 }

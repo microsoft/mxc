@@ -119,8 +119,17 @@ pub trait SandboxProcess: Send {
     ///
     /// Any stdout/stderr the caller did not `take_*` is drained and discarded
     /// while waiting so the child can never block on a full pipe. If the
-    /// timeout elapses, the child and its tree are killed and
+    /// timeout elapses, the workload is terminated and
     /// [`ErrorKind::TimedOut`](std::io::ErrorKind::TimedOut) is returned.
+    ///
+    /// **How far that termination reaches is the implementation's to state.**
+    /// The process-spawning implementations kill the whole tree — the child
+    /// leads its own process group on Unix and is assigned a job object on
+    /// Windows. An implementation whose only primitive is the foreground
+    /// process (the state-aware exec adapter, over a backend with no tree API)
+    /// confirms that process and leaves descendants to whatever owns the
+    /// sandbox's lifetime. Do not read `TimedOut` as a tree kill without
+    /// checking the backend.
     ///
     /// Implementors must drain the not-taken stdout and stderr **concurrently**
     /// (not one then the other) — see the type-level pipe-deadlock contract.

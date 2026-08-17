@@ -546,3 +546,126 @@ describe('windows_sandbox state-aware lifecycle', () => {
     });
   });
 });
+
+describe('wslc state-aware lifecycle', () => {
+  it('defaults the version to 0.8.0-alpha (not the isolation_session default)', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'wslc',
+      containment: 'wslc',
+      config: { image: 'alpine:latest' },
+    });
+    assert.strictEqual(env.version, '0.8.0-alpha');
+  });
+
+  it('still honors a caller-supplied version over the wslc default', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'wslc',
+      containment: 'wslc',
+      config: { version: '0.8.1-alpha', image: 'alpine:latest' },
+    });
+    assert.strictEqual(env.version, '0.8.1-alpha');
+  });
+
+  it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'wslc',
+      containment: 'wslc',
+      config: {
+        filesystem: { readwritePaths: ['C:\\ws\\rw'] },
+        network: { defaultPolicy: 'allow' },
+        image: 'alpine:latest',
+        imageTarPath: 'C:\\images\\alpine.tar',
+      },
+    });
+    assert.strictEqual(env.containment, 'wslc');
+    assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\ws\\rw'] });
+    assert.deepStrictEqual(env.network, { defaultPolicy: 'allow' });
+    const wire = JSON.parse(JSON.stringify(env));
+    assert.deepStrictEqual(wire.experimental, {
+      wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
+    });
+  });
+
+  it('omits the experimental block when provision carries no backend-specific field', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'provision',
+      backendKey: 'wslc',
+      containment: 'wslc',
+      config: { network: { defaultPolicy: 'block' } },
+    });
+    assert.strictEqual(env.experimental, undefined);
+    assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
+  });
+
+  it('lifts exec process + cooperative proxy network to top-level with no experimental block', () => {
+    const env = buildStateAwareEnvelope({
+      phase: 'exec',
+      backendKey: 'wslc',
+      sandboxId: 'wslc:abc',
+      config: {
+        process: { commandLine: 'echo hi' },
+        network: { proxy: { url: 'http://127.0.0.1:8888' } },
+      },
+    });
+    assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
+    assert.deepStrictEqual(env.network, { proxy: { url: 'http://127.0.0.1:8888' } });
+    assert.strictEqual(env.experimental, undefined);
+  });
+
+  describe('round-trip via the typed API', { skip: platformSkip }, () => {
+    afterEach(() => { _resetSpawnImpl(); });
+
+    it('provisionSandbox builds a wslc envelope and routes back via the wslc: prefix', async () => {
+      const fake = fakeSpawn({ stdout: '{"result":{"sandboxId":"wslc:0123abcd"}}', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const result = await provisionSandbox(
+        'wslc',
+        { image: 'alpine:latest', network: { defaultPolicy: 'block' } },
+        testOptions(),
+      );
+      assert.strictEqual(result.sandboxId, 'wslc:0123abcd');
+      assert.strictEqual(fake.captured.envelope?.phase, 'provision');
+      assert.strictEqual(fake.captured.envelope?.containment, 'wslc');
+      assert.strictEqual(fake.captured.envelope?.version, '0.8.0-alpha');
+    });
+
+    it('startSandbox infers wslc from the wslc: prefix', async () => {
+      const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+      await startSandbox(id, undefined, testOptions());
+      assert.strictEqual(fake.captured.envelope?.phase, 'start');
+      assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
+      assert.strictEqual(fake.captured.envelope?.experimental, undefined);
+    });
+
+    it('execInSandboxAsync places process at top-level for a wslc: id', async () => {
+      const fake = fakeSpawn({ stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
+      _setSpawnImpl(fake.spawn);
+      const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+      const result = await execInSandboxAsync(
+        id,
+        { process: { commandLine: 'echo hello-from-wslc' } },
+        testOptions(),
+      );
+      assert.deepStrictEqual(result, { stdout: 'hello-from-wslc\n', stderr: '', exitCode: 0 });
+      assert.deepStrictEqual(fake.captured.envelope?.process, { commandLine: 'echo hello-from-wslc' });
+    });
+
+    it('stopSandbox and deprovisionSandbox build minimal envelopes for a wslc: id', async () => {
+      for (const phase of ['stop', 'deprovision'] as const) {
+        const fake = fakeSpawn({ stdout: '{"result":{}}', exitCode: 0 });
+        _setSpawnImpl(fake.spawn);
+        const id = 'wslc:0123abcd' as SandboxId<'wslc'>;
+        const call = phase === 'stop' ? stopSandbox : deprovisionSandbox;
+        await call(id, undefined, testOptions());
+        assert.strictEqual(fake.captured.envelope?.phase, phase);
+        assert.strictEqual(fake.captured.envelope?.sandboxId, 'wslc:0123abcd');
+        _resetSpawnImpl();
+      }
+    });
+  });
+});

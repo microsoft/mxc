@@ -1,0 +1,13 @@
+{
+  "version": "0.7.0-alpha",
+  "containment": "processcontainer",
+  "process": {
+    "commandLine": "echo alias"
+  },
+  "appContainer": {
+    "leastPrivilege": true,
+    "capabilities": [
+      "internetClient"
+    ]
+  }
+}

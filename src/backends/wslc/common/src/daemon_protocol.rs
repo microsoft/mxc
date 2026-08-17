@@ -37,7 +37,7 @@ pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
 /// from the same build, so in normal operation both sides always match; the
 /// version guards against a stale daemon left running by a different mxc
 /// install. Bump only for incompatible changes to framing or message shape.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Per-phase config structs (daemon-internal; NOT the public wire schema)
@@ -194,21 +194,54 @@ pub enum ErrKind {
 /// [`DaemonRequest::Exec`]). Client→daemon carries [`StreamFrame::Stdin`];
 /// daemon→client carries [`StreamFrame::Stdout`] / [`StreamFrame::Stderr`] and
 /// a terminal [`StreamFrame::Exit`] (or [`StreamFrame::Error`]).
+///
+/// The raw byte payloads are base64-encoded on the wire (see [`base64_bytes`]).
+/// serde_json renders a `Vec<u8>` as a JSON array of decimal integers (`[104,
+/// 105, ...]`), roughly **4 bytes of wire per payload byte**, and since
+/// [`MAX_FRAME_SIZE`] is measured against the *encoded* frame that would cut
+/// effective throughput to ~1/4. base64 is ~1.33x instead, while keeping the
+/// single uniform JSON framing (no separate binary path to test).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamFrame {
     /// Client→daemon: bytes to write to the process stdin. An empty payload
     /// signals stdin EOF.
-    Stdin { data: Vec<u8> },
+    Stdin {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
     /// Daemon→client: bytes read from the process stdout.
-    Stdout { data: Vec<u8> },
+    Stdout {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
     /// Daemon→client: bytes read from the process stderr.
-    Stderr { data: Vec<u8> },
+    Stderr {
+        #[serde(with = "base64_bytes")]
+        data: Vec<u8>,
+    },
     /// Daemon→client: terminal frame; the process exited with `code`. No more
     /// stream frames follow.
     Exit { code: i32 },
     /// Daemon→client: terminal frame; the exec failed before or during the run.
     Error { message: String },
+}
+
+/// serde adapter that (de)serializes a `Vec<u8>` as a base64 string rather than
+/// a JSON integer array. Used for the [`StreamFrame`] byte payloads to keep the
+/// exec data phase compact over the wire.
+mod base64_bytes {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        STANDARD.decode(&encoded).map_err(serde::de::Error::custom)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -358,6 +391,34 @@ mod tests {
         roundtrip(StreamFrame::Error {
             message: "spawn failed".to_string(),
         });
+    }
+
+    #[test]
+    fn stream_frame_bytes_roundtrip_including_non_utf8() {
+        // Arbitrary bytes (incl. non-UTF8, NUL, 0xFF) must survive the base64
+        // wire encoding exactly.
+        let raw: Vec<u8> = (0u16..=255).map(|b| b as u8).collect();
+        roundtrip(StreamFrame::Stdout { data: raw.clone() });
+        roundtrip(StreamFrame::Stderr { data: raw.clone() });
+        roundtrip(StreamFrame::Stdin { data: raw });
+    }
+
+    #[test]
+    fn stream_frame_payload_is_base64_not_integer_array() {
+        // Guards the compact wire encoding: the payload is a base64 string, not
+        // serde_json's default `[104, 105, ...]` integer array (~4x larger).
+        let json = serde_json::to_string(&StreamFrame::Stdout {
+            data: b"hi".to_vec(),
+        })
+        .unwrap();
+        assert!(
+            json.contains("\"data\":\"aGk=\""),
+            "unexpected wire: {json}"
+        );
+        assert!(
+            !json.contains('['),
+            "payload must not be an integer array: {json}"
+        );
     }
 
     #[test]

@@ -23,4 +23,15 @@ public sealed class RunResult
 
     /// <summary>Structured outputs produced by optional sandbox features.</summary>
     public SandboxOutputMetadata? OutputMetadata { get; init; }
+
+    /// <summary>
+    /// Security warnings raised during the run, empty when there were none.
+    /// </summary>
+    /// <remarks>
+    /// Raised when a policy relaxes containment — notably
+    /// <c>permissiveLearningMode</c>, which disables deny-by-default. These are
+    /// never written to the host's stderr, so inspecting this is the only way to
+    /// learn that containment was relaxed.
+    /// </remarks>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }

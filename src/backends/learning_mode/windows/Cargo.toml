@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+learning_mode_core = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wxc_common = { workspace = true }
-learning_mode_core = { workspace = true }
 windows = { workspace = true }
 windows-core = { workspace = true }
 

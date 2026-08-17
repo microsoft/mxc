@@ -359,12 +359,13 @@ concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl reuses the existing one-shot `create_process` path
-synchronously: `manager.create_process(&options)` blocks until the agent
-process exits and the relay drains. Two concurrent exec calls against the
-same `sandboxId` from two `wxc-exec` processes are not coordinated by MXC;
-the OS-side service serialises (or rejects, depending on session state) at
-its own layer.
+The runner's `exec` impl blocks for an **executor** consumer: it reuses the
+one-shot `create_process` path, and that call runs until the agent process
+exits and the relay drains. For an **in-process** consumer it starts the
+process and returns without waiting, handing back the live pipe handles and a
+waiter, so the caller decides when to block. Either way, two concurrent exec
+calls against the same `sandboxId` are not coordinated by MXC; the OS-side
+service serialises (or rejects, depending on session state) at its own layer.
 
 ### Deprovision and concurrent sandboxes
 
@@ -447,17 +448,83 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
 - The SDK kills the `wxc-exec` process via process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
-  `process.timeout`) reaps the agent if the runner does not.
+  `process.timeout`) reaps the agent if the runner does not. On the
+  streaming path that timer is armed with a **margin** past the caller's
+  deadline, so it acts purely as a watchdog: the service kills with an
+  ordinary exit code (the host suite pins it as exit code 1), so if it
+  fired first a genuine timeout would be indistinguishable from a normal
+  exit and could not be reported as one. The run-to-completion path arms
+  it unchanged — it has no timeout channel to report through.
 - The runner's existing 3-tier shutdown (`CloseStandardInput` →
   `SendCtrlClose` → `Terminate`) handles the timeout case from inside the
   agent process before returning.
 
-`ExecHandle.terminator` is currently a no-op closure on the
-IsolationSession path because the backend reuses the one-shot
-`create_process` synchronously and there is no mid-flight cancellation
-seam. Future work — explicit Rust-layer `AbortSignal` plumbing — would
-require splitting `create_process` into a non-blocking start + a separate
-waiter, with `terminator` invoking `IsoSessionProcess::Terminate()`.
+`ExecHandle.terminator` is a no-op closure on the IsolationSession path
+when the consumer is the executor binary, which reuses the one-shot
+`create_process` synchronously and so has no mid-flight cancellation
+seam. For an in-process consumer the backend instead starts the process
+without waiting and returns a terminator that calls
+`IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
+waiter that blocks on exit.
+
+That terminator now reports whether the platform **accepted** the kill:
+`ExecHandle.terminator` returns a `Result`, and the answer
+`StartedProcess::terminate` already computed reaches the caller through
+`SandboxProcess::kill`. What it still cannot say is whether the process
+actually died — that would need the bounded post-kill wait's result,
+which the handle type does not carry.
+
+The waiter likewise distinguishes a timeout from an exit, returning
+`ExecOutcome::TimedOut` when the deadline elapsed while the process was
+running. Neither available signal proves that on its own: `WaitForExit`
+answers `-1` on timeout and `ExitCode()` reads `STILL_ACTIVE` (259), and
+both are legal exit codes for untrusted code. Their conjunction
+establishes whether the process was still running when it was sampled,
+which is what the ladder decision needs.
+
+A spent deadline is **sticky**. The two reads are not atomic, so a
+process can exit in the window between them; that still reports
+`TimedOut`, because the sentinel proves the deadline elapsed while the
+process ran and a later-observed exit code does not un-spend it.
+Reporting that code would hide a missed deadline from a caller who asked
+for one. The sibling WSLc backend draws the same line, tracking
+`deadline_elapsed` separately from `timed_out`. The one irreducible case
+is `-1`/`-1`, where the sentinel and the exit code collide and nothing
+distinguishes them, so it is read as the exit.
+
+`TimedOut` promises the process is **gone**, not that MXC killed it, and
+it reaches only the foreground process: `IsoSessionProcess` exposes
+`Terminate` and `ExitCode` and no tree primitive, so a descendant the
+workload backgrounded outlives a reported timeout on either path and is
+reclaimed when the session is stopped and deprovisioned.
+
+An exited process is never routed through the shutdown ladder, which reads only `ExitCode()`
+and so cannot tell a `259` exit from a live process. The adapter maps
+`TimedOut` onto `ErrorKind::TimedOut`, which is what
+`mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
+is reachable only for an in-process consumer: the executor has no
+timeout field in `ScriptResponse` to report one through, so the executor
+arm keeps reporting `Exited`.
+
+Teardown is bounded only insofar as the kill is: the streaming adapter's
+`Drop` joins the waiter when the kill was accepted, and abandons the
+thread when it was refused rather than blocking forever in a `Drop` the
+caller cannot opt out of. A process that survives an *accepted* kill can
+still park that waiter by either of
+two routes — in its leading `WaitForExit` (INFINITE when the caller
+supplied no timeout), or, when a timeout was supplied, in the graceful
+ladder's tier 3, which is `Terminate` followed by an INFINITE
+`WaitForExit(0)`. Neither is certain to stall: tier 1 ends a child that
+exits on stdin EOF once the caller has dropped its own duplicate of the
+write end, and tier 3's `Terminate` is a fresh attempt that may land
+where the first did not. The narrow claim is that nothing bounds the
+join if the process does survive. The terminator is now fallible end to
+end, so a *refused* kill is reported and the join is skipped; bounding
+the join after an *accepted* kill that never took effect is future work,
+and needs the backend to confirm the process actually died. A **confirmed
+exit** retires the terminator entirely: once the waiter has reported an
+outcome there is nothing to kill, so `kill` succeeds without running the
+terminator and an earlier refusal no longer applies.
 
 ## Known issues
 

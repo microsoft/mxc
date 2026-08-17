@@ -176,6 +176,15 @@ pub fn build_denial_from_access_check(
         .map(|v| v.trim_matches('"').to_string())
         .filter(|name| !name.is_empty())?;
 
+    if resource_type == ResourceType::File {
+        let app_path = find_prop(&parts.props, "AppPath")
+            .or_else(|| find_prop(&parts.props, "ApplicationPath"))
+            .map(|value| value.trim_matches('"'));
+        if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
+            return None;
+        }
+    }
+
     let access_type = if resource_type == ResourceType::Capability {
         // Capability checks report a mask (often 0x1) that is not a
         // read/write/execute verb, so don't run the file/registry
@@ -200,6 +209,54 @@ pub fn build_denial_from_access_check(
         filetime,
         event_id: parts.event_id,
     })
+}
+
+fn is_self_access(object_name: &str, app_path: &str) -> bool {
+    let object_name = strip_dos_namespace_prefix(object_name);
+    let app_path = strip_dos_namespace_prefix(app_path);
+    match (path_namespace(object_name), path_namespace(app_path)) {
+        (Some(object_namespace), Some(app_namespace)) if object_namespace == app_namespace => {
+            windows_paths_equal_ignore_case(object_name, app_path)
+        }
+        (Some(PathNamespace::Dos), Some(PathNamespace::DeviceVolume)) => {
+            crate::path_norm::device_path_matches_dos(app_path, object_name)
+        }
+        (Some(PathNamespace::DeviceVolume), Some(PathNamespace::Dos)) => {
+            crate::path_norm::device_path_matches_dos(object_name, app_path)
+        }
+        _ => false,
+    }
+}
+
+fn windows_paths_equal_ignore_case(a: &str, b: &str) -> bool {
+    wxc_common::string_util::windows_paths_equal_ignore_case(a, b)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathNamespace {
+    Dos,
+    DeviceVolume,
+}
+
+fn path_namespace(path: &str) -> Option<PathNamespace> {
+    let bytes = path.as_bytes();
+    if bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\' {
+        return Some(PathNamespace::Dos);
+    }
+
+    const VOLUME_PREFIX: &str = r"\Device\HarddiskVolume";
+    path.get(..VOLUME_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VOLUME_PREFIX))
+        .then_some(PathNamespace::DeviceVolume)
+}
+
+fn strip_dos_namespace_prefix(path: &str) -> &str {
+    for prefix in [r"\??\", r"\\?\", r"\\.\"] {
+        if let Some(path) = path.strip_prefix(prefix) {
+            return path;
+        }
+    }
+    path
 }
 
 /// Builds a [`RawDenial`] from a `LearningModeViolation` (event 27) payload.
@@ -323,7 +380,6 @@ fn parse_u32(raw: &str) -> Option<u32> {
 fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
     // Standard rights (object-type independent).
     const DELETE: u32 = 0x0001_0000;
-    const READ_CONTROL: u32 = 0x0002_0000;
     const WRITE_DAC: u32 = 0x0004_0000;
     const WRITE_OWNER: u32 = 0x0008_0000;
     // Generic rights (object-type independent).
@@ -343,12 +399,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const KEY_NOTIFY: u32 = 0x0010;
         const KEY_CREATE_LINK: u32 = 0x0020;
         (
-            KEY_QUERY_VALUE
-                | KEY_ENUMERATE_SUB_KEYS
-                | KEY_NOTIFY
-                | READ_CONTROL
-                | GENERIC_READ
-                | GENERIC_EXECUTE,
+            KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS | KEY_NOTIFY | GENERIC_READ | GENERIC_EXECUTE,
             KEY_SET_VALUE
                 | KEY_CREATE_SUB_KEY
                 | KEY_CREATE_LINK
@@ -370,7 +421,7 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
         const FILE_READ_ATTRIBUTES: u32 = 0x0080;
         const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
         (
-            FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | READ_CONTROL | GENERIC_READ,
+            FILE_READ_DATA | FILE_READ_EA | FILE_READ_ATTRIBUTES | GENERIC_READ,
             FILE_WRITE_DATA
                 | FILE_APPEND_DATA
                 | FILE_WRITE_EA
@@ -482,6 +533,122 @@ mod tests {
         );
         let ev = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
         assert_eq!(ev.access_type, AccessType::Write);
+    }
+
+    #[test]
+    fn access_check_drops_workload_self_access() {
+        let drive_map = crate::path_norm::rebuild_drive_map_for_tests();
+        let (drive, device) = drive_map
+            .first()
+            .expect("Windows test host has a drive map");
+        let object_name = format!(r#""\??\{drive}\Tools\App.EXE""#);
+        for app_path in [
+            format!(r#""{device}\Tools\app.exe""#),
+            format!(r#""{drive}\Tools\app.exe""#),
+        ] {
+            let p = parts(
+                14,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", &object_name),
+                    ("AppPath", &app_path),
+                    ("AccessMask", "0x1"),
+                ],
+            );
+            assert!(extract_denial(&p, 1, FIXED_FILETIME).is_none());
+        }
+    }
+
+    #[test]
+    fn access_check_preserves_mixed_namespace_path_on_another_volume() {
+        let drive_map = crate::path_norm::rebuild_drive_map_for_tests();
+        let (drive, device) = drive_map
+            .first()
+            .expect("Windows test host has a drive map");
+        let other_drive = if drive.eq_ignore_ascii_case("C:") {
+            "D:"
+        } else {
+            "C:"
+        };
+        let object_name = format!(r#""{other_drive}\Tools\app.exe""#);
+        let app_path = format!(r#""{device}\Tools\app.exe""#);
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", &object_name),
+                ("AppPath", &app_path),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn access_check_preserves_unmapped_device_path() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\Tools\app.exe""#),
+                (
+                    "AppPath",
+                    r#""\Device\HarddiskVolume4294967295\Tools\app.exe""#,
+                ),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn windows_path_comparison_uses_unicode_ordinal_case_folding() {
+        assert!(windows_paths_equal_ignore_case(
+            r"C:\TÄST\app.exe",
+            r"c:\täst\APP.EXE"
+        ));
+    }
+
+    #[test]
+    fn access_check_preserves_same_suffix_on_different_dos_drives() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\Tools\app.exe""#),
+                ("AppPath", r#""D:\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn access_check_preserves_same_suffix_on_different_device_volumes() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""\Device\HarddiskVolume3\Tools\app.exe""#),
+                ("AppPath", r#""\Device\HarddiskVolume4\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
+    }
+
+    #[test]
+    fn access_check_keeps_same_name_at_different_path() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", r#""C:\app.exe""#),
+                ("AppPath", r#""\Device\HarddiskVolume3\Tools\app.exe""#),
+                ("AccessMask", "0x1"),
+            ],
+        );
+        assert!(extract_denial(&p, 1, FIXED_FILETIME).is_some());
     }
 
     #[test]
@@ -790,7 +957,12 @@ mod tests {
 
     #[test]
     fn file_mask_no_recognised_right_is_unknown() {
-        // SYNCHRONIZE (0x100000) alone and MAXIMUM_ALLOWED (0x02000000) alone.
+        // READ_CONTROL, SYNCHRONIZE, and MAXIMUM_ALLOWED alone grant no
+        // file-content access and must not become readonly recommendations.
+        assert_eq!(
+            access_type_from_mask(0x0002_0000, false),
+            AccessType::Unknown
+        );
         assert_eq!(
             access_type_from_mask(0x0010_0000, false),
             AccessType::Unknown
@@ -815,5 +987,9 @@ mod tests {
         assert_eq!(access_type_from_mask(0x0020, true), AccessType::Write); // KEY_CREATE_LINK (execute for files!)
                                                                             // Registry has no execute concept: 0x20 is a write here, not execute.
         assert_ne!(access_type_from_mask(0x0020, true), AccessType::Execute);
+        assert_eq!(
+            access_type_from_mask(0x0002_0000, true),
+            AccessType::Unknown
+        );
     }
 }
