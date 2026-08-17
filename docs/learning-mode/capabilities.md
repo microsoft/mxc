@@ -248,16 +248,18 @@ per-run directory under `capture-denials\retained` only after sealing
 succeeds.
 
 WPR's source ETL is host-wide, so the elevated guarded-WPR helper never
-transfers that file across the privilege boundary. After the sandbox process
-tree terminates, the helper uses the retained, job-attested process handles and
-their exact PID/creation/exit `FILETIME` ranges to relog a second ETL. The
+transfers that file across the privilege boundary for `captureDenials` or
+`--audit`. After the sandbox process tree terminates, the helper uses the
+retained, job-attested process handles and their exact PID/creation/exit
+`FILETIME` ranges to relog a second ETL. The
 retained ETL contains only supported Learning Mode events whose event header
 falls inside one of those attested process generations. Guarded analysis and
 retention both consume that same filtered ETL; filtering failure transfers no
 trace. The host-wide source remains in protected elevated scratch and is
 deleted with that scratch. The unelevated caller writes the filtered retained
-ETL beside its unique denials JSON output, using the same file stem with an
-`.etl` extension.
+ETL beside its unique denials JSON output. Both paths contain the same run
+identifier and remain distinct even when the configured output path has no
+extension or already ends in `.etl`.
 
 Abandoning or disposing a process without a terminal wait deletes or discards
 the internal trace because no caller can observe its structured path. When

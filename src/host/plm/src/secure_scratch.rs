@@ -240,6 +240,11 @@ impl SecureScratch {
         self.open_trace_at(&self.filtered_trace, "filtered PLM trace")
     }
 
+    /// Opens the host-wide source ETL for the explicit interactive log flow.
+    pub fn open_source_trace(&self) -> Result<(std::fs::File, u64)> {
+        self.open_trace_at(&self.trace, "interactive PLM trace")
+    }
+
     fn open_trace_at(&self, path: &Path, description: &str) -> Result<(std::fs::File, u64)> {
         if self
             .trace_opened

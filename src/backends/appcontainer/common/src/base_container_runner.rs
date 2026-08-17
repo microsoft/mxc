@@ -40,7 +40,7 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
-    remove_internal_capture_file, unique_denials_output_path, write_denials_document,
+    remove_internal_capture_file, unique_denials_output_paths, write_denials_document,
     write_stderr_line_best_effort,
 };
 use crate::guarded_capture::{
@@ -1453,11 +1453,23 @@ impl BaseContainerRunner {
         } else {
             None
         };
-        let capture_output_path = capture_denials
+        let capture_output_paths = capture_denials
             .as_ref()
-            .map(|config| unique_denials_output_path(config.output_path.as_deref()))
+            .map(|config| {
+                let retain_guarded_etl = use_guarded_capture
+                    && config.retain_etl
+                    && self
+                        .guarded_capture_factory
+                        .as_ref()
+                        .is_some_and(|factory| factory.allows_trace_transfer());
+                unique_denials_output_paths(config.output_path.as_deref(), retain_guarded_etl)
+            })
             .transpose()
             .map_err(|error| ScriptResponse::error(&error))?;
+        let (capture_output_path, guarded_capture_etl_path) = match capture_output_paths {
+            Some(paths) => (Some(paths.denials), paths.etl),
+            None => (None, None),
+        };
 
         let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: Load API");
 
@@ -2190,21 +2202,6 @@ impl BaseContainerRunner {
         } else {
             None
         };
-        let guarded_capture_etl_path = (guarded_capture_session.is_some()
-            && capture_denials
-                .as_ref()
-                .is_some_and(|config| config.retain_etl)
-            && self
-                .guarded_capture_factory
-                .as_ref()
-                .is_some_and(|factory| factory.allows_trace_transfer()))
-        .then(|| {
-            capture_output_path
-                .as_ref()
-                .map(|path| path.with_extension("etl"))
-        })
-        .flatten();
-
         // The child was created suspended; now that it is in the job object (so
         // every descendant it spawns is captured), resume its main thread.
         // SAFETY: `pi.hThread` is the just-created, still-owned main-thread
@@ -2321,6 +2318,20 @@ struct BaseChild {
     retain_capture_etl: bool,
 }
 
+fn validate_guarded_etl_retention(
+    use_process_security_environment: bool,
+    retain_etl: bool,
+    allows_trace_transfer: bool,
+) -> Result<(), ScriptResponse> {
+    if !use_process_security_environment && retain_etl && !allows_trace_transfer {
+        return Err(ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
+        });
+    }
+    Ok(())
+}
+
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         let capture_denials = request.policy.capture_denials.is_some();
@@ -2335,22 +2346,17 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
-        if !use_process_security_environment
-            && request
+        validate_guarded_etl_retention(
+            use_process_security_environment,
+            request
                 .policy
                 .capture_denials
                 .as_ref()
-                .is_some_and(|config| config.retain_etl)
-            && !self
-                .guarded_capture_factory
+                .is_some_and(|config| config.retain_etl),
+            self.guarded_capture_factory
                 .as_ref()
-                .is_some_and(|factory| factory.allows_trace_transfer())
-        {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
-            });
-        }
+                .is_some_and(|factory| factory.allows_trace_transfer()),
+        )?;
         if capture_denials
             && !use_process_security_environment
             && self.guarded_capture_factory.is_none()
@@ -4619,26 +4625,26 @@ mod tests {
 
     #[test]
     fn validate_runner_rejects_etl_retention_when_guarded_fallback_is_selected() {
-        // Hold the shared env lock and force native capture unavailable, so a
-        // concurrent capability-guarded test cannot leak
-        // `MXC_FORCE_NATIVE_CAPTURE_USABLE=1` and flip this runner onto the
-        // native (non-guarded) path — which would skip the retain-ETL rejection
-        // under test. `psec_usable_override` alone is insufficient because the
-        // env override takes precedence in `native_capture_eligible`.
-        let _capture_guard = crate::test_env::CaptureCapabilityGuard::set(false, false);
-        let runner = BaseContainerRunner {
-            psec_usable_override: Some(false),
-            ..Default::default()
-        };
+        let runner = BaseContainerRunner::default();
         let mut request = ExecutionRequest::default();
         request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
             retain_etl: true,
             ..Default::default()
         });
 
-        let error = runner
-            .validate(&request)
-            .expect_err("the configured guarded provider cannot transfer ETL");
+        let error = validate_guarded_etl_retention(
+            false,
+            request
+                .policy
+                .capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl),
+            runner
+                .guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer()),
+        )
+        .expect_err("the configured guarded provider cannot transfer ETL");
 
         assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
         assert_eq!(
@@ -4661,7 +4667,6 @@ mod tests {
         }
 
         let runner = BaseContainerRunner {
-            psec_usable_override: Some(false),
             guarded_capture_factory: Some(Arc::new(NeverStartedFactory)),
             ..Default::default()
         };
@@ -4671,8 +4676,18 @@ mod tests {
             ..Default::default()
         });
 
-        runner
-            .validate(&request)
-            .expect("a transfer-capable guarded provider should permit ETL retention");
+        validate_guarded_etl_retention(
+            false,
+            request
+                .policy
+                .capture_denials
+                .as_ref()
+                .is_some_and(|config| config.retain_etl),
+            runner
+                .guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer()),
+        )
+        .expect("a transfer-capable guarded provider should permit ETL retention");
     }
 }

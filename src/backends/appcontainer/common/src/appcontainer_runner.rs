@@ -1127,10 +1127,12 @@ impl AppContainerScriptRunner {
             request.policy.capture_denials.as_ref(),
         ) {
             (Some(factory), Some(capture_config)) => {
-                let output_path = match capture_output::unique_denials_output_path(
+                let retain_etl = capture_config.retain_etl && factory.allows_trace_transfer();
+                let output_paths = match capture_output::unique_denials_output_paths(
                     capture_config.output_path.as_deref(),
+                    retain_etl,
                 ) {
-                    Ok(path) => path,
+                    Ok(paths) => paths,
                     Err(e) => {
                         job.terminate_and_wait(u32::MAX)
                             .map_err(|terminate_error| {
@@ -1145,6 +1147,7 @@ impl AppContainerScriptRunner {
                         )));
                     }
                 };
+                let output_path = output_paths.denials;
                 match factory.start(std::process::id()) {
                     Ok(session) => {
                         let session = attach_guarded_capture_or_cleanup(
@@ -1162,10 +1165,7 @@ impl AppContainerScriptRunner {
                             "guarded WPR captureDenials session started (output: {})",
                             output_path.display()
                         ));
-                        let etl_path = (capture_config.retain_etl
-                            && factory.allows_trace_transfer())
-                        .then(|| output_path.with_extension("etl"));
-                        (Some(session), Some(output_path), etl_path)
+                        (Some(session), Some(output_path), output_paths.etl)
                     }
                     Err(e) => {
                         // No active trace exists yet -- terminate the

@@ -362,7 +362,7 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self, StopDisposition::Trace);
+                        return run_guarded_stop(pipe, self, StopDisposition::InteractiveTrace);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
                         return run_guarded_stop(pipe, self, StopDisposition::Analyze);
@@ -1909,7 +1909,7 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StopDisposition {
-    Trace,
+    InteractiveTrace,
     Analyze,
     AnalyzeAndTrace,
     Discard,
@@ -2003,16 +2003,10 @@ fn run_guarded_stop_with_stopped(
             write_analysis_response(pipe, scratch.filtered_trace_path(), &membership)?;
             write_trace_response(pipe, &scratch)
         }
-        StopDisposition::Trace => {
-            let membership = owner.finish_job_tracking()?;
-            filter_trace_for_job_membership(
-                scratch.trace_path(),
-                scratch.filtered_trace_path(),
-                &membership,
-            )
-            .context("failed to create process-scoped guarded WPR trace")?;
-            write_trace_response(pipe, &scratch)
-        }
+        // `CONTROL_STOP` is reserved for standalone `plm log`, which has no
+        // sandbox job to attest because the operator chooses the workload
+        // interactively. Automated capture uses the scoped dispositions above.
+        StopDisposition::InteractiveTrace => write_source_trace_response(pipe, &scratch),
     }
 }
 
@@ -2076,6 +2070,19 @@ fn run_start() -> Result<()> {
 
 fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
     let (mut trace_file, len) = scratch.open_filtered_trace()?;
+    write_trace_file_response(pipe, &mut trace_file, len)
+}
+
+fn write_source_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
+    let (mut trace_file, len) = scratch.open_source_trace()?;
+    write_trace_file_response(pipe, &mut trace_file, len)
+}
+
+fn write_trace_file_response(
+    pipe: &mut std::fs::File,
+    trace_file: &mut std::fs::File,
+    len: u64,
+) -> Result<()> {
     if len > MAX_TRACE_BYTES {
         anyhow::bail!(
             "captured ETL is {len} bytes, exceeding the {} byte transfer limit",
@@ -2084,7 +2091,7 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
     }
 
     write_header(pipe, ResponseKind::Trace, len)?;
-    copy_exact_len(&mut trace_file, pipe, len)?;
+    copy_exact_len(trace_file, pipe, len)?;
     pipe.flush().context("failed to flush elevated PLM trace")
 }
 

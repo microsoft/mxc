@@ -24,6 +24,12 @@ use learning_mode_core::{
 };
 use wxc_common::models::CaptureDenialsOutput;
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct DenialsOutputPaths {
+    pub denials: PathBuf,
+    pub etl: Option<PathBuf>,
+}
+
 /// Writes a bounded [`AnalysisResult`] to `output_path` as the JSON denials
 /// document and returns the caller-facing [`CaptureDenialsOutput`] summary.
 ///
@@ -122,16 +128,61 @@ pub fn insert_run_id_into_stem(path: &Path, run_id: &str) -> PathBuf {
     }
 }
 
-/// Resolves the JSON denials deliverable path for a run: the caller's
-/// configured path with a per-run identifier stamped into the stem, or a
-/// managed per-run temp file when unset.
-pub fn unique_denials_output_path(configured_path: Option<&str>) -> Result<PathBuf, String> {
+/// Resolves the paired denials and optional retained-ETL paths for one run.
+///
+/// Both names contain the same run identifier. The retained path is always
+/// distinct, including when the configured denials path has no extension or
+/// already ends in `.etl`.
+pub fn unique_denials_output_paths(
+    configured_path: Option<&str>,
+    retain_etl: bool,
+) -> Result<DenialsOutputPaths, String> {
     let suffix = random_capture_suffix()?;
     let run_id = format!("{}_{suffix}", std::process::id());
-    Ok(match configured_path {
-        Some(path) => insert_run_id_into_stem(Path::new(path), &run_id),
+    Ok(denials_output_paths_for_run(
+        configured_path,
+        &run_id,
+        retain_etl,
+    ))
+}
+
+fn denials_output_paths_for_run(
+    configured_path: Option<&str>,
+    run_id: &str,
+    retain_etl: bool,
+) -> DenialsOutputPaths {
+    let denials = match configured_path {
+        Some(path) => insert_run_id_into_stem(Path::new(path), run_id),
         None => std::env::temp_dir().join(format!("mxc_denials_{run_id}.json")),
-    })
+    };
+    let etl = retain_etl.then(|| match configured_path {
+        Some(path) => retained_etl_path(Path::new(path), run_id),
+        None => std::env::temp_dir().join(format!("mxc_denials_{run_id}.etl")),
+    });
+    DenialsOutputPaths { denials, etl }
+}
+
+fn retained_etl_path(configured_path: &Path, run_id: &str) -> PathBuf {
+    let file_name = configured_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("denials");
+    let extension = configured_path.extension().and_then(|ext| ext.to_str());
+    let stem = configured_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or(file_name);
+    let retained_name = match extension {
+        Some(ext) if ext.eq_ignore_ascii_case("etl") => {
+            format!("{stem}.{run_id}.trace.etl")
+        }
+        Some(_) => format!("{stem}.{run_id}.etl"),
+        None => format!("{file_name}.{run_id}.etl"),
+    };
+    match configured_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(retained_name),
+        _ => PathBuf::from(retained_name),
+    }
 }
 
 /// A short random hex suffix used to keep per-run temp/output paths from
@@ -329,13 +380,48 @@ mod tests {
 
     #[test]
     fn managed_denials_paths_are_unique_per_run() {
-        let first = unique_denials_output_path(None).expect("first path");
-        let second = unique_denials_output_path(None).expect("second path");
+        let first = unique_denials_output_paths(None, false)
+            .expect("first path")
+            .denials;
+        let second = unique_denials_output_paths(None, false)
+            .expect("second path")
+            .denials;
 
         assert_ne!(first, second);
         assert_eq!(first.parent(), Some(std::env::temp_dir().as_path()));
         assert_eq!(second.parent(), Some(std::env::temp_dir().as_path()));
         assert_eq!(first.extension().and_then(|ext| ext.to_str()), Some("json"));
+    }
+
+    #[test]
+    fn paired_paths_preserve_run_id_for_extensionless_output() {
+        let paths = denials_output_paths_for_run(Some(r"C:\app\denials"), "77_abcd", true);
+
+        assert_eq!(paths.denials, PathBuf::from(r"C:\app\denials.77_abcd"));
+        assert_eq!(
+            paths.etl,
+            Some(PathBuf::from(r"C:\app\denials.77_abcd.etl"))
+        );
+    }
+
+    #[test]
+    fn paired_paths_are_distinct_for_etl_output() {
+        let paths = denials_output_paths_for_run(Some(r"C:\app\denials.ETL"), "77_abcd", true);
+
+        assert_eq!(paths.denials, PathBuf::from(r"C:\app\denials.77_abcd.ETL"));
+        assert_eq!(
+            paths.etl,
+            Some(PathBuf::from(r"C:\app\denials.77_abcd.trace.etl"))
+        );
+        assert_ne!(
+            paths.denials.to_string_lossy().to_ascii_lowercase(),
+            paths
+                .etl
+                .as_ref()
+                .expect("retained path")
+                .to_string_lossy()
+                .to_ascii_lowercase()
+        );
     }
 
     #[test]
