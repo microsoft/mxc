@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use learning_mode_core::{AnalysisResult, DenialAnalyzer, ProcessLifetime};
 use learning_mode_windows::{
     filter_trace_for_job_membership, EtlDenialAnalyzer, JobMembershipSnapshot,
     JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
@@ -362,7 +362,7 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self, StopDisposition::InteractiveTrace);
+                        return run_guarded_stop(pipe, self, StopDisposition::InteractiveAnalyze);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
                         return run_guarded_stop(pipe, self, StopDisposition::Analyze);
@@ -1445,7 +1445,7 @@ impl GuardedSession {
         Ok(())
     }
 
-    pub fn stop(&mut self, trace_destination: &Path) -> Result<()> {
+    fn stop_interactive_analyzed(&mut self) -> Result<AnalysisResult> {
         if self.disarmed {
             anyhow::bail!("guarded PLM session is already stopped");
         }
@@ -1458,17 +1458,10 @@ impl GuardedSession {
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
-        let result = read_response(
-            &mut pipe,
-            self.process.0,
-            Operation::Stop,
-            Some(trace_destination),
-            deadline,
-            || {
-                stopped.set(true);
-                Ok(())
-            },
-        );
+        let result = read_analysis_response(&mut pipe, self.process.0, deadline, || {
+            stopped.set(true);
+            Ok(())
+        });
         if stopped.get() {
             self.disarmed = true;
             drop(pipe);
@@ -1476,8 +1469,9 @@ impl GuardedSession {
                 self.process.0,
                 deadline.saturating_duration_since(Instant::now()),
             );
-            result?;
-            wait_result
+            let analysis = result?;
+            wait_result?;
+            Ok(analysis)
         } else {
             self.pipe = Some(pipe);
             result
@@ -1682,13 +1676,13 @@ pub fn invoke_guarded_start(owner_pid: u32) -> Result<()> {
     })
 }
 
-pub fn stop_current_guarded_start(trace_destination: &Path) -> Result<()> {
+pub fn stop_current_guarded_start() -> Result<AnalysisResult> {
     CURRENT_GUARDED_SESSION.with(|slot| {
         let mut session = slot
             .borrow_mut()
             .take()
             .context("no guarded PLM session is active on this thread")?;
-        let result = session.stop(trace_destination);
+        let result = session.stop_interactive_analyzed();
         if result.is_err() && !session.disarmed {
             *slot.borrow_mut() = Some(session);
         }
@@ -1909,7 +1903,7 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StopDisposition {
-    InteractiveTrace,
+    InteractiveAnalyze,
     Analyze,
     AnalyzeAndTrace,
     Discard,
@@ -2005,8 +1999,11 @@ fn run_guarded_stop_with_stopped(
         }
         // `CONTROL_STOP` is reserved for standalone `plm log`, which has no
         // sandbox job to attest because the operator chooses the workload
-        // interactively. Automated capture uses the scoped dispositions above.
-        StopDisposition::InteractiveTrace => write_source_trace_response(pipe, &scratch),
+        // interactively. Decode in the elevated child and return only the
+        // bounded analysis; automated capture uses the scoped dispositions.
+        StopDisposition::InteractiveAnalyze => {
+            write_interactive_analysis_response(pipe, scratch.trace_path())
+        }
     }
 }
 
@@ -2073,11 +2070,6 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
     write_trace_file_response(pipe, &mut trace_file, len)
 }
 
-fn write_source_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
-    let (mut trace_file, len) = scratch.open_source_trace()?;
-    write_trace_file_response(pipe, &mut trace_file, len)
-}
-
 fn write_trace_file_response(
     pipe: &mut std::fs::File,
     trace_file: &mut std::fs::File,
@@ -2103,6 +2095,20 @@ fn write_analysis_response(
     let analysis = EtlDenialAnalyzer
         .analyze_for_job_membership(trace_path, membership)
         .context("failed to decode guarded WPR trace for the sandbox process tree")?;
+    write_serialized_analysis_response(pipe, &analysis)
+}
+
+fn write_interactive_analysis_response(pipe: &mut std::fs::File, trace_path: &Path) -> Result<()> {
+    let analysis = EtlDenialAnalyzer
+        .analyze(trace_path)
+        .context("failed to decode interactive guarded WPR trace")?;
+    write_serialized_analysis_response(pipe, &analysis)
+}
+
+fn write_serialized_analysis_response(
+    pipe: &mut std::fs::File,
+    analysis: &AnalysisResult,
+) -> Result<()> {
     let payload =
         serde_json::to_vec(&analysis).context("failed to serialize guarded WPR analysis")?;
     let len = payload.len() as u64;
