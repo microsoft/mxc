@@ -2142,6 +2142,8 @@ mod tests {
             r#"{"allowLocalNetwork": true}"#,
             r#"{"allowedHosts": ["example.com"]}"#,
             r#"{"blockedHosts": ["example.com"]}"#,
+            r#"{"egress": {"allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}}"#,
+            r#"{"ingress": {"hostLoopback": "deny"}}"#,
         ] {
             let policy = provision_policy(net);
             assert!(
@@ -5070,6 +5072,27 @@ mod tests {
             "containment": "wslc",
             "process": {"commandLine": "echo hi"},
             "network": {"allowLocalNetwork": true}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{err}").contains("allowLocalNetwork=true is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn ga_ingress_host_loopback_allow_is_still_rejected_for_wslc() {
+        // The GA spelling must not route around a per-backend rejection that the
+        // legacy spelling already trips. WSLc reads the domain field, so mapping
+        // ingress onto it before that check is what keeps the two spellings
+        // equivalent.
+        let json = r#"{
+            "containment": "wslc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"ingress": {"hostLoopback": "allow"}}
         }"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();

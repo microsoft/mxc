@@ -14,7 +14,7 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, EgressAction, NetworkEnforcementMode, NetworkPolicy, PortSelector,
+    ContainerPolicy, EgressAction, NetworkEnforcementMode, NetworkPolicy, PortSelector, Protocol,
     ProxyAddress, ProxyHostPin,
 };
 
@@ -1175,22 +1175,22 @@ impl NetworkIptablesManager {
     ) -> FirewallRuleArgs {
         let mut args = FirewallRuleArgs::default();
         for destination in &destinations.ipv4 {
-            args.ipv4
-                .extend(Self::build_destination_rules(
-                    chain_name,
-                    destination,
-                    selectors,
-                    action,
-                ));
+            args.ipv4.extend(Self::build_destination_rules(
+                chain_name,
+                destination,
+                selectors,
+                IpFamily::V4,
+                action,
+            ));
         }
         for destination in &destinations.ipv6 {
-            args.ipv6
-                .extend(Self::build_destination_rules(
-                    chain_name,
-                    destination,
-                    selectors,
-                    action,
-                ));
+            args.ipv6.extend(Self::build_destination_rules(
+                chain_name,
+                destination,
+                selectors,
+                IpFamily::V6,
+                action,
+            ));
         }
         args
     }
@@ -1212,6 +1212,7 @@ impl NetworkIptablesManager {
         chain_name: &str,
         destination: &str,
         selectors: &[PortSelector],
+        family: IpFamily,
         action: &RuleAction,
     ) -> Vec<Vec<String>> {
         if selectors.is_empty() {
@@ -1219,13 +1220,20 @@ impl NetworkIptablesManager {
                 chain_name,
                 destination,
                 None,
+                family,
                 action,
             )];
         }
         selectors
             .iter()
             .map(|selector| {
-                Self::build_single_rule_args(chain_name, destination, Some(*selector), action)
+                Self::build_single_rule_args(
+                    chain_name,
+                    destination,
+                    Some(*selector),
+                    family,
+                    action,
+                )
             })
             .collect()
     }
@@ -1234,6 +1242,7 @@ impl NetworkIptablesManager {
         chain_name: &str,
         destination: &str,
         selector: Option<PortSelector>,
+        family: IpFamily,
         action: &RuleAction,
     ) -> Vec<String> {
         let mut args = vec![
@@ -1244,7 +1253,7 @@ impl NetworkIptablesManager {
         ];
         if let Some(selector) = selector {
             args.push("-p".to_string());
-            args.push(selector.protocol.iptables_arg().to_string());
+            args.push(Self::protocol_arg(selector.protocol, family).to_string());
             // `icmp` carries no ports, so the parser guarantees `port` is None
             // there; emitting `--dport` for it would make iptables reject the
             // whole rule at apply time.
@@ -1256,6 +1265,18 @@ impl NetworkIptablesManager {
         args.push("-j".to_string());
         args.push(Self::rule_action_arg(action).to_string());
         args
+    }
+
+    /// The `-p` value for a protocol in a given address family.
+    ///
+    /// ICMP is the one protocol whose name differs between the two binaries:
+    /// ip6tables knows it as `icmpv6` and rejects `-p icmp` outright, so a
+    /// family-blind name would make every IPv6 ICMP rule fail to install.
+    fn protocol_arg(protocol: Protocol, family: IpFamily) -> &'static str {
+        match (protocol, family) {
+            (Protocol::Icmp, IpFamily::V6) => "icmpv6",
+            _ => protocol.iptables_arg(),
+        }
     }
 
     /// Build the allow/deny rule args for a single host by resolving it once.
@@ -4017,6 +4038,7 @@ mod tests {
             chain_name,
             destination,
             None,
+            IpFamily::V4,
             &RuleAction::Deny,
         );
 
@@ -4099,6 +4121,7 @@ mod tests {
             "MXC-legacy",
             "192.0.2.10",
             &[],
+            IpFamily::V4,
             &RuleAction::Allow,
         );
 
@@ -4118,7 +4141,6 @@ mod tests {
 
     #[test]
     fn a_tcp_selector_emits_the_protocol_and_destination_port() {
-        use wxc_common::models::Protocol;
         let selectors = vec![PortSelector {
             protocol: Protocol::Tcp,
             port: Some(443),
@@ -4127,6 +4149,7 @@ mod tests {
             "MXC-tcp",
             "192.0.2.10",
             &selectors,
+            IpFamily::V4,
             &RuleAction::Allow,
         );
 
@@ -4142,7 +4165,6 @@ mod tests {
 
     #[test]
     fn a_protocol_selector_without_a_port_matches_every_port_for_that_protocol() {
-        use wxc_common::models::Protocol;
         let selectors = vec![PortSelector {
             protocol: Protocol::Udp,
             port: None,
@@ -4151,6 +4173,7 @@ mod tests {
             "MXC-anyport",
             "192.0.2.10",
             &selectors,
+            IpFamily::V4,
             &RuleAction::Allow,
         );
         let rendered = joined(&rules[0]);
@@ -4167,7 +4190,6 @@ mod tests {
 
     #[test]
     fn an_icmp_selector_emits_a_protocol_match_and_no_port() {
-        use wxc_common::models::Protocol;
         let selectors = vec![PortSelector {
             protocol: Protocol::Icmp,
             port: None,
@@ -4176,6 +4198,7 @@ mod tests {
             "MXC-icmp",
             "192.0.2.10",
             &selectors,
+            IpFamily::V4,
             &RuleAction::Deny,
         );
         let rendered = joined(&rules[0]);
@@ -4192,8 +4215,40 @@ mod tests {
     }
 
     #[test]
+    fn an_icmp_selector_is_named_icmpv6_in_the_ipv6_family() {
+        // ip6tables rejects `-p icmp` outright, so a family-blind protocol name
+        // would make every IPv6 ICMP rule fail to install.
+        let selectors = vec![PortSelector {
+            protocol: Protocol::Icmp,
+            port: None,
+        }];
+        let destinations = ResolvedDestinations {
+            ipv4: strings(&["192.0.2.10"]),
+            ipv6: strings(&["2001:db8::10"]),
+        };
+        let rules = NetworkIptablesManager::build_resolved_destination_rule_args(
+            "MXC-icmp6",
+            &destinations,
+            &selectors,
+            &RuleAction::Allow,
+        );
+
+        assert!(
+            joined(&rules.ipv4[0]).contains("-p icmp")
+                && !joined(&rules.ipv4[0]).contains("icmpv6"),
+            "the IPv4 rule should use icmp; actual: {:?}",
+            rules.ipv4
+        );
+        assert!(
+            joined(&rules.ipv6[0]).contains("-p icmpv6"),
+            "the IPv6 rule should use icmpv6, which is the only name ip6tables \
+             accepts; actual: {:?}",
+            rules.ipv6
+        );
+    }
+
+    #[test]
     fn each_protocol_port_pair_becomes_one_rule_and_no_cross_product_is_emitted() {
-        use wxc_common::models::Protocol;
         // The widening defect this pins: flattening the wire's (protocol, port)
         // pairs into two independent lists makes the emitter cross-product
         // them, so a policy allowing tcp:443 and udp:53 would also open tcp:53
@@ -4212,6 +4267,7 @@ mod tests {
             "MXC-pairs",
             "203.0.113.5",
             &selectors,
+            IpFamily::V4,
             &RuleAction::Allow,
         );
         let rendered: Vec<String> = rules.iter().map(|rule| joined(rule)).collect();
