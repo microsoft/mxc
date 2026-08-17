@@ -195,6 +195,14 @@ consumer's local Cargo output directory. A locally built or user-writable
 adjacent `plm.exe` is intentionally rejected, which means native PSEC capture
 may remain available but the guarded-WPR legacy fallback is unavailable.
 
+For an isolated developer validation loop, a locally built `plm.exe` can be
+Authenticode-signed with a short-lived development code-signing certificate
+whose signer Organization is `Microsoft Corporation`. Trust that certificate
+only on the validation machine, deploy the signed binary in an
+administrator-protected directory, and remove the certificate after testing.
+This exercises the production trust gate without adding an unsigned-build
+bypass; production packages still require the normal Microsoft-signed binary.
+
 ### Bounded discard-confirmation
 
 If discarding a guarded session fails, MXC confirms that the elevated guardian
