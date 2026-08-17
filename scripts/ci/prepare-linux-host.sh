@@ -150,6 +150,22 @@ enable_bridge_netfilter() {
     done
 }
 
+# Container-scoped rules hook egress (-i <veth>), so a reply arrives in the
+# opposite direction, matches nothing MXC installed, and falls through to the
+# host's FORWARD policy. A DROP policy (Docker sets one) therefore breaks
+# allowed destinations, and worse, makes the deny cases pass vacuously: a
+# container with no working hook at all is equally unreachable. Forwarding by
+# default leaves an MXC rule as the only thing that can block traffic.
+allow_host_forwarding() {
+    local command
+    for command in iptables ip6tables; do
+        if command -v "$command" >/dev/null 2>&1; then
+            sudo "$command" -P FORWARD ACCEPT ||
+                echo "WARNING: could not set the $command FORWARD policy to ACCEPT; deny-case tests may pass without enforcing anything." >&2
+        fi
+    done
+}
+
 # Report the host-side state that container networking depends on. Purely
 # diagnostic: never fails the job, so a networking problem still surfaces as
 # the backend test failure rather than as a prerequisite error.
@@ -172,8 +188,15 @@ report_lxc_network_diagnostics() {
     sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E '10\.0\.3|MASQUERADE' |
         sed 's/^/  /' || echo "  (none found)"
 
-    echo "FORWARD policy and bridge rules:"
-    sudo iptables -S FORWARD 2>/dev/null | grep -E "policy|$bridge" | sed 's/^/  /' ||
+    # A vacuous pass depends on this policy, so print it verbatim. grep reads
+    # the whole ruleset, avoiding the SIGPIPE an early-closing head would send
+    # back to iptables under pipefail.
+    echo "FORWARD policy (must be ACCEPT, or deny cases prove nothing):"
+    sudo iptables -S FORWARD 2>/dev/null | grep '^-P' | sed 's/^/  /' || echo "  (unknown)"
+    sudo ip6tables -S FORWARD 2>/dev/null | grep '^-P' | sed 's/^/  /' || echo "  (unknown)"
+
+    echo "FORWARD rules for the bridge:"
+    sudo iptables -S FORWARD 2>/dev/null | grep -E "$bridge" | sed 's/^/  /' ||
         echo "  (none found)"
 
     echo "Host /etc/resolv.conf nameservers:"
@@ -227,6 +250,7 @@ case "$backend" in
         fi
         start_lxc_bridge
         enable_bridge_netfilter
+        allow_host_forwarding
         report_lxc_network_diagnostics
         ;;
     microvm)
