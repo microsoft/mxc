@@ -39,6 +39,16 @@ pub fn diagnose_create_process_failure(
     command_line: &str,
     readonly_paths: &[String],
 ) -> LaunchDiagnostic {
+    if win32_error == ERROR_ACCESS_DISABLED_BY_POLICY.0 {
+        return LaunchDiagnostic {
+            kind: "launch_blocked_by_policy",
+            message: "Windows blocked the sandboxed process launch because of an IT-managed policy rule \
+                      (ERROR_ACCESS_DISABLED_BY_POLICY, 1260). Contact your system administrator \
+                      to allow the target executable to run in an MXC sandbox."
+                .to_string(),
+        };
+    }
+
     // Check for feature-not-enabled (velocity keys).
     if win32_error == ERROR_CALL_NOT_IMPLEMENTED.0 || win32_error == E_NOTIMPL.0 as u32 {
         return diagnose_api_not_implemented();
@@ -108,7 +118,8 @@ const REQUIRED_VELOCITY_KEYS: &[(u32, &str)] = &[
 // flow through `u32`, which matches the existing public surface of
 // this module (`diagnose_create_process_failure` takes `u32`).
 use windows::Win32::Foundation::{
-    ERROR_CALL_NOT_IMPLEMENTED, ERROR_NOT_SUPPORTED, E_NOTIMPL, STATUS_DLL_INIT_FAILED,
+    ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED, ERROR_NOT_SUPPORTED, E_NOTIMPL,
+    STATUS_DLL_INIT_FAILED,
 };
 
 // -- Internal heuristics -----------------------------------------------------
@@ -329,6 +340,20 @@ mod tests {
     fn e_notimpl_triggers_feature_diagnostic() {
         let diag = diagnose_create_process_failure(E_NOTIMPL.0 as u32, "pwsh.exe", &[]);
         assert_eq!(diag.kind, "feature_not_enabled");
+    }
+
+    #[test]
+    fn policy_block_takes_priority_over_executable_heuristics() {
+        let diag = diagnose_create_process_failure(
+            ERROR_ACCESS_DISABLED_BY_POLICY.0,
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
+            &[],
+        );
+        assert_eq!(diag.kind, "launch_blocked_by_policy");
+        assert!(diag.message.contains("IT-managed"));
+        assert!(diag.message.contains("1260"));
+        assert!(diag.message.contains("system administrator"));
+        assert!(!diag.message.contains("readonlyPaths"));
     }
 
     #[test]
