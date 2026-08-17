@@ -242,12 +242,23 @@ By default, the intermediate ETW `.etl` trace is an internal, runner-managed
 file in a protected per-run temporary directory that MXC deletes after
 analysis. Set `captureDenials.retainEtl` to `true` to preserve the sealed trace
 for diagnostics after a terminal wait. Both native PSEC/V2 capture and the
-guarded-WPR fallback honor retention; guarded WPR transfers the sealed trace
-back to the unelevated caller after process-scoped analysis. Native retention
-begins under `%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and moves
-to a protected per-run directory under `capture-denials\retained` only after
-sealing succeeds. Guarded WPR writes the retained ETL beside its unique
-denials JSON output, using the same file stem with an `.etl` extension.
+guarded-WPR fallback honor retention. Native retention begins under
+`%LOCALAPPDATA%\Microsoft\MXC\capture-denials\working` and moves to a protected
+per-run directory under `capture-denials\retained` only after sealing
+succeeds.
+
+WPR's source ETL is host-wide, so the elevated guarded-WPR helper never
+transfers that file across the privilege boundary. After the sandbox process
+tree terminates, the helper uses the retained, job-attested process handles and
+their exact PID/creation/exit `FILETIME` ranges to relog a second ETL. The
+retained ETL contains only supported Learning Mode events whose event header
+falls inside one of those attested process generations. Guarded analysis and
+retention both consume that same filtered ETL; filtering failure transfers no
+trace. The host-wide source remains in protected elevated scratch and is
+deleted with that scratch. The unelevated caller writes the filtered retained
+ETL beside its unique denials JSON output, using the same file stem with an
+`.etl` extension.
+
 Abandoning or disposing a process without a terminal wait deletes or discards
 the internal trace because no caller can observe its structured path. When
 retention succeeds, the structured pointer and in-process metadata include its
@@ -259,8 +270,9 @@ absolute `etlPath`:
 
 If native post-seal analysis fails while retention is enabled, MXC preserves
 the ETL and exposes its path through `captureDenialsError`. Guarded WPR
-transfers the ETL only after process-scoped analysis succeeds; if a later JSON
-output step fails, the same error metadata identifies the transferred trace.
+transfers the filtered ETL only after process-scoped analysis succeeds; if a
+later JSON output step fails, the same error metadata identifies the
+transferred trace.
 ETL traces can contain sensitive resource paths and identifiers; callers that
 retain them are responsible for deleting the ETL and, for native managed
 retention, its now-empty per-run parent directory when no longer needed.

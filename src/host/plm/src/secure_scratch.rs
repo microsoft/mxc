@@ -40,6 +40,7 @@ use windows::Win32::UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_F
 const DIRECTORY_PREFIX: &str = "mxc-plm-elevated-";
 const PROFILE_FILE: &str = "embedded.wprp";
 const TRACE_FILE: &str = "trace.etl";
+const FILTERED_TRACE_FILE: &str = "filtered.etl";
 const RECOVERY_STATE_PARENT: &str = "Microsoft";
 const RECOVERY_STATE_COMPONENTS: [&str; 2] = ["MXC", "PLM"];
 const RECOVERY_MARKER_FILE: &str = "active.marker";
@@ -54,6 +55,7 @@ pub struct SecureScratch {
     directory: PathBuf,
     profile: PathBuf,
     trace: PathBuf,
+    filtered_trace: PathBuf,
     _ancestor_handles: Vec<OwnedHandle>,
     directory_handle: Option<OwnedHandle>,
     trace_opened: AtomicBool,
@@ -66,6 +68,7 @@ impl fmt::Debug for SecureScratch {
             .field("directory", &self.directory)
             .field("profile", &self.profile)
             .field("trace", &self.trace)
+            .field("filtered_trace", &self.filtered_trace)
             .finish_non_exhaustive()
     }
 }
@@ -131,6 +134,7 @@ impl SecureScratch {
                     return Ok(Self {
                         profile: directory.join(PROFILE_FILE),
                         trace: directory.join(TRACE_FILE),
+                        filtered_trace: directory.join(FILTERED_TRACE_FILE),
                         directory,
                         _ancestor_handles: ancestor_handles,
                         directory_handle: Some(directory_handle),
@@ -162,6 +166,11 @@ impl SecureScratch {
     /// Returns the path WPR must use for the ETL output.
     pub fn trace_path(&self) -> &Path {
         &self.trace
+    }
+
+    /// Returns the protected destination for the process-scoped ETL.
+    pub fn filtered_trace_path(&self) -> &Path {
+        &self.filtered_trace
     }
 
     /// Creates, flushes, verifies, and seals the embedded WPR profile.
@@ -226,8 +235,12 @@ impl SecureScratch {
         })
     }
 
-    /// Opens the WPR-created ETL once, hardens it, and returns its exact size.
-    pub fn open_trace(&self) -> Result<(std::fs::File, u64)> {
+    /// Opens the process-scoped ETL once, hardens it, and returns its exact size.
+    pub fn open_filtered_trace(&self) -> Result<(std::fs::File, u64)> {
+        self.open_trace_at(&self.filtered_trace, "filtered PLM trace")
+    }
+
+    fn open_trace_at(&self, path: &Path, description: &str) -> Result<(std::fs::File, u64)> {
         if self
             .trace_opened
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -236,27 +249,23 @@ impl SecureScratch {
             bail!("secure PLM trace has already been opened");
         }
 
-        let result = self.open_trace_inner();
+        let result = self.open_trace_inner(path, description);
         if result.is_err() {
             self.trace_opened.store(false, Ordering::Release);
         }
         result
     }
 
-    fn open_trace_inner(&self) -> Result<(std::fs::File, u64)> {
+    fn open_trace_inner(&self, path: &Path, description: &str) -> Result<(std::fs::File, u64)> {
         let access = FILE_GENERIC_READ.0
             | READ_CONTROL.0
             | WRITE_DAC.0
             | WRITE_OWNER.0
             | FILE_READ_ATTRIBUTES.0;
-        let handle = open_handle(
-            &self.trace,
-            access,
-            PROTECTOR_SHARE,
-            FILE_FLAG_OPEN_REPARSE_POINT,
-        )
-        .with_context(|| format!("failed to open secure PLM trace {}", self.trace.display()))?;
-        verify_file_kind(handle.0, false).context("PLM trace has an unsafe file type")?;
+        let handle = open_handle(path, access, PROTECTOR_SHARE, FILE_FLAG_OPEN_REPARSE_POINT)
+            .with_context(|| format!("failed to open secure {description} {}", path.display()))?;
+        verify_file_kind(handle.0, false)
+            .with_context(|| format!("{description} has an unsafe file type"))?;
 
         let security = OwnedSecurityDescriptor::from_sddl(PROTECTED_SDDL)?;
         // SAFETY: `handle` is valid and the parsed descriptor remains alive
@@ -268,12 +277,14 @@ impl SecureScratch {
                 security.as_ptr(),
             )
         }
-        .context("failed to harden PLM trace security")?;
+        .with_context(|| format!("failed to harden {description} security"))?;
 
         let mut size = 0i64;
         // SAFETY: `handle` is valid and `size` is a correctly sized out-param.
-        unsafe { GetFileSizeEx(handle.0, &mut size) }.context("failed to read PLM trace size")?;
-        let size = u64::try_from(size).context("PLM trace reported a negative size")?;
+        unsafe { GetFileSizeEx(handle.0, &mut size) }
+            .with_context(|| format!("failed to read {description} size"))?;
+        let size = u64::try_from(size)
+            .with_context(|| format!("{description} reported a negative size"))?;
 
         // Transfer ownership from the RAII handle to File.
         let raw = handle.into_raw();
@@ -286,6 +297,7 @@ impl SecureScratch {
     fn cleanup(&mut self) {
         delete_known_leaf(&self.profile);
         delete_known_leaf(&self.trace);
+        delete_known_leaf(&self.filtered_trace);
         self.directory_handle.take();
         let wide = wide_path(&self.directory);
         // SAFETY: `wide` is a NUL-terminated path to the one known directory.

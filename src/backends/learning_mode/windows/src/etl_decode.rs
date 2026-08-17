@@ -58,6 +58,7 @@ struct CollectedEvent {
 enum CollectionMode {
     Analyze,
     Raw,
+    SelectForRelogging,
 }
 
 type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
@@ -69,12 +70,17 @@ struct LifetimeRange {
 }
 
 #[derive(Debug, Default)]
-struct ProcessLifetimeIndex {
+pub(crate) struct ProcessLifetimeIndex {
     ranges_by_pid: HashMap<u32, Vec<LifetimeRange>>,
 }
 
+pub(crate) struct RelogSelection {
+    pub(crate) selected_event_indices: Vec<usize>,
+    pub(crate) total_event_count: usize,
+}
+
 impl ProcessLifetimeIndex {
-    fn new(process_lifetimes: &[ProcessLifetime]) -> Self {
+    pub(crate) fn new(process_lifetimes: &[ProcessLifetime]) -> Self {
         let mut ranges_by_pid =
             HashMap::<u32, Vec<LifetimeRange>>::with_capacity(process_lifetimes.len());
         for lifetime in process_lifetimes {
@@ -105,7 +111,7 @@ impl ProcessLifetimeIndex {
         Self { ranges_by_pid }
     }
 
-    fn contains(&self, pid: u32, filetime: u64) -> bool {
+    pub(crate) fn contains(&self, pid: u32, filetime: u64) -> bool {
         let Some(ranges) = self.ranges_by_pid.get(&pid) else {
             return false;
         };
@@ -123,6 +129,8 @@ struct Accumulator<'visitor> {
     seen: HashSet<(String, learning_mode_core::AccessType)>,
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
+    relog_selected_event_indices: Vec<usize>,
+    relog_event_count: usize,
     raw_event_count: usize,
     processed_event_count: usize,
     processing_limit_reached: bool,
@@ -141,6 +149,8 @@ impl<'visitor> Accumulator<'visitor> {
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: None,
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -166,6 +176,28 @@ impl<'visitor> Accumulator<'visitor> {
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: Some(visitor),
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
+            raw_event_count: 0,
+            processed_event_count: 0,
+            processing_limit_reached: false,
+            stop_requested: false,
+            decode_error: None,
+            panic_payload: None,
+            schema_cache: tdh_decode::EventSchemaCache::default(),
+        }
+    }
+
+    fn select_for_relogging(process_lifetimes: &[ProcessLifetime]) -> Self {
+        Self {
+            mode: CollectionMode::SelectForRelogging,
+            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
+            denials: Vec::new(),
+            seen: HashSet::new(),
+            truncated: false,
+            raw_visitor: None,
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -395,6 +427,25 @@ pub fn visit_raw_events(
     Ok(accumulator.raw_event_count)
 }
 
+/// Builds a bounded decision vector for supported Learning Mode events in
+/// source order. `ProcessTrace` normalizes each timestamp to FILETIME before
+/// the exact process-generation test, so Trace Relogger can replay these
+/// decisions without comparing its raw trace-clock timestamps.
+pub(crate) fn select_learning_mode_events_for_relogging(
+    source_path: &Path,
+    process_lifetimes: &[ProcessLifetime],
+) -> Result<RelogSelection, AnalyzeError> {
+    let mut accumulator = Accumulator::select_for_relogging(process_lifetimes);
+    process_trace_file(source_path, &mut accumulator)?;
+    if let Some(error) = accumulator.decode_error {
+        return Err(AnalyzeError::Decode(error));
+    }
+    Ok(RelogSelection {
+        selected_event_indices: accumulator.relog_selected_event_indices,
+        total_event_count: accumulator.relog_event_count,
+    })
+}
+
 /// De-duplicates raw denials by `(user-visible resource, accessType)`,
 /// normalising case-insensitive Windows file/registry identifiers while
 /// preserving first-seen display spelling and order.
@@ -543,6 +594,34 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
 
+    if matches!(acc.mode, CollectionMode::SelectForRelogging) {
+        if !is_learning_mode_event(provider, event_id) {
+            return;
+        }
+        let event_index = acc.relog_event_count;
+        let Some(next_event_count) = acc.relog_event_count.checked_add(1) else {
+            acc.decode_error =
+                Some("trace contained too many Learning Mode events to index".to_string());
+            acc.stop_requested = true;
+            return;
+        };
+        acc.relog_event_count = next_event_count;
+        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+            return;
+        };
+        if acc.in_analysis_scope(header.ProcessId, filetime) {
+            if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
+                acc.decode_error = Some(format!(
+                    "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
+                ));
+                acc.stop_requested = true;
+                return;
+            }
+            acc.relog_selected_event_indices.push(event_index);
+        }
+        return;
+    }
+
     // Establish scope BEFORE charging the event against the shared processing
     // budget. Provider, event id, PID and timestamp all live in the event
     // header, so the scope test needs no (comparatively expensive) TDH decode.
@@ -649,6 +728,38 @@ mod tests {
         let index = ProcessLifetimeIndex::new(&[]);
 
         assert!(!index.contains(7, 10));
+    }
+
+    #[test]
+    fn relog_selection_tracks_supported_event_ordinals_and_exact_lifetimes() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+
+        let mut visit = |provider, event_id, pid, filetime| {
+            // SAFETY: this zeroed record is used only by selection mode, which
+            // reads the initialized POD header fields below and never decodes
+            // payload pointers.
+            let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+            record.EventHeader.ProviderId = provider;
+            record.EventHeader.EventDescriptor.Id = event_id;
+            record.EventHeader.ProcessId = pid;
+            record.EventHeader.TimeStamp = filetime;
+            // SAFETY: `record` remains live for this synchronous call.
+            unsafe { process_event_record(&mut record, &mut accumulator) };
+        };
+
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 42, 100);
+        visit(windows::core::GUID::from_u128(1), 14, 42, 150);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 27, 42, 201);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 28, 42, 200);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 43, 150);
+
+        assert_eq!(accumulator.relog_event_count, 4);
+        assert_eq!(accumulator.relog_selected_event_indices, [0, 2]);
+        assert!(accumulator.decode_error.is_none());
     }
 
     #[test]

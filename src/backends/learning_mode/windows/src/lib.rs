@@ -44,6 +44,8 @@ mod capability_names;
 #[cfg(target_os = "windows")]
 mod etl_decode;
 #[cfg(target_os = "windows")]
+mod etl_filter;
+#[cfg(target_os = "windows")]
 mod extractors;
 #[cfg(target_os = "windows")]
 mod path_norm;
@@ -56,6 +58,8 @@ mod ui;
 
 #[cfg(target_os = "windows")]
 pub use etl_decode::{visit_raw_events, EtlDenialAnalyzer};
+#[cfg(target_os = "windows")]
+pub use etl_filter::filter_trace_for_job_membership;
 #[cfg(target_os = "windows")]
 pub use extractors::DecodedEventParts;
 #[cfg(target_os = "windows")]

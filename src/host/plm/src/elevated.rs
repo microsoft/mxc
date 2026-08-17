@@ -28,7 +28,8 @@ use std::time::{Duration, Instant};
 
 use learning_mode_core::{AnalysisResult, ProcessLifetime};
 use learning_mode_windows::{
-    EtlDenialAnalyzer, JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
+    filter_trace_for_job_membership, EtlDenialAnalyzer, JobMembershipSnapshot,
+    JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
 };
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
@@ -1983,14 +1984,35 @@ fn run_guarded_stop_with_stopped(
             .context("failed to return elevated PLM discard success"),
         StopDisposition::Analyze => {
             let membership = owner.finish_job_tracking()?;
-            write_analysis_response(pipe, &scratch, &membership)
+            filter_trace_for_job_membership(
+                scratch.trace_path(),
+                scratch.filtered_trace_path(),
+                &membership,
+            )
+            .context("failed to create process-scoped guarded WPR trace")?;
+            write_analysis_response(pipe, scratch.filtered_trace_path(), &membership)
         }
         StopDisposition::AnalyzeAndTrace => {
             let membership = owner.finish_job_tracking()?;
-            write_analysis_response(pipe, &scratch, &membership)?;
+            filter_trace_for_job_membership(
+                scratch.trace_path(),
+                scratch.filtered_trace_path(),
+                &membership,
+            )
+            .context("failed to create process-scoped guarded WPR trace")?;
+            write_analysis_response(pipe, scratch.filtered_trace_path(), &membership)?;
             write_trace_response(pipe, &scratch)
         }
-        StopDisposition::Trace => write_trace_response(pipe, &scratch),
+        StopDisposition::Trace => {
+            let membership = owner.finish_job_tracking()?;
+            filter_trace_for_job_membership(
+                scratch.trace_path(),
+                scratch.filtered_trace_path(),
+                &membership,
+            )
+            .context("failed to create process-scoped guarded WPR trace")?;
+            write_trace_response(pipe, &scratch)
+        }
     }
 }
 
@@ -2053,7 +2075,7 @@ fn run_start() -> Result<()> {
 }
 
 fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
-    let (mut trace_file, len) = scratch.open_trace()?;
+    let (mut trace_file, len) = scratch.open_filtered_trace()?;
     if len > MAX_TRACE_BYTES {
         anyhow::bail!(
             "captured ETL is {len} bytes, exceeding the {} byte transfer limit",
@@ -2068,11 +2090,11 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
 
 fn write_analysis_response(
     pipe: &mut std::fs::File,
-    scratch: &SecureScratch,
+    trace_path: &Path,
     membership: &JobMembershipSnapshot,
 ) -> Result<()> {
     let analysis = EtlDenialAnalyzer
-        .analyze_for_job_membership(scratch.trace_path(), membership)
+        .analyze_for_job_membership(trace_path, membership)
         .context("failed to decode guarded WPR trace for the sandbox process tree")?;
     let payload =
         serde_json::to_vec(&analysis).context("failed to serialize guarded WPR analysis")?;
