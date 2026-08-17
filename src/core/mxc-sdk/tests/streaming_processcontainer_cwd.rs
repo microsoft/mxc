@@ -75,7 +75,9 @@
 //! not one it could have entered either.
 //!
 //! These require an elevated Windows host that can run the ProcessContainer
-//! backend (see docs/host-prep.md), so they are `#[ignore]`d.
+//! backend (see docs/host-prep.md). They are deliberately **not** `#[ignore]`d:
+//! the two PowerShell tests are expected to fail, and failing the build is the
+//! point — this file exists to keep the defect visible rather than filed away.
 
 #![cfg(target_os = "windows")]
 
@@ -214,7 +216,6 @@ fn run_in_sandbox(cwd: &str, script: &str) -> RunResult {
 /// it prints the process's stored cwd string without resolving it — so this
 /// asserts through PowerShell's `pwd`, which does resolve.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn pwd_reports_the_granted_working_directory() {
     let Some(dir) = TempDir::new("pwd") else {
         println!("SKIPPED: cannot create a drive-root test directory");
@@ -248,7 +249,6 @@ fn pwd_reports_the_granted_working_directory() {
 /// where an inaccessible ancestor surfaces as
 /// `Access to the path 'C:\Users' is denied`.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn set_location_into_the_granted_working_directory_succeeds() {
     let Some(dir) = TempDir::new("setloc") else {
         println!("SKIPPED: cannot create a drive-root test directory");
@@ -285,7 +285,6 @@ fn set_location_into_the_granted_working_directory_succeeds() {
 /// are **recursive**, so granting `C:\Users` would expose every user's files.
 /// This pins that boundary.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn granting_the_working_directory_does_not_expose_its_siblings() {
     let Some(base) = TempDir::new("sibling") else {
         println!("SKIPPED: cannot create a drive-root test directory");
@@ -329,7 +328,6 @@ fn granting_the_working_directory_does_not_expose_its_siblings() {
 /// afterwards. It is also why `cmd /c cd` must never be used to sanity-check a
 /// sandbox's working directory — it cannot observe the failure.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn cmd_cd_reports_the_granted_working_directory() {
     let Some(dir) = TempDir::new("cmdcd") else {
         println!("SKIPPED: cannot create a drive-root test directory");
@@ -377,7 +375,6 @@ fn cmd_cd_reports_the_granted_working_directory() {
 /// either — each `cd /d` sets `ERRORLEVEL` on failure, short-circuiting the
 /// `&&` chain and leaving stdout empty.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn cmd_chdir_into_the_granted_working_directory_succeeds() {
     let Some(dir) = TempDir::new("cmdchdir") else {
         println!("SKIPPED: cannot create a drive-root test directory");
@@ -419,7 +416,6 @@ fn cmd_chdir_into_the_granted_working_directory_succeeds() {
 /// fix makes the two tests above pass must not be reachable around by picking
 /// a different shell, so the boundary is pinned once per shell.
 #[test]
-#[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]
 fn cmd_granting_the_working_directory_does_not_expose_its_siblings() {
     let Some(base) = TempDir::new("cmdsibling") else {
         println!("SKIPPED: cannot create a drive-root test directory");
