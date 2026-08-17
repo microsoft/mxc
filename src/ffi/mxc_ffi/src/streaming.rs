@@ -57,7 +57,7 @@ use std::ptr;
 use mxc_sdk::{build_request, spawn_sandbox, Sandbox, SandboxPolicy, WaitOutcome};
 
 use crate::{
-    alloc_cstring, cstr_to_str, status_from_error_code, MXC_STATUS_BACKEND_ERROR,
+    alloc_cstring, cstr_to_str, status_from_error_code, MxcErrorDetail, MXC_STATUS_BACKEND_ERROR,
     MXC_STATUS_INVALID_UTF8, MXC_STATUS_MALFORMED_REQUEST, MXC_STATUS_NULL_ARGUMENT,
     MXC_STATUS_PANIC, MXC_STATUS_SUCCESS,
 };
@@ -103,23 +103,34 @@ pub struct MxcWriteStream {
 /// Parses `policy_json_utf8` as a `SandboxPolicy`, sets `command_utf8` as the
 /// command to run, and spawns the process with piped stdio. On success writes
 /// the handle to `*out_handle` and returns [`MXC_STATUS_SUCCESS`]. On failure
-/// returns the status code and, if `out_error` is non-null, writes an owned
-/// UTF-8 error string to `*out_error` (free it with
-/// [`mxc_string_free`](crate::mxc_string_free)); `*out_handle` is set to null.
+/// returns the status code and, if `out_error` is non-null, fills it with the
+/// message plus the failing API call when there was one (release it with
+/// [`mxc_error_detail_free`](crate::mxc_error_detail_free)); `*out_handle` is
+/// set to null.
 ///
 /// # Safety
 /// - `policy_json_utf8` / `command_utf8` must be null or valid NUL-terminated
 ///   UTF-8 C strings.
-/// - `out_handle` must be non-null and point to writable pointer-sized storage;
-///   on success the caller owns `*out_handle` and must free it with
-///   [`mxc_sandbox_free`].
-/// - `out_error` must be null or point to writable pointer-sized storage.
+/// - `out_handle` must be non-null and point to writable pointer-sized storage
+///   holding **no live handle**: this function overwrites it with null before
+///   doing anything else, so a handle already stored there is stranded, and
+///   [`mxc_sandbox_free`] is its only destructor. Free an existing handle
+///   before reusing its storage. On success the caller owns `*out_handle` and
+///   must free it with [`mxc_sandbox_free`].
+/// - `out_error` must be null, or point to writable storage for one
+///   [`MxcErrorDetail`] that holds **no live detail**: either fresh or
+///   uninitialised storage, or storage already released with
+///   [`mxc_error_detail_free`](crate::mxc_error_detail_free). This function
+///   overwrites that storage without freeing what was there, so handing it a
+///   populated detail leaks that detail's strings. It cannot do otherwise:
+///   uninitialised storage holds no pointers it could safely release, and
+///   nothing distinguishes the two cases at runtime.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_spawn(
     policy_json_utf8: *const c_char,
     command_utf8: *const c_char,
     out_handle: *mut *mut MxcSandbox,
-    out_error: *mut *mut c_char,
+    out_error: *mut MxcErrorDetail,
 ) -> i32 {
     // Initialise out-params defensively so a partial/failed call never leaves
     // stale pointers behind.
@@ -128,8 +139,13 @@ pub unsafe extern "C" fn mxc_spawn(
         unsafe { *out_handle = ptr::null_mut() };
     }
     if !out_error.is_null() {
-        // SAFETY: caller-guaranteed writable pointer-sized storage.
-        unsafe { *out_error = ptr::null_mut() };
+        // `write` rather than assignment: the storage may be uninitialised, and
+        // assigning would be a claim that a valid value is being overwritten.
+        // Nothing is dropped either way -- the type owns raw pointers and has no
+        // destructor -- which is exactly why the contract above requires the
+        // caller to hand over storage holding no live detail.
+        // SAFETY: caller-guaranteed writable storage for one detail.
+        unsafe { ptr::write(out_error, MxcErrorDetail::none()) };
     }
     if out_handle.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
@@ -138,10 +154,12 @@ pub unsafe extern "C" fn mxc_spawn(
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         spawn_inner(policy_json_utf8, command_utf8)
     }))
-    .unwrap_or(Err((
-        MXC_STATUS_PANIC,
-        "the mxc engine panicked".to_string(),
-    )));
+    .unwrap_or_else(|_| {
+        Err((
+            MXC_STATUS_PANIC,
+            MxcErrorDetail::from_message("the mxc engine panicked"),
+        ))
+    });
 
     // SAFETY: `out_handle` non-null (checked), `out_error` null or writable.
     unsafe { finish_spawn(outcome, out_handle, out_error) }
@@ -149,16 +167,16 @@ pub unsafe extern "C" fn mxc_spawn(
 
 /// Shared tail of the handle-returning spawn entry points ([`mxc_spawn`] and
 /// `mxc_state_aware_exec`): on success box the [`Sandbox`] into an
-/// [`MxcSandbox`] handle and write it to `*out_handle`; on failure write the
-/// message to `*out_error` (when non-null) and return the status.
+/// [`MxcSandbox`] handle and write it to `*out_handle`; on failure hand the
+/// detail to `*out_error` (when non-null) and return the status.
 ///
 /// # Safety
 /// `out_handle` must be non-null and writable; `out_error` must be null or
-/// writable. Both are pointer-sized.
+/// point to writable storage for one [`MxcErrorDetail`].
 pub(crate) unsafe fn finish_spawn(
-    outcome: Result<Sandbox, (i32, String)>,
+    outcome: Result<Sandbox, (i32, MxcErrorDetail)>,
     out_handle: *mut *mut MxcSandbox,
-    out_error: *mut *mut c_char,
+    out_error: *mut MxcErrorDetail,
 ) -> i32 {
     match outcome {
         Ok(sandbox) => {
@@ -167,10 +185,17 @@ pub(crate) unsafe fn finish_spawn(
             unsafe { *out_handle = Box::into_raw(boxed) };
             MXC_STATUS_SUCCESS
         }
-        Err((status, message)) => {
-            if !out_error.is_null() {
-                // SAFETY: `out_error` non-null and writable per the caller contract.
-                unsafe { *out_error = alloc_cstring(message.as_bytes()) };
+        Err((status, mut detail)) => {
+            if out_error.is_null() {
+                // The caller does not want the detail, but it already owns heap
+                // strings — dropping the struct would leak every one of them,
+                // because raw pointers have no destructor.
+                detail.free_strings();
+            } else {
+                // SAFETY: `out_error` non-null and writable per the caller contract,
+                // and initialised to an all-null detail by every caller before this
+                // point -- so nothing live is overwritten here.
+                unsafe { *out_error = detail };
             }
             status
         }
@@ -181,38 +206,59 @@ pub(crate) unsafe fn finish_spawn(
 fn spawn_inner(
     policy_json_utf8: *const c_char,
     command_utf8: *const c_char,
-) -> Result<Sandbox, (i32, String)> {
+) -> Result<Sandbox, (i32, MxcErrorDetail)> {
     // SAFETY: caller contract on `mxc_spawn`; borrowed only within scope.
     let policy_json = match unsafe { cstr_to_str(policy_json_utf8) } {
         Some(s) => s,
         None if policy_json_utf8.is_null() => {
             return Err((
                 MXC_STATUS_NULL_ARGUMENT,
-                "policy JSON pointer is null".into(),
+                MxcErrorDetail::from_message("policy JSON pointer is null"),
             ))
         }
-        None => return Err((MXC_STATUS_INVALID_UTF8, "policy JSON is not UTF-8".into())),
+        None => {
+            return Err((
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("policy JSON is not UTF-8"),
+            ))
+        }
     };
     let command = match unsafe { cstr_to_str(command_utf8) } {
         Some(s) => s,
         None if command_utf8.is_null() => {
-            return Err((MXC_STATUS_NULL_ARGUMENT, "command pointer is null".into()))
+            return Err((
+                MXC_STATUS_NULL_ARGUMENT,
+                MxcErrorDetail::from_message("command pointer is null"),
+            ))
         }
-        None => return Err((MXC_STATUS_INVALID_UTF8, "command is not UTF-8".into())),
+        None => {
+            return Err((
+                MXC_STATUS_INVALID_UTF8,
+                MxcErrorDetail::from_message("command is not UTF-8"),
+            ))
+        }
     };
 
     let policy: SandboxPolicy = serde_json::from_str(policy_json).map_err(|e| {
         (
             MXC_STATUS_MALFORMED_REQUEST,
-            format!("failed to parse policy JSON: {e}"),
+            MxcErrorDetail::from_message(format!("failed to parse policy JSON: {e}")),
         )
     })?;
 
-    let mut request =
-        build_request(&policy, None).map_err(|e| (status_from_error_code(e.code), e.message))?;
+    let mut request = build_request(&policy, None).map_err(sdk_error_detail)?;
     request.set_script(command);
 
-    spawn_sandbox(request).map_err(|e| (status_from_error_code(e.code), e.message))
+    spawn_sandbox(request).map_err(sdk_error_detail)
+}
+
+/// Map an SDK error onto the status + detail pair the spawn chain carries, so
+/// the failing API call survives instead of being flattened to a message.
+fn sdk_error_detail(error: mxc_sdk::Error) -> (i32, MxcErrorDetail) {
+    (
+        status_from_error_code(error.code),
+        MxcErrorDetail::from_error(&error),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -633,14 +679,17 @@ mod tests {
     fn spawn_null_policy_reports_null_argument() {
         let command = CString::new("echo hi").unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err: *mut c_char = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
         // SAFETY: null policy pointer is explicitly handled.
         let status = unsafe { mxc_spawn(ptr::null(), command.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_NULL_ARGUMENT);
         assert!(handle.is_null());
-        assert!(!err.is_null(), "an error message should be provided");
-        // SAFETY: `err` was allocated by `mxc_spawn`.
-        unsafe { crate::mxc_string_free(err) };
+        assert!(
+            !err.message_utf8.is_null(),
+            "an error message should be provided"
+        );
+        // SAFETY: `err` was filled by `mxc_spawn` and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
     }
 
     #[test]
@@ -648,14 +697,14 @@ mod tests {
         let policy = CString::new("{ not json").unwrap();
         let command = CString::new("echo hi").unwrap();
         let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err: *mut c_char = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
         // SAFETY: valid strings and valid out pointers.
         let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_MALFORMED_REQUEST);
         assert!(handle.is_null());
-        assert!(!err.is_null());
-        // SAFETY: `err` was allocated by `mxc_spawn`.
-        unsafe { crate::mxc_string_free(err) };
+        assert!(!err.message_utf8.is_null());
+        // SAFETY: `err` was filled by `mxc_spawn` and not yet freed.
+        unsafe { crate::mxc_error_detail_free(&mut err) };
     }
 
     #[test]
@@ -745,7 +794,7 @@ mod tests {
         let command = CString::new("echo mxc_stream_ok").unwrap();
 
         let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err: *mut c_char = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
         // SAFETY: valid strings and out pointers.
         let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
@@ -801,7 +850,7 @@ mod tests {
                 .unwrap();
 
         let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err: *mut c_char = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
         // SAFETY: valid strings and out pointers.
         let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
@@ -862,7 +911,7 @@ mod tests {
             CString::new("C:\\Windows\\System32\\cmd.exe /v:on /c set /p x= & echo done").unwrap();
 
         let mut handle: *mut MxcSandbox = ptr::null_mut();
-        let mut err: *mut c_char = ptr::null_mut();
+        let mut err = MxcErrorDetail::none();
         // SAFETY: valid strings and out pointers.
         let status = unsafe { mxc_spawn(policy.as_ptr(), command.as_ptr(), &mut handle, &mut err) };
         assert_eq!(status, MXC_STATUS_SUCCESS, "spawn failed (status {status})");
