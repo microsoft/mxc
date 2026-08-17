@@ -1305,6 +1305,29 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // Only LXC consumes `network.egress`: `ContainerPolicy::egress_rules`
+        // is read in exactly one place, the LXC iptables emitter. Every other
+        // backend would accept the block and then never program anything from
+        // it, and an unenforced `deny` leaves reachable precisely what the
+        // author named as unreachable -- the policy ends up wider than what
+        // was written, with no diagnostic. The legacy host lists already get
+        // this treatment per backend; the GA spelling must not be the way
+        // around it.
+        //
+        // This is a `!=` rather than a match so that a backend added later
+        // is rejected until someone teaches it to read `egress_rules`.
+        if !policy.egress_rules.is_empty() && containment != ContainmentBackend::Lxc {
+            let msg = format!(
+                "network.egress is not supported by the {:?} backend. Only LXC \
+                 programs egress rules today, so accepting them here would drop \
+                 the policy silently and leave traffic the config denies still \
+                 reachable.",
+                containment
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
+        }
+
         // WSLc cannot enforce per-host egress filtering: containers lack
         // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
         // cannot expose VM-level enforcement without breaking other security
@@ -2142,7 +2165,6 @@ mod tests {
             r#"{"allowLocalNetwork": true}"#,
             r#"{"allowedHosts": ["example.com"]}"#,
             r#"{"blockedHosts": ["example.com"]}"#,
-            r#"{"egress": {"allow": [{"to": [{"cidr": "203.0.113.0/24"}]}]}}"#,
             r#"{"ingress": {"hostLoopback": "deny"}}"#,
         ] {
             let policy = provision_policy(net);
@@ -3341,6 +3363,7 @@ mod tests {
     #[test]
     fn ga_egress_pairs_each_protocol_with_its_own_port() {
         let json = r#"{
+            "containment": "lxc",
             "process": {"commandLine": "print('test')"},
             "network": {
                 "egress": {
@@ -3383,6 +3406,7 @@ mod tests {
         // The firewall chain is first-match-wins, so this ordering is the only
         // thing that makes a deny beat an overlapping allow.
         let json = r#"{
+            "containment": "lxc",
             "process": {"commandLine": "print('test')"},
             "network": {
                 "egress": {
@@ -3405,6 +3429,7 @@ mod tests {
     #[test]
     fn ga_egress_default_omitted_denies() {
         let json = r#"{
+            "containment": "lxc",
             "process": {"commandLine": "print('test')"},
             "network": {
                 "defaultPolicy": "allow",
@@ -3426,6 +3451,7 @@ mod tests {
     #[test]
     fn ga_egress_default_allow_permits_unmatched_traffic() {
         let json = r#"{
+            "containment": "lxc",
             "process": {"commandLine": "print('test')"},
             "network": {"egress": {"default": "allow", "deny": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}
         }"#;
@@ -3525,6 +3551,54 @@ mod tests {
     }
 
     #[test]
+    fn ga_egress_is_rejected_by_every_backend_that_cannot_enforce_it() {
+        // The hole this closes: `egress_rules` is read in exactly one place,
+        // the LXC iptables emitter. On any other backend the block parsed
+        // cleanly, produced no rule, and left the denied destination
+        // reachable -- a policy silently wider than the one written. WSLc is
+        // the sharpest case because its legacy rejection keys off the host
+        // lists, which a GA-only config leaves empty.
+        for backend in ["wslc", "processcontainer", "vm", "bubblewrap"] {
+            let json = format!(
+                r#"{{
+                    "containment": "{backend}",
+                    "process": {{"commandLine": "echo hi"}},
+                    "network": {{
+                        "egress": {{
+                            "default": "allow",
+                            "deny": [{{"to": [{{"cidr": "10.0.0.0/8"}}]}}]
+                        }}
+                    }}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{err}").contains("network.egress is not supported"),
+                "{backend} must refuse a policy it cannot program; got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn ga_egress_is_accepted_by_lxc() {
+        // The other half of the rejection above: the one backend that does
+        // consume `egress_rules` must still take it.
+        let json = r#"{
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow", "deny": [{"to": [{"cidr": "10.0.0.0/8"}]}]}}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.egress_rules.len(), 1);
+    }
+
+    #[test]
     fn a_ga_only_network_block_still_marks_the_network_mode_as_specified() {
         // Backends that refuse a network-posture change on an immutable phase
         // key off this flag; leaving it false would let a GA block through and
@@ -3534,7 +3608,7 @@ mod tests {
             r#""ingress": {"hostLoopback": "deny"}"#,
         ] {
             let json = format!(
-                r#"{{"process":{{"commandLine":"x"}},"network":{{{fragment}}}}}"#
+                r#"{{"containment":"lxc","process":{{"commandLine":"x"}},"network":{{{fragment}}}}}"#
             );
             let encoded = base64_encode(json.as_bytes());
             let mut logger = test_logger();
