@@ -6,8 +6,8 @@ use std::ptr;
 use std::sync::Arc;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
-    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ACCESS_DISABLED_BY_POLICY,
+    ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -74,9 +74,13 @@ fn create_process_failure(
     readonly_paths: &[String],
     working_directory: &str,
 ) -> WxcError {
-    let hresult = err.code().0 as u32;
-    let message = if (hresult >> 16) & 0x1FFF == 7 {
-        diagnose_create_process_failure(hresult & 0xFFFF, command_line, readonly_paths).message
+    let message = if err.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
+        diagnose_create_process_failure(
+            ERROR_ACCESS_DISABLED_BY_POLICY.0,
+            command_line,
+            readonly_paths,
+        )
+        .message
     } else {
         format!("CreateProcessW failed: {err}")
     };
@@ -2170,7 +2174,7 @@ mod tests {
     use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
     use learning_mode_core::AnalysisResult;
     use std::sync::Arc;
-    use windows::Win32::Foundation::ERROR_ACCESS_DISABLED_BY_POLICY;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED};
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
@@ -2218,6 +2222,18 @@ mod tests {
         assert!(message.contains("system administrator"));
         assert!(message.contains(r"working directory: C:\work"));
         assert!(!message.contains("readonlyPaths"));
+    }
+
+    #[test]
+    fn appcontainer_other_win32_error_preserves_create_process_message() {
+        let err = windows_core::Error::from_hresult(ERROR_CALL_NOT_IMPLEMENTED.to_hresult());
+        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work");
+        let message = mapped.to_string();
+
+        assert!(message.contains("CreateProcessW failed"));
+        assert!(message.contains(r"working directory: C:\work"));
+        assert!(!message.contains("BaseContainer"));
+        assert!(!message.contains("Experimental_CreateProcessInSandbox"));
     }
 
     #[test]
