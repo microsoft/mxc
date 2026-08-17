@@ -61,6 +61,28 @@
 //! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
 //! the standalone executor binaries for those.
 //!
+//! # Diagnosing a failure
+//!
+//! [`Error`] carries a closed [`ErrorCode`] and a message, and — when the
+//! failure came from an underlying platform API — the call that failed and its
+//! status:
+//!
+//! ```no_run
+//! # fn demo(error: mxc_sdk::Error) {
+//! if let Some(operation) = &error.operation {
+//!     eprintln!("{operation} failed with {:?}", error.native_code);
+//! }
+//! if let Some(hint) = &error.remediation {
+//!     eprintln!("  try: {hint}");
+//! }
+//! # }
+//! ```
+//!
+//! [`Error::operation`] and [`Error::native_code`] are absent for a failure
+//! raised before any API call was reached — a malformed policy, say — and a
+//! native code only ever appears alongside the operation it belongs to.
+//! `Display` renders both, so logging the error alone does not lose them.
+//!
 //! ```no_run
 //! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
 //!
@@ -150,9 +172,11 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
 /// [`Error`]), or when waiting on the child fails at the OS level.
 pub fn run(request: SandboxRequest) -> Result<Output, Error> {
     let sandbox = spawn_sandbox(request)?;
-    sandbox.wait_with_output().map_err(|e| Error {
-        code: ErrorCode::BackendError,
-        message: format!("waiting for the sandbox to complete failed: {e}"),
+    sandbox.wait_with_output().map_err(|e| {
+        Error::new(
+            ErrorCode::BackendError,
+            format!("waiting for the sandbox to complete failed: {e}"),
+        )
     })
 }
 
