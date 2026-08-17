@@ -42,10 +42,11 @@ pub fn diagnose_create_process_failure(
     if win32_error == ERROR_ACCESS_DISABLED_BY_POLICY.0 {
         return LaunchDiagnostic {
             kind: "launch_blocked_by_policy",
-            message: "Windows blocked the sandboxed process launch because of an IT-managed policy rule \
+            message:
+                "Windows blocked the sandboxed process launch because of an IT-managed policy rule \
                       (ERROR_ACCESS_DISABLED_BY_POLICY, 1260). Contact your system administrator \
                       to allow the target executable to run in an MXC sandbox."
-                .to_string(),
+                    .to_string(),
         };
     }
 
