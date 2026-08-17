@@ -70,7 +70,7 @@ impl From<MxcErrorCode> for ErrorCode {
 }
 
 /// An error returned by the SDK's fallible operations
-/// ([`build_request`](crate::build_request) / [`spawn_sandbox`](crate::spawn_sandbox)).
+/// ([`build_request`](crate::build_request) / [`spawn`](crate::spawn)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error {
     /// The closed error code.
