@@ -203,6 +203,68 @@ administrator-protected directory, and remove the certificate after testing.
 This exercises the production trust gate without adding an unsigned-build
 bypass; production packages still require the normal Microsoft-signed binary.
 
+`signtool.exe` is a public tool included with the Windows SDK; it is not
+Microsoft-internal. The following PowerShell example creates a one-day,
+non-exportable local certificate, signs a development build, and exports only
+its public certificate:
+
+```powershell
+$cert = New-SelfSignedCertificate `
+    -Type CodeSigningCert `
+    -Subject 'CN=MXC Local Validation TEST ONLY,O=Microsoft Corporation' `
+    -CertStoreLocation 'Cert:\CurrentUser\My' `
+    -KeyExportPolicy NonExportable `
+    -NotAfter (Get-Date).AddDays(1) `
+    -HashAlgorithm SHA256
+
+$signTool = Get-ChildItem `
+    "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+    -Filter signtool.exe -Recurse |
+    Where-Object FullName -Like '*\x64\signtool.exe' |
+    Sort-Object FullName -Descending |
+    Select-Object -First 1
+
+& $signTool.FullName sign `
+    /sha1 $cert.Thumbprint /s My /fd SHA256 .\plm.exe
+
+Export-Certificate -Cert $cert -FilePath .\mxc-dev-validation.cer
+$cert.Thumbprint | Set-Content .\mxc-dev-validation.thumbprint
+```
+
+On an isolated validation machine, an administrator can trust the public
+certificate locally and verify the signed binary:
+
+```powershell
+$certificate = Import-Certificate `
+    -FilePath .\mxc-dev-validation.cer `
+    -CertStoreLocation 'Cert:\LocalMachine\Root'
+Import-Certificate `
+    -FilePath .\mxc-dev-validation.cer `
+    -CertStoreLocation 'Cert:\LocalMachine\TrustedPublisher'
+
+Get-AuthenticodeSignature .\plm.exe
+```
+
+Deploy `plm.exe` in an administrator-protected directory such as
+`C:\Program Files\MXC-Dev\`; the directory-integrity gate still rejects a
+signed binary from a user-writable location. After validation, remove the
+certificate from the validation machine and remove the private-key certificate
+from the development machine:
+
+```powershell
+$thumbprint = Get-Content .\mxc-dev-validation.thumbprint
+
+# Run elevated on the validation machine.
+Remove-Item "Cert:\LocalMachine\Root\$thumbprint"
+Remove-Item "Cert:\LocalMachine\TrustedPublisher\$thumbprint"
+
+# Run on the development machine.
+Remove-Item "Cert:\CurrentUser\My\$thumbprint"
+```
+
+The certificate and signed binary are test artifacts: do not publish,
+redistribute, or use them outside the isolated validation environment.
+
 ### Bounded discard-confirmation
 
 If discarding a guarded session fails, MXC confirms that the elevated guardian
