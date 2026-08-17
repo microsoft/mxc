@@ -125,16 +125,21 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 NativeSandbox* handle = null;
-                byte* error = null;
+                MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_state_aware_exec(requestPtr, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
-                    var message = PtrToString(error) ?? "unknown error";
-                    if (error is not null)
+                    // See MxcSandbox.Spawn: the release belongs in `finally` so a throw
+                    // during marshalling or exception construction cannot strand the
+                    // detail's strings.
+                    try
                     {
-                        NativeMethods.mxc_string_free(error);
+                        throw NativeError.ToException(status, error, "unknown error");
                     }
-                    throw new MxcException((ErrorCode)status, message);
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
                 }
                 return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle));
             }
@@ -250,8 +255,7 @@ public static class MxcLifecycle
                 {
                     if (status != (int)ErrorCode.Success)
                     {
-                        var message = PtrToString(result.error_utf8) ?? "unknown error";
-                        throw new MxcException((ErrorCode)status, message);
+                        throw NativeError.ToException(status, result.error, "unknown error");
                     }
                     var responseJson = PtrToString(result.response_json_utf8) ?? "{}";
                     var root = JsonNode.Parse(responseJson) as JsonObject;

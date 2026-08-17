@@ -72,8 +72,7 @@ public static class MxcSandbox
                 {
                     if (status != (int)ErrorCode.Success)
                     {
-                        var message = PtrToString(result.error_utf8) ?? "unknown error";
-                        throw new MxcException((ErrorCode)status, message);
+                        throw NativeError.ToException(status, result.error, "unknown error");
                     }
 
                     return new RunResult
@@ -132,16 +131,22 @@ public static class MxcSandbox
             fixed (byte* commandPtr = commandBuf)
             {
                 NativeSandbox* handle = null;
-                byte* error = null;
+                MxcErrorDetail error = default;
                 var status = NativeMethods.mxc_spawn(policyPtr, commandPtr, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
-                    var message = PtrToString(error) ?? "unknown error";
-                    if (error is not null)
+                    // `finally`, not a straight-line free: marshalling the strings or
+                    // allocating the exception can throw, and on that path the detail
+                    // would never be released. Ownership has to be discharged however
+                    // we leave this block.
+                    try
                     {
-                        NativeMethods.mxc_string_free(error);
+                        throw NativeError.ToException(status, error, "unknown error");
                     }
-                    throw new MxcException((ErrorCode)status, message);
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
                 }
                 return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle), policy.TimeoutMs);
             }
