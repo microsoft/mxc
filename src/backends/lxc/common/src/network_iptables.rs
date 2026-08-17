@@ -4298,6 +4298,58 @@ mod tests {
     }
 
     #[test]
+    fn a_ga_egress_config_traverses_the_parser_and_reaches_the_emitter_intact() {
+        // The seam this pins is the one nothing else covers. The parser's GA
+        // mapping has tests, and the emitter's selector expansion has tests,
+        // but the wiring between them -- `ContainerPolicy::egress_rules` being
+        // chained into `build_policy_rules_logged` -- has none. Delete that
+        // chain and every other test in both crates still passes while the
+        // entire GA policy is silently dropped and no rule is programmed.
+        let config = serde_json::json!({
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "enforcementMode": "firewall",
+                "egress": {
+                    "default": "deny",
+                    "allow": [{
+                        "to": [{"cidr": "203.0.113.0/24"}],
+                        "ports": [{"protocol": "tcp", "port": 443}]
+                    }]
+                }
+            }
+        });
+        let mut logger = Logger::new(Mode::Buffer);
+        let req = wxc_common::config_parser::load_request_from_value(config, &mut logger, false)
+            .expect("the GA config should parse");
+
+        let args = NetworkIptablesManager::build_policy_rule_args("MXC-e2e", &req.policy);
+
+        assert_eq!(
+            args.ipv4,
+            vec![strings(&[
+                "-A",
+                "MXC-e2e",
+                "-d",
+                "203.0.113.0/24",
+                "-p",
+                "tcp",
+                "--dport",
+                "443",
+                "-j",
+                "ACCEPT",
+            ])],
+            "the GA rule should arrive at the emitter with its destination and \
+             its (protocol, port) pair intact"
+        );
+        assert!(
+            args.ipv6.is_empty(),
+            "an IPv4 CIDR must not produce an ip6tables rule; actual: {:?}",
+            args.ipv6
+        );
+    }
+
+    #[test]
     fn base_chain_rules_are_four_family_agnostic_rules_in_documented_order() {
         let chain_name = "MXC-base";
         let rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
