@@ -25,22 +25,22 @@ apt_update() {
     fi
 }
 
-# Red Hat ships no third-party content, so epel-release is not in RHEL's own
-# repos; the documented install is the release RPM straight from Fedora. EPEL
-# packages also routinely link against CRB (CodeReady Builder) content, which
-# is shipped but disabled by default.
-install_epel() {
-    local package_manager="$1"
+# # Red Hat ships no third-party content, so epel-release is not in RHEL's own
+# # repos; the documented install is the release RPM straight from Fedora. EPEL
+# # packages also routinely link against CRB (CodeReady Builder) content, which
+# # is shipped but disabled by default.
+# install_epel() {
+#     local package_manager="$1"
 
-    if command -v subscription-manager >/dev/null 2>&1; then
-        sudo subscription-manager repos \
-            --enable "codeready-builder-for-rhel-10-$(arch)-rpms" ||
-            echo "WARNING: could not enable the CRB repository; EPEL packages that depend on it may fail to install." >&2
-    fi
+#     if command -v subscription-manager >/dev/null 2>&1; then
+#         sudo subscription-manager repos \
+#             --enable "codeready-builder-for-rhel-10-$(arch)-rpms" ||
+#             echo "WARNING: could not enable the CRB repository; EPEL packages that depend on it may fail to install." >&2
+#     fi
 
-    sudo "$package_manager" install -y \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
-}
+#     sudo "$package_manager" install -y \
+#         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
+# }
 
 install_bubblewrap() {
     if command -v bwrap >/dev/null 2>&1; then
@@ -74,13 +74,13 @@ install_lxc() {
         fi
         sudo apt-get install -y --no-install-recommends "${packages[@]}"
     elif command -v dnf >/dev/null 2>&1; then
-        install_epel dnf
+        # install_epel dnf
         sudo dnf install -y lxc lxc-templates dnsmasq iptables
     elif command -v yum >/dev/null 2>&1; then
-        install_epel yum
+        # install_epel yum
         sudo yum install -y lxc lxc-templates dnsmasq iptables
     elif command -v microdnf >/dev/null 2>&1; then
-        install_epel microdnf
+        # install_epel microdnf
         sudo microdnf install -y lxc lxc-templates dnsmasq iptables
     else
         echo "No supported package manager found to install LXC." >&2
