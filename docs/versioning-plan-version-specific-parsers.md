@@ -32,6 +32,8 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 - Introduce a JSON `Value` migration engine or a second schema-validation
   language in the runtime trust boundary.
 - Edit the existing immutable `0.6` or `0.7` stable schema files.
+- Reject positional JSON arrays that Serde can deserialize into structs. That
+  object-root hardening is out of scope for this work in every phase.
 - Introduce another development version as part of the initial parser
   conversion. `0.9.0-dev` is selected when `0.8.0-alpha` is published;
   `1.0.0` remains a later milestone.
@@ -494,12 +496,9 @@ The phase probe runs after the exact version probe. An absent phase selects
 state-aware root family. Duplicate, null, non-string, and unknown phase
 declarations fail before root deserialization.
 
-Follow-up parser hardening: require an object root in both the version and
-phase probes. Serde's derived struct deserialization also accepts positional
-JSON arrays: a required-field probe rejects an empty array but can accept a
-populated positional array, while an all-optional probe can accept an empty
-array. Add a shared map-only probe mechanism and regression tests for empty and
-populated array roots rather than fixing only the phase probe.
+Serde's derived struct deserialization can accept positional JSON arrays.
+Rejecting those arrays through map-only probes or request deserializers is
+explicitly out of scope for this work and is not assigned to any phase.
 
 Exact phase fields use private-macro-generated zero-sized string markers
 (`StartPhase`, `ExecPhase`, `StopPhase`, `DeprovisionPhase`, and
@@ -1098,7 +1097,8 @@ occurs.
 - missing `version` is rejected
 - null and non-string versions are rejected
 - duplicate `version` keys are rejected
-- a non-object root is rejected
+- scalar and empty-array roots are rejected; populated positional arrays are
+  outside this plan's scope
 - trailing non-whitespace content is rejected
 
 After deserialization, call `ContractVersion::parse_exact`.
@@ -1112,7 +1112,8 @@ Unit tests should cover:
 3. Missing version fails.
 4. Null, number, object, and array versions fail.
 5. Duplicate version fields fail.
-6. A non-object root fails.
+6. Scalar and empty-array roots fail; populated positional arrays are not
+   covered.
 7. Trailing JSON content fails.
 8. `0.6.0`, `0.6.1-alpha`, `0.8.0-dev`, and `1.0.0-dev` are unsupported.
 9. Registry descriptors report the expected published/development status.
