@@ -81,13 +81,14 @@ impl AnalysisResult {
             return Ok(true);
         }
 
-        let original = std::mem::take(&mut self.data_loop.signatures);
-        let mut retained_bytes = 0usize;
-        const ENVELOPE_HEADROOM: usize = 4 * 1024;
-        let base_len = serde_json::to_vec(self)?.len();
+        let base_len = serialized_analysis_len(self, &[], self.data_loop.signatures.as_slice())?;
         if base_len > max_bytes {
             return Ok(false);
         }
+
+        let original = std::mem::take(&mut self.data_loop.signatures);
+        let mut retained_bytes = 0usize;
+        const ENVELOPE_HEADROOM: usize = 4 * 1024;
         let signature_budget = max_bytes
             .saturating_sub(base_len)
             .saturating_sub(ENVELOPE_HEADROOM);
@@ -340,16 +341,41 @@ mod tests {
 
     #[test]
     fn serialized_size_limit_never_discards_canonical_denials() {
-        let mut result = AnalysisResult::complete(vec![DeniedResource {
-            resource: "canonical".repeat(512),
-            resource_type: ResourceType::File,
-            access_type: AccessType::Read,
-            pid: 1,
-            filetime: 2,
-        }]);
+        let mut result = AnalysisResult {
+            denials: vec![DeniedResource {
+                resource: "canonical".repeat(512),
+                resource_type: ResourceType::File,
+                access_type: AccessType::Read,
+                pid: 1,
+                filetime: 2,
+            }],
+            denied_resources_truncated: false,
+            data_loop: DataLoopSummary {
+                signatures: vec![DataLoopAggregate {
+                    signature: DataLoopSignature {
+                        provider: DataLoopProvider::KernelGeneral,
+                        provider_guid: "provider".to_string(),
+                        event_id: 14,
+                        reason: DataLoopExclusionReason::CanonicalDenial,
+                        pid: 1,
+                        access_type: Some(AccessType::Read),
+                        resource_type: Some(ResourceType::File),
+                        properties: vec![("ObjectName".to_string(), "value".to_string())],
+                    },
+                    count: 1,
+                }],
+                total_occurrences: 1,
+                ..Default::default()
+            },
+        };
+        let original = result.clone();
 
         assert!(!result.fit_data_loop_within_serialized_bytes(1).unwrap());
-        assert_eq!(result.denials.len(), 1);
+        assert_eq!(result, original);
+        assert!(result
+            .fit_data_loop_within_serialized_bytes(serde_json::to_vec(&original).unwrap().len())
+            .unwrap());
+        assert_eq!(result, original);
     }
 
     #[test]
