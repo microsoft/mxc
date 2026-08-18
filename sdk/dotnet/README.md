@@ -52,6 +52,47 @@ when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
 to the host's stderr, so inspecting `Warnings` is the only way to learn that
 containment was relaxed.
 
+### Denial capture (Windows)
+
+Set `SandboxPolicy.CaptureDenials` to record Windows ProcessContainer accesses
+that the policy does not grant:
+
+```csharp
+var policy = new SandboxPolicy
+{
+    Version = "0.8.0-alpha",
+    CaptureDenials = new CaptureDenialsPolicy
+    {
+        // Block is the safe default: deny the access and record it.
+        // Allow records what would have been denied but relaxes containment.
+        Mode = CaptureDenialsMode.Block,
+        // Optional absolute destination. MXC inserts a per-run ID into the stem.
+        OutputPath = @"C:\logs\denials.json",
+        // Retained ETLs can contain sensitive paths and identifiers.
+        RetainEtl = false,
+    },
+};
+
+RunResult result = MxcSandbox.Run(policy, "cmd /c type C:\\blocked.txt");
+if (result.OutputMetadata?.CaptureDenials is { } capture)
+{
+    Console.WriteLine($"denials: {capture.OutputPath}");
+    Console.WriteLine($"unique denials: {capture.TotalDenials}");
+}
+
+foreach (string warning in result.Warnings)
+{
+    Console.Error.WriteLine(warning);
+}
+```
+
+`OutputPath`'s parent directory must already exist. When it is omitted, MXC
+uses a managed temporary location. If `RetainEtl` is `true`, delete the
+reported ETL after use and remove its now-empty per-run parent directory.
+`CaptureDenialsMode.Allow` intentionally weakens deny-by-default containment;
+always inspect `RunResult.Warnings`. Linux and macOS accept the policy for
+cross-platform parity but do not act on it.
+
 ### Streaming
 
 `MxcSandbox.Spawn(policy, command)` returns a live `MxcSandboxProcess` you can

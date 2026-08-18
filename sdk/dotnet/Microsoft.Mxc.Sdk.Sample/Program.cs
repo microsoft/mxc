@@ -27,6 +27,21 @@ var policy = new SandboxPolicy
     TimeoutMs = 30_000,
 };
 
+// Set MXC_SAMPLE_CAPTURE_DENIALS=1 to opt into Windows denial capture without
+// changing the sample's default host requirements or generating traces by default.
+if (OperatingSystem.IsWindows()
+    && string.Equals(
+        Environment.GetEnvironmentVariable("MXC_SAMPLE_CAPTURE_DENIALS"),
+        "1",
+        StringComparison.Ordinal))
+{
+    policy.CaptureDenials = new CaptureDenialsPolicy
+    {
+        Mode = CaptureDenialsMode.Block,
+        RetainEtl = false,
+    };
+}
+
 Console.WriteLine($"Running: {command}");
 
 try
@@ -38,6 +53,23 @@ try
     if (!string.IsNullOrWhiteSpace(result.Stderr))
     {
         Console.WriteLine($"stderr    : {result.Stderr.TrimEnd()}");
+    }
+    foreach (var warning in result.Warnings)
+    {
+        Console.WriteLine($"warning   : {warning}");
+    }
+    if (result.OutputMetadata?.CaptureDenials is { } capture)
+    {
+        Console.WriteLine($"denials   : {capture.OutputPath}");
+        if (capture.EtlPath is not null)
+        {
+            Console.WriteLine($"ETL       : {capture.EtlPath}");
+        }
+    }
+    if (result.OutputMetadata?.CaptureDenialsError is { } captureError)
+    {
+        Console.WriteLine($"capture error: {captureError.Message}");
+        Console.WriteLine($"retained ETL : {captureError.EtlPath}");
     }
 
     // Streaming variant: spawn the same command as a live process and stream
