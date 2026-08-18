@@ -131,7 +131,39 @@ export function validateCatalog(catalog) {
     }
   }
 
+  validateBackendDelayedStart(catalog);
+
   return { platforms, plans };
+}
+
+// backendDelayedStart is optional: an absent or empty section means every job
+// starts as soon as its runner is ready.
+function validateBackendDelayedStart(catalog) {
+  const delays = catalog.backendDelayedStart;
+  if (delays == null) {
+    return;
+  }
+  if (!Array.isArray(delays)) {
+    throw new Error('catalog backendDelayedStart must be an array');
+  }
+
+  const seen = new Set();
+  for (const entry of delays) {
+    if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('each backendDelayedStart entry must be an object');
+    }
+    assertNonEmptyString(entry.backend, 'backendDelayedStart backend');
+    if (seen.has(entry.backend)) {
+      throw new Error(`duplicate backendDelayedStart entry for ${entry.backend}`);
+    }
+    seen.add(entry.backend);
+
+    if (!Number.isInteger(entry.minutes) || entry.minutes < 0) {
+      throw new Error(
+        `backendDelayedStart ${entry.backend} minutes must be a non-negative integer`
+      );
+    }
+  }
 }
 
 export function expandPlan(catalog, plan) {
@@ -186,7 +218,38 @@ export function resolvePlan(catalog, plan) {
 
   suppressNonMacArm64(matrices);
   sortMatrices(matrices);
+  applyDelayedStart(matrices, catalog.backendDelayedStart);
   return matrices;
+}
+
+// A backend named in backendDelayedStart has its jobs started at staggered
+// offsets rather than all at once. This exists for backends whose setup
+// downloads a large runtime or several container images: every runner in a
+// pool shares one egress address, so simultaneous starts concentrate that
+// traffic into a burst that draws rate limiting and stalled downloads.
+//
+// The entry's minutes value is the gap between consecutive jobs of that
+// backend, counted independently per backend. Applied after sorting so the
+// assignment follows the emitted order and stays reproducible.
+function applyDelayedStart(matrices, delays) {
+  if (!Array.isArray(delays) || delays.length === 0) {
+    return;
+  }
+
+  const stepMinutes = new Map(delays.map(entry => [entry.backend, entry.minutes]));
+  const scheduled = new Map();
+
+  for (const family of FAMILIES) {
+    for (const entry of matrices[family]) {
+      const step = stepMinutes.get(entry.backend);
+      if (step === undefined) {
+        continue;
+      }
+      const position = scheduled.get(entry.backend) ?? 0;
+      entry.startup_delay_minutes = position * step;
+      scheduled.set(entry.backend, position + 1);
+    }
+  }
 }
 
 // Windows and Linux ARM64 hosted VMs currently lack nested virtualization.

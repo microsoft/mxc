@@ -325,6 +325,12 @@
       }
     }
   ],
+  "backendDelayedStart": [
+    {
+      "backend": "wslc",
+      "minutes": 2
+    }
+  ],
   "triggers": {
     "pr": [],
     "nightly": [

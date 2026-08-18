@@ -27,7 +27,7 @@ the individual local test scripts are documented in
 |------|------|
 | `.github/workflows/Validation.Tests.Scheduled.yml` | Scheduled entry point. Builds artifacts, then calls the matrix job. |
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
-| `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers. |
+| `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
@@ -157,6 +157,40 @@ isolation-session, wslc; 25H2/24H2/23H2 × process-t3 + wslc) and
 8 Linux (each of the four distros × bubblewrap + lxc). macOS resolves empty
 because Seatbelt has no wired suite.
 
+### `backendDelayedStart`
+
+Optional. Staggers the start of jobs for a named backend instead of letting
+them all begin at once:
+
+```json
+"backendDelayedStart": [
+  { "backend": "wslc", "minutes": 5 }
+]
+```
+
+Every runner in a pool shares one egress address. A backend whose setup
+downloads a large runtime or several container images therefore concentrates
+that traffic into a burst when its jobs start together, which draws rate
+limiting from public registries and stalled downloads. 
+
+`minutes` is the gap between consecutive jobs of that backend, counted
+independently per backend, following the resolved job order. With the entry
+above, four WSLC jobs start at 0, 5, 10, and 15 minutes.
+
+The resolver emits the offset as `startup_delay_minutes` on each affected
+matrix entry. The job sleeps that long before its first network step, and its
+`timeout-minutes` grows by the same amount so a delayed entry keeps the full
+test budget. Entries for other backends carry no such field and never wait.
+
+Omit the section (or leave it empty) to have every job start as soon as its
+runner is ready. A backend id that no plan schedules is accepted and simply
+never applies.
+
+Note this holds the runner while it sleeps: Actions cannot defer allocating a
+matrix job, so the wait happens inside the job. Keep the value only as large as
+the contention requires. It spreads simultaneous load — it does not help a
+single download that stalls on its own.
+
 ## Backend status
 
 Snapshot of what the matrix actually proves today. Update this table as backends
@@ -281,6 +315,13 @@ passing a distinguishing argument later without touching the matrix.
 Replace the explicit failure in the dispatcher with the suite invocation, add
 any host prerequisites, then add the OS/backend pair to a trigger. Always verify 
 by testing it ahead of time. 
+
+### Stagger a backend's job starts
+
+Add or edit its `backendDelayedStart` entry in the catalog, then resolve
+locally to confirm the offsets. Reach for this when a backend's setup is
+network-heavy enough that concurrent jobs hit rate limits or stalled
+downloads; remove the entry once that pressure is gone.
 
 ### Change the schedule
 
