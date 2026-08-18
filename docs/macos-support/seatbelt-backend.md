@@ -286,8 +286,8 @@ independently of the profile.
 | `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — on its own this is what lets a process `listen()` on a local address; it covers the `bind()` too. (`network-bind (local ip)` alone is *not* enough: `bind()` succeeds and `listen()` is denied.) Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
 | `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
 | `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
-| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |
-| `proxy` (remote `url`) | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot filter a remote proxy by DNS name, so reachability would degrade to allow-all and silently weaken the deny for raw-socket clients. Under `allow`, allows all outbound as best-effort (the proxy enforces host policy). Use a loopback proxy or `builtinTestServer` for MXC-scoped reachability under deny. |
+| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, **rejected during validation** — see below. |
+| `proxy` (remote `url`) | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot filter a remote proxy by DNS name, so reachability would degrade to allow-all and silently weaken the deny for raw-socket clients. Under `allow`, **rejected during validation** — see below. Use a loopback proxy or `builtinTestServer` for MXC-scoped reachability under deny. |
 
 Proxy configuration (`network.proxy`) is supported via the **cooperative
 env-var model** (the same as the Bubblewrap backend): the runner launches or
@@ -299,6 +299,17 @@ the env vars bypass it. `builtinTestServer` launches a bundled, testing-only
 proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
 per-process WinHTTP-style OS proxy policy, so unlike Windows the proxy is
 cooperative rather than kernel-enforced.
+
+`network.proxy` (or `runtimeConfig.networkProxy`) combined with
+`defaultPolicy: "allow"` (or `egress.default: "allow"`) is **rejected during
+validation**. Seatbelt's only enforcement lever for a proxy is scoping the
+sandbox profile's *deny* rule to spare just the proxy's address+port
+(`write_proxy_reachability_rules`); under `allow` there is no deny rule left
+to scope, so the config would silently reduce to "proxy env vars injected,
+direct egress wide open" with no indication that any client ignoring
+`HTTP_PROXY`/`HTTPS_PROXY` bypasses the proxy entirely. Use `defaultPolicy:
+"block"` (or `egress.default: "deny"`) with a loopback proxy for enforced
+reachability.
 
 #### Schema 0.8 network shape (`egress` / `ingress` / `runtimeConfig.networkProxy`)
 
@@ -314,7 +325,7 @@ not accept this shape yet.
 | `network.egress.default` | `"allow"` / absent-then-`"deny"` maps to the same profile generation as legacy `defaultPolicy: "allow"` / `"block"`. |
 | `network.egress.allow` / `network.egress.deny` | **Rejected** if non-empty — Seatbelt has no destination-filtering primitive (no CIDR/port/protocol allow-lists), so only the blanket `default` posture can be expressed. |
 | `network.ingress.default` / `network.ingress.hostLoopback` | Map together to the same `(allow network-inbound (local ip))` rule as legacy `allowLocalNetwork`. Seatbelt has no private loopback, so it cannot enforce a host-loopback posture independent of the general local-network posture: `hostLoopback` must equal `default`, or the config is **rejected**. |
-| `runtimeConfig.networkProxy` | Replaces `network.proxy.localhost` / loopback `network.proxy.url`. Must be an `http`/`https` URL with a `localhost` / `127.0.0.1` / `[::1]` host and an explicit port — a non-loopback host is **rejected** (the schema-0.8 GA design requires the runtime proxy endpoint to be loopback-only). |
+| `runtimeConfig.networkProxy` | Replaces `network.proxy.localhost` / loopback `network.proxy.url`. Must be an `http`/`https` URL with a `localhost` / `127.0.0.1` / `[::1]` host and an explicit port — a non-loopback host is **rejected** (the schema-0.8 GA design requires the runtime proxy endpoint to be loopback-only). Combined with `network.egress.default: "allow"`, also **rejected** — same unenforceable-proxy rule as the legacy shape above. |
 
 ### UI policy
 

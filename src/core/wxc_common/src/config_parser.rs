@@ -1503,6 +1503,34 @@ fn convert_wire_config(
         }
     }
 
+    // Seatbelt's only enforcement lever for network.proxy is scoping the
+    // *deny* rule to spare just the proxy's address+port
+    // (profile_builder::write_proxy_reachability_rules) -- there is no deny
+    // rule left to scope once defaultPolicy/egress.default is 'allow'.
+    // Accepting the combination would silently degrade to "proxy env vars
+    // injected, direct egress wide open", the exact cooperative-only bypass
+    // this guard closes; the two checks above already reject the other
+    // unenforceable proxy shapes (firewall enforcementMode, remote proxy
+    // under 'block'), so this closes the last gap. Checked after both the
+    // legacy `network.proxy` and schema-0.8 `runtimeConfig.networkProxy`
+    // parsing above so it covers either shape.
+    if containment == ContainmentBackend::Seatbelt
+        && policy.network_proxy.is_enabled()
+        && policy.default_network_policy == NetworkPolicy::Allow
+    {
+        let msg = "Seatbelt: network.proxy (or runtimeConfig.networkProxy) cannot be \
+                   combined with defaultPolicy='allow' (or egress.default='allow'). \
+                   Seatbelt can only scope outbound reachability to the proxy's \
+                   address+port when the default posture denies everything else; under \
+                   'allow' there is nothing to scope, so the proxy would be injected as \
+                   HTTP_PROXY/HTTPS_PROXY while direct egress stayed wide open -- any \
+                   client that ignores those env vars would bypass the proxy entirely. \
+                   Use defaultPolicy='block' (or egress.default='deny') with a loopback \
+                   proxy for enforced reachability.";
+        logger.log_line(msg);
+        return Err(WxcError::ConfigParse(msg.to_string()));
+    }
+
     // Lifecycle section
     let lifecycle = match cfg.lifecycle {
         Some(lc) => LifecycleConfig {
@@ -3552,13 +3580,17 @@ mod tests {
     fn network_v2_equivalent_to_legacy_shape_for_seatbelt() {
         // A legacy-shape config and its schema-0.8 equivalent must produce the
         // same domain policy fields, proving the Seatbelt backend itself
-        // needs no changes for the migration.
+        // needs no changes for the migration. Uses defaultPolicy='block' /
+        // egress.default='deny' (rather than 'allow') because a proxy
+        // combined with 'allow' is rejected (see
+        // network_proxy_seatbelt_rejected_with_default_policy_allow below);
+        // 'block' still exercises proxy + allowLocalNetwork equivalence.
         let legacy_json = r#"{
             "version": "0.7.0-alpha",
             "containment": "seatbelt",
             "process": {"commandLine": "echo hi"},
             "network": {
-                "defaultPolicy": "allow",
+                "defaultPolicy": "block",
                 "allowLocalNetwork": true,
                 "proxy": {"url": "http://127.0.0.1:9000"}
             }
@@ -3568,7 +3600,7 @@ mod tests {
             "containment": "seatbelt",
             "process": {"commandLine": "echo hi"},
             "network": {
-                "egress": {"default": "allow"},
+                "egress": {"default": "deny"},
                 "ingress": {"default": "allow", "hostLoopback": "allow"}
             },
             "runtimeConfig": {"networkProxy": "http://127.0.0.1:9000"}
@@ -3611,6 +3643,57 @@ mod tests {
                 .address
                 .as_ref()
                 .map(|a| a.port())
+        );
+    }
+
+    #[test]
+    fn network_proxy_seatbelt_rejected_with_default_policy_allow() {
+        // Legacy shape: defaultPolicy='allow' + network.proxy. Seatbelt has no
+        // deny rule to scope the proxy reachability against once the default
+        // posture is allow-all, so the proxy would be cooperative-only with
+        // no warning -- reject it instead.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "proxy": {"url": "http://127.0.0.1:9000"}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("cannot be combined with defaultPolicy='allow'"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn network_v2_egress_allow_rejected_with_runtime_config_proxy_for_seatbelt() {
+        // Schema-0.8 shape: egress.default='allow' + runtimeConfig.networkProxy.
+        // Same unenforceable combination as the legacy shape above, just
+        // spelled with the schema-0.8 fields.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "allow"}},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:9000"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("cannot be combined with defaultPolicy='allow'"),
+            "unexpected error message: {}",
+            msg
         );
     }
 
