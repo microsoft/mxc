@@ -16,7 +16,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::data_loop::DataLoopSummary;
+use crate::data_loop::{DataLoopAggregate, DataLoopSummary};
 use crate::model::DeniedResource;
 
 /// Result of decoding a capture source into bounded, de-duplicated denials.
@@ -102,25 +102,92 @@ impl AnalysisResult {
                 self.data_loop.move_to_overflow(aggregate);
             }
         }
+
+        let mut retained = std::mem::take(&mut self.data_loop.signatures);
+        let serialized_len = |retained_count: usize| {
+            serialized_analysis_len(
+                self,
+                &retained[..retained_count],
+                &retained[retained_count..],
+            )
+        };
+        let mut low = 0usize;
+        let mut high = retained.len();
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if serialized_len(middle)? <= max_bytes {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let removed = retained.split_off(low);
+        self.data_loop.signatures = retained;
+        for aggregate in removed {
+            self.data_loop.move_to_overflow(aggregate);
+        }
         self.data_loop
             .signatures
             .sort_by(|left, right| left.signature.cmp(&right.signature));
-
-        while serde_json::to_vec(self)?.len() > max_bytes {
-            let index = self
-                .data_loop
-                .signatures
-                .iter()
-                .rposition(|aggregate| !aggregate.signature.reason.is_canonical_denial())
-                .or_else(|| self.data_loop.signatures.len().checked_sub(1));
-            let Some(index) = index else {
-                return Ok(false);
-            };
-            let aggregate = self.data_loop.signatures.remove(index);
-            self.data_loop.move_to_overflow(aggregate);
-        }
-        Ok(true)
+        Ok(serde_json::to_vec(self)?.len() <= max_bytes)
     }
+}
+
+fn serialized_analysis_len(
+    analysis: &AnalysisResult,
+    retained: &[DataLoopAggregate],
+    removed: &[DataLoopAggregate],
+) -> Result<usize, serde_json::Error> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AnalysisView<'a> {
+        denials: &'a [DeniedResource],
+        denied_resources_truncated: bool,
+        data_loop: DataLoopView<'a>,
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct DataLoopView<'a> {
+        signatures: &'a [DataLoopAggregate],
+        total_occurrences: u64,
+        overflow_occurrences: u64,
+        canonical_overflow_occurrences: u64,
+        aggregate_groups_truncated: bool,
+        processed_events_truncated: bool,
+        canonical_denial_limit_reached: bool,
+    }
+
+    let removed_occurrences = removed.iter().fold(0u64, |total, aggregate| {
+        total.saturating_add(aggregate.count)
+    });
+    let removed_canonical_occurrences = removed
+        .iter()
+        .filter(|aggregate| aggregate.signature.reason.is_canonical_denial())
+        .fold(0u64, |total, aggregate| {
+            total.saturating_add(aggregate.count)
+        });
+    let view = AnalysisView {
+        denials: &analysis.denials,
+        denied_resources_truncated: analysis.denied_resources_truncated,
+        data_loop: DataLoopView {
+            signatures: retained,
+            total_occurrences: analysis.data_loop.total_occurrences,
+            overflow_occurrences: analysis
+                .data_loop
+                .overflow_occurrences
+                .saturating_add(removed_occurrences),
+            canonical_overflow_occurrences: analysis
+                .data_loop
+                .canonical_overflow_occurrences
+                .saturating_add(removed_canonical_occurrences),
+            aggregate_groups_truncated: analysis.data_loop.aggregate_groups_truncated
+                || !removed.is_empty(),
+            processed_events_truncated: analysis.data_loop.processed_events_truncated,
+            canonical_denial_limit_reached: analysis.data_loop.canonical_denial_limit_reached,
+        },
+    };
+    serde_json::to_vec(&view).map(|bytes| bytes.len())
 }
 
 /// Failure modes when analysing a capture source into denials.
@@ -283,5 +350,43 @@ mod tests {
 
         assert!(!result.fit_data_loop_within_serialized_bytes(1).unwrap());
         assert_eq!(result.denials.len(), 1);
+    }
+
+    #[test]
+    fn serialized_size_limit_handles_maximum_signature_count() {
+        let signatures = (0..crate::data_loop::MAX_DATA_LOOP_GROUPS)
+            .map(|pid| DataLoopAggregate {
+                signature: DataLoopSignature {
+                    provider: DataLoopProvider::KernelGeneral,
+                    provider_guid: "provider".to_string(),
+                    event_id: 14,
+                    reason: DataLoopExclusionReason::MissingObjectName,
+                    pid: u32::try_from(pid).unwrap(),
+                    access_type: Some(AccessType::Read),
+                    resource_type: Some(ResourceType::File),
+                    properties: vec![("ObjectName".to_string(), "x".repeat(256))],
+                },
+                count: 1,
+            })
+            .collect();
+        let mut result = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            data_loop: DataLoopSummary {
+                signatures,
+                total_occurrences: crate::data_loop::MAX_DATA_LOOP_GROUPS as u64,
+                ..Default::default()
+            },
+        };
+
+        assert!(result
+            .fit_data_loop_within_serialized_bytes(64 * 1024)
+            .unwrap());
+        assert!(serde_json::to_vec(&result).unwrap().len() <= 64 * 1024);
+        assert!(!result.data_loop.signatures.is_empty());
+        assert_eq!(
+            result.data_loop.signatures.len() as u64 + result.data_loop.overflow_occurrences,
+            crate::data_loop::MAX_DATA_LOOP_GROUPS as u64
+        );
     }
 }

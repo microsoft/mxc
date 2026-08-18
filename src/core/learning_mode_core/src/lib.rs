@@ -48,6 +48,7 @@ pub use data_loop::{
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use paired_output::{
-    relocate_paired_output_files, write_paired_output_files, ExistingOutputPolicy,
+    relocate_output_file, relocate_paired_output_files, write_paired_output_files,
+    ExistingOutputPolicy,
 };
 pub use summary::DenialSummary;

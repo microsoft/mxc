@@ -16,7 +16,6 @@
 //! error type; callers map the plain `String` errors into their own error
 //! type at the call site.
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
@@ -95,47 +94,6 @@ pub fn write_denials_document(
 pub fn data_loop_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
     data_loop_sibling_path(output_path)
         .map_err(|error| std::io::Error::other(format!("captureDenials {error}")))
-}
-
-/// Creates `output_path` (failing if it already exists) and writes through
-/// `write`, cleaning up a partial file if `write` fails.
-pub fn write_denials_output_file(
-    output_path: &Path,
-    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(output_path)
-        .map_err(|error| {
-            std::io::Error::other(format!(
-                "captureDenials failed to create denials output file {}: {error}",
-                output_path.display()
-            ))
-        })?;
-
-    let write_result = {
-        let mut writer = std::io::BufWriter::new(file);
-        write(&mut writer).and_then(|()| writer.flush())
-    };
-    if let Err(error) = write_result {
-        let write_error = std::io::Error::other(format!(
-            "captureDenials failed to write denials output file {}: {error}",
-            output_path.display()
-        ));
-        return match std::fs::remove_file(output_path) {
-            Ok(()) => Err(write_error),
-            Err(cleanup_error) if cleanup_error.kind() == std::io::ErrorKind::NotFound => {
-                Err(write_error)
-            }
-            Err(cleanup_error) => Err(std::io::Error::other(format!(
-                "{write_error}; additionally failed to remove incomplete output file {}: {cleanup_error}",
-                output_path.display()
-            ))),
-        };
-    }
-
-    Ok(())
 }
 
 /// Inserts a per-run identifier into a denials output path's file stem so
@@ -327,6 +285,7 @@ mod tests {
         AccessType, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature, DeniedResource,
         ResourceType,
     };
+    use std::io::Write;
 
     #[test]
     fn write_denials_document_writes_summary_and_document() {
@@ -446,35 +405,6 @@ mod tests {
         assert!(error.to_string().contains("simulated Data Loop failure"));
         assert!(!output_path.exists());
         assert!(!data_loop_path.exists());
-    }
-
-    #[test]
-    fn failed_denials_write_removes_incomplete_output() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-
-        let error = write_denials_output_file(&output_path, |writer| {
-            std::io::Write::write_all(writer, b"{\"partial\":")?;
-            Err(std::io::Error::other("simulated write failure"))
-        })
-        .expect_err("write should fail");
-
-        assert!(error.to_string().contains("simulated write failure"));
-        assert!(!output_path.exists());
-    }
-
-    #[test]
-    fn denials_output_does_not_overwrite_an_existing_file() {
-        let directory = tempfile::tempdir().expect("temp directory");
-        let output_path = directory.path().join("denials.json");
-        std::fs::write(&output_path, b"existing").expect("seed output");
-
-        write_denials_output_file(&output_path, |_| Ok(())).expect_err("collision should fail");
-
-        assert_eq!(
-            std::fs::read(&output_path).expect("read existing output"),
-            b"existing"
-        );
     }
 
     #[test]

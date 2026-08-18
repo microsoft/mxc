@@ -292,28 +292,74 @@ const SHA256_HEX_LEN: usize = 64;
 const BOUNDED_VALUE_MARKER_LEN: usize = "...<sha256=".len() + SHA256_HEX_LEN + ">...".len();
 const _: () = assert!(MAX_SIGNATURE_VALUE_LEN > BOUNDED_VALUE_MARKER_LEN);
 
+#[derive(Clone, Copy)]
+struct NormalizedPropertyName<'a>(&'a str);
+
+impl<'a> NormalizedPropertyName<'a> {
+    fn bytes(self) -> impl DoubleEndedIterator<Item = u8> + Clone + 'a {
+        self.0
+            .bytes()
+            .filter(|byte| !matches!(byte, b'_' | b'-'))
+            .map(|byte| byte.to_ascii_lowercase())
+    }
+
+    fn equals(self, expected: &str) -> bool {
+        self.bytes().eq(expected.bytes())
+    }
+
+    fn ends_with(self, suffix: &str) -> bool {
+        let mut bytes = self.bytes().rev();
+        suffix
+            .bytes()
+            .rev()
+            .all(|expected| bytes.next() == Some(expected))
+    }
+
+    fn contains(self, needle: &str) -> bool {
+        let needle = needle.as_bytes();
+        if needle.is_empty() {
+            return true;
+        }
+        let mut bytes = self.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == needle[0] {
+                let mut remainder = bytes.clone();
+                if needle[1..]
+                    .iter()
+                    .all(|expected| remainder.next() == Some(*expected))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 /// Returns whether `name` looks like it carries a timestamp, so it is
 /// dropped from a Data Loop signature entirely (never redacted or
 /// truncated) — exact timestamps must not prevent otherwise-identical
 /// events from deduplicating.
 fn is_timestamp_like_property(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase().replace(['_', '-'], "");
-    matches!(
-        lower.as_str(),
-        "time"
-            | "timestamp"
-            | "filetime"
-            | "systemtime"
-            | "eventtime"
-            | "timecreated"
-            | "creationtime"
-            | "createtime"
-            | "starttime"
-            | "endtime"
-            | "exittime"
-            | "lastwritetime"
-    ) || lower.ends_with("timestamp")
-        || lower.ends_with("filetime")
+    let normalized = NormalizedPropertyName(name);
+    [
+        "time",
+        "timestamp",
+        "filetime",
+        "systemtime",
+        "eventtime",
+        "timecreated",
+        "creationtime",
+        "createtime",
+        "starttime",
+        "endtime",
+        "exittime",
+        "lastwritetime",
+    ]
+    .into_iter()
+    .any(|expected| normalized.equals(expected))
+        || normalized.ends_with("timestamp")
+        || normalized.ends_with("filetime")
 }
 
 /// Returns whether `name` is itself a standalone user/account-identity
@@ -321,33 +367,33 @@ fn is_timestamp_like_property(name: &str) -> bool {
 /// its value is replaced outright with [`REDACTED_USER`] regardless of
 /// content.
 fn is_identity_property(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase().replace(['_', '-'], "");
-    if lower.contains("sid")
-        || lower.contains("guid")
-        || lower.contains("identifier")
-        || lower.ends_with("id")
+    let normalized = NormalizedPropertyName(name);
+    if normalized.contains("sid")
+        || normalized.contains("guid")
+        || normalized.contains("identifier")
+        || normalized.ends_with("id")
     {
         return false;
     }
-    lower == "user"
-        || lower == "account"
-        || lower == "owner"
-        || lower.contains("username")
-        || lower.contains("accountname")
-        || lower.contains("ownername")
-        || lower.contains("principalname")
-        || lower.ends_with("account")
-        || lower == "upn"
-        || lower.ends_with("upn")
+    normalized.equals("user")
+        || normalized.equals("account")
+        || normalized.equals("owner")
+        || normalized.contains("username")
+        || normalized.contains("accountname")
+        || normalized.contains("ownername")
+        || normalized.contains("principalname")
+        || normalized.ends_with("account")
+        || normalized.equals("upn")
+        || normalized.ends_with("upn")
 }
 
 fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
-    let normalized_name = name.to_ascii_lowercase().replace(['_', '-'], "");
-    if normalized_name.ends_with("path") || normalized_name.ends_with("filename") {
+    let normalized = NormalizedPropertyName(name);
+    if normalized.ends_with("path") || normalized.ends_with("filename") {
         return true;
     }
 
-    if normalized_name != "objectname" && normalized_name != "resource" {
+    if !normalized.equals("objectname") && !normalized.equals("resource") {
         return false;
     }
     if let Some(object_type) = object_type {

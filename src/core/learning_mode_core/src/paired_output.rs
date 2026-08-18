@@ -260,6 +260,35 @@ pub fn relocate_paired_output_files(
     }
 }
 
+/// Copies one existing output to a new no-clobber destination, then removes
+/// the source only if its identity and contents still match the copied file.
+///
+/// # Errors
+///
+/// Returns an error when the source cannot be read, the destination cannot be
+/// committed without clobbering, or verified source cleanup fails.
+pub fn relocate_output_file(
+    operation: &str,
+    kind: &str,
+    source_path: &Path,
+    destination_path: &Path,
+) -> std::io::Result<()> {
+    if source_path == destination_path {
+        return Ok(());
+    }
+
+    let mut source = std::fs::File::open(source_path)?;
+    let source_identity = PromotedOutput::from_file(source.try_clone()?)?;
+    ensure_output_absent(operation, destination_path, kind)?;
+    let temp = stage_output_file(operation, destination_path, kind, |writer| {
+        source.rewind()?;
+        std::io::copy(&mut source, writer).map(|_| ())
+    })?;
+    let promoted = promote_output_file(operation, temp, destination_path, kind)?;
+    drop((source, promoted));
+    remove_promoted_output_if_owned(source_path, source_identity, None).and_then(cleanup_result)
+}
+
 fn cleanup_result(error: Option<std::io::Error>) -> std::io::Result<()> {
     error.map_or(Ok(()), Err)
 }

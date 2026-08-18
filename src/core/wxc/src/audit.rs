@@ -121,7 +121,8 @@ pub fn finalize(
         })?;
 
     let final_denials = context.log_dir.join("denials.json");
-    let final_data_loop = context.log_dir.join("denials.data-loop.json");
+    let final_data_loop = learning_mode_core::data_loop_sibling_path(&final_denials)
+        .map_err(|error| format!("failed to derive audit Data Loop output path: {error}"))?;
     let final_etl = context.log_dir.join("trace.etl");
     relocate_artifacts(
         capture,
@@ -218,45 +219,19 @@ fn relocate_artifacts(
 }
 
 fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
-    if source == destination {
-        return Ok(());
-    }
-    ensure_destination_available(source, destination)?;
-    match std::fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(rename_error) => {
-            if let Err(copy_error) = copy_to_new_file(source, destination) {
-                return Err(format!(
-                    "failed to move audit artifact {} to {}: {rename_error}; \
-                     copy fallback failed: {copy_error}",
-                    source.display(),
-                    destination.display()
-                ));
-            }
-            match std::fs::remove_file(source) {
-                Ok(()) => Ok(()),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(remove_error) => Err(format!(
-                    "copied audit artifact to {}, but failed to remove source {}: {remove_error}; \
-                     the complete no-clobber destination was retained",
-                    destination.display(),
-                    source.display()
-                )),
-            }
-        }
-    }
-}
-
-fn copy_to_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-    let mut source_file = std::fs::File::open(source)?;
-    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
-    std::io::copy(&mut source_file, &mut staged)?;
-    staged.as_file().sync_all()?;
-    staged
-        .persist_noclobber(destination)
-        .map(|_| ())
-        .map_err(|error| error.error)
+    learning_mode_core::relocate_output_file(
+        "audit artifact relocation",
+        "retained ETL",
+        source,
+        destination,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to move audit artifact {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
@@ -467,6 +442,36 @@ mod tests {
     }
 
     #[test]
+    fn finalize_rejects_malformed_data_loop_without_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_data_loop = learning_mode_core::data_loop_sibling_path(&source_denials).unwrap();
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::write(&source_data_loop, b"{").unwrap();
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("Data Loop output"));
+        assert!(error.contains("not valid JSON"));
+        assert!(source_denials.is_file());
+        assert!(source_data_loop.is_file());
+        assert!(source_etl.is_file());
+        assert!(!log_dir.join("denials.json").exists());
+        assert!(!log_dir.join("denials.data-loop.json").exists());
+        assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    #[test]
     fn finalize_preflights_both_destinations_before_moving_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         let log_dir = directory.path().join("audit");
@@ -495,16 +500,16 @@ mod tests {
     }
 
     #[test]
-    fn copy_fallback_never_clobbers_an_existing_destination() {
+    fn etl_relocation_never_clobbers_an_existing_destination() {
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source.json");
         let destination = directory.path().join("destination.json");
         std::fs::write(&source, b"new").unwrap();
         std::fs::write(&destination, b"existing").unwrap();
 
-        let error = copy_to_new_file(&source, &destination).unwrap_err();
+        let error = move_new_file(&source, &destination).unwrap_err();
 
-        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.contains("already exists"));
         assert_eq!(std::fs::read(&source).unwrap(), b"new");
         assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
     }
