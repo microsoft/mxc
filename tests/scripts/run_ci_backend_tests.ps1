@@ -64,6 +64,23 @@ function Invoke-TestScript {
 Assert-File -Path $wxc
 
 function Invoke-ProcessContainerTests {
+    $cargoRoot = Join-Path (Split-Path -Parent $scriptRoot) '..\src'
+    $previousBinaryDirectory = $env:MXC_E2E_BINARY_DIR
+    try {
+        $env:MXC_E2E_BINARY_DIR = $binaryDirectoryPath
+        Push-Location $cargoRoot
+        try {
+            & cargo test -p wxc_e2e_tests --test e2e_processcontainer_probe -- --nocapture
+            if ($LASTEXITCODE -ne 0) {
+                throw "Process Container Rust probe tests failed with exit code $LASTEXITCODE."
+            }
+        } finally {
+            Pop-Location
+        }
+    } finally {
+        $env:MXC_E2E_BINARY_DIR = $previousBinaryDirectory
+    }
+
     # The existing harness expects separate debug and release layouts. CI
     # intentionally tests one release artifact, so stage it in both slots.
     $debugDirectory = Join-Path $binaryDirectoryPath 'debug'
@@ -81,7 +98,6 @@ function Invoke-ProcessContainerTests {
     # Skip build and Cargo phases because this job consumes a previously
     # built artifact; retain the host and containment behavior phases.
     $phases = @(
-        'Probes',
         'T3Forced',
         'T1DenyForced',
         'UiMitigationMatrix',

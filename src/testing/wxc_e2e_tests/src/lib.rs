@@ -86,6 +86,13 @@ fn current_triple() -> &'static str {
 /// Profile preference (debug-vs-release) only resolves ties when neither
 /// candidate has been built more recently than the other.
 pub fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(directory) = std::env::var_os("MXC_E2E_BINARY_DIR") {
+        let candidate = PathBuf::from(directory).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
     let src = src_dir();
     let (primary, fallback) = if is_release_mode() {
         ("release", "debug")
@@ -493,6 +500,18 @@ pub fn run_wxc_config_value(
     args.push("--config-base64".to_string());
     args.push(encoded);
 
+    run_executable(label, &exe, args)
+}
+
+/// Run the read-only `wxc-exec.exe --probe` path with an optional in-memory
+/// config and capture its JSON output.
+pub fn run_wxc_probe(label: &str, config: Option<&serde_json::Value>) -> CommandResult {
+    let exe = find_binary("wxc-exec.exe").expect("wxc-exec.exe should be available");
+    let mut args = vec!["--probe".to_string()];
+    if let Some(config) = config {
+        args.push("--config-base64".to_string());
+        args.push(STANDARD.encode(config.to_string().as_bytes()));
+    }
     run_executable(label, &exe, args)
 }
 

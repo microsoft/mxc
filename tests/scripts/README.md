@@ -63,7 +63,7 @@ directly.
 The validation matrix (see `scripts/ci/validation-test-matrix.json` and
 `.github/workflows/Validation.Tests.Matrix.Job.yml`, documented end to end in
 [`docs/ci-validation-infrastructure.md`](../../docs/ci-validation-infrastructure.md))
-never builds from source.
+never rebuilds the backend under test.
 It downloads a build artifact, prepares the host, and then hands off to one of
 these dispatchers, which map a matrix backend id to the suites above:
 
@@ -73,9 +73,10 @@ these dispatchers, which map a matrix backend id to the suites above:
 | `run_ci_backend_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
-handler name. Ids that share a suite have their own case in the dispatcher:
-`process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
-determines the tier it expects from the host's own `wxc-exec --probe`.
+handler name. Ids that share a suite have their own case in the dispatcher.
+`process-t1` and `process-t3` run the Rust ProcessContainer probe integration
+test first, then run the remaining phases in `WinProcessContainer-Tests.ps1`.
+Both derive the expected tier from the downloaded `wxc-exec --probe`.
 
 ```powershell
 tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 `
