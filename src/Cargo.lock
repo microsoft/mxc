@@ -1537,6 +1537,7 @@ dependencies = [
  "seatbelt_common",
  "serde",
  "serde_json",
+ "tempfile",
  "windows",
  "windows_sandbox_lifecycle",
  "wslc_common",
@@ -3172,6 +3173,7 @@ name = "wxc_common"
 version = "0.7.0"
 dependencies = [
  "base64",
+ "filetime",
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
@@ -3182,6 +3184,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror",
  "unicode-general-category",

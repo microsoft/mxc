@@ -1,15 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Microsoft Correlation Vector (MS-CV) v2, the correlation primitive that
+//! Microsoft Correlation Vector (MS-CV) v2.1, the correlation primitive that
 //! [WIL TraceLogging](https://github.com/microsoft/wil) stamps into the
 //! reserved `__TlgCV__` event field.
 //!
 //! An MS-CV is a lightweight, sortable string identity that threads a single
 //! logical operation across process, service, and (here) state-aware lifecycle
-//! boundaries. Format (v2): `base "." element ("." element)*` where `base` is
+//! boundaries. Format (v2.1): `base "." element ("." element)*` where `base` is
 //! 22 base64 characters encoding a random 128-bit value, and each `element` is
-//! a decimal `u32`. The whole vector is capped at 127 characters; on overflow
+//! a decimal `u32`. The whole vector is capped at 128 characters; on overflow
 //! the vector is frozen by appending a `!` terminator and is never mutated
 //! again.
 //!
@@ -20,14 +20,14 @@
 //!   (state-aware `provision`). The base is random, so no `sandbox_id` / UPN or
 //!   other caller identity is embedded — the vector is privacy-safe by
 //!   construction.
-//! - [`spin`] — derive a child vector (`V.<spin>.0`) for a downstream received
-//!   flow whose parent cannot atomically increment per child. Each MXC
-//!   non-provision phase (`start` / `exec` / `stop` / `deprovision`) is a
-//!   separate, stateless `wxc-exec` process that receives the *same* relayed
-//!   vector, so a plain [`extend`] would collapse every phase — and every
-//!   repeated `exec` — to an identical `V.0`. `spin` mixes a coarse timestamp
-//!   and random entropy so each phase/invocation gets a distinct, still-sortable
-//!   child.
+//! - [`spin`] — derive a child vector (`V.A.B.0`) for a downstream flow whose
+//!   parent cannot atomically increment per child. Each MXC non-provision phase
+//!   (`start` / `exec` / `stop` / `deprovision`) is a separate, stateless
+//!   `wxc-exec` process that recalls the *same* lifecycle root persisted by
+//!   `provision` (see [`super::correlation_state`]), so a plain [`extend`] would
+//!   collapse every phase — and every repeated `exec` — to an identical `V.0`.
+//!   `spin` mixes a coarse timestamp and random entropy so each phase/invocation
+//!   gets a distinct, still-sortable child.
 //! - [`extend`] / [`increment`] — provided for completeness (single incoming
 //!   flow, sequential ticks); not currently on MXC's hot path but kept so the
 //!   module is a faithful, reusable MS-CV implementation.
@@ -42,8 +42,8 @@ use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 /// Number of base64 characters in a v2 base (128 random bits).
 const BASE_LEN: usize = 22;
 
-/// Maximum length of a v2 vector before it must be terminated (spec §-max).
-const MAX_LEN: usize = 127;
+/// Maximum wire length of a v2.1 vector before it must be terminated.
+const MAX_LEN: usize = 128;
 
 /// Character appended to freeze a vector that would otherwise overflow [`MAX_LEN`].
 const TERMINATOR: char = '!';
@@ -53,9 +53,11 @@ const TERMINATOR: char = '!';
 const SPIN_INTERVAL_BITS: u32 = 24;
 
 /// Default `spin` entropy: 2 random bytes (16 bits), matching the reference
-/// default (`spin_entropy::two`). Combined with the 16-bit coarse counter this
-/// yields a single 32-bit `u32` element.
+/// default (`spin_entropy::two`).
 const SPIN_ENTROPY_BYTES: usize = 2;
+/// Default `spin` counter periodicity: retain 16 bits of the coarse counter,
+/// matching the reference `spin_counter_periodicity::short`.
+const SPIN_COUNTER_PERIODICITY_BITS: u32 = 16;
 
 /// Mint a fresh v2 correlation vector `base.0`.
 ///
@@ -175,13 +177,13 @@ pub fn increment(cv: &str) -> String {
 }
 
 /// Derive a child vector for a downstream received flow whose parent cannot
-/// atomically increment per child: `V => V.<spin>.0`.
+/// atomically increment per child: `V => V.A.B.0`.
 ///
-/// `<spin>` is a single `u32` built from the low 16 bits of a coarse 100ns tick
-/// counter (high half) and 16 bits of random entropy (low half), matching the
-/// reference default spin parameters (coarse interval, short periodicity, two
-/// entropy bytes). The timestamp keeps sibling spins roughly time-sortable; the
-/// entropy keeps concurrent spins distinct.
+/// `A` is the low 16 bits of the coarse 100ns tick counter and `B` is a
+/// separately encoded 16-bit random value, matching the reference default spin
+/// parameters (coarse interval, short periodicity, two entropy bytes). The
+/// timestamp keeps sibling spins roughly time-sortable; the entropy keeps
+/// concurrent spins distinct.
 pub fn spin(cv: &str) -> String {
     // Validate / short-circuit BEFORE sourcing entropy or the clock: a valid
     // frozen or a malformed input never reaches `spin_with`, so we neither waste
@@ -202,7 +204,7 @@ pub fn spin(cv: &str) -> String {
     spin_with(m.full, now_ticks_100ns(), entropy, nonce)
 }
 
-/// Deterministic core of [`spin`]: derive `V.<spin>.0` from explicit tick and
+/// Deterministic core of [`spin`]: derive `V.A.B.0` from explicit tick and
 /// entropy sources. Split out from [`spin`] so tests can pin the spin element
 /// and drive the RNG-failure fallback (`entropy == None`). Assumes `cv` is a
 /// valid mutable vector — [`spin`] runs [`classify`] before calling this, so
@@ -213,16 +215,6 @@ fn spin_with(
     entropy: Option<[u8; SPIN_ENTROPY_BYTES]>,
     fallback_nonce: u64,
 ) -> String {
-    // The spin element is a single `u32` (32 bits): the entropy occupies the low
-    // `8 * SPIN_ENTROPY_BYTES` bits and the coarse counter the remainder. The
-    // math below is width-generic in `SPIN_ENTROPY_BYTES`; the real constraint is
-    // that the entropy leave room for the counter *inside* the 32-bit element, so
-    // the counter still contributes to the low 32 bits after the shift-and-mix
-    // below. That requires strictly fewer than 4 entropy bytes (< 32 bits): at
-    // exactly 4 bytes the counter is shifted entirely above bit 32 and dropped by
-    // `as u32`, erasing time-sortability. `<< 8` is a logical shift (bits shifted
-    // out are simply dropped, no overflow), and `as u32` keeps the low 32 bits.
-    const _: () = assert!(SPIN_ENTROPY_BYTES < 4);
     let entropy = entropy.unwrap_or_else(|| {
         // RNG unavailable: derive the entropy bytes from the process-wide nonce
         // so concurrent same-tick sibling spins still get distinct elements.
@@ -235,15 +227,10 @@ fn spin_with(
         bytes.copy_from_slice(&nonce[..SPIN_ENTROPY_BYTES]);
         bytes
     });
-    // Coarse counter: high bits of the tick count. Mix the entropy bytes into
-    // the low bits, then keep the low 32 bits as a single element.
-    let mut value: u64 = now_ticks >> SPIN_INTERVAL_BITS;
-    for b in entropy {
-        value = (value << 8) | u64::from(b);
-    }
-    let element = value as u32;
-
-    let spun = format!("{cv}.{element}.0");
+    let counter_mask = (1u64 << SPIN_COUNTER_PERIODICITY_BITS) - 1;
+    let counter = (now_ticks >> SPIN_INTERVAL_BITS) & counter_mask;
+    let entropy = u16::from_be_bytes(entropy);
+    let spun = format!("{cv}.{counter}.{entropy}.0");
     terminate_if_oversized(cv, spun)
 }
 
@@ -265,7 +252,7 @@ fn is_immutable(cv: &str) -> bool {
     cv.ends_with(TERMINATOR)
 }
 
-/// A validated, mutable v2 vector, split at its rightmost element so operators
+/// A validated, mutable v2.1 vector, split at its rightmost element so operators
 /// can advance it without re-parsing (and without an `.unwrap()` resting on an
 /// invariant established in a different function). Built only by [`parse_mutable`],
 /// so holding one is proof the vector is a valid, mutable MS-CV.
@@ -303,7 +290,7 @@ enum Class<'a> {
 /// that must not spin the RNG) and the operators run one and the same parse.
 ///
 /// The immutable check is deliberately gated on [`is_valid_frozen`]: a bare
-/// "ends with `!`" test would let an attacker-controlled `correlationVector`
+/// "ends with `!`" test would let an attacker-controlled value
 /// (e.g. `"user@contoso.com!"` or a multi-KB string) bypass validation and be
 /// emitted verbatim under `__TlgCV__`.
 fn classify(cv: &str) -> Class<'_> {
@@ -320,10 +307,9 @@ fn classify(cv: &str) -> Class<'_> {
     }
 }
 
-/// If `candidate` exceeds [`MAX_LEN`], freeze the original `cv` with a
-/// terminator instead (the spec's overflow behaviour); otherwise return
-/// `candidate`. The frozen result is truncated so it still fits within
-/// [`MAX_LEN`] rather than emitting a `MAX_LEN + 1`-character value.
+/// If `candidate` exceeds 127 bytes, freeze the original `cv` with a terminator
+/// instead (the spec's overflow behaviour). A terminated vector is allowed to
+/// occupy the full 128-byte maximum.
 fn terminate_if_oversized(cv: &str, candidate: String) -> String {
     if candidate.len() <= MAX_LEN {
         return candidate;
@@ -360,14 +346,14 @@ pub fn is_relayable(cv: &str) -> bool {
     matches!(classify(cv), Class::Frozen | Class::Mutable(_))
 }
 
-/// Whether `cv` is a well-formed, mutable v2 vector: a canonical 22-char base64
+/// Whether `cv` is a well-formed, mutable v2.1 vector: a canonical 22-char base64
 /// `base` followed by at least one canonical decimal-`u32` element, within the
 /// length cap, with no whitespace and no terminator.
 fn is_valid(cv: &str) -> bool {
     parse_mutable(cv).is_some()
 }
 
-/// Parse `cv` as a valid, mutable v2 vector, returning it split at its rightmost
+/// Parse `cv` as a valid, mutable v2.1 vector, returning it split at its rightmost
 /// element (see [`MutableCv`]). Returns `None` for anything that is empty, over
 /// the length cap, terminated, or not `base "." element ("." element)*` with a
 /// canonical base and canonical decimal-`u32` elements. This is the single place
@@ -537,7 +523,8 @@ mod tests {
         assert!(spun.starts_with(&format!("{parent}.")));
         assert!(spun.ends_with(".0"));
         // parent had 2 parts (base, 0); spin adds the spin element and a fresh 0.
-        assert_eq!(spun.split('.').count(), 4);
+        // parent had 2 parts; v2.1 spin adds counter, entropy, and fresh 0.
+        assert_eq!(spun.split('.').count(), 5);
         assert!(is_valid(&spun));
     }
 
@@ -575,7 +562,7 @@ mod tests {
     fn operators_reseed_on_malformed_terminated_input() {
         // A '!'-terminated value that is not a valid frozen vector must NOT pass
         // through the immutable fast path to telemetry — it reseeds instead.
-        // Guards against a hostile relayed correlationVector bypassing validation.
+        // Guards against a hostile input string bypassing validation.
         let huge = format!("{}!", "x".repeat(200));
         for bad in ["user@contoso.com!", "!", "not-a-cv!", huge.as_str()] {
             assert!(is_valid(&extend(bad)), "extend({bad:?}) should reseed");
@@ -666,7 +653,7 @@ mod tests {
     fn increment_terminates_and_caps_on_length_overflow() {
         // Final element "99" rolls to "100", gaining a char at the cap.
         let cv = max_len_vector();
-        assert!(cv.ends_with(".99"));
+        assert!(cv.ends_with(".9"));
         let out = increment(&cv);
         assert!(out.ends_with(TERMINATOR));
         assert!(out.len() <= MAX_LEN, "increment {out:?} exceeds MAX_LEN");
@@ -780,10 +767,10 @@ mod tests {
     /// element (so incrementing or extending it overflows the length cap).
     fn max_len_vector() -> String {
         let mut cv = BASE.to_string(); // 22
-        for _ in 0..51 {
+        for _ in 0..52 {
             cv.push_str(".9"); // +2 each => 22 + 102 = 124
         }
-        cv.push_str(".99"); // +3 => 127
+        cv.push_str(".9"); // +2 => 128
         debug_assert_eq!(cv.len(), MAX_LEN);
         cv
     }
@@ -793,9 +780,8 @@ mod tests {
     /// chopping the final digit and leaving a dangling `.`.
     fn max_len_vector_single_digit_tail() -> String {
         let mut cv = BASE.to_string(); // 22
-        cv.push_str(".99"); // +3 => 25 (odd, so the trailing ".9"s land on 127)
-        for _ in 0..51 {
-            cv.push_str(".9"); // +2 each => 25 + 102 = 127
+        for _ in 0..53 {
+            cv.push_str(".9"); // +2 each => 22 + 106 = 128
         }
         debug_assert_eq!(cv.len(), MAX_LEN);
         cv
@@ -809,10 +795,11 @@ mod tests {
     /// preserves the vector's meaning.
     fn max_len_vector_multi_digit_tail() -> String {
         let mut cv = BASE.to_string(); // 22
-        for _ in 0..51 {
+        for _ in 0..50 {
             cv.push_str(".9"); // +2 each => 22 + 102 = 124
         }
-        cv.push_str(".42"); // +3 => 127
+        cv.push_str(".99"); // +3 => 125
+        cv.push_str(".42"); // +3 => 128
         debug_assert_eq!(cv.len(), MAX_LEN);
         cv
     }
@@ -863,5 +850,46 @@ mod tests {
         let incremented = increment(&cv);
         assert!(incremented.ends_with(".43"), "{incremented:?}");
         assert!(is_valid(&incremented));
+    }
+
+    #[test]
+    fn relay_boundaries_reject_truncated_and_hostile_vectors() {
+        let valid = max_len_vector_single_digit_tail();
+        assert_eq!(valid.len(), MAX_LEN);
+        assert!(is_relayable(&valid));
+        let frozen = extend(&valid);
+        assert!(is_relayable(&frozen));
+
+        // Every truncation at the wire boundary is invalid unless it is a
+        // complete mutable vector or a complete frozen vector. In particular,
+        // a dangling separator and a cut terminator must never be relayed.
+        let truncated = vec![
+            valid[..MAX_LEN - 1].to_string(),
+            format!("{valid}."),
+            format!("{}!", &valid[..MAX_LEN - 1]),
+        ];
+        for truncated in truncated {
+            assert!(
+                !is_relayable(&truncated),
+                "truncated or malformed relay vector was accepted: {truncated:?}"
+            );
+        }
+
+        // A hostile value ending in the immutable marker is not a valid
+        // frozen vector and must not pass through unchanged.
+        assert!(!is_relayable(&format!("{}!", "A".repeat(MAX_LEN))));
+        assert!(!is_relayable(&format!("{}!", "user@contoso.com")));
+    }
+
+    #[test]
+    fn relay_boundary_never_emits_a_falsified_partial_element() {
+        let cv = max_len_vector_multi_digit_tail();
+        let truncated = format!("{}!", &cv[..MAX_LEN - 2]);
+        assert!(!is_relayable(&truncated));
+
+        let frozen = extend(&cv);
+        let (body, _) = cv.rsplit_once('.').unwrap();
+        assert_eq!(frozen, format!("{body}{TERMINATOR}"));
+        assert!(is_relayable(&frozen));
     }
 }

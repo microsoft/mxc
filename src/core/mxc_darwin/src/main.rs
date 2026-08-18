@@ -13,7 +13,7 @@ use std::fmt::Write;
 use std::process;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_request_from_json;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 
@@ -61,6 +61,90 @@ struct Cli {
     /// Path to diagnostic log file (appends, creates if missing)
     #[arg(long = "log-file")]
     log_file: Option<String>,
+
+    /// Report the persisted telemetry consent state and exit. MXC only
+    /// ever collects telemetry on Windows, so on macOS this always
+    /// reports "not-applicable" — there is no consent to grant or
+    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Not supported on macOS; always fails. Present for CLI-surface
+    /// parity with wxc-exec.exe.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Optional source associated with a legacy grant/revoke flag.
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
+    telemetry_consent_source: Option<String>,
+}
+
+/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
+/// mirrors. On macOS, `wxc_common::telemetry::consent` always reports
+/// `NotApplicable`; legacy state-changing flags return the same non-mutating
+/// maintenance-JSON migration error as every other executor.
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
+/// this fast path can't drift from `wxc-exec`/`lxc-exec`. The shared handler
+/// returns the outcome as data; terminating the process is this binary's
+/// job, not the foundation crate's.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) = wxc_common::telemetry::consent_cli::handle_consent_flags(
+        &wxc_common::telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        },
+    ) else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+fn handle_telemetry_consent_input(config_json: Option<&str>) -> bool {
+    let Some(input) = config_json else {
+        return false;
+    };
+    let Some(outcome) = wxc_common::telemetry::consent_cli::handle_maintenance_input_json(input)
+    else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+/// Decode the config input source (base64 arg / file path) exactly once.
+///
+/// The maintenance-consent probe and the normal request loader both need the
+/// decoded JSON. Named pipes, `/dev/stdin`, and process-substitution paths
+/// are drained by the first read, so reading them twice fails or blocks;
+/// regular files pay duplicate I/O for no reason. This helper reads the
+/// source a single time and returns the JSON text (or a load error).
+///
+/// Returns `None` if the CLI provided no config source at all — the caller
+/// then reports the appropriate missing-config error for its mode.
+fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
+    let (input, is_base64) = if let Some(b64) = cli.config_base64.as_ref() {
+        (b64.as_str(), true)
+    } else if let Some(path) = cli.config.as_ref().or(cli.config_path.as_ref()) {
+        (path.as_str(), false)
+    } else {
+        return None;
+    };
+    Some(wxc_common::config_parser::decode_request_input(
+        input, is_base64,
+    ))
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -82,16 +166,46 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
 fn main() {
     let cli = Cli::parse();
 
+    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // (always not-applicable on macOS) consent state and exit.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+    // Decode the config source once so the maintenance probe and the normal
+    // request loader below share the same JSON — necessary for named pipes,
+    // `/dev/stdin`, and process-substitution paths that are drained by the
+    // first read.
+    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
+        decode_config_input_once(&cli);
+    let request_hint = decoded_config
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
+    if matches!(
+        request_hint.as_ref().map(|hint| hint.kind()),
+        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
+    ) && handle_telemetry_consent_input(
+        decoded_config
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(String::as_str),
+    ) {
+        return;
+    }
+
     // Determine config input.
-    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
-        (b64.clone(), true)
-    } else if let Some(ref path) = cli.config {
-        (path.clone(), false)
-    } else if let Some(ref path) = cli.config_path {
-        (path.clone(), false)
-    } else {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
+    let config_json = match decoded_config {
+        Some(Ok(json)) => json,
+        Some(Err(error)) => {
+            eprintln!("Request error\n{error}");
+            process::exit(1);
+        }
+        None => {
+            eprintln!(
+                "Error: No config provided. Use a positional path, --config, or --config-base64"
+            );
+            process::exit(1);
+        }
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -106,7 +220,17 @@ fn main() {
         }
     }
 
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let parsed_request = if let Some(hint) = request_hint.as_ref() {
+        wxc_common::config_parser::load_request_from_json_with_hint_and_options(
+            &config_json,
+            &mut logger,
+            wxc_common::config_parser::LoadOptions::default(),
+            hint,
+        )
+    } else {
+        load_request_from_json(&config_json, &mut logger)
+    };
+    let mut request = match parsed_request {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -127,21 +251,16 @@ fn main() {
 fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use wxc_common::telemetry;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
+    // ── Telemetry init ──────────────────────────────────────────────
     // Mirrors lxc-exec / wxc-exec. The ETW provider has no macOS backend today,
     // so `init` returns false and every emit below is a no-op; wiring it anyway
     // keeps the three executors structurally identical and ready the moment
     // telemetry gains a macOS sink.
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -172,7 +291,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 
     display_script_results(&response, logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
+    // ── Telemetry emit ──────────────────────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,

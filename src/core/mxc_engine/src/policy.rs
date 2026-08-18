@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use wxc_common::logger::{Logger, Mode};
-use wxc_common::models::ExecutionRequest;
+use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 use wxc_common::mxc_error::MxcError;
 
 // ---------------------------------------------------------------------------
@@ -781,6 +781,19 @@ impl SandboxRequest {
         self.inner.experimental_enabled = enabled;
         self
     }
+
+    /// Enable or disable telemetry for this invocation.
+    ///
+    /// Enabling this per-request switch is necessary but not sufficient:
+    /// telemetry still requires persisted user consent and an administrative
+    /// policy that permits collection. It is independent of experimental mode.
+    pub fn set_telemetry_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.inner.telemetry = Some(TelemetryConfig {
+            enabled: Some(enabled),
+            ..Default::default()
+        });
+        self
+    }
 }
 
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
@@ -877,7 +890,6 @@ fn build_wire_config(
             "deniedPaths": fs.denied_paths,
         },
     });
-
     // `ui` is emitted only when the caller actually supplied one.
     //
     // The parser records presence as `ContainerPolicy::ui_specified`, and
@@ -1695,6 +1707,38 @@ mod tests {
         assert!(!request.inner.experimental_enabled);
         request.set_experimental(true);
         assert!(request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn telemetry_enablement_is_stable_and_independent_of_experimental_mode() {
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        assert!(request.inner.telemetry.is_none());
+        assert!(!request.inner.experimental_enabled);
+
+        request.set_telemetry_enabled(true);
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(true)
+        );
+        assert!(
+            !request.inner.experimental_enabled,
+            "stable telemetry enablement must not opt into experimental features"
+        );
+
+        request.set_telemetry_enabled(false);
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.enabled),
+            Some(false)
+        );
+        assert!(!request.inner.experimental_enabled);
     }
 
     #[test]

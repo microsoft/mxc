@@ -55,7 +55,9 @@ pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
 
 use wxc_common::logger::{Logger, Mode};
+use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
+use wxc_common::telemetry;
 
 /// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
 /// by [`build_request`] (with the command, and any working directory / env,
@@ -65,29 +67,347 @@ use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 /// with piped stdio, and returns the handle. No pty is allocated. Backends
 /// without a streaming implementation return an [`Error`] with
 /// [`ErrorCode::UnsupportedContainment`].
+///
+/// # Safety / lifetime contract for library-context callers
+///
+/// When this crate is compiled into a dynamically-loadable library (the
+/// `mxc_ffi` cdylib, or a host that dlopens `mxc-sdk`), the ETW telemetry
+/// provider is registered while an invocation is live. The provider retains
+/// callbacks into this module's code, so **the library must remain loaded
+/// until every spawned handle produced by this function has been dropped**
+/// (which releases the corresponding provider reference through
+/// [`telemetry::shutdown`] via the [`TelemetryProcess`] `Drop` impl below).
+/// Callers that dlclose / `FreeLibrary` while a spawned handle is still live
+/// would leave ETW with dangling callbacks into unmapped memory.
+///
+/// The registration is reference-counted per `telemetry::init` call and
+/// released once when the returned handle is dropped, so multiple concurrent
+/// spawns from the same load are safe as long as the library outlives them.
 pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error> {
     let mut logger = Logger::new(Mode::Buffer);
-    let process = dispatch::spawn_runner(&request.inner, &mut logger).map_err(Error::from)?;
-    let mut warnings = process.warnings().to_vec();
-    for warning in logger.take_warnings() {
-        if !warnings.contains(&warning) {
-            warnings.push(warning);
+    let telemetry_active = request
+        .inner
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .inner
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let containment = request.inner.containment.clone();
+    let started = std::time::Instant::now();
+    let process = match dispatch::spawn_runner(&request.inner, &mut logger) {
+        Ok(process) => process,
+        Err(error) => {
+            // Preserve the actual error category so bounded telemetry
+            // categorises malformed requests, unsupported containment, and
+            // policy validation failures under their real reason — not the
+            // catch-all `InitError`. Shares the exhaustive `MxcErrorCode` →
+            // `FailureReason` mapping with the state-aware path.
+            telemetry::emit_sdk_early_exit_with_kind(
+                telemetry_active,
+                &containment,
+                requested_sandbox_kind,
+                telemetry::classify_mxc_error(&error),
+            );
+            return Err(Error::from(error));
         }
-    }
-    if warnings.is_empty() {
-        Ok(process)
-    } else {
-        Ok(Box::new(ProcessWithWarnings {
+    };
+    let extra_warnings = logger.take_warnings();
+    let process: Box<dyn SandboxProcess> = ProcessWithWarnings::wrap(process, extra_warnings);
+    if telemetry_active {
+        Ok(Box::new(TelemetryProcess {
             inner: process,
-            warnings,
+            active: true,
+            mode: TelemetryMode::OneShot {
+                containment,
+                requested_sandbox_kind,
+            },
+            started,
         }))
+    } else {
+        Ok(process)
+    }
+}
+
+/// Streaming process wrapper that owns one telemetry provider reference and
+/// emits exactly one terminal event for this SDK invocation.
+///
+/// # Terminal-event invariant
+///
+/// Every non-nop path a caller can drive this wrapper through emits exactly
+/// one terminal telemetry event before the provider reference is released:
+///
+/// * [`SandboxProcess::wait`] — real completion / timeout / spawn error.
+/// * [`SandboxProcess::try_wait`] — same, on the poll that observes the exit
+///   or an error branch (a `Pending` poll leaves the invariant to a later
+///   `wait` / `kill` / `Drop`).
+/// * [`SandboxProcess::kill`] — synthesised cancellation event.
+/// * [`Drop`] — synthesised process-error event, so a wrapper dropped without
+///   `wait` never releases the provider without accounting for the run.
+///
+/// `active` doubles as the exactly-once flag: it starts `true`, and every
+/// terminal path calls [`TelemetryProcess::emit`] which flips it to `false`
+/// after the event and after [`telemetry::shutdown`] releases the provider
+/// reference.
+struct TelemetryProcess {
+    inner: Box<dyn SandboxProcess>,
+    active: bool,
+    mode: TelemetryMode,
+    started: std::time::Instant,
+}
+
+enum TelemetryMode {
+    OneShot {
+        containment: ContainmentBackend,
+        requested_sandbox_kind: Option<&'static str>,
+    },
+    StateAware {
+        backend: String,
+        phase: String,
+        correlation_vector: String,
+        requested_sandbox_kind: Option<&'static str>,
+    },
+}
+
+pub(crate) fn wrap_state_aware_telemetry_process_with_kind(
+    process: Box<dyn SandboxProcess>,
+    active: bool,
+    backend: String,
+    phase: String,
+    correlation_vector: String,
+    requested_sandbox_kind: Option<&'static str>,
+    started: std::time::Instant,
+) -> Box<dyn SandboxProcess> {
+    if active {
+        Box::new(TelemetryProcess {
+            inner: process,
+            active: true,
+            mode: TelemetryMode::StateAware {
+                backend,
+                phase,
+                correlation_vector,
+                requested_sandbox_kind,
+            },
+            started,
+        })
+    } else {
+        process
+    }
+}
+
+impl TelemetryProcess {
+    /// Emit the single terminal event for this invocation and release the
+    /// provider reference. Idempotent — subsequent calls (from another exit
+    /// path or `Drop`) are silent no-ops.
+    fn emit(&mut self, result: &std::io::Result<i32>) {
+        if !self.active {
+            return;
+        }
+        let response = match result {
+            Ok(exit_code) => ScriptResponse {
+                exit_code: *exit_code,
+                ..Default::default()
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
+                error_message: "sandbox execution timed out".to_string(),
+                failure_phase: FailurePhase::Timeout,
+                ..Default::default()
+            },
+            Err(error) => ScriptResponse {
+                error_message: error.to_string(),
+                failure_phase: FailurePhase::PostLaunchFailed,
+                ..Default::default()
+            },
+        };
+        match &self.mode {
+            TelemetryMode::OneShot {
+                containment,
+                requested_sandbox_kind,
+            } => telemetry::emit_sdk_completion_with_kind(
+                true,
+                containment,
+                *requested_sandbox_kind,
+                &response,
+                self.started.elapsed(),
+            ),
+            TelemetryMode::StateAware {
+                backend,
+                phase,
+                correlation_vector,
+                requested_sandbox_kind,
+            } => {
+                let outcome = match result {
+                    Ok(exit_code) => Ok(
+                        wxc_common::state_aware_dispatch::DispatchOutcome::ExecCompleted {
+                            exit_code: *exit_code,
+                        },
+                    ),
+                    Err(error) => Err(wxc_common::mxc_error::MxcError::backend_error(
+                        error.to_string(),
+                    )),
+                };
+                telemetry::emit_sdk_state_aware_with_kind(
+                    true,
+                    *requested_sandbox_kind,
+                    telemetry::TelemetryContext {
+                        backend,
+                        phase,
+                        correlation_vector,
+                    },
+                    &outcome,
+                    self.started.elapsed(),
+                );
+            }
+        }
+        self.active = false;
+    }
+
+    /// Emit a synthesised terminal event when no real completion result is
+    /// available (kill, poll-error, drop-without-wait). Routes through
+    /// [`Self::emit`] so it shares the exactly-once slot and the
+    /// provider-release path with the natural exit paths.
+    fn emit_synthetic(&mut self, kind: SyntheticTerminal) {
+        if !self.active {
+            return;
+        }
+        let (raw_kind, message) = match kind {
+            SyntheticTerminal::Killed => (
+                std::io::ErrorKind::Interrupted,
+                "sandbox handle was killed before completion",
+            ),
+            SyntheticTerminal::Dropped => (
+                std::io::ErrorKind::Other,
+                "sandbox handle was dropped before completion",
+            ),
+            SyntheticTerminal::PollError => (
+                std::io::ErrorKind::Other,
+                "sandbox handle try_wait returned an error before completion",
+            ),
+        };
+        // The Err path in `emit` classifies non-timeout errors as
+        // PostLaunchFailed → FailureReason::InitError (one-shot) or
+        // BackendError → FailureReason::ProcessError (state-aware).
+        self.emit(&Err(std::io::Error::new(raw_kind, message)));
+    }
+}
+
+/// The three synthetic-terminal callsites, so [`TelemetryProcess::emit_synthetic`]
+/// can attribute the event to the exit path that produced it.
+#[derive(Debug, Clone, Copy)]
+enum SyntheticTerminal {
+    /// `SandboxProcess::kill` was called.
+    Killed,
+    /// The wrapper was dropped without a preceding `wait` / successful `try_wait`.
+    Dropped,
+    /// `SandboxProcess::try_wait` observed an underlying error.
+    PollError,
+}
+
+impl Drop for TelemetryProcess {
+    fn drop(&mut self) {
+        // If `wait` / `try_wait(Ok(Some))` / `kill` already emitted the
+        // terminal event, `active` is false and this is a no-op. Otherwise
+        // synthesise one so the "exactly-one terminal event" invariant holds
+        // for the drop-without-wait path as well. `emit` also releases the
+        // provider reference.
+        self.emit_synthetic(SyntheticTerminal::Dropped);
+    }
+}
+
+impl SandboxProcess for TelemetryProcess {
+    fn warnings(&self) -> &[String] {
+        self.inner.warnings()
+    }
+
+    fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+        self.inner.output_metadata()
+    }
+
+    fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+        self.inner.take_stdin()
+    }
+
+    fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.inner.take_stdout()
+    }
+
+    fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        self.inner.take_stderr()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+        let result = self.inner.try_wait();
+        match &result {
+            // Exit observed: emit the terminal event now.
+            Ok(Some(exit_code)) => self.emit(&Ok(*exit_code)),
+            // Still running: leave the invariant to a later `wait` / `kill` / `Drop`.
+            Ok(None) => {}
+            // Poll-error branch — emit a synthesised terminal event so the
+            // provider reference isn't released without accounting for the
+            // run, then return the error unchanged to the caller.
+            Err(_) => self.emit_synthetic(SyntheticTerminal::PollError),
+        }
+        result
+    }
+
+    fn id(&self) -> u32 {
+        self.inner.id()
+    }
+
+    fn kill(&mut self) -> std::io::Result<()> {
+        // Forward the kill first so its I/O outcome is what we return; then
+        // emit the synthesised cancellation event before the provider
+        // reference is released. `emit_synthetic` is idempotent, so a
+        // subsequent `wait` on the (now-killed) child is a no-op.
+        let result = self.inner.kill();
+        self.emit_synthetic(SyntheticTerminal::Killed);
+        result
+    }
+
+    fn wait(&mut self) -> std::io::Result<i32> {
+        let result = self.inner.wait();
+        self.emit(&result);
+        result
+    }
+
+    fn stdout_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stdout_closer()
+    }
+
+    fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
+        self.inner.stderr_closer()
     }
 }
 
 /// A streaming process paired with security warnings emitted during spawn.
-struct ProcessWithWarnings {
+pub(crate) struct ProcessWithWarnings {
     inner: Box<dyn SandboxProcess>,
     warnings: Vec<String>,
+}
+
+impl ProcessWithWarnings {
+    /// Wrap `inner` so its `warnings()` reports the union of its own warnings
+    /// and `extra_warnings` (duplicates deduplicated). Returns `inner`
+    /// unchanged if the merged list is empty.
+    pub(crate) fn wrap(
+        inner: Box<dyn SandboxProcess>,
+        extra_warnings: Vec<String>,
+    ) -> Box<dyn SandboxProcess> {
+        let mut warnings = inner.warnings().to_vec();
+        for warning in extra_warnings {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        }
+        if warnings.is_empty() {
+            inner
+        } else {
+            Box::new(ProcessWithWarnings { inner, warnings })
+        }
+    }
 }
 
 impl SandboxProcess for ProcessWithWarnings {
@@ -133,5 +453,107 @@ impl SandboxProcess for ProcessWithWarnings {
 
     fn stderr_closer(&self) -> Option<Box<dyn StreamCloser>> {
         self.inner.stderr_closer()
+    }
+}
+
+#[cfg(test)]
+mod telemetry_process_tests {
+    use super::*;
+
+    enum TryWaitResult {
+        Running,
+        Exited(i32),
+        Failed,
+    }
+
+    struct StubProcess {
+        try_wait_result: TryWaitResult,
+        wait_result: std::io::Result<i32>,
+    }
+
+    impl SandboxProcess for StubProcess {
+        fn take_stdin(&mut self) -> Option<Box<dyn std::io::Write + Send>> {
+            None
+        }
+
+        fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+            None
+        }
+
+        fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
+            match self.try_wait_result {
+                TryWaitResult::Running => Ok(None),
+                TryWaitResult::Exited(code) => Ok(Some(code)),
+                TryWaitResult::Failed => Err(std::io::Error::other("poll failed")),
+            }
+        }
+
+        fn id(&self) -> u32 {
+            1
+        }
+
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn wait(&mut self) -> std::io::Result<i32> {
+            self.wait_result
+                .as_ref()
+                .copied()
+                .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
+        }
+    }
+
+    fn wrapped(try_wait_result: TryWaitResult) -> TelemetryProcess {
+        TelemetryProcess {
+            inner: Box::new(StubProcess {
+                try_wait_result,
+                wait_result: Ok(0),
+            }),
+            active: true,
+            mode: TelemetryMode::StateAware {
+                backend: "test".to_string(),
+                phase: "exec".to_string(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            started: std::time::Instant::now(),
+        }
+    }
+
+    #[test]
+    fn terminal_paths_consume_the_exactly_once_slot() {
+        let mut waited = wrapped(TryWaitResult::Running);
+        assert_eq!(waited.wait().unwrap(), 0);
+        assert!(!waited.active);
+        waited.kill().unwrap();
+        assert!(!waited.active);
+
+        let mut killed = wrapped(TryWaitResult::Running);
+        killed.kill().unwrap();
+        assert!(!killed.active);
+        assert_eq!(killed.wait().unwrap(), 0);
+        assert!(!killed.active);
+
+        let mut exited = wrapped(TryWaitResult::Exited(7));
+        assert_eq!(exited.try_wait().unwrap(), Some(7));
+        assert!(!exited.active);
+
+        let mut poll_failed = wrapped(TryWaitResult::Failed);
+        assert!(poll_failed.try_wait().is_err());
+        assert!(!poll_failed.active);
+    }
+
+    #[test]
+    fn nonterminal_poll_leaves_the_exactly_once_slot_active() {
+        let mut process = wrapped(TryWaitResult::Running);
+        assert_eq!(process.try_wait().unwrap(), None);
+        assert!(process.active);
+        process.emit_synthetic(SyntheticTerminal::Dropped);
+        assert!(!process.active);
     }
 }
