@@ -133,6 +133,7 @@ pub fn finalize(
             source_etl: &source_etl,
             final_etl: &final_etl,
         },
+        learning_mode_core::relocate_paired_output_files,
         move_new_file,
     )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
@@ -174,11 +175,10 @@ fn validate_metadata(
 /// on-disk state and the metadata paths mutually truthful even on partial
 /// failure.
 ///
-/// All destinations are preflighted (no-clobber) before anything moves. The
-/// primary denials JSON moves first and its final path is published to the
-/// metadata immediately; its Data Loop sibling moves second; the retained ETL
-/// moves last and its final path is published immediately on success. A later
-/// move failure therefore leaves every metadata path truthful.
+/// The JSON pair is relocated transactionally and its final canonical path is
+/// published only after both siblings commit. The retained ETL moves last and
+/// its final path is published immediately on success. A later move failure
+/// therefore leaves every metadata path truthful.
 ///
 /// `move_file` is injected so tests can force a second-move failure
 /// deterministically; production passes [`move_new_file`].
@@ -194,21 +194,22 @@ struct ArtifactRelocation<'a> {
 fn relocate_artifacts(
     capture: &mut wxc_common::models::CaptureDenialsOutput,
     paths: &ArtifactRelocation<'_>,
+    relocate_pair: impl FnOnce(&str, &Path, &Path, &Path, &Path) -> std::io::Result<()>,
     mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    ensure_destination_available(paths.source_denials, paths.final_denials)?;
-    ensure_destination_available(paths.source_data_loop, paths.final_data_loop)?;
     ensure_destination_available(paths.source_etl, paths.final_etl)?;
 
-    // Primary denials JSON first: publish its final path the instant it moves so
-    // a later ETL failure can never leave `output_path` referencing a file that
-    // has already been renamed away.
-    move_file(paths.source_denials, paths.final_denials)?;
+    relocate_pair(
+        "audit output relocation",
+        paths.source_denials,
+        paths.source_data_loop,
+        paths.final_denials,
+        paths.final_data_loop,
+    )
+    .map_err(|error| format!("failed to relocate audit output pair: {error}"))?;
     capture.output_path = paths.final_denials.to_string_lossy().into_owned();
 
-    move_file(paths.source_data_loop, paths.final_data_loop)?;
-
-    // Retained ETL second: on failure it stays at its source and `etl_path`
+    // Retained ETL last: on failure it stays at its source and `etl_path`
     // still points there (unchanged), so each artifact remains individually
     // truthful even though the relocation as a whole failed.
     move_file(paths.source_etl, paths.final_etl)?;
@@ -225,65 +226,37 @@ fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
         Ok(()) => Ok(()),
         Err(rename_error) => {
             if let Err(copy_error) = copy_to_new_file(source, destination) {
-                return Err(match copy_error.cleanup_error {
-                    Some(cleanup_error) => format!(
-                        "failed to move audit artifact {} to {}: {rename_error}; \
-                         copy fallback failed: {}; partial destination cleanup failed: \
-                         {cleanup_error}",
-                        source.display(),
-                        destination.display(),
-                        copy_error.error
-                    ),
-                    None => format!(
-                        "failed to move audit artifact {} to {}: {rename_error}; \
-                         copy fallback failed: {}",
-                        source.display(),
-                        destination.display(),
-                        copy_error.error
-                    ),
-                });
+                return Err(format!(
+                    "failed to move audit artifact {} to {}: {rename_error}; \
+                     copy fallback failed: {copy_error}",
+                    source.display(),
+                    destination.display()
+                ));
             }
-            std::fs::remove_file(source).map_err(|remove_error| {
-                let _ = std::fs::remove_file(destination);
-                format!(
-                    "copied audit artifact to {}, but failed to remove source {}: {remove_error}",
+            match std::fs::remove_file(source) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(remove_error) => Err(format!(
+                    "copied audit artifact to {}, but failed to remove source {}: {remove_error}; \
+                     the complete no-clobber destination was retained",
                     destination.display(),
                     source.display()
-                )
-            })
+                )),
+            }
         }
     }
 }
 
-struct CopyNewFileError {
-    error: std::io::Error,
-    cleanup_error: Option<std::io::Error>,
-}
-
-fn copy_to_new_file(source: &Path, destination: &Path) -> Result<(), CopyNewFileError> {
-    let mut source_file = std::fs::File::open(source).map_err(|error| CopyNewFileError {
-        error,
-        cleanup_error: None,
-    })?;
-    let mut destination_file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)
-        .map_err(|error| CopyNewFileError {
-            error,
-            cleanup_error: None,
-        })?;
-    if let Err(error) = std::io::copy(&mut source_file, &mut destination_file) {
-        drop(destination_file);
-        let cleanup_error = std::fs::remove_file(destination)
-            .err()
-            .filter(|cleanup_error| cleanup_error.kind() != std::io::ErrorKind::NotFound);
-        return Err(CopyNewFileError {
-            error,
-            cleanup_error,
-        });
-    }
-    Ok(())
+fn copy_to_new_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    let mut source_file = std::fs::File::open(source)?;
+    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::copy(&mut source_file, &mut staged)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist_noclobber(destination)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
@@ -512,7 +485,7 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("destination already exists"));
+        assert!(error.contains("canonical output file already exists"));
         assert!(source_denials.exists());
         assert!(learning_mode_core::data_loop_sibling_path(&source_denials)
             .unwrap()
@@ -531,8 +504,7 @@ mod tests {
 
         let error = copy_to_new_file(&source, &destination).unwrap_err();
 
-        assert_eq!(error.error.kind(), std::io::ErrorKind::AlreadyExists);
-        assert!(error.cleanup_error.is_none());
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&source).unwrap(), b"new");
         assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
     }
@@ -596,12 +568,13 @@ mod tests {
                 source_etl: &source_etl,
                 final_etl: &final_etl,
             },
+            learning_mode_core::relocate_paired_output_files,
             |source, destination| {
                 calls += 1;
-                if calls <= 2 {
-                    std::fs::rename(source, destination).map_err(|error| error.to_string())
-                } else {
+                if calls == 1 {
                     Err("injected ETL move failure".to_string())
+                } else {
+                    std::fs::rename(source, destination).map_err(|error| error.to_string())
                 }
             },
         )
@@ -621,6 +594,50 @@ mod tests {
             capture.etl_path.as_deref().map(Path::new),
             Some(source_etl.as_path())
         );
+    }
+
+    #[test]
+    fn relocate_rolls_back_json_pair_before_publishing_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_denials = directory.path().join("denials.unique.json");
+        let source_data_loop = directory.path().join("denials.unique.data-loop.json");
+        let source_etl = directory.path().join("denials.unique.etl");
+        let shared_destination = directory.path().join("denials.json");
+        let final_etl = directory.path().join("trace.etl");
+        std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_data_loop, b"data-loop").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut capture = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: source_denials.to_string_lossy().into_owned(),
+            exit_code: 0,
+            total_denials: 0,
+            denied_resources_truncated: false,
+            etl_path: Some(source_etl.to_string_lossy().into_owned()),
+        };
+
+        let error = relocate_artifacts(
+            &mut capture,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &shared_destination,
+                source_data_loop: &source_data_loop,
+                final_data_loop: &shared_destination,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
+            learning_mode_core::relocate_paired_output_files,
+            |_, _| panic!("ETL relocation must not run after JSON-pair failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to promote canonical"));
+        assert_eq!(Path::new(&capture.output_path), source_denials);
+        assert!(source_denials.is_file());
+        assert!(source_data_loop.is_file());
+        assert!(!shared_destination.exists());
+        assert!(source_etl.is_file());
+        assert!(!final_etl.exists());
     }
 
     fn response_with_capture(

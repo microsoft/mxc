@@ -190,6 +190,80 @@ pub fn write_paired_output_files(
     remove_backups(canonical_backup.as_deref(), data_loop_backup.as_deref())
 }
 
+/// Copies an existing canonical/Data Loop pair to new no-clobber destinations,
+/// then removes only source files whose identity and contents still match the
+/// files that were copied.
+///
+/// The destination pair uses the same transactional promotion and rollback as
+/// [`write_paired_output_files`]. Source cleanup quarantines and verifies each
+/// file before deletion, so a concurrent replacement is restored rather than
+/// removed.
+///
+/// # Errors
+///
+/// Returns an error when the source pair cannot be read, the destination pair
+/// cannot be committed atomically, or verified source cleanup fails.
+pub fn relocate_paired_output_files(
+    operation: &str,
+    canonical_source_path: &Path,
+    data_loop_source_path: &Path,
+    canonical_destination_path: &Path,
+    data_loop_destination_path: &Path,
+) -> std::io::Result<()> {
+    if canonical_source_path == canonical_destination_path
+        && data_loop_source_path == data_loop_destination_path
+    {
+        return Ok(());
+    }
+    if canonical_source_path == canonical_destination_path
+        || data_loop_source_path == data_loop_destination_path
+    {
+        return Err(std::io::Error::other(format!(
+            "{operation} cannot relocate only one member of an output pair"
+        )));
+    }
+
+    let mut canonical_source = std::fs::File::open(canonical_source_path)?;
+    let canonical_identity = PromotedOutput::from_file(canonical_source.try_clone()?)?;
+    let mut data_loop_source = std::fs::File::open(data_loop_source_path)?;
+    let data_loop_identity = PromotedOutput::from_file(data_loop_source.try_clone()?)?;
+
+    write_paired_output_files(
+        operation,
+        canonical_destination_path,
+        data_loop_destination_path,
+        ExistingOutputPolicy::CreateNew,
+        |writer| {
+            canonical_source.rewind()?;
+            std::io::copy(&mut canonical_source, writer).map(|_| ())
+        },
+        |writer| {
+            data_loop_source.rewind()?;
+            std::io::copy(&mut data_loop_source, writer).map(|_| ())
+        },
+    )?;
+
+    drop((canonical_source, data_loop_source));
+    let data_loop_cleanup =
+        remove_promoted_output_if_owned(data_loop_source_path, data_loop_identity, None)
+            .and_then(cleanup_result);
+    let canonical_cleanup =
+        remove_promoted_output_if_owned(canonical_source_path, canonical_identity, None)
+            .and_then(cleanup_result);
+    match (data_loop_cleanup, canonical_cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(first), Err(second)) => Err(std::io::Error::other(format!(
+            "{first}; additionally failed to remove relocated canonical source {}: {second}",
+            canonical_source_path.display()
+        ))),
+    }
+}
+
+fn cleanup_result(error: Option<std::io::Error>) -> std::io::Result<()> {
+    error.map_or(Ok(()), Err)
+}
+
 fn ensure_output_absent(operation: &str, path: &Path, kind: &str) -> std::io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Err(std::io::Error::new(
@@ -575,6 +649,30 @@ mod tests {
 
         assert!(error.to_string().contains("failed to promote canonical"));
         assert_eq!(std::fs::read(shared_path).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn relocation_rolls_back_failed_second_promotion_and_keeps_sources() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical_source = directory.path().join("source-denials.json");
+        let data_loop_source = directory.path().join("source-denials.data-loop.json");
+        let shared_destination = directory.path().join("denials.json");
+        std::fs::write(&canonical_source, b"canonical").unwrap();
+        std::fs::write(&data_loop_source, b"data-loop").unwrap();
+
+        let error = relocate_paired_output_files(
+            "test relocation",
+            &canonical_source,
+            &data_loop_source,
+            &shared_destination,
+            &shared_destination,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("failed to promote canonical"));
+        assert!(!shared_destination.exists());
+        assert_eq!(std::fs::read(canonical_source).unwrap(), b"canonical");
+        assert_eq!(std::fs::read(data_loop_source).unwrap(), b"data-loop");
     }
 
     #[test]
