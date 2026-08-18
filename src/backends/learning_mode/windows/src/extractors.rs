@@ -410,6 +410,37 @@ fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&s
         || value.starts_with(r"\??\")
         || value.starts_with(r"\\?\")
         || value.starts_with(r"\\.\")
+        || looks_like_nt_filesystem_path(value)
+}
+
+fn looks_like_nt_filesystem_path(value: &str) -> bool {
+    let Some(rest) = strip_prefix_ignore_ascii_case(value, r"\Device\") else {
+        return false;
+    };
+    let Some((device, _path)) = rest.split_once('\\') else {
+        return false;
+    };
+    if device.eq_ignore_ascii_case("Mup") || ends_with_ignore_ascii_case(device, "Redirector") {
+        return true;
+    }
+
+    let Some(volume_number) = strip_prefix_ignore_ascii_case(device, "HarddiskVolume") else {
+        return false;
+    };
+    !volume_number.is_empty() && volume_number.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+        .then(|| &value[prefix.len()..])
+}
+
+fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
 /// Bounds an already-sanitized property list to [`MAX_SIGNATURE_PROPERTIES`]
@@ -1440,6 +1471,17 @@ mod tests {
             r"C:\Users\alice\secret.txt",
             Some("Section")
         ));
+        for path in [
+            r"\Device\HarddiskVolume3\Users\alice\secret.txt",
+            r"\device\mup\server\share\Users\alice\secret.txt",
+            r"\Device\LanmanRedirector\;Z:0000000000001234\server\share\secret.txt",
+        ] {
+            assert!(looks_like_file_path_property(
+                "ObjectName",
+                path,
+                Some("Section")
+            ));
+        }
         assert!(!looks_like_file_path_property(
             "ObjectName",
             r"\BaseNamedObjects\shared-cache",
@@ -1454,6 +1496,11 @@ mod tests {
             "resource",
             "internetClient",
             None
+        ));
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\Device\MountPointManager",
+            Some("Section")
         ));
     }
 
@@ -1544,18 +1591,22 @@ mod tests {
 
     #[test]
     fn sanitize_properties_redacts_absolute_path_despite_non_file_object_type() {
-        let props = vec![
-            ("ObjectType".to_string(), "\"Section\"".to_string()),
-            (
-                "ObjectName".to_string(),
-                "\"C:\\Users\\alice\\secret.txt\"".to_string(),
-            ),
-        ];
+        for path in [
+            r"C:\Users\alice\secret.txt",
+            r"\Device\HarddiskVolume3\Users\alice\secret.txt",
+            r"\Device\Mup\server\share\Users\alice\secret.txt",
+        ] {
+            let props = vec![
+                ("ObjectType".to_string(), "\"Section\"".to_string()),
+                ("ObjectName".to_string(), format!("\"{path}\"")),
+            ];
 
-        let out = sanitize_properties(&props);
-        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
-        assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
-        assert_eq!(value_for("ObjectType"), Some("Section"));
+            let out = sanitize_properties(&props);
+            let value_for =
+                |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+            assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+            assert_eq!(value_for("ObjectType"), Some("Section"));
+        }
     }
 
     #[test]
