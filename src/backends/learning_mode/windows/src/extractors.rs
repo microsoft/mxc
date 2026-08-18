@@ -48,6 +48,7 @@
 //!   decoded identifier are omitted.
 
 use learning_mode_core::{AccessType, DataLoopExclusionReason, DataLoopProvider, ResourceType};
+use sha2::{Digest, Sha256};
 use windows::core::GUID;
 
 /// Microsoft-Windows-Kernel-General provider.
@@ -206,13 +207,11 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
     }
 }
 
-pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> u32 {
+pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
     if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
-        find_prop(&parts.props, "ProcessId")
-            .and_then(|value| parse_u32(value))
-            .unwrap_or(header_pid)
+        find_prop(&parts.props, "ProcessId").and_then(|value| parse_u32(value))
     } else {
-        header_pid
+        Some(header_pid)
     }
 }
 
@@ -281,6 +280,9 @@ pub(crate) const REDACTED_USER: &str = "<redacted-user>";
 pub(crate) const MAX_SIGNATURE_PROPERTIES: usize = 24;
 /// Maximum retained length (in `char`s) of one sanitized property value.
 pub(crate) const MAX_SIGNATURE_VALUE_LEN: usize = 256;
+const SHA256_HEX_LEN: usize = 64;
+const BOUNDED_VALUE_MARKER_LEN: usize = "...<sha256=".len() + SHA256_HEX_LEN + ">...".len();
+const _: () = assert!(MAX_SIGNATURE_VALUE_LEN > BOUNDED_VALUE_MARKER_LEN);
 
 /// Returns whether `name` looks like it carries a timestamp, so it is
 /// dropped from a Data Loop signature entirely (never redacted or
@@ -378,17 +380,39 @@ pub(crate) fn redact_username_in_path(value: &str) -> String {
 /// Bounds an already-sanitized property list to [`MAX_SIGNATURE_PROPERTIES`]
 /// entries and [`MAX_SIGNATURE_VALUE_LEN`] characters per value.
 ///
-/// Callers must sanitize (redact) *before* calling this: truncation is a
-/// pure length cap and does not know how to avoid splitting a redaction
-/// marker or a still-sensitive suffix.
+/// Overlong values retain prefix and suffix context plus a digest of the full
+/// sanitized value. The digest prevents distinct values with a long shared
+/// prefix from collapsing into one Data Loop signature.
+///
+/// Callers must sanitize (redact) *before* calling this so neither the retained
+/// context nor the digest is derived from sensitive identity content.
 pub(crate) fn bound_properties(mut properties: Vec<(String, String)>) -> Vec<(String, String)> {
     properties.truncate(MAX_SIGNATURE_PROPERTIES);
     for (_, value) in &mut properties {
         if value.chars().count() > MAX_SIGNATURE_VALUE_LEN {
-            *value = value.chars().take(MAX_SIGNATURE_VALUE_LEN).collect();
+            *value = bound_property_value(value);
         }
     }
     properties
+}
+
+fn bound_property_value(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let marker = format!("...<sha256={digest:x}>...");
+    debug_assert_eq!(marker.len(), BOUNDED_VALUE_MARKER_LEN);
+    let context_len = MAX_SIGNATURE_VALUE_LEN - BOUNDED_VALUE_MARKER_LEN;
+    let prefix_len = context_len.div_ceil(2);
+    let suffix_len = context_len / 2;
+    let prefix = value.chars().take(prefix_len).collect::<String>();
+    let suffix = value
+        .chars()
+        .rev()
+        .take(suffix_len)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("{prefix}{marker}{suffix}")
 }
 
 /// Produces the deterministic, sanitized, bounded property list for a Data
@@ -1308,10 +1332,21 @@ mod tests {
     }
 
     #[test]
-    fn capability_denial_falls_back_to_header_pid() {
+    fn capability_denial_uses_supplied_effective_pid() {
         let p = parts(28, &[("Denied", "true"), ("PackageSid", "S-1-15-3-1")]);
         let ev = extract_denial(&p, 555, FIXED_FILETIME).unwrap();
         assert_eq!(ev.pid, 555);
+    }
+
+    #[test]
+    fn capability_event_requires_payload_pid_for_scoping() {
+        let missing = parts(28, &[("Denied", "true")]);
+        let malformed = parts(28, &[("ProcessId", "\"broker\"")]);
+        let valid = parts(28, &[("ProcessId", "42")]);
+
+        assert_eq!(effective_event_pid(&missing, 555), None);
+        assert_eq!(effective_event_pid(&malformed, 555), None);
+        assert_eq!(effective_event_pid(&valid, 555), Some(42));
     }
 
     #[test]
@@ -1573,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_properties_truncates_count_and_value_length_after_sanitizing() {
+    fn bound_properties_preserves_identity_within_count_and_value_limits() {
         let long_value = format!(
             r"C:\Users\{}\{}",
             "jsmith",
@@ -1600,10 +1635,66 @@ mod tests {
             .expect("ObjectName retained (sorted first)");
         assert!(
             object_name.1.contains(REDACTED_USER),
-            "redaction must survive truncation: {}",
+            "redaction must survive bounding: {}",
             object_name.1
         );
-        assert!(object_name.1.chars().count() <= MAX_SIGNATURE_VALUE_LEN);
+        assert!(object_name.1.contains("<sha256="));
+        assert_eq!(object_name.1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+    }
+
+    #[test]
+    fn bound_properties_keeps_long_shared_prefixes_distinct() {
+        let common = "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2);
+        let first = bound_properties(vec![(
+            "ObjectName".to_string(),
+            format!("{common}\\first.db"),
+        )]);
+        let second = bound_properties(vec![(
+            "ObjectName".to_string(),
+            format!("{common}\\second.db"),
+        )]);
+
+        assert_ne!(first, second);
+        assert!(first[0].1.ends_with(r"\first.db"));
+        assert!(second[0].1.ends_with(r"\second.db"));
+        assert_eq!(first[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+        assert_eq!(second[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_before_bounding_and_hashing() {
+        let tail = "x".repeat(MAX_SIGNATURE_VALUE_LEN * 2);
+        let alice = sanitize_properties(&[
+            ("UserName".to_string(), "\"alice\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                format!("\"C:\\Users\\alice\\{tail}\""),
+            ),
+        ]);
+        let bob = sanitize_properties(&[
+            ("UserName".to_string(), "\"bob\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                format!("\"C:\\Users\\bob\\{tail}\""),
+            ),
+        ]);
+
+        assert_eq!(alice, bob);
+        assert!(alice
+            .iter()
+            .all(|(_, value)| { !value.contains("alice") && !value.contains("bob") }));
+    }
+
+    #[test]
+    fn bound_properties_preserves_unicode_boundaries_and_short_values() {
+        let short = "unchanged".to_string();
+        let bounded_short = bound_properties(vec![("ObjectName".to_string(), short.clone())]);
+        assert_eq!(bounded_short[0].1, short);
+
+        let long = format!("{}尾", "é".repeat(MAX_SIGNATURE_VALUE_LEN * 2));
+        let bounded_long = bound_properties(vec![("ObjectName".to_string(), long)]);
+        assert_eq!(bounded_long[0].1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+        assert!(bounded_long[0].1.ends_with('尾'));
     }
 
     // ---- parse_u32 --------------------------------------------------------

@@ -18,7 +18,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 
 use crate::etl_decode::select_learning_mode_events_for_relogging;
-use crate::extractors::is_learning_mode_event;
+use crate::extractors::provider_category;
 use crate::process_lifetime::{attested_process_lifetimes, JobMembershipSnapshot};
 
 const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
@@ -93,7 +93,7 @@ impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
             ));
         };
         let header = &record.EventHeader;
-        if !is_learning_mode_event(header.ProviderId, header.EventDescriptor.Id) {
+        if provider_category(header.ProviderId).is_none() {
             return Ok(());
         }
         let event_index = self.event_cursor.fetch_add(1, Ordering::Relaxed);

@@ -584,7 +584,7 @@ pub fn visit_raw_events(
     Ok(accumulator.raw_event_count)
 }
 
-/// Builds a bounded decision vector for supported Learning Mode events in
+/// Builds a bounded decision vector for known-provider Learning Mode events in
 /// source order. `ProcessTrace` normalizes each timestamp to FILETIME before
 /// the exact process-generation test, so Trace Relogger can replay these
 /// decisions without comparing its raw trace-clock timestamps.
@@ -748,7 +748,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
     if matches!(acc.mode, CollectionMode::SelectForRelogging) {
-        if !is_learning_mode_event(provider, event_id) {
+        if crate::extractors::provider_category(provider).is_none() {
             return;
         }
         let event_index = acc.relog_event_count;
@@ -762,15 +762,27 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
             return;
         };
-        if acc.event_in_scope(header.ProcessId, filetime) {
-            if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
-                acc.decode_error = Some(format!(
-                    "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
-                ));
-                acc.stop_requested = true;
-                return;
+        if event_id == crate::extractors::CAPABILITY_DENIAL_EVENT_ID
+            && is_learning_mode_event(provider, event_id)
+        {
+            match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+                Ok(parts) => select_decoded_event_for_relogging(
+                    acc,
+                    event_index,
+                    &parts,
+                    header.ProcessId,
+                    filetime,
+                ),
+                Err(error) => {
+                    acc.decode_error = Some(format!(
+                        "failed to decode brokered capability event while scoping guarded trace: {error}"
+                    ));
+                    acc.stop_requested = true;
+                    return;
+                }
             }
-            acc.relog_selected_event_indices.push(event_index);
+        } else {
+            select_event_for_relogging(acc, event_index, header.ProcessId, filetime);
         }
         return;
     }
@@ -835,6 +847,41 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     }
 }
 
+fn select_decoded_event_for_relogging(
+    acc: &mut Accumulator<'_>,
+    event_index: usize,
+    parts: &DecodedEventParts,
+    header_pid: u32,
+    filetime: u64,
+) {
+    let Some(effective_pid) = crate::extractors::effective_event_pid(parts, header_pid) else {
+        acc.decode_error =
+            Some("brokered capability event has no valid payload ProcessId".to_string());
+        acc.stop_requested = true;
+        return;
+    };
+    select_event_for_relogging(acc, event_index, effective_pid, filetime);
+}
+
+fn select_event_for_relogging(
+    acc: &mut Accumulator<'_>,
+    event_index: usize,
+    pid: u32,
+    filetime: u64,
+) {
+    if !acc.event_in_scope(pid, filetime) {
+        return;
+    }
+    if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
+        acc.decode_error = Some(format!(
+            "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
+        ));
+        acc.stop_requested = true;
+        return;
+    }
+    acc.relog_selected_event_indices.push(event_index);
+}
+
 /// Extracts denials from one decoded, in-vocabulary event and feeds them
 /// (or their closed exclusion reason) into `acc`.
 ///
@@ -847,21 +894,35 @@ fn handle_decoded_event(
     filetime: u64,
     acc: &mut Accumulator<'_>,
 ) {
-    let pid = crate::extractors::effective_event_pid(parts, header_pid);
-    if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
-        return;
-    }
     let Some(category) = crate::extractors::provider_category(parts.provider) else {
         return;
     };
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        acc.record_exclusion(
-            category,
-            parts.event_id,
-            DataLoopExclusionReason::UnsupportedEventSchema,
-            pid,
-            crate::extractors::sanitize_properties(&parts.props),
-        );
+        if acc.event_in_scope(header_pid, filetime) && acc.begin_event() {
+            acc.record_exclusion(
+                category,
+                parts.event_id,
+                DataLoopExclusionReason::UnsupportedEventSchema,
+                header_pid,
+                crate::extractors::sanitize_properties(&parts.props),
+            );
+        }
+        return;
+    }
+    let Some(pid) = crate::extractors::effective_event_pid(parts, header_pid) else {
+        if acc.process_lifetimes.is_none() && acc.begin_event() {
+            acc.record_outcome(
+                category,
+                parts.event_id,
+                DataLoopExclusionReason::EventPayloadMalformed,
+                header_pid,
+                crate::extractors::data_loop_classification(parts),
+                crate::extractors::sanitize_properties(&parts.props),
+            );
+        }
+        return;
+    };
+    if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
         return;
     }
 
@@ -956,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn relog_selection_tracks_supported_event_ordinals_and_exact_lifetimes() {
+    fn relog_selection_tracks_known_provider_ordinals_and_exact_lifetimes() {
         let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
             pid: 42,
             start_filetime: 100,
@@ -964,9 +1025,8 @@ mod tests {
         }]);
 
         let mut visit = |provider, event_id, pid, filetime| {
-            // SAFETY: this zeroed record is used only by selection mode, which
-            // reads the initialized POD header fields below and never decodes
-            // payload pointers.
+            // SAFETY: these fixtures avoid the brokered capability event, so
+            // selection reads only the initialized POD header fields below.
             let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
             record.EventHeader.ProviderId = provider;
             record.EventHeader.EventDescriptor.Id = event_id;
@@ -979,12 +1039,53 @@ mod tests {
         visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 42, 100);
         visit(windows::core::GUID::from_u128(1), 14, 42, 150);
         visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 27, 42, 201);
-        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 28, 42, 200);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 999, 42, 200);
         visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 43, 150);
 
         assert_eq!(accumulator.relog_event_count, 4);
         assert_eq!(accumulator.relog_selected_event_indices, [0, 2]);
         assert!(accumulator.decode_error.is_none());
+    }
+
+    #[test]
+    fn relog_selection_scopes_brokered_capability_events_by_payload_pid() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        let parts = DecodedEventParts {
+            provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
+            event_id: crate::extractors::CAPABILITY_DENIAL_EVENT_ID,
+            props: vec![("ProcessId".to_string(), "42".to_string())],
+        };
+
+        select_decoded_event_for_relogging(&mut accumulator, 0, &parts, 9000, 150);
+
+        assert_eq!(accumulator.relog_selected_event_indices, [0]);
+    }
+
+    #[test]
+    fn relog_selection_rejects_brokered_capability_without_payload_pid() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        let parts = DecodedEventParts {
+            provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
+            event_id: crate::extractors::CAPABILITY_DENIAL_EVENT_ID,
+            props: Vec::new(),
+        };
+
+        select_decoded_event_for_relogging(&mut accumulator, 0, &parts, 42, 150);
+
+        assert!(accumulator.relog_selected_event_indices.is_empty());
+        assert!(accumulator.stop_requested);
+        assert!(accumulator
+            .decode_error
+            .as_deref()
+            .is_some_and(|error| error.contains("payload ProcessId")));
     }
 
     #[test]
@@ -1126,10 +1227,32 @@ mod tests {
             ),
         ];
 
-        let out = dedup_to_resources(denials).denials;
+        let analysis = dedup_to_resources(denials);
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].resource, r"\\server\share\file.txt");
+        assert_eq!(analysis.denials.len(), 1);
+        assert_eq!(analysis.denials[0].resource, r"\\server\share\file.txt");
+        let excluded = analysis
+            .data_loop
+            .signatures
+            .iter()
+            .filter(|group| group.signature.reason == DataLoopExclusionReason::UnusableResourcePath)
+            .collect::<Vec<_>>();
+        assert_eq!(excluded.len(), 4);
+        assert!(excluded.iter().all(|group| {
+            group.signature.access_type == Some(AccessType::Read)
+                && group.signature.resource_type == Some(ResourceType::File)
+                && group.count == 1
+        }));
+        for expected in [
+            r"\Device\UnknownVolume\file.txt",
+            r"C:relative.txt",
+            r"PIPE\name",
+            r"\\server\pipe\name",
+        ] {
+            assert!(excluded
+                .iter()
+                .any(|group| property(&group.signature, "resource") == expected));
+        }
     }
 
     #[test]
@@ -1666,6 +1789,139 @@ mod tests {
             reason_for(9999),
             Some(DataLoopExclusionReason::UnsupportedEventSchema)
         );
+    }
+
+    #[test]
+    fn device_namespace_file_is_retained_as_unusable_resource_path() {
+        let events = vec![kernel_event(
+            14,
+            1996,
+            134_309_021_955_593_414,
+            &[
+                ("Mode", "\"Permissive\""),
+                ("ObjectType", "\"File\""),
+                ("ObjectName", "\"\\Device\\MountPointManager\""),
+                ("AccessMask", "0x100080"),
+            ],
+        )];
+
+        let out = resources_from_events(&events);
+
+        assert!(out.denials.is_empty());
+        assert_eq!(out.data_loop.signatures.len(), 1);
+        let group = &out.data_loop.signatures[0];
+        assert_eq!(group.count, 1);
+        assert_eq!(group.signature.provider, DataLoopProvider::KernelGeneral);
+        assert_eq!(
+            group.signature.provider_guid,
+            "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}"
+        );
+        assert_eq!(group.signature.event_id, 14);
+        assert_eq!(
+            group.signature.reason,
+            DataLoopExclusionReason::UnusableResourcePath
+        );
+        assert_eq!(group.signature.pid, 1996);
+        assert_eq!(group.signature.access_type, Some(AccessType::Read));
+        assert_eq!(group.signature.resource_type, Some(ResourceType::File));
+        assert_eq!(
+            property(&group.signature, "ObjectName"),
+            r"\Device\MountPointManager"
+        );
+    }
+
+    #[test]
+    fn output_gap_object_types_are_individually_retained() {
+        let cases = [
+            ("Directory", r"\BaseNamedObjects"),
+            (
+                "Section",
+                r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-1\cache.db",
+            ),
+            ("SymbolicLink", r"\??\FDC#GENERIC_FLOPPY_DRIVE"),
+            (
+                "ALPC Port",
+                r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-1\RPC Control\ubpmtaskhostchannel",
+            ),
+            ("RPC Interface", "f6beaff7-1e19-4fbb-9f8f-b89e2018337c"),
+        ];
+        let events = cases
+            .iter()
+            .enumerate()
+            .map(|(index, (object_type, object_name))| CollectedEvent {
+                pid: 42,
+                filetime: index as u64 + 1,
+                parts: DecodedEventParts {
+                    provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
+                    event_id: 14,
+                    props: vec![
+                        ("Mode".to_string(), "\"Permissive\"".to_string()),
+                        ("ObjectType".to_string(), format!("\"{object_type}\"")),
+                        ("ObjectName".to_string(), format!("\"{object_name}\"")),
+                        ("AccessMask".to_string(), "0x1".to_string()),
+                    ],
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let out = resources_from_events(&events);
+
+        assert!(out.denials.is_empty());
+        assert_eq!(out.data_loop.signatures.len(), cases.len());
+        for (object_type, object_name) in cases {
+            let group = out
+                .data_loop
+                .signatures
+                .iter()
+                .find(|group| property(&group.signature, "ObjectType") == object_type)
+                .unwrap_or_else(|| panic!("missing Data Loop signature for {object_type}"));
+            assert_eq!(
+                group.signature.reason,
+                DataLoopExclusionReason::UnsupportedObjectType
+            );
+            assert_eq!(property(&group.signature, "ObjectName"), object_name);
+            assert_eq!(group.count, 1);
+        }
+    }
+
+    #[test]
+    fn long_section_names_with_shared_prefix_remain_distinct() {
+        let prefix = format!(
+            r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-{}\C:*ProgramData*Microsoft*Windows*Caches*",
+            "1-".repeat(100)
+        );
+        let names = [
+            format!("{prefix}{{6AF0698E-D558-4F6E-9B3C-3716689AF493}}.db"),
+            format!("{prefix}{{DDF571F2-BE98-426D-8288-1A9A39C3FDA2}}.db"),
+            format!("{prefix}cversions.2.ro"),
+        ];
+        let events = names
+            .iter()
+            .enumerate()
+            .map(|(index, object_name)| CollectedEvent {
+                pid: 42,
+                filetime: index as u64 + 1,
+                parts: DecodedEventParts {
+                    provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
+                    event_id: 14,
+                    props: vec![
+                        ("ObjectType".to_string(), "\"Section\"".to_string()),
+                        ("ObjectName".to_string(), format!("\"{object_name}\"")),
+                        ("AccessMask".to_string(), "0x6".to_string()),
+                    ],
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let out = resources_from_events(&events);
+
+        assert!(out.denials.is_empty());
+        assert_eq!(out.data_loop.signatures.len(), names.len());
+        assert!(out.data_loop.signatures.iter().all(|group| {
+            group.signature.reason == DataLoopExclusionReason::UnsupportedObjectType
+                && group.count == 1
+                && property(&group.signature, "ObjectName").contains("<sha256=")
+        }));
     }
 
     #[test]

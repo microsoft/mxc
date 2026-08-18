@@ -20,8 +20,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
-    data_loop_sibling_path, write_data_loop_document, write_document, AnalysisResult,
-    DataLoopDocument, DenialSummary, DenialsDocument, DenialsOutputPointer,
+    data_loop_sibling_path, write_data_loop_document, write_document, write_paired_output_files,
+    AnalysisResult, DataLoopDocument, DenialSummary, DenialsDocument, DenialsOutputPointer,
+    ExistingOutputPolicy,
 };
 use wxc_common::models::CaptureDenialsOutput;
 
@@ -52,8 +53,10 @@ pub fn write_denials_document(
     let data_loop_document = DataLoopDocument::new(&analysis.data_loop);
 
     write_paired_output_files(
+        "captureDenials",
         output_path,
         &data_loop_path,
+        ExistingOutputPolicy::CreateNew,
         |writer| write_document(writer, &document),
         |writer| write_data_loop_document(writer, &data_loop_document),
     )?;
@@ -73,150 +76,6 @@ pub fn write_denials_document(
 pub fn data_loop_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
     data_loop_sibling_path(output_path)
         .map_err(|error| std::io::Error::other(format!("captureDenials {error}")))
-}
-
-fn write_paired_output_files(
-    denials_path: &Path,
-    data_loop_path: &Path,
-    write_denials: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-    write_data_loop: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    ensure_output_absent(denials_path, "denials")?;
-    ensure_output_absent(data_loop_path, "Data Loop")?;
-
-    let denials_temp = stage_output_file(denials_path, "denials", write_denials)?;
-    let data_loop_temp = match stage_output_file(data_loop_path, "Data Loop", write_data_loop) {
-        Ok(path) => path,
-        Err(error) => {
-            return Err(combine_error_with_cleanup(
-                error,
-                remove_if_present(&denials_temp),
-                &denials_temp,
-            ))
-        }
-    };
-
-    if let Err(error) = std::fs::rename(&data_loop_temp, data_loop_path) {
-        let error = std::io::Error::other(format!(
-            "captureDenials failed to promote Data Loop output file {}: {error}",
-            data_loop_path.display()
-        ));
-        let error =
-            combine_error_with_cleanup(error, remove_if_present(&data_loop_temp), &data_loop_temp);
-        return Err(combine_error_with_cleanup(
-            error,
-            remove_if_present(&denials_temp),
-            &denials_temp,
-        ));
-    }
-
-    if let Err(error) = std::fs::rename(&denials_temp, denials_path) {
-        let error = std::io::Error::other(format!(
-            "captureDenials failed to promote denials output file {}: {error}",
-            denials_path.display()
-        ));
-        let error =
-            combine_error_with_cleanup(error, remove_if_present(data_loop_path), data_loop_path);
-        return Err(combine_error_with_cleanup(
-            error,
-            remove_if_present(&denials_temp),
-            &denials_temp,
-        ));
-    }
-
-    Ok(())
-}
-
-fn ensure_output_absent(path: &Path, kind: &str) -> std::io::Result<()> {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!(
-                "captureDenials {kind} output file already exists: {}",
-                path.display()
-            ),
-        )),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(std::io::Error::other(format!(
-            "captureDenials failed to inspect {kind} output file {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn stage_output_file(
-    final_path: &Path,
-    kind: &str,
-    write: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-) -> std::io::Result<PathBuf> {
-    let temp_path = temporary_sibling_path(final_path)?;
-    let file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .map_err(|error| {
-            std::io::Error::other(format!(
-                "captureDenials failed to create temporary {kind} output file {}: {error}",
-                temp_path.display()
-            ))
-        })?;
-    let mut writer = std::io::BufWriter::new(file);
-    if let Err(error) = write(&mut writer)
-        .and_then(|()| writer.flush())
-        .and_then(|()| writer.get_ref().sync_all())
-    {
-        let error = std::io::Error::other(format!(
-            "captureDenials failed to write temporary {kind} output file {}: {error}",
-            temp_path.display()
-        ));
-        drop(writer);
-        return Err(combine_error_with_cleanup(
-            error,
-            remove_if_present(&temp_path),
-            &temp_path,
-        ));
-    }
-    Ok(temp_path)
-}
-
-fn temporary_sibling_path(final_path: &Path) -> std::io::Result<PathBuf> {
-    let file_name = final_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .ok_or_else(|| {
-            std::io::Error::other(format!(
-                "captureDenials output path has no usable file name: {}",
-                final_path.display()
-            ))
-        })?;
-    let suffix = random_capture_suffix().map_err(std::io::Error::other)?;
-    let temp_name = format!(".{file_name}.tmp.{}.{suffix}", std::process::id());
-    Ok(match final_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join(temp_name),
-        _ => PathBuf::from(temp_name),
-    })
-}
-
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
-    }
-}
-
-fn combine_error_with_cleanup(
-    error: std::io::Error,
-    cleanup: std::io::Result<()>,
-    cleanup_path: &Path,
-) -> std::io::Error {
-    match cleanup {
-        Ok(()) => error,
-        Err(cleanup_error) => std::io::Error::other(format!(
-            "{error}; additionally failed to remove {}: {cleanup_error}",
-            cleanup_path.display()
-        )),
-    }
 }
 
 /// Creates `output_path` (failing if it already exists) and writes through
@@ -553,8 +412,10 @@ mod tests {
         let data_loop_path = data_loop_output_path(&output_path).unwrap();
 
         let error = write_paired_output_files(
+            "captureDenials",
             &output_path,
             &data_loop_path,
+            ExistingOutputPolicy::CreateNew,
             |writer| writer.write_all(b"denials"),
             |writer| {
                 writer.write_all(b"partial")?;

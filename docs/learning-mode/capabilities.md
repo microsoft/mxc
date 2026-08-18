@@ -275,6 +275,26 @@ the canonical unique-denial bound. Those occurrences deduplicate under the
 same signature and increment its count. `accessType` and `resourceType` are
 included when denial extraction determined them; diagnostic outcomes without
 those classifications omit the fields.
+
+Candidates excluded from canonical policy output retain a closed diagnostic
+reason and their sanitized event properties:
+
+- `unusableResourcePath` means a File access-check resource could not be
+  converted to a safe absolute DOS or UNC path. For example,
+  `\Device\MountPointManager` is useful Devices-namespace evidence, but it is
+  not a directly authorable filesystem grant.
+- `unsupportedObjectType` means the event names a resource outside the
+  canonical policy model. Examples include `\BaseNamedObjects` as a Directory,
+  shared-cache Sections, SymbolicLinks, ALPC Ports such as
+  `ubpmtaskhostchannel`, and RPC Interface GUIDs.
+
+Property values longer than 256 characters retain bounded prefix and suffix
+context plus a SHA-256 digest of the complete sanitized value. This keeps long
+named-object resources individually identifiable when they share a prefix
+without exceeding the per-property bound. Username redaction occurs before the
+digest is computed, so neither the retained context nor the digest is derived
+from the original username.
+
 Unknown event IDs from known Learning Mode providers are classified as
 `unsupportedEventSchema`; the real ETL path retains their provider GUID and
 PID without attempting an unsupported TDH payload decode.

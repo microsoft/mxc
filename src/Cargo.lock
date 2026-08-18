@@ -1275,6 +1275,7 @@ version = "0.7.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1285,6 +1286,7 @@ dependencies = [
  "flatbuffers",
  "learning_mode_core",
  "process_security_environment_spec",
+ "sha2 0.10.9",
  "thiserror",
  "windows",
  "windows-core",
