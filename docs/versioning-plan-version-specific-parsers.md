@@ -234,8 +234,8 @@ Before exact dispatch is enabled, the loader must provide an entry-point-aware,
 typed path for `LoadOptions::allow_missing_command` that combines the CLI
 command with the versioned policy before normal semantic validation. A
 dedicated versioned policy root is acceptable; falling back to the rolling
-version-insensitive parser is not. Phase 8 shadow dispatch must cover this path,
-and Phase 10 cannot enable exact dispatch until its behavior matches the current
+version-insensitive parser is not. Phase 7 shadow dispatch must cover this path,
+and Phase 9 cannot enable exact dispatch until its behavior matches the current
 CLI override flow.
 
 ## Work plan
@@ -359,8 +359,9 @@ Status:
 - **Phase 5A** — one-shot development contract, under review in PR #909
 - **Phase 5B** — one-shot development adapter, stacked on 5A in PR #910
 - **Phase 5C** — phase discriminator and state-aware development contracts,
-  in progress on `user/gudge/version_specific_config_parsers_phase5c`
-- **Phase 5D** — state-aware adapter and convergence tests, not started
+  complete and under review in PR #929
+- **Phase 5D** — state-aware adapter and wire-equivalence tests, in progress on
+  `user/gudge/version_specific_config_parsers_phase5d`
 
 Separate the mutable development contract into:
 
@@ -606,23 +607,22 @@ tests must additionally prove containment discrimination, exact marker
 enforcement, backend-key/phase-key closure, and rejection of foreign backend
 fields.
 
-#### Phase 5D: State-aware development adapter and convergence
+#### Phase 5D: State-aware development adapter and wire equivalence
 
-Add the mutable state-aware adapter outside the contract crate. It maps every
-phase root into `ParsedStateAwareRequest` and the existing state-aware
-normalization model while preserving the source text needed for positional
-diagnostics.
+Add the mutable state-aware adapter outside the contract crate. It exhaustively
+maps every phase root into the current `wire::MxcConfig` shape. Preserve the
+validated raw experimental object and original source text in a neutral
+pre-normalization value.
 
-The adapter may reconstruct the raw experimental value required by the current
-dispatcher only after the complete typed contract validates it. Backend-specific
-runtime deserialization remains in the dispatcher so `wxc_common` does not gain
-backend dependencies.
+Add direct expected-wire and current-wire-deserialization equivalence tests for
+every supported backend/phase combination, including optional-field presence,
+telemetry, and required envelope fields. Add focused tests proving the neutral
+adapter output preserves raw experimental data and source text.
 
-Add expected-model and current-parser equivalence tests for every supported
-backend/phase combination, wrong-phase fields, backend-key closure, immutable
-post-provision policy, telemetry, and required envelope fields. Explicitly
-classify intentional tightening where the rolling parser accepted or ignored
-state-aware experimental content that the exact phase root rejects.
+Comprehensive rolling-versus-exact final-model convergence, acceptance mismatch
+classification, and diagnostic parity are explicitly deferred to Phase 7, where
+both complete parser pipelines run together. Phase 5D does not modify the rolling
+parser or normalize exact requests into `ParsedStateAwareRequest`.
 
 ### Phase 6: Add versioned development-schema codegen
 
@@ -641,11 +641,97 @@ This phase generates development artifacts only; it does not publish or freeze
 those changes update the Rust contract, JSON Schema, and TypeScript oracle
 together.
 
-### Phase 7: Reintroduce the GA network contract on the development version
+### Phase 7: Add shadow exact-contract dispatch
+
+Add a private exact-contract path in `config_parser` while retaining the current
+path as authoritative.
+
+Extract a behavior-preserving shared state-aware normalization seam from the
+rolling parser when the exact path becomes its second caller. Both parser paths
+produce the same neutral pre-normalization value and feed that shared function
+to obtain `ParsedStateAwareRequest`; do not duplicate runtime normalization in
+the shadow path.
+
+For matching inputs:
+
+1. Parse with the current parser.
+2. Parse through the selected version contract.
+3. Adapt both to the runtime model.
+4. Assert semantic equivalence.
+
+Semantic-equivalence tests belong here, where both complete parsing paths
+exist. For valid inputs, Phase 3's wire-equivalence tests establish that the
+same deterministic wire-to-runtime conversion receives the same value; Phase 7
+adds end-to-end coverage for runtime results, acceptance differences, and
+diagnostic behavior.
+
+Cover every loader mode and representative one-shot/state-aware backend/phase
+combination, including `allow_missing_command`, immutable post-provision policy,
+telemetry, required envelope fields, and source-position diagnostics. Explicitly
+classify intentional tightening and other known expected incompatibilities,
+especially configs that declare `0.6.0-alpha` while carrying experimental
+fields.
+
+Shadow comparison uses the current legacy Network syntax for all versions. The
+GA Network change is intentionally deferred until exact dispatch is
+authoritative, because the rolling parser cannot accept the new `0.8.0-alpha`
+shape without repeating the version-insensitive break introduced by PR #676.
+
+### Phase 8: Migrate producers and the config corpus
+
+Do not rely on the original base-commit counts; the corpus changes frequently.
+Regenerate and check in an inventory report at the start of this phase,
+covering configs, examples, SDK producers, state-aware envelopes, and schema
+references.
+
+The most recent focused audit (2026-08-11, `tests/configs` plus
+`tests/examples`) found:
+
+- 97 configs declaring `0.6.0-alpha`: 54 conformed to the exact stable
+  contract, while 43 used experimental or later-version surfaces
+- 55 unversioned configs: none conformed after temporary `0.6.0-alpha`
+  injection; they were experimental, state-aware, or annotation-bearing
+
+These counts are evidence that migration is required, not a frozen Phase 8
+input.
+
+Experimental and state-aware configs move to `0.8.0-alpha`. Stable configs are
+classified and assigned an exact published version.
+
+This migration retains the current legacy Network syntax. Development configs
+that use Network policy receive a second, focused migration when Phase 10
+changes the authoritative `0.8.0-alpha` contract to the GA shape.
+
+Update Node, C#, Rust SDK, FFI, examples, tests, and `$schema` references.
+State-aware producers must stop hard-coding `0.6.0-alpha`.
+
+This step is primarily mechanical and is suitable for delegation.
+
+### Phase 9: Enable exact dispatch
+
+Replace the major/minor range check with exact registry dispatch.
+
+Add `allow_development_contract` to parser load options. Initially, the
+existing `--experimental` option authorizes parsing `0.8.0-alpha` as well as
+enabling experimental execution.
+
+Published versions reject `experimental` as an ordinary unknown field.
+Development requests without opt-in receive a specific error. There is no
+fallback to the latest version.
+
+After parity tests pass, remove the direct version-insensitive wire
+deserialization path.
+
+Exact dispatch must be authoritative before the development Network contract
+changes. This sequencing is what protects `0.6.0-alpha` and `0.7.0-alpha`
+callers from the breaking-change failure mode that caused PR #676 to be
+reverted.
+
+### Phase 10: Reintroduce the GA network contract on the authoritative development version
 
 Redo the work originally attempted by PR #676 and reverted by PR #707, but
-apply it through the version-specific contract stack rather than replacing one
-rolling wire shape in place.
+apply it only to the now-authoritative version-specific `0.8.0-alpha` contract.
+Do not replace or widen a rolling version-insensitive wire shape.
 
 The `0.8.0-alpha` development contract adds:
 
@@ -663,78 +749,19 @@ TypeScript SDK surfaces, generated artifacts, fixtures, and applicable unit,
 integration, and E2E tests. Do not merge a schema-only change that intentionally
 breaks the parser, codegen, SDK, or test gates.
 
-The published `0.6` and `0.7` contracts retain their immutable legacy network
-syntax. Their adapters normalize legacy fields into the canonical GA runtime
-model. Migrations must not silently drop DNS host rules, enforcement choices,
-local-network intent, or proxy configuration; each legacy behavior must be
-translated, rejected with a specific migration error, or retained through a
-documented compatibility representation.
+The published `0.6` and `0.7` contracts retain their immutable legacy Network
+syntax and continue to parse through their exact contract modules. Their
+adapters normalize legacy fields into the canonical runtime model. Migrations
+must not silently drop DNS host rules, enforcement choices, local-network
+intent, or proxy configuration; each legacy behavior must be translated,
+rejected with a specific migration error, or retained through a documented
+compatibility representation.
 
-The GA fields are available only in the `0.8.0-alpha` development contract.
-This phase occurs before shadow dispatch so all later parity and corpus work
-targets the final development network shape.
-
-### Phase 8: Add shadow exact-contract dispatch
-
-Add a private exact-contract path in `config_parser` while retaining the current
-path as authoritative.
-
-For matching inputs:
-
-1. Parse with the current parser.
-2. Parse through the selected version contract.
-3. Adapt both to the runtime model.
-4. Assert semantic equivalence.
-
-Semantic-equivalence tests belong here, where both complete parsing paths
-exist. For valid inputs, Phase 3's wire-equivalence tests establish that the
-same deterministic wire-to-runtime conversion receives the same value; Phase 8
-adds end-to-end coverage for runtime results, acceptance differences, and
-diagnostic behavior.
-
-Explicitly classify known expected incompatibilities, especially configs that
-declare `0.6.0-alpha` while carrying experimental fields.
-
-### Phase 9: Migrate producers and the config corpus
-
-Do not rely on the original base-commit counts; the corpus changes frequently.
-Regenerate and check in an inventory report at the start of this phase,
-covering configs, examples, SDK producers, state-aware envelopes, and schema
-references.
-
-The most recent focused audit (2026-08-11, `tests/configs` plus
-`tests/examples`) found:
-
-- 97 configs declaring `0.6.0-alpha`: 54 conformed to the exact stable
-  contract, while 43 used experimental or later-version surfaces
-- 55 unversioned configs: none conformed after temporary `0.6.0-alpha`
-  injection; they were experimental, state-aware, or annotation-bearing
-
-These counts are evidence that migration is required, not a frozen Phase 9
-input.
-
-Experimental and state-aware configs move to `0.8.0-alpha`. Stable configs are
-classified and assigned an exact published version.
-
-Update Node, C#, Rust SDK, FFI, examples, tests, and `$schema` references.
-State-aware producers must stop hard-coding `0.6.0-alpha`.
-
-This step is primarily mechanical and is suitable for delegation.
-
-### Phase 10: Enable exact dispatch
-
-Replace the major/minor range check with exact registry dispatch.
-
-Add `allow_development_contract` to parser load options. Initially, the
-existing `--experimental` option authorizes parsing `0.8.0-alpha` as well as
-enabling experimental execution.
-
-Published versions reject `experimental` as an ordinary unknown field.
-Development requests without opt-in receive a specific error. There is no
-fallback to the latest version.
-
-After parity tests pass, remove the direct version-insensitive wire
-deserialization path.
+The GA fields are available only in the mutable `0.8.0-alpha` development
+contract. Update the development schema, TypeScript oracle, SDK emitters, and
+the `0.8.0-alpha` Network config corpus in this phase. Because exact dispatch is
+already authoritative, these changes cannot alter the accepted syntax of
+published `0.6.0-alpha` or `0.7.0-alpha` requests.
 
 ### Phase 11: Add publication and freeze checks
 
