@@ -91,6 +91,19 @@ try
 
         var streamResult = proc.Wait();
         Console.WriteLine($"streamed exit code : {streamResult.ExitCode}");
+        if (proc.OutputMetadata?.CaptureDenials is { } streamCapture)
+        {
+            Console.WriteLine($"stream denials    : {streamCapture.OutputPath}");
+            if (streamCapture.EtlPath is not null)
+            {
+                Console.WriteLine($"stream ETL        : {streamCapture.EtlPath}");
+            }
+        }
+        if (proc.OutputMetadata?.CaptureDenialsError is { } streamCaptureError)
+        {
+            Console.WriteLine($"stream capture error: {streamCaptureError.Message}");
+            Console.WriteLine($"stream retained ETL : {streamCaptureError.EtlPath}");
+        }
     }
 
     // State-aware lifecycle: provision -> start -> exec -> stop -> deprovision.
