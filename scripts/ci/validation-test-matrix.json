@@ -411,6 +411,24 @@
         "backends": [
           "lxc"
         ]
+      },
+      {
+        "os": "windows-25h2",
+        "backends": [
+          "wslc"
+        ]
+      },
+      {
+        "os": "windows-24h2",
+        "backends": [
+          "wslc"
+        ]
+      },
+      {
+        "os": "windows-23h2",
+        "backends": [
+          "wslc"
+        ]
       }
     ]
   }

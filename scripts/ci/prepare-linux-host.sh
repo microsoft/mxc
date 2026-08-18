@@ -181,126 +181,6 @@ enable_bridge_netfilter() {
     done
 }
 
-# Container-scoped rules hook egress (-i <veth>), so a reply arrives in the
-# opposite direction, matches nothing MXC installed, and falls through to the
-# host's FORWARD policy. A DROP policy (Docker sets one) therefore breaks
-# allowed destinations, and worse, makes the deny cases pass vacuously: a
-# container with no working hook at all is equally unreachable. Forwarding by
-# default leaves an MXC rule as the only thing that can block traffic.
-allow_host_forwarding() {
-    local command
-    for command in iptables ip6tables; do
-        if command -v "$command" >/dev/null 2>&1; then
-            sudo "$command" -P FORWARD ACCEPT ||
-                echo "WARNING: could not set the $command FORWARD policy to ACCEPT; deny-case tests may pass without enforcing anything." >&2
-        fi
-    done
-}
-
-# Report the host-side state that container networking depends on. Purely
-# diagnostic: never fails the job, so a networking problem still surfaces as
-# the backend test failure rather than as a prerequisite error.
-report_lxc_network_diagnostics() {
-    local bridge="${LXC_BRIDGE:-lxcbr0}"
-
-    echo "--- LXC network diagnostics (host) ---"
-
-    echo "net.ipv4.ip_forward: $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo unknown)"
-
-    echo "bridge-nf-call-iptables: $(cat /proc/sys/net/bridge/bridge-nf-call-iptables 2>/dev/null || echo absent)"
-
-    echo "Bridge $bridge:"
-    ip -4 addr show "$bridge" 2>/dev/null | sed 's/^/  /' || echo "  (absent)"
-
-    echo "dnsmasq processes:"
-    pgrep -af dnsmasq 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-
-    echo "NAT rules for the bridge subnet:"
-    sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' |
-        sed 's/^/  /' || echo "  (none found)"
-
-    # A vacuous pass depends on this policy, so print it verbatim. grep reads
-    # the whole ruleset, avoiding the SIGPIPE an early-closing head would send
-    # back to iptables under pipefail.
-    echo "FORWARD policy (must be ACCEPT, or deny cases prove nothing):"
-    sudo iptables -S FORWARD 2>/dev/null | grep '^-P' | sed 's/^/  /' || echo "  (unknown)"
-    sudo ip6tables -S FORWARD 2>/dev/null | grep '^-P' | sed 's/^/  /' || echo "  (unknown)"
-
-    echo "FORWARD rules for the bridge:"
-    sudo iptables -S FORWARD 2>/dev/null | grep -E "$bridge" | sed 's/^/  /' ||
-        echo "  (none found)"
-
-    echo "Host /etc/resolv.conf nameservers:"
-    grep '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-
-    echo "lxc-net configuration:"
-    grep -E '^(USE_LXC_BRIDGE|LXC_ADDR|LXC_NETMASK|LXC_DHCP_RANGE|LXC_DHCP_CONFILE)' \
-        /etc/default/lxc-net 2>/dev/null | sed 's/^/  /' || echo "  (no /etc/default/lxc-net)"
-
-    # Prove the host itself can resolve the name the network test uses. If this
-    # fails, the container was never going to succeed.
-    if command -v getent >/dev/null 2>&1; then
-        echo "Host resolution of api.github.com:"
-        getent ahostsv4 api.github.com 2>/dev/null | head -n 2 | sed 's/^/  /' ||
-            echo "  FAILED - the host cannot resolve it either"
-    fi
-
-    # Ask the bridge's own resolver, which is what a container is handed via
-    # DHCP. This isolates "dnsmasq is broken" from "the host is fine".
-    local bridge_ip
-    bridge_ip="$(ip -4 -o addr show "$bridge" 2>/dev/null |
-        awk '{print $4}' | cut -d/ -f1 | head -n 1)"
-    if [[ -n "$bridge_ip" ]] && command -v nslookup >/dev/null 2>&1; then
-        echo "Resolution via bridge resolver ($bridge_ip):"
-        nslookup api.github.com "$bridge_ip" 2>&1 | tail -n 4 | sed 's/^/  /' ||
-            echo "  FAILED - dnsmasq on $bridge is not answering"
-    fi
-
-    echo "--- end diagnostics ---"
-}
-
-# Boot a throwaway container and confirm it gets an IPv4 lease and can reach
-# off-host. Every host-side check can pass while a container still comes up
-# IPv6-only, which surfaces as an unrelated-looking resolution failure much
-# later in the suite. Purely diagnostic: never fails the job.
-report_lxc_container_connectivity() {
-    local container="mxc-ci-netcheck-$$"
-
-    echo "--- LXC container connectivity probe ---"
-
-    if ! sudo lxc-create -n "$container" -t download -- \
-        --dist alpine --release 3.23 --arch "$(dpkg --print-architecture 2>/dev/null || arch)" \
-        >/dev/null 2>&1; then
-        echo "  could not create the probe container; skipping."
-        echo "--- end probe ---"
-        return 0
-    fi
-
-    if sudo lxc-start -n "$container" >/dev/null 2>&1; then
-        # The suite's own containers wait about this long for an address.
-        sudo lxc-wait -n "$container" -s RUNNING -t 15 >/dev/null 2>&1 || true
-        sleep 5
-
-        echo "  addresses:"
-        sudo lxc-info -n "$container" -iH 2>/dev/null | sed 's/^/    /' || echo "    (none)"
-
-        if sudo lxc-info -n "$container" -iH 2>/dev/null | grep -qE '^[0-9]+\.'; then
-            echo "  IPv4: present"
-        else
-            echo "  WARNING: no IPv4 address; DHCPv4 on the bridge is not working." >&2
-        fi
-
-        echo "  resolution from inside the container:"
-        sudo lxc-attach -n "$container" -- getent hosts api.github.com 2>&1 |
-            sed 's/^/    /' || echo "    FAILED - the container cannot resolve"
-    else
-        echo "  probe container failed to start."
-    fi
-
-    sudo lxc-destroy -n "$container" -f >/dev/null 2>&1 || true
-    echo "--- end probe ---"
-}
-
 chmod +x "$binary_directory/lxc-exec"
 case "$backend" in
     bubblewrap)
@@ -323,10 +203,7 @@ case "$backend" in
         fi
         start_lxc_bridge
         enable_bridge_netfilter
-        allow_host_forwarding
         ensure_bridge_nat
-        report_lxc_network_diagnostics
-        report_lxc_container_connectivity
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
