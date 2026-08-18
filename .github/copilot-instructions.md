@@ -135,7 +135,8 @@ npm test
 npm run test:integration
 
 # C# SDK (from sdk/dotnet/)
-dotnet test Microsoft.Mxc.Sdk.slnx           # requires mxc_ffi built (cargo build -p mxc_ffi); resolver finds it in src/target/{debug,release}
+dotnet test Microsoft.Mxc.Sdk.slnx           # Debug only; requires mxc_ffi built (cargo build -p mxc_ffi); resolver finds it in src/target/{debug,release}
+                                             # the telemetry tests need the debug-only MXC_TEST_LOCALAPPDATA_OVERRIDE, so `-c Release` fails by design
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
@@ -148,6 +149,7 @@ tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
+tests\scripts\run_telemetry_consent_smoke_test.ps1  # Telemetry consent + policy CLI E2E (Windows; debug binary only)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
@@ -221,8 +223,9 @@ Core references:
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
 - `docs/ci-validation-infrastructure.md` — validation (E2E) test matrix: workflows and job names, catalog format, per-backend coverage and status, and the runbook for adding/removing an OS, backend, or plan
-- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/0.7.0/policy.md` — sandbox policy 0.7.0 specification
+- `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
+- `docs/telemetry/telemetry.md` — telemetry overview; `docs/telemetry/telemetry-consent-design.md` (Windows-only consent design and per-SDK surface) and `docs/telemetry/telemetry-administrative-policy.md` (the MDM / Group Policy ceiling)
 
 Per-backend guides:
 
@@ -302,6 +305,18 @@ The parser deserializes JSON directly into the typed wire model (`wxc_common::wi
 - macOS: `mxc-exec-mac` (Seatbelt)
 - Target triples: `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
 
+### Telemetry consent
+
+Telemetry is **Windows-only** and is never collected without explicit user consent. Three independent conditions must all hold before anything is emitted: the user has granted consent, the administrative (MDM / Group Policy) ceiling permits it, and the config kill-switch has not disabled it. `wxc_common::telemetry::is_enabled()` is the single place those three terms are combined — do not re-derive enablement anywhere else.
+
+- **Everything fails closed.** Any error, unreadable value, corrupt file, missing native library, or ambiguity must resolve to "no telemetry" (`Undetermined` consent / `Blocked` policy), never to a permissive state.
+- **Policy may restrict, but may never substitute for, consent.** The administrative policy is a deny-only ceiling: it can subtract from what a user permitted, never add to it. An administrator cannot opt a user in — a denied or never-asked user stays opted out even under `AllowTelemetry=3`. Keep the terms combined with `&&`; never add a policy value or config path that grants collection on its own.
+- **MXC owns its own consent state.** It must never read or infer from the Windows system telemetry consent. The consent store is a per-user JSON file; the policy is `HKLM\SOFTWARE\Policies\Mxc` → `AllowTelemetry` (`REG_DWORD`).
+- **One definition, distributed to the bindings.** The Rust `ConsentState` / `PolicyState` enums are the source of truth; the FFI, C#, and TypeScript layers marshal the same strings. Keep those spellings in sync anywhere this branch surfaces them.
+- **Test isolation.** The consent store and the policy key are process-global, each behind its own mutex. Use `wxc_common::telemetry::test_support::TelemetryTestEnv` whenever a test needs both; constructing `PolicyKeyGuard` and `LocalAppDataGuard` directly in the same test risks a lock-order deadlock. The consent-store override is compiled into test binaries and into debug `test-support` builds only, so release binaries do not honor it. The `wxc_common` `test-support` feature re-exports the policy override for downstream crates' integration tests (`mxc_ffi` uses it) and must stay a dev-dependency-only feature.
+- **Read-only queries must never be able to crash the host.** `NeedsConsentPrompt`/`needsTelemetryConsentPrompt` and `GetPolicy`/`getTelemetryPolicy` fail closed on *any* failure and never throw — including a non-`Success` FFI status, which covers a caught panic. The consent *read* and *write* still throw, because their callers must distinguish "not decided" from "could not read" and "did not persist"; when they do, they raise only the binding's documented exception type (`MxcException`), wrapping anything unexpected rather than letting a raw type escape.
+- **Never swallow a failure silently.** Fail-closed return values are indistinguishable from legitimate ones, so a broken install would otherwise be invisible. Every swallowed failure is reported once per distinct failure per process (deduplicated — hosts poll these getters), and the reporter itself must never throw. At the FFI boundary, `catch_unwind` sites log the panic payload before returning `MXC_STATUS_PANIC`, which would otherwise be discarded.
+
 ### Package versioning
 
 All Rust crates use `version.workspace = true` to inherit the version from `src/Cargo.toml` `[workspace.package]`. The npm SDK version in `sdk/node/package.json` and the C# SDK version (`<Version>` in `sdk/dotnet/Microsoft.Mxc.Sdk/Microsoft.Mxc.Sdk.csproj`) must match. Run `node scripts/check-version-sync.js` to validate they are in sync. When bumping the version, update `src/Cargo.toml` (workspace version), `sdk/node/package.json`, and the C# csproj in the same commit.
@@ -315,6 +330,7 @@ When changing behavior covered by existing documentation, update the relevant do
 - **SDK API changes** (new exports, changed signatures, new options) → update `sdk/node/README.md` and the JSDoc in `sdk/node/src/index.ts` (TypeScript SDK); the Rust `mxc-sdk` crate docs/`README.md`; and `sdk/dotnet/README.md` (C# SDK). If the `mxc_ffi` C ABI surface changes, the C# P/Invoke regenerates on the next C# build; keep the `ErrorCode` parity + bindings-codegen gates green.
 - **New containment backends or major backend changes** → update the relevant doc in `docs/` (e.g., `lxc-support/lxc-backend.md`, `windows-sandbox/windows-sandbox.md`)
 - **Versioning or promotion changes** → update `docs/versioning.md`
+- **Telemetry consent or policy changes** → update `docs/telemetry/telemetry-consent-design.md` and/or `docs/telemetry/telemetry-administrative-policy.md`, and keep the Rust/C#/TypeScript spellings aligned in the files present on this branch
 
 ### Policy versioning
 

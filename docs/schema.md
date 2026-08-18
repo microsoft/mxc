@@ -197,7 +197,7 @@ cannot mix both formats in one request.
 > it is rejected as an unknown field because lifecycle correlation is internal
 > to MXC and is not part of the request or response contract. See
 > [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md).
+> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md#correlating-a-lifecycle).
 
 ### Working Directory
 
