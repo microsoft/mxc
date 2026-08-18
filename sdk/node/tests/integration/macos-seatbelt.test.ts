@@ -80,6 +80,17 @@ describe('macOS Seatbelt Container', {
     assert.strictEqual(result.exitCode, 42);
   });
 
+  it('should allow a process to signal its child', async () => {
+    const result = await sdk.spawnSandboxAsync(
+      'sleep 30 & child=$!; kill -TERM "$child" || exit 1; wait "$child"; test "$?" -eq 143',
+      { version: schemaVersion },
+      seatbeltSpawnOptions,
+      undefined,
+      'seatbelt-child-signal',
+    );
+    assert.strictEqual(result.exitCode, 0, `Expected exit 0: ${result.stderr}`);
+  });
+
   it('should deny filesystem access by default', async () => {
     // The default seatbelt profile denies access to /Users.
     const result = await sdk.spawnSandboxAsync(
