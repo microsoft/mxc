@@ -215,6 +215,15 @@ $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout me
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
+# The filesystem configs mount C:\workspace and read test.txt from it. A
+# developer machine usually has both already; a clean runner has neither, so
+# create them here rather than leaving the mount empty.
+$WorkspaceDir = "C:\workspace"
+New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
+$WorkspaceFile = Join-Path $WorkspaceDir "test.txt"
+if (-not (Test-Path $WorkspaceFile)) {
+    Set-Content $WorkspaceFile "workspace fixture"
+}
 # wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
 $null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
     -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
