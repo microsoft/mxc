@@ -85,6 +85,11 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    #[cfg(target_os = "windows")]
+    {
+        resolve_runner_inner_windows(request, logger).map_err(Error::from)
+    }
+    #[cfg(not(target_os = "windows"))]
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
@@ -107,7 +112,7 @@ pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResp
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn resolve_runner_inner(
+fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
@@ -403,7 +408,7 @@ mod tests {
         for config in [None, Some(WindowsSandboxConfig::default())] {
             let request = windows_sandbox_request(config);
             let mut logger = Logger::new(Mode::Buffer);
-            resolve_runner_inner(&request, &mut logger).unwrap();
+            resolve_runner_inner_windows(&request, &mut logger).unwrap();
             assert!(logger.get_buffer().is_empty());
         }
     }
@@ -417,7 +422,7 @@ mod tests {
         let request = windows_sandbox_request(Some(config));
         let mut logger = Logger::new(Mode::Buffer);
 
-        resolve_runner_inner(&request, &mut logger).unwrap();
+        resolve_runner_inner_windows(&request, &mut logger).unwrap();
 
         let warning = logger.get_buffer();
         assert!(warning.contains("idleTimeoutMs"));

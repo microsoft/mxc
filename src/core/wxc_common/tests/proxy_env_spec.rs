@@ -194,6 +194,36 @@ fn cooperative_env_scrubs_all_caller_supplied_proxy_keys() {
     assert_eq!(value_for(&result, "ftp_proxy"), Some(PROXY_URL));
 }
 
+// Protects clients (b), (c), and (d): the three key-set constants are the
+// contract, so this derives the expected state of every managed key from them
+// instead of naming keys by hand. A hand-written per-key expectation can
+// silently disagree with the constant that actually drives the behavior --
+// which is how an assertion that FTP_PROXY stays absent survived FTP_PROXY
+// being added to PROXY_SET_KEYS, leaving the suite asserting both at once.
+#[test]
+fn every_managed_key_lands_in_the_state_its_constants_dictate() {
+    let hostile = "http://attacker.example:9999";
+    let caller: Vec<String> = PROXY_ENV_KEYS
+        .iter()
+        .map(|key| format!("{key}={hostile}"))
+        .collect();
+
+    let result = apply_cooperative_proxy_env(&caller, PROXY_URL);
+
+    for key in PROXY_ENV_KEYS {
+        let expected = if PROXY_SET_KEYS.contains(key) {
+            Some(PROXY_URL)
+        } else if PROXY_NEUTRALIZE_KEYS.contains(key) {
+            Some("")
+        } else {
+            None
+        };
+        assert_eq!(value_for(&result, key), expected, "managed key {key}");
+    }
+
+    assert!(!result.iter().any(|entry| entry.contains(hostile)));
+}
+
 // Protects client (d): duplicate and mixed-case proxy keys are an obvious
 // evasion attempt. Neither the second copy nor an unusual casing survives with
 // the workload's value.

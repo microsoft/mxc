@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Local;
+use learning_mode_core::DenialsDocument;
 use serde::Serialize;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -32,6 +33,17 @@ pub struct StopOptions {
     pub trace_file: Option<PathBuf>,
     /// Exit code recorded in the canonical denials document.
     pub exit_code: i32,
+    pub verbose: bool,
+}
+
+/// Inputs for generating compatibility artifacts from canonical denials.
+#[derive(Debug, Clone)]
+pub struct PostProcessOptions {
+    pub log_dir: PathBuf,
+    pub bin_path: Option<PathBuf>,
+    pub config_path: Option<PathBuf>,
+    pub trace_path: PathBuf,
+    pub denials_path: PathBuf,
     pub verbose: bool,
 }
 
@@ -199,11 +211,6 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
     // in `config::update_from_access_events` can compare it against the
     // verbatim-prefixed paths ETW emits. The fallback chain is in
     // `resolve_bin_path`.
-    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
-    if let Some(w) = warning {
-        eprintln!("[plm] warning: {w}");
-    }
-
     let trace_file = opts
         .trace_file
         .context("plm stop requires --trace-file from a retained guardian capture")?;
@@ -225,18 +232,60 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
 
     let analysis = analyze_trace(&trace_file)?;
     write_detection_summary(&analysis);
-    write_denials(&denials_path, &analysis, opts.exit_code)?;
+    let document = write_denials(&denials_path, &analysis, opts.exit_code)?;
 
-    let config_outputs = match config_outputs {
-        Some(paths) => paths,
-        None => {
-            return Ok(StopResult {
-                trace_path: trace_file,
-                denials_path,
-                adjusted_config_path: None,
-            })
-        }
+    let adjusted_config_path = postprocess_denials_with_paths(
+        &document,
+        &PostProcessOptions {
+            log_dir,
+            bin_path: opts.bin_path,
+            config_path: opts.config_path,
+            trace_path: trace_file.clone(),
+            denials_path: denials_path.clone(),
+            verbose: opts.verbose,
+        },
+        exe_dir,
+        config_outputs,
+    )?;
+
+    Ok(StopResult {
+        trace_path: trace_file,
+        denials_path,
+        adjusted_config_path,
+    })
+}
+
+/// Generates the source-config snapshot and adjusted config from canonical denials.
+pub fn postprocess_denials(
+    document: &DenialsDocument,
+    opts: &PostProcessOptions,
+    exe_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    std::fs::create_dir_all(&opts.log_dir)
+        .with_context(|| format!("failed to create log dir {}", opts.log_dir.display()))?;
+    let config_outputs = prepare_config_output_paths(
+        opts.config_path.as_deref(),
+        &opts.log_dir,
+        &opts.trace_path,
+        &opts.denials_path,
+    )?;
+    postprocess_denials_with_paths(document, opts, exe_dir, config_outputs)
+}
+
+fn postprocess_denials_with_paths(
+    document: &DenialsDocument,
+    opts: &PostProcessOptions,
+    exe_dir: &Path,
+    config_outputs: Option<ConfigOutputPaths>,
+) -> Result<Option<PathBuf>> {
+    let Some(config_outputs) = config_outputs else {
+        return Ok(None);
     };
+
+    let (bin_path, warning) = resolve_bin_path(opts.bin_path.as_deref(), exe_dir);
+    if let Some(warning) = warning {
+        eprintln!("[plm] warning: {warning}");
+    }
 
     // Load the source config before copying or mutating it. The trace and
     // canonical denials remain useful even if this compatibility-only
@@ -255,34 +304,26 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
             .with_context(|| format!("failed to copy {}", config_outputs.source.display()))?;
     }
 
-    if analysis.denied_resources_truncated {
+    if document.summary.denied_resources_truncated {
         eprintln!(
             "[plm] warning: denial analysis was truncated; skipping adjusted-config \
              generation because the learned policy would be incomplete"
         );
-        return Ok(StopResult {
-            trace_path: trace_file,
-            denials_path,
-            adjusted_config_path: None,
-        });
+        return Ok(None);
     }
 
     let current_directory = std::env::current_dir()
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
     let (valid_access_events, requested_capabilities) =
-        legacy_config_inputs(&analysis.denials, current_directory.as_deref());
+        legacy_config_inputs(&document.denials, current_directory.as_deref());
     write_requested_capabilities_summary(&requested_capabilities, opts.verbose);
 
     if valid_access_events.is_empty() && requested_capabilities.is_empty() {
         // Nothing mergeable -- skip producing an Adjusted_*.json (which
         // would be byte-identical to the input and confuse the harness's
         // diff-based pass/fail signal).
-        return Ok(StopResult {
-            trace_path: trace_file,
-            denials_path,
-            adjusted_config_path: None,
-        });
+        return Ok(None);
     }
 
     // Edit the pre-loaded copy of the config in memory rather than
@@ -323,11 +364,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
     save_adjusted_config(&config, &config_outputs.adjusted)?;
 
     write_added_paths_summary(&added, opts.verbose);
-    Ok(StopResult {
-        trace_path: trace_file,
-        denials_path,
-        adjusted_config_path: Some(config_outputs.adjusted),
-    })
+    Ok(Some(config_outputs.adjusted))
 }
 
 /// True iff `a` and `b` denote the same Windows target.
@@ -423,6 +460,74 @@ fn normalize_win32_components(path: &str, trim_trailing_dots_and_spaces: bool) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use learning_mode_core::{AccessType, DenialSummary, DeniedResource, ResourceType};
+
+    fn postprocess_fixture(
+        document: &DenialsDocument,
+    ) -> (tempfile::TempDir, PathBuf, Option<PathBuf>) {
+        let directory = tempfile::tempdir().unwrap();
+        let source_dir = directory.path().join("source");
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let config_path = source_dir.join("policy.json");
+        std::fs::write(&config_path, r#"{"processContainer":{"capabilities":[]}}"#).unwrap();
+        let trace_path = log_dir.join("trace.etl");
+        let denials_path = log_dir.join("denials.json");
+        std::fs::write(&trace_path, b"etl").unwrap();
+        std::fs::write(&denials_path, b"{}").unwrap();
+
+        let adjusted = postprocess_denials(
+            document,
+            &PostProcessOptions {
+                log_dir: log_dir.clone(),
+                bin_path: None,
+                config_path: Some(config_path),
+                trace_path,
+                denials_path,
+                verbose: false,
+            },
+            directory.path(),
+        )
+        .unwrap();
+        (directory, log_dir, adjusted)
+    }
+
+    #[test]
+    fn canonical_denials_generate_snapshot_and_adjusted_config() {
+        let document = DenialsDocument::new(
+            vec![DeniedResource {
+                resource: "internetClient".to_string(),
+                resource_type: ResourceType::Capability,
+                access_type: AccessType::Unknown,
+                pid: 42,
+                filetime: 1,
+            }],
+            DenialSummary::new(7, 1, false),
+        );
+
+        let (_directory, log_dir, adjusted) = postprocess_fixture(&document);
+
+        assert!(log_dir.join("policy.json").is_file());
+        let adjusted = adjusted.expect("capability denial should produce adjusted config");
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(adjusted).unwrap()).unwrap();
+        assert_eq!(
+            config["processContainer"]["capabilities"],
+            serde_json::json!(["internetClient"])
+        );
+    }
+
+    #[test]
+    fn truncated_canonical_denials_snapshot_but_skip_adjusted_config() {
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, true));
+
+        let (_directory, log_dir, adjusted) = postprocess_fixture(&document);
+
+        assert!(log_dir.join("policy.json").is_file());
+        assert!(adjusted.is_none());
+        assert!(!log_dir.join("Adjusted_policy.json").exists());
+    }
 
     // ---- resolve_bin_path -----------------------------------------------
 

@@ -26,9 +26,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use learning_mode_core::{AnalysisResult, ProcessLifetime};
+use learning_mode_core::{AnalysisResult, DenialAnalyzer, ProcessLifetime};
 use learning_mode_windows::{
-    EtlDenialAnalyzer, JobMembershipSnapshot, JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
+    filter_trace_for_job_membership, EtlDenialAnalyzer, JobMembershipSnapshot,
+    JobProcessMembership, MAX_JOB_PROCESS_LIFETIMES,
 };
 use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Foundation::{
@@ -91,6 +92,7 @@ const CONTROL_STOP: u8 = 1;
 const CONTROL_STOP_AND_ANALYZE: u8 = 2;
 const CONTROL_STOP_AND_DISCARD: u8 = 3;
 const CONTROL_ATTACH_JOB: u8 = 4;
+const CONTROL_STOP_ANALYZE_AND_TRANSFER: u8 = 5;
 const TRACKER_STOP_MESSAGE: u32 = u32::MAX;
 static GUARDIAN_SINGLETON: AtomicIsize = AtomicIsize::new(0);
 
@@ -100,6 +102,7 @@ enum GuardControl {
     StopAndAnalyze,
     StopAndDiscard,
     AttachJob,
+    StopAnalyzeAndTransfer,
 }
 
 fn attest_job_process(job: HANDLE, pid: u32) -> Result<(OwnedHandle, u64)> {
@@ -142,6 +145,7 @@ fn parse_guard_control(value: u8) -> Result<GuardControl> {
         CONTROL_STOP_AND_ANALYZE => Ok(GuardControl::StopAndAnalyze),
         CONTROL_STOP_AND_DISCARD => Ok(GuardControl::StopAndDiscard),
         CONTROL_ATTACH_JOB => Ok(GuardControl::AttachJob),
+        CONTROL_STOP_ANALYZE_AND_TRANSFER => Ok(GuardControl::StopAnalyzeAndTransfer),
         _ => anyhow::bail!("invalid guarded PLM control message {value}"),
     }
 }
@@ -358,13 +362,16 @@ impl GuardedOwner {
             match pipe.read(&mut control) {
                 Ok(1) => match parse_guard_control(control[0]) {
                     Ok(GuardControl::Stop) => {
-                        return run_guarded_stop(pipe, self, StopDisposition::Trace);
+                        return run_guarded_stop(pipe, self, StopDisposition::InteractiveAnalyze);
                     }
                     Ok(GuardControl::StopAndAnalyze) => {
                         return run_guarded_stop(pipe, self, StopDisposition::Analyze);
                     }
                     Ok(GuardControl::StopAndDiscard) => {
                         return run_guarded_stop(pipe, self, StopDisposition::Discard);
+                    }
+                    Ok(GuardControl::StopAnalyzeAndTransfer) => {
+                        return run_guarded_stop(pipe, self, StopDisposition::AnalyzeAndTrace);
                     }
                     Ok(GuardControl::AttachJob) => {
                         let deadline = Instant::now() + ATTACH_HANDOFF_TIMEOUT;
@@ -1336,6 +1343,25 @@ fn current_filetime() -> u64 {
     filetime_value(unsafe { GetSystemTimePreciseAsFileTime() })
 }
 
+/// Result of a stop-analyze-and-transfer guarded capture.
+///
+/// The process-scoped [`AnalysisResult`] is always present here: analysis
+/// failure is reported as the outer `Err` of
+/// [`GuardedSession::stop_analyzed_with_trace`], never as a value. The ETL
+/// transfer is reported independently in `trace_transfer` so a transfer failure
+/// that occurs *after* a successful analysis never discards the decoded
+/// denials — the caller can still publish the canonical denials JSON while
+/// surfacing the retention failure separately.
+#[derive(Debug)]
+pub struct AnalyzedTraceTransfer {
+    /// The bounded, process-scoped analysis of the guarded WPR trace.
+    pub analysis: AnalysisResult,
+    /// Whether the sealed ETL was transferred to the requested destination.
+    /// `Err` carries the retention failure as data; the `analysis` above is
+    /// still valid.
+    pub trace_transfer: Result<()>,
+}
+
 /// Live authenticated connection to the elevated START child.
 ///
 /// [`Self::cancel`] closes an armed session and reports that WPR state may
@@ -1438,7 +1464,7 @@ impl GuardedSession {
         Ok(())
     }
 
-    pub fn stop(&mut self, trace_destination: &Path) -> Result<()> {
+    fn stop_interactive_analyzed(&mut self) -> Result<AnalysisResult> {
         if self.disarmed {
             anyhow::bail!("guarded PLM session is already stopped");
         }
@@ -1451,17 +1477,13 @@ impl GuardedSession {
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
-        let result = read_response(
-            &mut pipe,
-            self.process.0,
-            Operation::Stop,
-            Some(trace_destination),
-            deadline,
-            || {
+        let result = {
+            let mut source = PipeResponseBytes::new(&mut pipe, self.process.0, deadline);
+            read_analysis_response(&mut source, || {
                 stopped.set(true);
                 Ok(())
-            },
-        );
+            })
+        };
         if stopped.get() {
             self.disarmed = true;
             drop(pipe);
@@ -1469,8 +1491,9 @@ impl GuardedSession {
                 self.process.0,
                 deadline.saturating_duration_since(Instant::now()),
             );
-            result?;
-            wait_result
+            let analysis = result?;
+            wait_result?;
+            Ok(analysis)
         } else {
             self.pipe = Some(pipe);
             result
@@ -1529,10 +1552,13 @@ impl GuardedSession {
 
         let stopped = std::cell::Cell::new(false);
         let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
-        let result = read_analysis_response(&mut pipe, self.process.0, deadline, || {
-            stopped.set(true);
-            Ok(())
-        });
+        let result = {
+            let mut source = PipeResponseBytes::new(&mut pipe, self.process.0, deadline);
+            read_analysis_response(&mut source, || {
+                stopped.set(true);
+                Ok(())
+            })
+        };
         if stopped.get() {
             self.disarmed = true;
             drop(pipe);
@@ -1543,6 +1569,48 @@ impl GuardedSession {
             let analysis = result?;
             wait_result?;
             Ok(analysis)
+        } else {
+            self.pipe = Some(pipe);
+            result
+        }
+    }
+
+    pub fn stop_analyzed_with_trace(
+        &mut self,
+        trace_destination: &Path,
+    ) -> Result<AnalyzedTraceTransfer> {
+        if self.disarmed {
+            anyhow::bail!("guarded PLM session is already stopped");
+        }
+        let mut pipe = self
+            .pipe
+            .take()
+            .context("guarded PLM control connection is already closed")?;
+        send_control_unless_response_pending(&mut pipe, CONTROL_STOP_ANALYZE_AND_TRANSFER)
+            .context("failed to send guarded PLM analyzed trace-transfer STOP")?;
+
+        let stopped = std::cell::Cell::new(false);
+        let deadline = Instant::now() + WAIT_TIMEOUT_DURATION;
+        let result = {
+            let mut source = PipeResponseBytes::new(&mut pipe, self.process.0, deadline);
+            read_analysis_and_trace_response(&mut source, trace_destination, || {
+                stopped.set(true);
+                Ok(())
+            })
+        };
+        if stopped.get() {
+            self.disarmed = true;
+            drop(pipe);
+            let wait_result = wait_for_child_exit(
+                self.process.0,
+                deadline.saturating_duration_since(Instant::now()),
+            );
+            // `Err` here is an *analysis* failure; a trace-transfer failure
+            // after a successful analysis is carried inside the returned
+            // `AnalyzedTraceTransfer` rather than discarding the analysis.
+            let outcome = result?;
+            wait_result?;
+            Ok(outcome)
         } else {
             self.pipe = Some(pipe);
             result
@@ -1636,13 +1704,13 @@ pub fn invoke_guarded_start(owner_pid: u32) -> Result<()> {
     })
 }
 
-pub fn stop_current_guarded_start(trace_destination: &Path) -> Result<()> {
+pub fn stop_current_guarded_start() -> Result<AnalysisResult> {
     CURRENT_GUARDED_SESSION.with(|slot| {
         let mut session = slot
             .borrow_mut()
             .take()
             .context("no guarded PLM session is active on this thread")?;
-        let result = session.stop(trace_destination);
+        let result = session.stop_interactive_analyzed();
         if result.is_err() && !session.disarmed {
             *slot.borrow_mut() = Some(session);
         }
@@ -1863,8 +1931,9 @@ fn start_owned_trace(owner: &mut GuardedOwner) -> Result<()> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StopDisposition {
-    Trace,
+    InteractiveAnalyze,
     Analyze,
+    AnalyzeAndTrace,
     Discard,
 }
 
@@ -1937,9 +2006,32 @@ fn run_guarded_stop_with_stopped(
             .context("failed to return elevated PLM discard success"),
         StopDisposition::Analyze => {
             let membership = owner.finish_job_tracking()?;
-            write_analysis_response(pipe, &scratch, &membership)
+            filter_trace_for_job_membership(
+                scratch.trace_path(),
+                scratch.filtered_trace_path(),
+                &membership,
+            )
+            .context("failed to create process-scoped guarded WPR trace")?;
+            write_analysis_response(pipe, scratch.filtered_trace_path(), &membership)
         }
-        StopDisposition::Trace => write_trace_response(pipe, &scratch),
+        StopDisposition::AnalyzeAndTrace => {
+            let membership = owner.finish_job_tracking()?;
+            filter_trace_for_job_membership(
+                scratch.trace_path(),
+                scratch.filtered_trace_path(),
+                &membership,
+            )
+            .context("failed to create process-scoped guarded WPR trace")?;
+            write_analysis_response(pipe, scratch.filtered_trace_path(), &membership)?;
+            write_trace_response(pipe, &scratch)
+        }
+        // `CONTROL_STOP` is reserved for standalone `plm log`, which has no
+        // sandbox job to attest because the operator chooses the workload
+        // interactively. Decode in the elevated child and return only the
+        // bounded analysis; automated capture uses the scoped dispositions.
+        StopDisposition::InteractiveAnalyze => {
+            write_interactive_analysis_response(pipe, scratch.trace_path())
+        }
     }
 }
 
@@ -2002,7 +2094,15 @@ fn run_start() -> Result<()> {
 }
 
 fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Result<()> {
-    let (mut trace_file, len) = scratch.open_trace()?;
+    let (mut trace_file, len) = scratch.open_filtered_trace()?;
+    write_trace_file_response(pipe, &mut trace_file, len)
+}
+
+fn write_trace_file_response(
+    pipe: &mut std::fs::File,
+    trace_file: &mut std::fs::File,
+    len: u64,
+) -> Result<()> {
     if len > MAX_TRACE_BYTES {
         anyhow::bail!(
             "captured ETL is {len} bytes, exceeding the {} byte transfer limit",
@@ -2011,18 +2111,32 @@ fn write_trace_response(pipe: &mut std::fs::File, scratch: &SecureScratch) -> Re
     }
 
     write_header(pipe, ResponseKind::Trace, len)?;
-    copy_exact_len(&mut trace_file, pipe, len)?;
+    copy_exact_len(trace_file, pipe, len)?;
     pipe.flush().context("failed to flush elevated PLM trace")
 }
 
 fn write_analysis_response(
     pipe: &mut std::fs::File,
-    scratch: &SecureScratch,
+    trace_path: &Path,
     membership: &JobMembershipSnapshot,
 ) -> Result<()> {
     let analysis = EtlDenialAnalyzer
-        .analyze_for_job_membership(scratch.trace_path(), membership)
+        .analyze_for_job_membership(trace_path, membership)
         .context("failed to decode guarded WPR trace for the sandbox process tree")?;
+    write_serialized_analysis_response(pipe, &analysis)
+}
+
+fn write_interactive_analysis_response(pipe: &mut std::fs::File, trace_path: &Path) -> Result<()> {
+    let analysis = EtlDenialAnalyzer
+        .analyze(trace_path)
+        .context("failed to decode interactive guarded WPR trace")?;
+    write_serialized_analysis_response(pipe, &analysis)
+}
+
+fn write_serialized_analysis_response(
+    pipe: &mut std::fs::File,
+    analysis: &AnalysisResult,
+) -> Result<()> {
     let payload =
         serde_json::to_vec(&analysis).context("failed to serialize guarded WPR analysis")?;
     let len = payload.len() as u64;
@@ -2184,37 +2298,7 @@ fn read_response(
         ResponseKind::Success => anyhow::bail!("elevated stop returned no ETL payload"),
         ResponseKind::Trace if operation == Operation::Stop && stopped => {
             let destination = trace_destination.context("missing unelevated trace destination")?;
-            let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create trace output directory {}",
-                    parent.display()
-                )
-            })?;
-            let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
-                format!(
-                    "failed to create unelevated trace temp file in {}",
-                    parent.display()
-                )
-            })?;
-            copy_exact_polling(
-                pipe,
-                temporary.as_file_mut(),
-                process,
-                header.payload_len,
-                deadline,
-            )?;
-            temporary
-                .as_file_mut()
-                .sync_all()
-                .context("failed to flush unelevated trace temp file")?;
-            temporary
-                .persist(destination)
-                .map_err(|error| error.error)
-                .with_context(|| {
-                    format!("failed to persist trace output {}", destination.display())
-                })?;
-            Ok(())
+            receive_trace_payload(pipe, process, destination, header.payload_len, deadline)
         }
         ResponseKind::Trace if operation == Operation::Stop => {
             anyhow::bail!("elevated stop returned ETL before the WPR-stopped milestone")
@@ -2235,21 +2319,103 @@ fn read_response(
     }
 }
 
-fn read_analysis_response(
+fn read_analysis_and_trace_response(
+    source: &mut dyn ResponseBytes,
+    trace_destination: &Path,
+    on_stopped: impl FnOnce() -> Result<()>,
+) -> Result<AnalyzedTraceTransfer> {
+    // A failure up to and including the analysis payload is an analysis failure:
+    // propagate it as `Err` so no partial denials are published.
+    let analysis = read_analysis_response(source, on_stopped)?;
+    // The analysis is decoded and owned. From here, a trace-transfer failure is
+    // carried as *data* in `trace_transfer` — it must never discard the analysis
+    // (the canonical denials JSON is still publishable).
+    let trace_transfer = receive_analyzed_trace(source, trace_destination);
+    Ok(AnalyzedTraceTransfer {
+        analysis,
+        trace_transfer,
+    })
+}
+
+/// Reads the trace frame that follows a successful analysis payload and
+/// persists it to `trace_destination`. Returns the transfer status; the caller
+/// keeps the already-decoded analysis regardless of the outcome here.
+fn receive_analyzed_trace(source: &mut dyn ResponseBytes, trace_destination: &Path) -> Result<()> {
+    let header = read_header_frame(source)?;
+    match header.kind {
+        ResponseKind::Trace => persist_trace_to(trace_destination, |file| {
+            copy_payload_frame(source, file, header.payload_len)
+        }),
+        ResponseKind::Error => {
+            let message = read_payload_frame(source, header.payload_len as usize)?;
+            anyhow::bail!(
+                "elevated guarded WPR trace transfer failed: {}",
+                String::from_utf8_lossy(&message)
+            )
+        }
+        other => anyhow::bail!(
+            "elevated guarded WPR analyzed trace transfer returned unexpected {other:?} payload"
+        ),
+    }
+}
+
+fn receive_trace_payload(
     pipe: &mut std::fs::File,
     process: HANDLE,
+    destination: &Path,
+    payload_len: u64,
     deadline: Instant,
+) -> Result<()> {
+    persist_trace_to(destination, |file| {
+        copy_exact_polling(pipe, file, process, payload_len, deadline)
+    })
+}
+
+/// Atomically materializes a trace payload at `destination`: it writes through a
+/// sibling temp file (via `copy`), flushes it, and persists it into place. The
+/// byte source is injected via `copy` so both the live-pipe path and the
+/// in-memory test path share the same durable-write sequence.
+fn persist_trace_to(
+    destination: &Path,
+    copy: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).with_context(|| {
+        format!(
+            "failed to create trace output directory {}",
+            parent.display()
+        )
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "failed to create unelevated trace temp file in {}",
+            parent.display()
+        )
+    })?;
+    copy(temporary.as_file_mut())?;
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .context("failed to flush unelevated trace temp file")?;
+    temporary
+        .persist(destination)
+        .map_err(|error| error.error)
+        .with_context(|| format!("failed to persist trace output {}", destination.display()))?;
+    Ok(())
+}
+
+fn read_analysis_response(
+    source: &mut dyn ResponseBytes,
     on_stopped: impl FnOnce() -> Result<()>,
 ) -> Result<AnalysisResult> {
-    let first_header = read_header_polling(pipe, process, deadline)?;
+    let first_header = read_header_frame(source)?;
     let (header, stopped) =
         accept_response_headers(first_header, Operation::Stop, on_stopped, || {
-            read_header_polling(pipe, process, deadline)
+            read_header_frame(source)
         })?;
     match header.kind {
         ResponseKind::Analysis if stopped => {
-            let mut payload = vec![0u8; header.payload_len as usize];
-            read_exact_polling(pipe, &mut payload, process, deadline)?;
+            let payload = read_payload_frame(source, header.payload_len as usize)?;
             serde_json::from_slice(&payload)
                 .context("elevated guarded WPR returned invalid filtered analysis")
         }
@@ -2257,8 +2423,7 @@ fn read_analysis_response(
             anyhow::bail!("elevated stop returned analysis before the WPR-stopped milestone")
         }
         ResponseKind::Error => {
-            let mut message = vec![0u8; header.payload_len as usize];
-            read_exact_polling(pipe, &mut message, process, deadline)?;
+            let message = read_payload_frame(source, header.payload_len as usize)?;
             anyhow::bail!(
                 "elevated guarded WPR analysis failed: {}",
                 String::from_utf8_lossy(&message)
@@ -2295,31 +2460,84 @@ fn accept_response_headers(
     }
 }
 
-fn read_header_polling(
-    pipe: &mut std::fs::File,
+/// A pollable byte source for elevated-PLM response frames. Abstracts the live
+/// control pipe so the frame assembly and response-protocol parsing can be
+/// unit-tested against in-memory byte streams — including partial reads and
+/// malformed frames — while production keeps the child-liveness / deadline
+/// polling in [`PipeResponseBytes`].
+trait ResponseBytes {
+    /// Reads up to `buffer.len()` bytes, returning the number read. `0` means
+    /// the source is closed/exhausted. A single call MAY fill fewer bytes than
+    /// requested (a partial read); the frame helpers loop until satisfied.
+    fn read_some(&mut self, buffer: &mut [u8]) -> Result<usize>;
+}
+
+/// Production [`ResponseBytes`] over a live control pipe. Preserves the
+/// child-liveness / deadline polling used across the elevation boundary.
+struct PipeResponseBytes<'a> {
+    pipe: &'a mut std::fs::File,
     process: HANDLE,
     deadline: Instant,
+}
+
+impl<'a> PipeResponseBytes<'a> {
+    fn new(pipe: &'a mut std::fs::File, process: HANDLE, deadline: Instant) -> Self {
+        Self {
+            pipe,
+            process,
+            deadline,
+        }
+    }
+}
+
+impl ResponseBytes for PipeResponseBytes<'_> {
+    fn read_some(&mut self, buffer: &mut [u8]) -> Result<usize> {
+        read_some_polling(self.pipe, buffer, self.process, self.deadline)
+    }
+}
+
+/// Reads exactly `buffer.len()` bytes, looping over partial reads.
+fn read_exact_frame(source: &mut dyn ResponseBytes, mut buffer: &mut [u8]) -> Result<()> {
+    while !buffer.is_empty() {
+        let read = source.read_some(buffer)?;
+        if read == 0 {
+            anyhow::bail!("elevated PLM pipe closed before the response completed");
+        }
+        buffer = &mut buffer[read..];
+    }
+    Ok(())
+}
+
+/// Reads and parses the next fixed-size response header.
+fn read_header_frame(
+    source: &mut dyn ResponseBytes,
 ) -> Result<crate::elevated_protocol::ResponseHeader> {
     let mut bytes = [0u8; HEADER_LEN];
-    read_exact_polling(pipe, &mut bytes, process, deadline)?;
+    read_exact_frame(source, &mut bytes)?;
     read_header(&mut bytes.as_slice()).context("invalid elevated PLM response header")
 }
 
-fn copy_exact_polling(
-    pipe: &mut std::fs::File,
-    output: &mut impl Write,
-    process: HANDLE,
+/// Reads exactly `len` payload bytes into a fresh buffer.
+fn read_payload_frame(source: &mut dyn ResponseBytes, len: usize) -> Result<Vec<u8>> {
+    let mut payload = vec![0u8; len];
+    read_exact_frame(source, &mut payload)?;
+    Ok(payload)
+}
+
+/// Streams exactly `remaining` payload bytes from `source` to `writer`.
+fn copy_payload_frame(
+    source: &mut dyn ResponseBytes,
+    writer: &mut dyn Write,
     mut remaining: u64,
-    deadline: Instant,
 ) -> Result<()> {
     let mut buffer = vec![0u8; 1024 * 1024];
     while remaining != 0 {
         let amount = remaining.min(buffer.len() as u64) as usize;
-        let read = read_some_polling(pipe, &mut buffer[..amount], process, deadline)?;
+        let read = source.read_some(&mut buffer[..amount])?;
         if read == 0 {
             anyhow::bail!("elevated PLM pipe closed before the ETL transfer completed");
         }
-        output
+        writer
             .write_all(&buffer[..read])
             .context("failed to write unelevated ETL output")?;
         remaining -= read as u64;
@@ -2327,20 +2545,35 @@ fn copy_exact_polling(
     Ok(())
 }
 
+fn read_header_polling(
+    pipe: &mut std::fs::File,
+    process: HANDLE,
+    deadline: Instant,
+) -> Result<crate::elevated_protocol::ResponseHeader> {
+    read_header_frame(&mut PipeResponseBytes::new(pipe, process, deadline))
+}
+
+fn copy_exact_polling(
+    pipe: &mut std::fs::File,
+    output: &mut impl Write,
+    process: HANDLE,
+    remaining: u64,
+    deadline: Instant,
+) -> Result<()> {
+    copy_payload_frame(
+        &mut PipeResponseBytes::new(pipe, process, deadline),
+        output,
+        remaining,
+    )
+}
+
 fn read_exact_polling(
     pipe: &mut std::fs::File,
-    mut buffer: &mut [u8],
+    buffer: &mut [u8],
     process: HANDLE,
     deadline: Instant,
 ) -> Result<()> {
-    while !buffer.is_empty() {
-        let read = read_some_polling(pipe, buffer, process, deadline)?;
-        if read == 0 {
-            anyhow::bail!("elevated PLM pipe closed before the response completed");
-        }
-        buffer = &mut buffer[read..];
-    }
-    Ok(())
+    read_exact_frame(&mut PipeResponseBytes::new(pipe, process, deadline), buffer)
 }
 
 fn read_some_polling(
@@ -2573,7 +2806,79 @@ fn to_wide(value: impl AsRef<OsStr>) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
     use std::os::windows::process::ExitStatusExt;
+
+    struct ChunkedResponseBytes {
+        bytes: Cursor<Vec<u8>>,
+        max_chunk: usize,
+    }
+
+    impl ChunkedResponseBytes {
+        fn new(bytes: Vec<u8>, max_chunk: usize) -> Self {
+            Self {
+                bytes: Cursor::new(bytes),
+                max_chunk,
+            }
+        }
+    }
+
+    impl ResponseBytes for ChunkedResponseBytes {
+        fn read_some(&mut self, buffer: &mut [u8]) -> Result<usize> {
+            let amount = buffer.len().min(self.max_chunk);
+            self.bytes
+                .read(&mut buffer[..amount])
+                .context("failed to read in-memory response")
+        }
+    }
+
+    #[test]
+    fn analysis_survives_following_trace_error_with_partial_reads() {
+        let analysis = AnalysisResult::complete(Vec::new());
+        let analysis_payload = serde_json::to_vec(&analysis).unwrap();
+        let trace_error = b"filtered trace transfer failed";
+        let mut response = Vec::new();
+        write_header(&mut response, ResponseKind::Stopped, 0).unwrap();
+        write_header(
+            &mut response,
+            ResponseKind::Analysis,
+            analysis_payload.len() as u64,
+        )
+        .unwrap();
+        response.extend_from_slice(&analysis_payload);
+        write_header(&mut response, ResponseKind::Error, trace_error.len() as u64).unwrap();
+        response.extend_from_slice(trace_error);
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("trace.etl");
+        let mut source = ChunkedResponseBytes::new(response, 1);
+        let stopped = std::cell::Cell::new(false);
+        let outcome = read_analysis_and_trace_response(&mut source, &destination, || {
+            stopped.set(true);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(stopped.get());
+        assert_eq!(outcome.analysis, analysis);
+        assert!(outcome
+            .trace_transfer
+            .unwrap_err()
+            .to_string()
+            .contains("filtered trace transfer failed"));
+        assert!(!destination.exists());
+    }
+
+    #[test]
+    fn malformed_response_header_is_rejected_without_liveness_polling() {
+        let mut source = ChunkedResponseBytes::new(vec![0u8; HEADER_LEN], 2);
+
+        let error = read_header_frame(&mut source).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("invalid elevated PLM response header"));
+    }
 
     #[test]
     fn guarded_start_requires_readiness_before_start() {
@@ -2808,7 +3113,11 @@ mod tests {
             parse_guard_control(CONTROL_ATTACH_JOB).unwrap(),
             GuardControl::AttachJob
         );
-        for invalid in [0, 5, u8::MAX] {
+        assert_eq!(
+            parse_guard_control(CONTROL_STOP_ANALYZE_AND_TRANSFER).unwrap(),
+            GuardControl::StopAnalyzeAndTransfer
+        );
+        for invalid in [0, 6, u8::MAX] {
             assert!(parse_guard_control(invalid).is_err());
         }
     }

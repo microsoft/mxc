@@ -215,19 +215,39 @@ $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout me
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
-# The filesystem configs mount C:\workspace and read test.txt from it. A
-# developer machine usually has both already; a clean runner has neither, so
-# create them here rather than leaving the mount empty.
-$WorkspaceDir = "C:\workspace"
-New-Item -ItemType Directory -Path $WorkspaceDir -Force | Out-Null
-$WorkspaceFile = Join-Path $WorkspaceDir "test.txt"
-if (-not (Test-Path $WorkspaceFile)) {
-    Set-Content $WorkspaceFile "workspace fixture"
+
+# Fixed paths must match tests\configs\wslc_filesystem.json and
+# tests\configs\wslc_readonly_mount.json.
+$fsFixtureDir = "C:\wslcfs"
+$readonlyFixtureDir = "C:\wslcro"
+$readonlyFixture = Join-Path $readonlyFixtureDir "test.txt"
+
+function Remove-FilesystemFixtures {
+    Remove-Item -Recurse -Force $fsFixtureDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $readonlyFixtureDir -ErrorAction SilentlyContinue
 }
-# wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
-$null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
-    -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
-$null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+
+# Both filesystem configs mount a host directory the suite owns outright, so a
+# run needs nothing hand-made and never touches C:\workspace, where the
+# prerequisites above tell the developer to keep alpine.tar.  wslc_filesystem
+# only needs its mount target to exist; wslc_readonly_mount also reads
+# test.txt, seeded the way the LXC and bubblewrap suites seed theirs
+# (run_lxc_filesystem_test.sh:21, run_bwrap_filesystem_test.sh:25).  The
+# finally removes both roots, including the probe file a wrongly-writable
+# mount would leave behind.
+Remove-FilesystemFixtures
+try {
+    $null = New-Item -ItemType Directory -Path $fsFixtureDir -Force
+    $null = New-Item -ItemType Directory -Path $readonlyFixtureDir -Force
+    Set-Content -Path $readonlyFixture -Value "test content" -Encoding ascii
+
+    # wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
+    $null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
+        -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
+    $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+} finally {
+    Remove-FilesystemFixtures
+}
 
 Write-Host "`n--- Object Validation Tests ---" -ForegroundColor Cyan
 # Object-based validation (roadmap D6): a directory under readwritePaths and a

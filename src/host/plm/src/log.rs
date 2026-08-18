@@ -9,13 +9,11 @@
 //! 4. Stops the trace into a temp .etl and reports where it landed.
 
 use anyhow::{Context, Result};
-use chrono::Local;
 use learning_mode_core::AnalysisResult;
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
 
-use crate::analysis::{analyze_trace, legacy_config_inputs, write_detection_summary};
+use crate::analysis::{legacy_config_inputs, write_detection_summary};
 use crate::config::{
     deny_file_set, initialize_filesystem, update_from_access_events, write_added_paths_summary,
 };
@@ -49,22 +47,10 @@ pub fn run(owner_pid: u32, verbose: bool, on_trace_started: impl FnOnce()) -> Re
 
     prompt_enter("Press Enter to stop logging...")?;
 
-    // Per-run trace file in temp; PID + sub-second component prevents
-    // parallel `plm log` invocations from colliding on the same .etl.
-    let stamp = Local::now().format("%Y-%m-%d_%H%M%S%.3f").to_string();
-    let trace_file: PathBuf = std::env::temp_dir().join(format!("plm_log_{stamp}.etl"));
-    elevated::stop_current_guarded_start(&trace_file)?;
-
     if verbose {
         println!("Beginning event parsing, this may take several minutes");
     }
-
-    let analysis = analyze_trace(&trace_file);
-
-    // Clean up the temp .etl regardless of analysis outcome.
-    let _ = std::fs::remove_file(&trace_file);
-
-    let analysis = analysis?;
+    let analysis = elevated::stop_current_guarded_start()?;
     write_detection_summary(&analysis);
     if !can_generate_policy_preview(&analysis) {
         eprintln!(

@@ -98,7 +98,7 @@ plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
 
 ### `plm log`
 
-Interactive iteration mode: press Enter to start a trace, run the workload, press Enter again to stop. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview.
+Interactive iteration mode: press Enter to start a host-wide trace, run the operator-selected workload, then press Enter again to stop. Because this standalone flow has no sandbox job to define a process scope, the elevated guardian analyzes the source trace in protected scratch and returns only the bounded canonical findings; the host-wide ETL never crosses the privilege boundary. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview. Automated `--audit` and `captureDenials` flows instead attach an authenticated sandbox job and analyze or retain only the process-scoped filtered trace.
 
 It also has no public `--wprp` or destination override flags.
 

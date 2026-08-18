@@ -24,8 +24,12 @@ pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
         .with_context(|| format!("failed to analyze {}", trace_file.display()))
 }
 
-/// Write canonical denials JSON atomically.
-pub fn write_denials(output_path: &Path, analysis: &AnalysisResult, exit_code: i32) -> Result<()> {
+/// Write canonical denials JSON atomically and return the document that was written.
+pub fn write_denials(
+    output_path: &Path,
+    analysis: &AnalysisResult,
+    exit_code: i32,
+) -> Result<DenialsDocument> {
     let parent = output_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -46,7 +50,7 @@ pub fn write_denials(output_path: &Path, analysis: &AnalysisResult, exit_code: i
     temp.persist(output_path)
         .map_err(|error| error.error)
         .with_context(|| format!("failed to replace {}", output_path.display()))?;
-    Ok(())
+    Ok(document)
 }
 
 /// Build the temporary legacy config-generator inputs from canonical denials.
