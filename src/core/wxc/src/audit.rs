@@ -96,12 +96,14 @@ pub fn finalize(
 
     let final_denials = context.log_dir.join("denials.json");
     let final_etl = context.log_dir.join("trace.etl");
-    ensure_destination_available(&source_etl, &final_etl)?;
-    ensure_destination_available(&source_denials, &final_denials)?;
-    move_new_file(&source_etl, &final_etl)?;
-    move_new_file(&source_denials, &final_denials)?;
-    capture.output_path = final_denials.to_string_lossy().into_owned();
-    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
+    relocate_artifacts(
+        capture,
+        &source_denials,
+        &final_denials,
+        &source_etl,
+        &final_etl,
+        move_new_file,
+    )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
 
     plm::stop::postprocess_denials(
@@ -134,6 +136,45 @@ fn validate_metadata(
             "captureDenials metadata does not match the canonical denials document".to_string(),
         );
     }
+    Ok(())
+}
+
+/// Relocates the capture artifacts into the audit log directory, keeping the
+/// on-disk state and the metadata paths mutually truthful even on partial
+/// failure.
+///
+/// Both destinations are preflighted (no-clobber) before anything moves. The
+/// primary denials JSON moves first and its final path is published to the
+/// metadata immediately; the retained ETL moves second and its final path is
+/// published immediately on success. If the ETL move fails, the JSON is
+/// truthfully recorded at its final location while the ETL — never touched —
+/// stays at its source with `etl_path` still pointing there. Nothing is
+/// stranded and no metadata is left referencing a file that has moved.
+///
+/// `move_file` is injected so tests can force a second-move failure
+/// deterministically; production passes [`move_new_file`].
+fn relocate_artifacts(
+    capture: &mut wxc_common::models::CaptureDenialsOutput,
+    source_denials: &Path,
+    final_denials: &Path,
+    source_etl: &Path,
+    final_etl: &Path,
+    mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
+) -> Result<(), String> {
+    ensure_destination_available(source_denials, final_denials)?;
+    ensure_destination_available(source_etl, final_etl)?;
+
+    // Primary denials JSON first: publish its final path the instant it moves so
+    // a later ETL failure can never leave `output_path` referencing a file that
+    // has already been renamed away.
+    move_file(source_denials, final_denials)?;
+    capture.output_path = final_denials.to_string_lossy().into_owned();
+
+    // Retained ETL second: on failure it stays at its source and `etl_path`
+    // still points there (unchanged), so each artifact remains individually
+    // truthful even though the relocation as a whole failed.
+    move_file(source_etl, final_etl)?;
+    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
     Ok(())
 }
 
@@ -182,10 +223,11 @@ fn remove_empty_managed_directory(
     let Some(directory) = directory else {
         return Ok(());
     };
-    let is_retained_capture_dir = directory
-        .parent()
-        .and_then(Path::file_name)
-        .is_some_and(|name| name.eq_ignore_ascii_case("retained"));
+    // Only prune a per-run directory promoted into the backend's retained-ETL
+    // store; the predicate is owned by `appcontainer_common` so this does not
+    // duplicate the store's private directory name.
+    let is_retained_capture_dir =
+        appcontainer_common::capture_output::is_retained_capture_run_dir(directory);
     if directory == audit_dir || !is_retained_capture_dir {
         return Ok(());
     }
@@ -386,6 +428,62 @@ mod tests {
         assert!(source_denials.exists());
         assert!(source_etl.exists());
         assert!(!log_dir.join("trace.etl").exists());
+    }
+
+    #[test]
+    fn relocate_keeps_metadata_truthful_when_second_move_fails() {
+        // Primary JSON moves; the ETL (second) move is forced to fail. The JSON
+        // must be truthfully recorded at its final path, and the ETL — never
+        // touched — must remain at its source with `etl_path` still pointing
+        // there. Nothing is stranded and no metadata is left stale.
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_etl = log_dir.join("denials.unique.etl");
+        let final_denials = log_dir.join("denials.json");
+        let final_etl = log_dir.join("trace.etl");
+        std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut capture = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: source_denials.to_string_lossy().into_owned(),
+            exit_code: 0,
+            total_denials: 0,
+            denied_resources_truncated: false,
+            etl_path: Some(source_etl.to_string_lossy().into_owned()),
+        };
+
+        let mut calls = 0;
+        let error = relocate_artifacts(
+            &mut capture,
+            &source_denials,
+            &final_denials,
+            &source_etl,
+            &final_etl,
+            |source, destination| {
+                calls += 1;
+                if calls == 1 {
+                    std::fs::rename(source, destination).map_err(|error| error.to_string())
+                } else {
+                    Err("injected ETL move failure".to_string())
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("injected ETL move failure"));
+        // Primary JSON moved; metadata truthfully points at the final path.
+        assert!(final_denials.is_file());
+        assert!(!source_denials.exists());
+        assert_eq!(Path::new(&capture.output_path), final_denials);
+        // ETL untouched; metadata still truthfully points at the source.
+        assert!(source_etl.is_file());
+        assert!(!final_etl.exists());
+        assert_eq!(
+            capture.etl_path.as_deref().map(Path::new),
+            Some(source_etl.as_path())
+        );
     }
 
     fn response_with_capture(

@@ -3,6 +3,7 @@
 
 //! Process-scoped ETL rewriting for guarded WPR captures.
 
+use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,9 +55,60 @@ impl Drop for ComApartment {
 
 #[implement(ITraceEventCallback)]
 struct ProcessScopedTraceFilter {
-    selected_event_indices: Vec<usize>,
+    selection: RelogSelectionState,
+}
+
+#[derive(Clone)]
+struct RelogSelectionState {
+    selected_event_indices: Arc<[usize]>,
+    attested_pids: Arc<HashSet<u32>>,
     event_cursor: Arc<AtomicUsize>,
     selected_event_cursor: Arc<AtomicUsize>,
+}
+
+impl RelogSelectionState {
+    fn new(selected_event_indices: Vec<usize>, process_lifetimes: &[ProcessLifetime]) -> Self {
+        Self {
+            selected_event_indices: selected_event_indices.into(),
+            attested_pids: Arc::new(
+                process_lifetimes
+                    .iter()
+                    .map(|lifetime| lifetime.pid)
+                    .collect(),
+            ),
+            event_cursor: Arc::new(AtomicUsize::new(0)),
+            selected_event_cursor: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn observe_supported_event(&self, pid: u32) -> bool {
+        let event_index = self.event_cursor.fetch_add(1, Ordering::Relaxed);
+        let selected_index = self.selected_event_cursor.load(Ordering::Relaxed);
+        if self.selected_event_indices.get(selected_index) != Some(&event_index) {
+            return false;
+        }
+
+        // The first ProcessTrace pass selected this ordinal using exact PID and
+        // lifetime bounds. Revalidate the second pass's current PID before
+        // injection so a different equal-timestamp ordering cannot substitute
+        // a foreign process's event at the same ordinal. Do not advance the
+        // selected cursor on mismatch: the final count reconciliation then
+        // fails closed and the partial destination is deleted.
+        if !self.attested_pids.contains(&pid) {
+            return false;
+        }
+
+        self.selected_event_cursor.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn consumed_event_count(&self) -> usize {
+        self.event_cursor.load(Ordering::Relaxed)
+    }
+
+    fn consumed_selected_event_count(&self) -> usize {
+        self.selected_event_cursor.load(Ordering::Relaxed)
+    }
 }
 
 impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
@@ -96,13 +148,62 @@ impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
         if !is_learning_mode_event(header.ProviderId, header.EventDescriptor.Id) {
             return Ok(());
         }
-        let event_index = self.event_cursor.fetch_add(1, Ordering::Relaxed);
-        let selected_index = self.selected_event_cursor.load(Ordering::Relaxed);
-        if self.selected_event_indices.get(selected_index) == Some(&event_index) {
+        if self.selection.observe_supported_event(header.ProcessId) {
             // SAFETY: both interfaces are valid for this synchronous callback,
             // and Inject clones the event into the output trace.
             unsafe { relogger.Inject(event)? };
-            self.selected_event_cursor.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+}
+
+trait TraceRelogger {
+    fn process(
+        &self,
+        source: &Path,
+        destination: &Path,
+        selection: RelogSelectionState,
+    ) -> Result<(), AnalyzeError>;
+}
+
+struct WindowsTraceRelogger;
+
+impl TraceRelogger for WindowsTraceRelogger {
+    fn process(
+        &self,
+        source: &Path,
+        destination: &Path,
+        selection: RelogSelectionState,
+    ) -> Result<(), AnalyzeError> {
+        let _apartment = ComApartment::new()?;
+        // SAFETY: COM is initialized on this thread, the in-proc class ID is
+        // fixed, and the returned interface remains apartment-local.
+        let relogger: ITraceRelogger = unsafe {
+            CoCreateInstance(&CLSID_TraceRelogger, None, CLSCTX_INPROC_SERVER)
+                .map_err(|error| windows_error("CoCreateInstance(CLSID_TraceRelogger)", error))?
+        };
+
+        let source = path_bstr(source);
+        let destination = path_bstr(destination);
+        // SAFETY: the BSTRs remain valid for each synchronous COM call.
+        unsafe {
+            relogger
+                .AddLogfileTraceStream(&source, std::ptr::null())
+                .map_err(|error| windows_error("ITraceRelogger::AddLogfileTraceStream", error))?;
+            relogger
+                .SetOutputFilename(&destination)
+                .map_err(|error| windows_error("ITraceRelogger::SetOutputFilename", error))?;
+        }
+
+        let callback: ITraceEventCallback = ProcessScopedTraceFilter { selection }.into();
+        // SAFETY: callback and relogger stay alive until ProcessTrace returns.
+        unsafe {
+            relogger
+                .RegisterCallback(&callback)
+                .map_err(|error| windows_error("ITraceRelogger::RegisterCallback", error))?;
+            relogger
+                .ProcessTrace()
+                .map_err(|error| windows_error("ITraceRelogger::ProcessTrace", error))?;
         }
         Ok(())
     }
@@ -154,53 +255,33 @@ fn relog_trace(
     destination: &Path,
     process_lifetimes: &[ProcessLifetime],
 ) -> Result<(), AnalyzeError> {
+    relog_trace_with(
+        source,
+        destination,
+        process_lifetimes,
+        &WindowsTraceRelogger,
+    )
+}
+
+fn relog_trace_with(
+    source: &Path,
+    destination: &Path,
+    process_lifetimes: &[ProcessLifetime],
+    relogger: &dyn TraceRelogger,
+) -> Result<(), AnalyzeError> {
     let selection = select_learning_mode_events_for_relogging(source, process_lifetimes)?;
     let expected_event_count = selection.total_event_count;
     let expected_selected_event_count = selection.selected_event_indices.len();
-    let _apartment = ComApartment::new()?;
-    // SAFETY: COM is initialized on this thread, the in-proc class ID is
-    // fixed, and the returned interface remains apartment-local.
-    let relogger: ITraceRelogger = unsafe {
-        CoCreateInstance(&CLSID_TraceRelogger, None, CLSCTX_INPROC_SERVER)
-            .map_err(|error| windows_error("CoCreateInstance(CLSID_TraceRelogger)", error))?
-    };
+    let selection = RelogSelectionState::new(selection.selected_event_indices, process_lifetimes);
+    relogger.process(source, destination, selection.clone())?;
 
-    let source = path_bstr(source);
-    let destination_bstr = path_bstr(destination);
-    // SAFETY: the BSTRs remain valid for each synchronous COM call.
-    unsafe {
-        relogger
-            .AddLogfileTraceStream(&source, std::ptr::null())
-            .map_err(|error| windows_error("ITraceRelogger::AddLogfileTraceStream", error))?;
-        relogger
-            .SetOutputFilename(&destination_bstr)
-            .map_err(|error| windows_error("ITraceRelogger::SetOutputFilename", error))?;
-    }
-
-    let event_cursor = Arc::new(AtomicUsize::new(0));
-    let selected_event_cursor = Arc::new(AtomicUsize::new(0));
-    let callback: ITraceEventCallback = ProcessScopedTraceFilter {
-        selected_event_indices: selection.selected_event_indices,
-        event_cursor: Arc::clone(&event_cursor),
-        selected_event_cursor: Arc::clone(&selected_event_cursor),
-    }
-    .into();
-    // SAFETY: callback and relogger stay alive until ProcessTrace returns.
-    unsafe {
-        relogger
-            .RegisterCallback(&callback)
-            .map_err(|error| windows_error("ITraceRelogger::RegisterCallback", error))?;
-        relogger
-            .ProcessTrace()
-            .map_err(|error| windows_error("ITraceRelogger::ProcessTrace", error))?;
-    }
-    let consumed_event_count = event_cursor.load(Ordering::Relaxed);
+    let consumed_event_count = selection.consumed_event_count();
     if consumed_event_count != expected_event_count {
         return Err(AnalyzeError::Decode(format!(
             "Trace Relogger observed {consumed_event_count} supported Learning Mode events, but ProcessTrace selected {expected_event_count}"
         )));
     }
-    let consumed_selected_event_count = selected_event_cursor.load(Ordering::Relaxed);
+    let consumed_selected_event_count = selection.consumed_selected_event_count();
     if consumed_selected_event_count != expected_selected_event_count {
         return Err(AnalyzeError::Decode(format!(
             "Trace Relogger injected {consumed_selected_event_count} process-scoped Learning Mode events, but ProcessTrace selected {expected_selected_event_count}"
@@ -244,6 +325,36 @@ mod tests {
     const START: u64 = 100;
     const END: u64 = 200;
 
+    fn lifetime(pid: u32) -> ProcessLifetime {
+        ProcessLifetime {
+            pid,
+            start_filetime: START,
+            end_filetime: END,
+        }
+    }
+
+    #[test]
+    fn selected_ordinal_with_foreign_pid_is_not_injected() {
+        let selection = RelogSelectionState::new(vec![0], &[lifetime(42)]);
+
+        assert!(!selection.observe_supported_event(99));
+        assert_eq!(selection.consumed_event_count(), 1);
+        assert_eq!(
+            selection.consumed_selected_event_count(),
+            0,
+            "foreign PID must not advance the selected-event cursor"
+        );
+    }
+
+    #[test]
+    fn selected_ordinal_with_attested_pid_is_injected() {
+        let selection = RelogSelectionState::new(vec![0], &[lifetime(42)]);
+
+        assert!(selection.observe_supported_event(42));
+        assert_eq!(selection.consumed_event_count(), 1);
+        assert_eq!(selection.consumed_selected_event_count(), 1);
+    }
+
     #[test]
     fn refuses_to_overwrite_existing_destination() {
         let unique = format!(
@@ -260,16 +371,8 @@ mod tests {
         let destination = directory.join("filtered.etl");
         std::fs::write(&destination, b"sentinel").unwrap();
 
-        let error = filter_trace_for_process_lifetimes(
-            &source,
-            &destination,
-            &[ProcessLifetime {
-                pid: 42,
-                start_filetime: START,
-                end_filetime: END,
-            }],
-        )
-        .unwrap_err();
+        let error =
+            filter_trace_for_process_lifetimes(&source, &destination, &[lifetime(42)]).unwrap_err();
 
         assert!(error.to_string().contains("already exists"));
         assert_eq!(std::fs::read(&destination).unwrap(), b"sentinel");

@@ -561,15 +561,18 @@ fn config_file_path(cli: &Cli) -> Option<std::path::PathBuf> {
 // the next wxc-exec startup (which we already run at the top of
 // `main`).
 
+#[cfg(target_os = "windows")]
 static DACL_CLEANUP_SLOT: OnceLock<Mutex<Option<wxc_common::filesystem_dacl::DaclManager>>> =
     OnceLock::new();
 
+#[cfg(target_os = "windows")]
 fn dacl_cleanup_slot() -> &'static Mutex<Option<wxc_common::filesystem_dacl::DaclManager>> {
     DACL_CLEANUP_SLOT.get_or_init(|| Mutex::new(None))
 }
 
 /// Park the DACL manager in the global slot so the Ctrl-C handler can
 /// drop it if a signal arrives before the normal-exit path runs.
+#[cfg(target_os = "windows")]
 fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
     let slot = dacl_cleanup_slot();
     let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
@@ -584,6 +587,7 @@ fn park_dacl_for_cleanup(mgr: wxc_common::filesystem_dacl::DaclManager) {
 /// does (`into_inner`): a poisoned mutex must NOT silently swallow a
 /// parked manager — that would leak ACEs until the next-startup
 /// recovery scan reaps them.
+#[cfg(target_os = "windows")]
 fn take_parked_dacl() -> Option<wxc_common::filesystem_dacl::DaclManager> {
     DACL_CLEANUP_SLOT.get().and_then(|slot| {
         let mut guard = slot.lock().unwrap_or_else(|p| p.into_inner());
@@ -602,8 +606,10 @@ fn take_parked_dacl() -> Option<wxc_common::filesystem_dacl::DaclManager> {
 ///
 /// `Drop` is a no-op if nothing was ever parked or if the Ctrl-C
 /// handler already drained the slot.
+#[cfg(target_os = "windows")]
 struct ParkedDaclGuard;
 
+#[cfg(target_os = "windows")]
 impl Drop for ParkedDaclGuard {
     fn drop(&mut self) {
         drop(take_parked_dacl());
@@ -626,6 +632,7 @@ impl Drop for ParkedDaclGuard {
 /// (lock released) or the shared timeout elapses — whichever comes
 /// first. On timeout we proceed anyway; the recovery scan on the next
 /// `wxc-exec` startup reaps anything left behind.
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::BOOL {
     // Ordering guarantee: best-effort cancellation telemetry runs STRICTLY
     // BEFORE the up-to-5s DACL cleanup loop, which can consume the OS
@@ -683,6 +690,7 @@ unsafe extern "system" fn dacl_ctrl_handler(_ctrl_type: u32) -> windows::core::B
 /// A caught panic is intentionally swallowed: this runs on the OS
 /// shutdown-handler path where there is nothing left to propagate it to, and the
 /// security-critical `cleanup` is what must not be skipped.
+#[cfg(target_os = "windows")]
 fn cancel_then_cleanup(emit: impl FnOnce(), cleanup: impl FnOnce()) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(emit));
     cleanup();
@@ -691,6 +699,7 @@ fn cancel_then_cleanup(emit: impl FnOnce(), cleanup: impl FnOnce()) {
 /// Install the console-control handler. Idempotent — calling twice
 /// registers the same handler twice, which is harmless because the
 /// take-and-drop is `Option::take`-based.
+#[cfg(target_os = "windows")]
 fn install_dacl_ctrl_handler() {
     use windows::Win32::System::Console::SetConsoleCtrlHandler;
     // SAFETY: `dacl_ctrl_handler` has the correct ABI; the `Add=TRUE`
@@ -798,7 +807,9 @@ fn main() {
     };
 
     // Install the Ctrl-C / Ctrl-Break handler that drops any parked
-    // DaclManager on signal. Cheap and idempotent.
+    // DaclManager on signal. Cheap and idempotent. Windows-only: the parked
+    // DACL manager it drains lives behind `#[cfg(target_os = "windows")]`.
+    #[cfg(target_os = "windows")]
     install_dacl_ctrl_handler();
 
     // Stack-owned witness so a panic anywhere below — between
@@ -806,6 +817,7 @@ fn main() {
     // near the end of `main` — still drains the slot and runs
     // `restore()` during unwind. Without it the manager is parked in
     // a static and unwinding skips destructors of static-owned values.
+    #[cfg(target_os = "windows")]
     let _dacl_guard = ParkedDaclGuard;
 
     // --setup-hyperlight: warm up the snapshot and exit. Runs before
@@ -1178,16 +1190,10 @@ fn main() {
     // it on signal as well as the normal-exit path below; it is `None` when no
     // DACL augmentation was required. Tier-selection warnings and the selected
     // tier are logged to `logger` by the engine.
-    #[cfg(target_os = "windows")]
-    let resolved_runner = if cli.audit {
-        mxc_engine::resolve_runner_for_audit(&request, &mut logger)
-    } else {
-        mxc_engine::resolve_runner(&request, &mut logger)
-    };
-    #[cfg(not(target_os = "windows"))]
     let resolved_runner = mxc_engine::resolve_runner(&request, &mut logger);
     let mut runner: Box<dyn ScriptRunner> = match resolved_runner {
         Ok(resolved) => {
+            #[cfg(target_os = "windows")]
             if let Some(mgr) = resolved.dacl_manager {
                 park_dacl_for_cleanup(mgr);
             }
@@ -1242,7 +1248,12 @@ fn main() {
     // manually for prompt cleanup on the normal path. The Ctrl-C
     // handler covers the abnormal path; recover_orphaned_state on the
     // next startup covers everything else.)
+    //
+    // The parked-DACL machinery is Windows-only: `DaclManager` lives behind
+    // `#[cfg(target_os = "windows")]` in `wxc_common::filesystem_dacl`, so the
+    // whole extract/park/take/cleanup lifecycle is gated to match.
     drop(runner);
+    #[cfg(target_os = "windows")]
     drop(take_parked_dacl());
 
     // Surface security warnings (e.g. permissiveLearningMode relaxing
@@ -1714,6 +1725,7 @@ mod tests {
             .contains("only supported for state-aware exec requests"));
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn cancel_then_cleanup_emits_before_cleanup() {
         // Locks in the dacl_ctrl_handler ordering guarantee: cancellation
@@ -1732,6 +1744,7 @@ mod tests {
         assert_eq!(*order.lock().unwrap(), vec!["emit", "cleanup"]);
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
     fn cancel_then_cleanup_runs_cleanup_even_if_emit_panics() {
         // Locks in the cleanup-always guarantee: a panic in the cancellation

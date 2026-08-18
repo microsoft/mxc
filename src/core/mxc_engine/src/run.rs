@@ -93,15 +93,6 @@ pub fn resolve_runner(
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
-/// Resolve a runner for the `wxc-exec --audit` compatibility workflow.
-#[cfg(target_os = "windows")]
-pub fn resolve_runner_for_audit(
-    request: &ExecutionRequest,
-    logger: &mut Logger,
-) -> Result<ResolvedRunner, Error> {
-    resolve_runner_inner_windows(request, logger).map_err(Error::from)
-}
-
 /// Resolve `request`'s backend and run it to completion.
 ///
 /// Convenience over [`resolve_runner`] for callers without external guard /
