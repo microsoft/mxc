@@ -343,10 +343,7 @@ fn is_identity_property(name: &str) -> bool {
 
 fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
     let normalized_name = name.to_ascii_lowercase().replace(['_', '-'], "");
-    if normalized_name.contains("filepath")
-        || normalized_name == "path"
-        || normalized_name.ends_with("filename")
-    {
+    if normalized_name.ends_with("path") || normalized_name.ends_with("filename") {
         return true;
     }
 
@@ -1454,14 +1451,28 @@ mod tests {
 
     #[test]
     fn sanitize_properties_redacts_the_entire_file_path() {
-        let props = vec![(
-            "ObjectName".to_string(),
-            "\"C:\\Users\\jsmith\\secret.txt\"".to_string(),
-        )];
+        let props = vec![
+            (
+                "ObjectName".to_string(),
+                "\"C:\\Users\\jsmith\\secret.txt\"".to_string(),
+            ),
+            (
+                "AppPath".to_string(),
+                "\"C:\\Users\\jsmith\\app.exe\"".to_string(),
+            ),
+            (
+                "ApplicationPath".to_string(),
+                "\"D:\\Profiles\\alice\\tool.exe\"".to_string(),
+            ),
+        ];
         let out = sanitize_properties(&props);
         assert_eq!(
             out,
-            vec![("ObjectName".to_string(), REDACTED_PATH.to_string())]
+            vec![
+                ("AppPath".to_string(), REDACTED_PATH.to_string()),
+                ("ApplicationPath".to_string(), REDACTED_PATH.to_string()),
+                ("ObjectName".to_string(), REDACTED_PATH.to_string()),
+            ]
         );
     }
 
