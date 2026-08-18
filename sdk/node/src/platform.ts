@@ -25,6 +25,7 @@ function getSdkPackageRoot(): string {
 }
 
 let windowsSandboxAvailableCache: boolean | undefined;
+let wxcExecutableCache: string | null | undefined;
 
 /**
  * Check if Windows Sandbox feature is enabled via DISM.
@@ -529,11 +530,15 @@ function getDarwinRustTargetTriple(): string {
  * @returns Path to wxc-exec.exe if found, null otherwise
  */
 export function findWxcExecutable(): string | null {
+  if (wxcExecutableCache !== undefined) {
+    return wxcExecutableCache;
+  }
   // Allow override for bundled deployments (debugging/testing)
   if (process.env.MXC_BIN_DIR) {
     const overridePath = path.join(process.env.MXC_BIN_DIR, getSdkArch(), 'wxc-exec.exe');
     if (verifyWxcExecutable(overridePath)) {
-      return overridePath;
+      wxcExecutableCache = overridePath;
+      return wxcExecutableCache;
     }
   }
 
@@ -556,11 +561,18 @@ export function findWxcExecutable(): string | null {
 
   for (const wxcPath of possiblePaths) {
     if (verifyWxcExecutable(wxcPath)) {
-      return wxcPath;
+      wxcExecutableCache = wxcPath;
+      return wxcExecutableCache;
     }
   }
 
-  return null;
+  wxcExecutableCache = null;
+  return wxcExecutableCache;
+}
+
+/** @internal Test-only: clear the resolved executable path. */
+export function _resetWxcExecutableCache(): void {
+  wxcExecutableCache = undefined;
 }
 
 /**

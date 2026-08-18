@@ -23,6 +23,18 @@
   <PropertyGroup>
     <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
     <MxcGeneratedBindings>$(MSBuildProjectDirectory)/Native/NativeMethods.g.cs</MxcGeneratedBindings>
+    <!-- Build the native library into the Cargo profile that
+         NativeLibraryResolver prefers for this configuration, so a Release
+         C# build does not silently bind against a stale debug mxc_ffi (which
+         has debug-only behaviour such as the LOCALAPPDATA test override). -->
+    <MxcCargoProfileArg Condition="'$(Configuration)' == 'Release'">--release</MxcCargoProfileArg>
+    <MxcCargoFeatures>dotnetsdk</MxcCargoFeatures>
+    <MxcCargoTargetDir Condition="'$(MxcCargoTargetDir)' == ''">$(MxcSrcDir)/target</MxcCargoTargetDir>
+    <MxcCargoProfileDir Condition="'$(Configuration)' == 'Release'">release</MxcCargoProfileDir>
+    <MxcCargoProfileDir Condition="'$(Configuration)' != 'Release'">debug</MxcCargoProfileDir>
+    <MxcNativeOutput Condition="'$(OS)' == 'Windows_NT'">$(MxcCargoTargetDir)/$(MxcCargoProfileDir)/mxc_ffi.dll</MxcNativeOutput>
+    <MxcNativeOutput Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(MxcCargoTargetDir)/$(MxcCargoProfileDir)/libmxc_ffi.dylib</MxcNativeOutput>
+    <MxcNativeOutput Condition="'$(MxcNativeOutput)' == ''">$(MxcCargoTargetDir)/$(MxcCargoProfileDir)/libmxc_ffi.so</MxcNativeOutput>
   </PropertyGroup>
 
   <ItemGroup>
@@ -38,10 +50,18 @@
           BeforeTargets="CoreCompile"
           Inputs="$(MxcSrcDir)/ffi/mxc_ffi/src/lib.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/error_detail.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/streaming.rs;$(MxcSrcDir)/ffi/mxc_ffi/src/state_aware.rs;$(MxcSrcDir)/ffi/mxc_ffi/build.rs"
           Outputs="$(MxcGeneratedBindings)">
-    <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features dotnetsdk)" />
-    <Exec Command="cargo build -p mxc_ffi --features dotnetsdk" WorkingDirectory="$(MxcSrcDir)" />
+    <Message Importance="high" Text="mxc: generating C# P/Invoke bindings (cargo build -p mxc_ffi --features $(MxcCargoFeatures) $(MxcCargoProfileArg) --target-dir $(MxcCargoTargetDir))" />
+    <Exec Command="cargo build -p mxc_ffi --features $(MxcCargoFeatures) $(MxcCargoProfileArg) --target-dir &quot;$(MxcCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
     <Error Condition="!Exists('$(MxcGeneratedBindings)')"
            Text="Binding generation did not produce $(MxcGeneratedBindings). Ensure the Rust toolchain (cargo) is installed and on PATH." />
+  </Target>
+
+  <!-- Cargo tracks its own workspace inputs and feature/profile selection;
+       always invoke it here so switching between SDK and test-support
+       feature sets cannot reuse an incompatible native library. -->
+  <Target Name="EnsureNativeLibraryForConfiguration"
+          AfterTargets="GenerateNativeBindings">
+    <Exec Command="cargo build -p mxc_ffi --features $(MxcCargoFeatures) $(MxcCargoProfileArg) --target-dir &quot;$(MxcCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
   </Target>
 
   <!-- Native mxc_ffi library for the host platform, staged into runtimes/<rid>/native
@@ -53,6 +73,10 @@
        NativeLibraryResolver from the Cargo target dir. -->
   <ItemGroup>
     <None Include="runtimes/**/*" Pack="true" PackagePath="runtimes/" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="$(MxcNativeOutput)"
+          Link="$([System.IO.Path]::GetFileName('$(MxcNativeOutput)'))"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="'$(MxcStageNativeOutput)' == 'true'" />
   </ItemGroup>
 
 </Project>

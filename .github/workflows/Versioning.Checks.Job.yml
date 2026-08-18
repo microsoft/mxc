@@ -50,5 +50,17 @@ jobs:
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
 
+      - name: Check telemetry consent maintenance artifacts (codegen)
+        run: node scripts/versioning/check-telemetry-consent-codegen.js
+
+      - name: Check telemetry policy binding parity
+        run: node scripts/check-telemetry-policy-parity.js
+
+      - name: Check .NET error-code parity
+        run: node scripts/check-dotnet-errorcode-parity.js
+
+      - name: Check .NET native bindings (codegen)
+        run: node scripts/check-dotnet-bindings-codegen.js
+
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js

@@ -413,6 +413,16 @@ getAvailableToolsPolicy(env?, options?) → FilesystemPolicyResult
 getUserProfilePolicy()                  → FilesystemPolicyResult
 getTemporaryFilesPolicy(env?)           → FilesystemPolicyResult
 
+// Telemetry consent (Windows-only; see Telemetry Consent section below)
+getTelemetryConsent()             → TelemetryConsentState
+queryTelemetryConsent()           → { storedState, effectiveState, needsPrompt, policy, reason?, error? }
+queryTelemetryConsentAsync()      → Promise<{ storedState, effectiveState, needsPrompt, policy, reason?, error? }>
+needsTelemetryConsentPrompt()     → boolean
+requestTelemetryConsent(presenter, locale?) → Promise<TelemetryConsentOutcome>
+withdrawTelemetryConsent()        → TelemetryConsentOutcome
+withdrawTelemetryConsentAsync()   → Promise<TelemetryConsentOutcome>
+getTelemetryPolicy()              → TelemetryPolicyState
+
 // Capability types
 UiCapabilitySupport
 
@@ -429,21 +439,87 @@ Full TypeScript definitions ship with the package (`dist/index.d.ts`). All expor
 
 ## Telemetry Consent
 
-Telemetry is off-by-default unless the caller opts in with top-level `telemetry.enabled: true` and the applicable Windows consent/policy gates permit collection.
+MXC only ever collects telemetry on Windows, and only after the end user has
+explicitly opted in — a persisted, MXC-owned consent flag gates every
+emission (never a Windows-level setting like Diagnostics & feedback). See
+[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md)
+for the full design.
 
-Telemetry consent behavior follows
-[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md):
-the SDK stays UI-agnostic, renders the canonical resource verbatim through a
-host presenter, persists only explicit yes/no decisions, treats dismissal and
-failures as non-grants, and never lets policy or transport failures opt a user
-in.
+Telemetry is additionally off per invocation unless a one-shot
+`ContainerConfig` includes `telemetry: { enabled: true }`, a one-shot call
+passes `options.telemetry: { enabled: true }`, or a state-aware call passes the
+same option. For `spawnSandboxFromConfig`, an explicitly supplied option
+overrides `config.telemetry`; omitting it preserves the config value. This
+stable switch does not require `options.experimental` and cannot bypass consent
+or administrative policy.
+
+The SDK does not ship a consent UI. It passes the versioned canonical resource
+from the native layer to your presenter. Render its supplied fields verbatim
+and return a typed decision. Follow the
+[SDK presenter requirements](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements)
+for control mappings, dismissal behavior, and withdrawal:
+
+```typescript
+import {
+  requestTelemetryConsent,
+  queryTelemetryConsentAsync,
+  withdrawTelemetryConsentAsync,
+} from '@microsoft/mxc-sdk';
+
+const outcome = await requestTelemetryConsent(async (prompt, signal) => {
+  // Dismiss any pending UI when signal?.aborted becomes true.
+  return 'yes'; // 'yes' | 'no' | 'dismissed'
+}, 'en-US');
+
+const status = await queryTelemetryConsentAsync();
+await withdrawTelemetryConsentAsync();
+```
+
+If the API is never called, the presenter fails, or it returns `dismissed`,
+telemetry remains off. On non-Windows hosts requests and withdrawals return
+`notApplicable` without invoking the presenter or child process.
+
+The synchronous query/getter and withdrawal APIs are retained for startup and
+compatibility code, but may block the Node event loop for up to five seconds.
+Prefer `queryTelemetryConsentAsync()` and `withdrawTelemetryConsentAsync()`.
+
+`getTelemetryConsent()` never throws: any failure to reach `wxc-exec` reads
+back as `'undetermined'` (fail-closed — never `'granted'`). If you need to
+tell a genuine "user has not decided yet" apart from a broken install, use
+`queryTelemetryConsentAsync()`, which returns the same state plus a diagnostic
+`error` string when the state was forced by a failure:
+
+```typescript
+const { effectiveState, storedState, needsPrompt, policy, reason, error } =
+  await queryTelemetryConsentAsync();
+if (error) {
+  console.warn(`mxc: could not read telemetry consent: ${error}`);
+}
+```
+
+`needsPrompt` is supplied by the native layer. If the resolved `wxc-exec` is
+older than this SDK and does not report the field, it fails closed to `false`.
 
 ### Administrative policy
 
-An IT administrator can still block MXC telemetry device-wide via MXC's own
-registry policy setting. See
-[`docs/telemetry/telemetry-administrative-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules.
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. `getTelemetryPolicy()` (also the `policy` field
+above) reports the result:
+
+```typescript
+import { getTelemetryPolicy } from '@microsoft/mxc-sdk';
+
+const policy = getTelemetryPolicy();
+// 'unrestricted' | 'allowed' | 'blocked' | 'not-applicable'
+if (policy === 'blocked') {
+  // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+`'allowed'` does not grant user consent, while `'blocked'` disables collection
+and the consent prompt. An unreadable or missing `policy` field reads back as
+`'blocked'`; non-Windows hosts return `'not-applicable'`. See
+[`docs/telemetry/telemetry-administrative-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-administrative-policy.md).
 
 ---
 

@@ -13,6 +13,7 @@ import {
   _probeBubblewrap,
   _setBwrapVersionRunner,
   findWxcExecutable,
+  _resetWxcExecutableCache,
 } from '../../src/platform.js';
 
 const isWindows = os.platform() === 'win32';
@@ -295,6 +296,7 @@ describe('findWxcExecutable failure modes', () => {
 
   beforeEach(() => {
     prevBinDir = process.env.MXC_BIN_DIR;
+    _resetWxcExecutableCache();
   });
 
   afterEach(() => {
@@ -303,6 +305,7 @@ describe('findWxcExecutable failure modes', () => {
     } else {
       process.env.MXC_BIN_DIR = prevBinDir;
     }
+    _resetWxcExecutableCache();
   });
 
   it('returns a string or null and never throws under a nonexistent MXC_BIN_DIR', () => {

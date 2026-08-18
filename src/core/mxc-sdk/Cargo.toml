@@ -14,6 +14,10 @@ default = []
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
+# Debug-only downstream test seam for telemetry consent/policy redirection.
+# Used by the .NET SDK integration tests through `mxc_ffi`; never enable it
+# for shipping Release builds.
+test-support = ["wxc_common/test-support"]
 
 [dependencies]
 wxc_common.workspace = true

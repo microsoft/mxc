@@ -7,6 +7,7 @@ import { SandboxSpawnOptions } from './sandbox.js';
 import { mxcErrorFromCode, mxcErrorFromEnvelope, WireError } from './errors.js';
 import { diagLog } from './diagnostic.js';
 import { Phase, StateAwareContainmentBackend } from './state-aware-types.js';
+import { TelemetryConfig } from './types.js';
 
 export const STATE_AWARE_VERSION = '0.6.0-alpha';
 
@@ -84,6 +85,7 @@ export interface BuildEnvelopeArgs {
   backendKey: StateAwareContainmentBackend;
   containment?: StateAwareContainmentBackend; // provision only
   sandboxId?: string;                        // non-provision only
+  telemetry?: TelemetryConfig;               // stable cross-cutting config
   config?: Record<string, unknown>;
 }
 
@@ -94,7 +96,14 @@ export interface BuildEnvelopeArgs {
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {
-  const { phase, backendKey, containment, sandboxId, config } = args;
+  const {
+    phase,
+    backendKey,
+    containment,
+    sandboxId,
+    telemetry,
+    config,
+  } = args;
   // Copy of config; fields are removed as they are lifted into the envelope.
   // Anything left becomes experimental.<backend>.<phase>.
   const backendSpecific: Record<string, unknown> = { ...(config ?? {}) };
@@ -108,6 +117,9 @@ export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string,
   }
   if (sandboxId) {
     envelope.sandboxId = sandboxId;
+  }
+  if (telemetry) {
+    envelope.telemetry = telemetry;
   }
 
   for (const field of CROSS_CUTTING_FIELDS) {

@@ -208,6 +208,11 @@ export function resolveExecutableAndArgs(
   config: ContainerConfig,
   options: SandboxSpawnOptions = {},
 ): { executablePath: string; args: string[] } {
+  if (config.experimental && 'telemetry' in config.experimental) {
+    throw new Error(
+      "'experimental.telemetry' is no longer accepted; use top-level 'telemetry' instead.",
+    );
+  }
   if (!config.process?.commandLine) {
     throw new Error('script is required. Set process.commandLine on the config or pass a script to spawnSandbox().');
   }
@@ -284,7 +289,10 @@ export function resolveExecutableAndArgs(
     );
   }
 
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  const executionConfig = options.telemetry === undefined
+    ? config
+    : { ...config, telemetry: options.telemetry };
+  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(executionConfig), options);
   if (usesBuiltinTestServer) {
     resolved.args.push('--allow-testing-features');
   }

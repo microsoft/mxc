@@ -161,23 +161,59 @@ MXC telemetry is Windows-only and remains off until both of these are true:
 1. the user has explicitly granted MXC-owned consent, and
 2. the caller opts this invocation in via telemetry settings.
 
-Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
-
-Any .NET consent surface should stay UI-agnostic, present the canonical
-resource verbatim through a host callback, persist only explicit yes/no
-decisions, treat dismissal and failures as non-grants, and follow the rules in
+`MxcTelemetry` is UI-agnostic: it passes the native canonical prompt resource
+to your presenter and persists only the typed decision you return. For
+presenter rules and consent semantics, see
 [`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
 and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
+Per-invocation opt-in:
+- One-shot (`Run`/`Spawn`): set `SandboxPolicy.TelemetryEnabled = true`.
+- State-aware phases: set each phase's `TelemetryEnabled = true` independently.
+  `ProvisionResult` contains the sandbox identity used by later phases; no
+  telemetry context needs to be forwarded between phases.
+
+These switches do not bypass persisted consent or administrative policy.
+
+```csharp
+using Microsoft.Mxc.Sdk;
+
+var outcome = MxcTelemetry.RequestConsent(prompt =>
+{
+    return TelemetryConsentDecision.Yes;
+});
+
+TelemetryConsentStatus status = MxcTelemetry.GetConsentStatus();
+MxcTelemetry.WithdrawConsent();
+```
+
+`RequestConsentAsync` accepts an asynchronous presenter. If consent is never
+requested, the presenter fails, or it returns `Dismissed`, telemetry remains
+off. On non-Windows hosts requests and withdrawals return `NotApplicable`
+without invoking a presenter.
+
 ### Administrative policy
 
-An IT administrator can still block MXC telemetry device-wide via MXC's own
-registry policy setting. See
-[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Policy and consent
-queries fail closed rather than upgrading an unreadable device state into
-collection.
+An IT administrator can block MXC telemetry device-wide via MXC's own
+Group Policy / MDM setting. `MxcTelemetry.GetPolicy()` reports the result:
+
+```csharp
+if (MxcTelemetry.GetPolicy() == TelemetryPolicyState.Blocked)
+{
+    // Don't show a consent toggle; telemetry is unavailable on this device.
+}
+```
+
+`Allowed` does not grant user consent, while `Blocked` disables collection and
+the consent prompt. The policy query fails closed to `Blocked` if the native
+library cannot be loaded; non-Windows hosts return `NotApplicable`. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md).
+
+`GetConsent()` never throws for a missing, mismatched, or outdated native
+library: those fail closed to `TelemetryConsentState.Undetermined` (never
+`Granted`). Only a genuine failure reported by the native layer surfaces as
+`MxcException`.
 
 ## Projects
 
@@ -187,7 +223,10 @@ collection.
 
 Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
-Run native telemetry-consent integration tests in the **Debug** configuration.
+Run the tests in the **Debug** configuration. The telemetry-consent tests
+redirect the consent store via `MXC_TEST_LOCALAPPDATA_OVERRIDE`, which the
+native library compiles out in release builds; under `dotnet test -c Release`
+they fail loudly rather than touch the real per-user consent file.
 
 ## Native library loading
 

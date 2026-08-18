@@ -20,34 +20,70 @@
 
 use serde_json::Value;
 
-const BANNER: &str = "\
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+/// Describes an artifact that this emitter produces, so the generated-file
+/// banner names the correct CI drift-check gate and regeneration command
+/// instead of hard-coding the values for `wire.ts`.
+pub struct ArtifactMeta {
+    /// CI drift-check script (path relative to the repo root) that regenerates
+    /// this artifact and diffs it against the committed copy.
+    pub check_script: &'static str,
+    /// Regeneration command a developer would run to refresh this artifact.
+    pub regen_command: &'static str,
+}
 
-/* eslint-disable */
-/**
- * GENERATED FILE — DO NOT EDIT BY HAND.
- *
- * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
- * exported from the SDK. The conformance test asserts the hand-written public
- * types in `../types.ts` still match these. CI gate:
- * `scripts/versioning/check-sdk-types-codegen.js`.
- *
- * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
- */
-";
+/// Banner for the one-shot / execution SDK wire types (`wire.ts`).
+pub const CONFIG_TYPES_META: ArtifactMeta = ArtifactMeta {
+    check_script: "scripts/versioning/check-sdk-types-codegen.js",
+    regen_command:
+        "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts",
+};
+
+/// Banner for the telemetry-consent SDK wire types (`telemetry-consent-wire.ts`).
+pub const TELEMETRY_CONSENT_TYPES_META: ArtifactMeta = ArtifactMeta {
+    check_script: "scripts/versioning/check-telemetry-consent-codegen.js",
+    regen_command:
+        "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --telemetry-consent-ts sdk/node/src/generated/telemetry-consent-wire.ts",
+};
+
+fn banner(meta: &ArtifactMeta) -> String {
+    format!(
+        "// Copyright (c) Microsoft Corporation.\n\
+// Licensed under the MIT License.\n\
+\n\
+/* eslint-disable */\n\
+/**\n \
+* GENERATED FILE — DO NOT EDIT BY HAND.\n \
+*\n \
+* Emitted from the generated JSON Schema (itself generated from the Rust wire\n \
+* model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter\n \
+* (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never\n \
+* exported from the SDK. The conformance test asserts the hand-written public\n \
+* types in `../types.ts` still match these. CI gate:\n \
+* `{check}`.\n \
+*\n \
+* Regenerate with:\n \
+*   {regen}\n \
+*/\n",
+        check = meta.check_script,
+        regen = meta.regen_command,
+    )
+}
 
 /// Root interface name (mirrors the json-schema-to-typescript convention of
 /// deriving it from the schema `title`, "MXC Configuration").
 const ROOT_NAME: &str = "MXCConfiguration";
 
-/// Emit the full `wire.ts` content for the given schema root value.
+/// Emit the full `wire.ts` content for the given schema root value using the
+/// legacy banner (kept for callers that always emitted `wire.ts`).
 pub fn emit_ts(schema: &Value) -> String {
+    emit_ts_with_meta(schema, &CONFIG_TYPES_META)
+}
+
+/// Emit the full wire TypeScript content for the given schema root value,
+/// selecting a banner appropriate for the artifact being written.
+pub fn emit_ts_with_meta(schema: &Value, meta: &ArtifactMeta) -> String {
     let root = schema.as_object().expect("schema root is an object");
-    let mut out = String::from(BANNER);
+    let mut out = banner(meta);
 
     if let Some(Value::Object(defs)) = root.get("definitions") {
         for (name, def) in defs {
@@ -161,6 +197,17 @@ fn ts_type(prop: &Value) -> (String, bool) {
 
     if let Some(r) = obj.get("$ref").and_then(|v| v.as_str()) {
         return (ref_name(r), false);
+    }
+
+    // Schemars wraps a single `$ref` inside an `allOf` when the field carries
+    // its own description (so the reference stays intact but the description
+    // is attached at the property site). For our schema all uses of `allOf`
+    // are single-element (a wrapped $ref or single subschema); resolve to the
+    // wrapped type instead of falling through to `unknown`.
+    if let Some(Value::Array(all_of)) = obj.get("allOf") {
+        if all_of.len() == 1 {
+            return ts_type(&all_of[0]);
+        }
     }
 
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
@@ -332,6 +379,56 @@ mod tests {
         assert!(ts.contains("tags?: string[] | null;"), "{ts}");
         // Optional ref made nullable by the anyOf null branch.
         assert!(ts.contains("child?: Thing | null;"), "{ts}");
+    }
+
+    #[test]
+    fn resolves_all_of_single_ref_wrapper_to_the_referenced_type() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "action": {
+                    "allOf": [ { "$ref": "#/definitions/Action" } ],
+                    "description": "wrapped ref"
+                }
+            },
+            "required": ["action"],
+            "definitions": {
+                "Action": { "enum": ["a", "b"], "type": "string" }
+            }
+        });
+        let ts = emit_ts(&schema);
+        assert!(ts.contains("action: Action;"), "{ts}");
+        assert!(!ts.contains("action: unknown"), "{ts}");
+    }
+
+    #[test]
+    fn banner_names_the_check_script_and_regen_command_of_the_artifact() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+        });
+        let default = emit_ts(&schema);
+        assert!(
+            default.contains("scripts/versioning/check-sdk-types-codegen.js"),
+            "{default}"
+        );
+        assert!(
+            default.contains("--ts sdk/node/src/generated/wire.ts"),
+            "{default}"
+        );
+        let telemetry = emit_ts_with_meta(&schema, &TELEMETRY_CONSENT_TYPES_META);
+        assert!(
+            telemetry.contains("scripts/versioning/check-telemetry-consent-codegen.js"),
+            "{telemetry}"
+        );
+        assert!(
+            telemetry.contains(
+                "--telemetry-consent-ts sdk/node/src/generated/telemetry-consent-wire.ts"
+            ),
+            "{telemetry}"
+        );
     }
 
     #[test]

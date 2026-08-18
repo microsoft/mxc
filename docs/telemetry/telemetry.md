@@ -117,7 +117,8 @@ Emitted on execution errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `mxc.backend` | string | Containment backend name |
+| `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
+| `mxc.backend` | string | Concrete containment backend selected on the host |
 | `mxc.error_type` | string | Error category (`config_error`, `policy_error`, `process_error`, `timeout`, `init_error`, `internal_error`, `cancelled`, `unknown`) |
 | `mxc.exit_code` | int32 | Process exit code |
 | `mxc.phase` | string | State-aware lifecycle phase; empty for one-shot executions |
@@ -126,6 +127,7 @@ Emitted on execution errors.
 > usernames, or credentials, so `MXC.Error` deliberately carries only the
 > bounded `error_type` category and the numeric `exit_code` — never the
 > message string itself.
+
 
 ### Crash telemetry (panic hook)
 
@@ -180,6 +182,61 @@ free-form text.
 Telemetry emission is gated by the per-run request, MXC-owned consent,
 administrative policy, and provider availability. See
 [`docs/telemetry/telemetry-consent-design.md`](telemetry-consent-design.md).
+
+## Diagnosing "telemetry is on but I see no events"
+
+Every gate fails closed, so a suppressed run is otherwise indistinguishable
+from a broken one. Run the executor with `--debug` and look for a
+`telemetry:` line, which names the gate that stopped collection:
+
+| `--debug` line | Meaning |
+|---|---|
+| `not requested for this run` | The config did not set `telemetry.enabled: true`. |
+| `requested but suppressed (consent=…, policy=…)` | The run asked, but MXC consent is not `granted` and/or administrative policy is `blocked`. |
+| `ETW provider registration failed` | The provider could not register; no events can be written. |
+| `events are emitted to local ETW only` | The build has **no provider group GUID**, so events reach local ETW but are never routed to the Microsoft pipeline. |
+
+Two points that commonly cause confusion:
+
+- **The Windows diagnostic-data setting is not an input.** Turning on
+  "Optional diagnostic data" does not grant MXC consent. MXC owns its own
+  consent store and never reads or infers from the system setting, so
+  `--telemetry-consent-status` must report `effectiveState: "granted"`
+  before anything is collected.
+- **A build without `MXC_TELEMETRY_PROVIDER_GROUP_GUID` never uploads.**
+  Without the group GUID the `Microsoft.MXC` provider is a plain ETW
+  provider that UTC does not collect, so events are visible to a local ETW
+  trace but will never appear in a Microsoft-side pipeline — regardless of
+  consent. Internal builds must set that variable at build time.
+- **`MICROSOFT_KEYWORD_MEASURES` is sampled.** Both MXC events use the
+  Measures keyword, which UTC collects from only a sampled subset of
+  devices, so an ordinary opted-in machine is not guaranteed to contribute
+  events even when everything else is correct. This is a property of the
+  keyword, not a defect: on a device forced into the collection population
+  (`AllowTelemetry=3` plus DiagTrack test hooks, notably
+  `SkipDownloadedSettings`) every emitted Measures event was ingested.
+  Verify on such a device before concluding that a build is broken.
+
+To confirm UTC ingestion on a dev machine, set
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Diagnostics\DiagTrack\EventTranscriptKey`
+→ `EnableEventTranscript` (`REG_DWORD`) to `1`, restart the `DiagTrack`
+service, and query
+`C:\ProgramData\Microsoft\Diagnosis\EventTranscript\EventTranscript.db`
+for `full_event_name LIKE '%MXC%'` — an ingested run appears as
+`Microsoft.MXC.MXC.Execution`. Remove the value when finished; it makes
+UTC persist a readable local copy of all collected diagnostic data.
+
+
+`src/testing/wxc_e2e_tests/tests/e2e_telemetry_etw.rs` exercises this
+end-to-end: it builds `wxc-exec.exe` with a fake provider group GUID, grants
+consent, and decodes a live ETW trace to prove events are emitted when
+consent is granted and not emitted when it is denied. It is `#[ignore]`d
+because it runs its own `cargo build` and needs rights to create an ETW
+session:
+
+```
+cargo test -p wxc_e2e_tests --test e2e_telemetry_etw -- --ignored
+```
 
 ## Privacy review status
 

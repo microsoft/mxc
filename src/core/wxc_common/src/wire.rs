@@ -870,10 +870,18 @@ mod schema_gen {
 
     /// Generate TypeScript wire types for both maintenance requests and
     /// responses without adding them to the execution-config drift oracle.
+    ///
+    /// Uses `emit_ts_with_meta` (not the legacy `emit_ts`) so the generated
+    /// banner names *this* artifact's CI drift-check script and regen command
+    /// (`check-telemetry-consent-codegen.js` / `--telemetry-consent-ts …
+    /// telemetry-consent-wire.ts`) rather than `wire.ts`'s. The meta constant
+    /// lives beside the emitter in `ts_emit.rs`; the choice of *which* meta to
+    /// pass belongs at this per-artifact call site rather than being inferred
+    /// inside a generic emitter.
     pub fn generate_telemetry_consent_sdk_types_ts() -> String {
         let value =
             schema_value_for::<TelemetryConsentMaintenanceTypes>(TELEMETRY_CONSENT_SCHEMA_ID);
-        crate::ts_emit::emit_ts(&value)
+        crate::ts_emit::emit_ts_with_meta(&value, &crate::ts_emit::TELEMETRY_CONSENT_TYPES_META)
     }
 
     /// Render the root object as pretty JSON with a fixed key order — the schema

@@ -130,3 +130,23 @@ export {
   stopSandbox,
   deprovisionSandbox,
 } from './state-aware.js';
+
+// Export telemetry consent functions and types
+export {
+  TelemetryConsentState,
+  TelemetryConsentStatusReason,
+  TelemetryConsentPrompt,
+  TelemetryConsentDecision,
+  TelemetryConsentOutcome,
+  TelemetryConsentPresenter,
+  TelemetryConsentQuery,
+  TelemetryPolicyState,
+  getTelemetryConsent,
+  queryTelemetryConsent,
+  needsTelemetryConsentPrompt,
+  getTelemetryPolicy,
+  requestTelemetryConsent,
+  queryTelemetryConsentAsync,
+  withdrawTelemetryConsent,
+  withdrawTelemetryConsentAsync,
+} from './telemetry.js';

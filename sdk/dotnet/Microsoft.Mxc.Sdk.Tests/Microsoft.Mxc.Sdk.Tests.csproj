@@ -17,7 +17,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
+    <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj"
+                      AdditionalProperties="MxcCargoFeatures=dotnetsdk,test-support;MxcCargoTargetDir=$(MSBuildProjectDirectory)/../../../src/target/dotnet-test-support;MxcStageNativeOutput=true" />
   </ItemGroup>
 
 </Project>
