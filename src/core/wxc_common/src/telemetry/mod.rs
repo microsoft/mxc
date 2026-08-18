@@ -868,8 +868,8 @@ pub fn emit_sdk_cancellation_with_kind(
     });
 }
 
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
     use super::consent::test_support::LocalAppDataGuard;
     use super::policy::test_support::PolicyKeyGuard;
 
@@ -890,7 +890,7 @@ pub(crate) mod test_support {
     /// must hold this — *including* tests that only care about consent.
     /// Otherwise they read the real machine policy and fail on an
     /// administratively managed device.
-    pub(crate) struct TelemetryTestEnv {
+    pub struct TelemetryTestEnv {
         // Fields drop in declaration order, so consent is released before
         // policy: the exact reverse of the acquisition order below.
         _consent: LocalAppDataGuard,
@@ -900,7 +900,7 @@ pub(crate) mod test_support {
     impl TelemetryTestEnv {
         /// Redirects the consent store to `store` and the policy key to a
         /// fresh, empty one (i.e. an unmanaged machine).
-        pub(crate) fn new(store: &std::path::Path) -> Self {
+        pub fn new(store: &std::path::Path) -> Self {
             let policy = PolicyKeyGuard::new();
             let _consent = LocalAppDataGuard::set(store);
             Self { _consent, policy }
@@ -908,7 +908,7 @@ pub(crate) mod test_support {
 
         /// Sets the administrative `AllowTelemetry` policy value.
         #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        pub(crate) fn set_policy_value(&self, value: u32) {
+        pub fn set_policy_value(&self, value: u32) {
             self.policy.set_value(value);
         }
     }

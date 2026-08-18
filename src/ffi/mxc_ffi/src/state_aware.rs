@@ -117,7 +117,10 @@ pub unsafe extern "C" fn mxc_state_aware(
     let result = catch_unwind(AssertUnwindSafe(|| {
         state_aware_inner(request_json_utf8, dry_run != 0, experimental != 0)
     }))
-    .unwrap_or_else(|_| MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked"));
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware", &*panic);
+        MxcStateAwareResult::error(MXC_STATUS_PANIC, "the mxc engine panicked")
+    });
 
     let status = result.status;
     // SAFETY: `out` is non-null and caller-guaranteed writable; ownership of the
@@ -166,10 +169,12 @@ pub unsafe extern "C" fn mxc_state_aware_result_free(r: *mut MxcStateAwareResult
     if r.is_null() {
         return;
     }
-    let _ = catch_unwind(AssertUnwindSafe(|| {
+    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: caller guarantees `r` points to a valid, not-yet-freed result.
         unsafe { (*r).free_strings() };
-    }));
+    })) {
+        crate::report_panic("mxc_state_aware_result_free", &*panic);
+    }
 }
 
 /// Run the `exec` phase of a state-aware request as a **live streaming** process.
@@ -244,7 +249,8 @@ pub unsafe extern "C" fn mxc_state_aware_exec(
             )
         })
     }))
-    .unwrap_or_else(|_| {
+    .unwrap_or_else(|panic| {
+        crate::report_panic("mxc_state_aware_exec", &*panic);
         Err((
             MXC_STATUS_PANIC,
             MxcErrorDetail::from_message("the mxc engine panicked"),

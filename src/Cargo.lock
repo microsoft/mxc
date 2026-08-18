@@ -1550,7 +1550,10 @@ version = "0.7.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "serde",
  "serde_json",
+ "tempfile",
+ "wxc_common",
 ]
 
 [[package]]
