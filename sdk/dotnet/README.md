@@ -1,6 +1,6 @@
 # Microsoft.Mxc.Sdk (C# SDK)
 
-A .NET binding for [MXC](../README.md) (Microsoft eXecution Container),
+A .NET binding for [MXC](../../README.md) (Microsoft eXecution Container),
 implemented in C#. It runs a command inside a sandbox described by a
 `SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
 library, which wraps the Rust engine.
@@ -155,6 +155,30 @@ failure, `MxcSandboxProcess.OutputMetadata` exposes the same structured feature
 outputs as `RunResult.OutputMetadata`. Disposing without waiting deletes an
 internal ETL even when retention was requested.
 
+## Telemetry consent
+
+MXC telemetry is Windows-only and remains off until both of these are true:
+1. the user has explicitly granted MXC-owned consent, and
+2. the caller opts this invocation in via telemetry settings.
+
+Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
+
+Any .NET consent surface should stay UI-agnostic, present the canonical
+resource verbatim through a host callback, persist only explicit yes/no
+decisions, treat dismissal and failures as non-grants, and follow the rules in
+[`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
+and its
+[SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
+
+### Administrative policy
+
+An IT administrator can still block MXC telemetry device-wide via MXC's own
+registry policy setting. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
+for the stable registry contract and interaction rules. Any eventual .NET
+policy/consent query must fail closed rather than upgrading an unreadable
+device state into collection.
+
 ## Projects
 
 - **`Microsoft.Mxc.Sdk`** — the class library (public API + generated P/Invoke).
@@ -162,6 +186,8 @@ internal ETL even when retention was requested.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`).
 
 Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
+
+Run native telemetry-consent integration tests in the **Debug** configuration.
 
 ## Native library loading
 
