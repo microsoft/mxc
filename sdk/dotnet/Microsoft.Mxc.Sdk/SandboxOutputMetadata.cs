@@ -24,7 +24,10 @@ public sealed class CaptureDenialsErrorOutput
     [JsonPropertyName("message")]
     public string Message { get; init; } = string.Empty;
 
-    /// <summary>Absolute path to the retained ETL trace.</summary>
+    /// <summary>
+    /// Absolute path to the retained ETL trace. Delete this file after use; do not delete its
+    /// parent directory unless the caller independently owns or positively recognizes it.
+    /// </summary>
     [JsonPropertyName("etlPath")]
     public string EtlPath { get; init; } = string.Empty;
 }
@@ -52,7 +55,11 @@ public sealed class CaptureDenialsOutput
     [JsonPropertyName("deniedResourcesTruncated")]
     public bool DeniedResourcesTruncated { get; init; }
 
-    /// <summary>Absolute path to the retained ETL trace, when requested.</summary>
+    /// <summary>
+    /// Absolute path to the retained ETL trace, when requested. Delete this file after use; do
+    /// not delete its parent directory unless the caller independently owns or positively
+    /// recognizes it.
+    /// </summary>
     [JsonPropertyName("etlPath")]
     public string? EtlPath { get; init; }
 }

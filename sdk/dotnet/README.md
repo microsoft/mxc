@@ -44,8 +44,10 @@ generated JSON document and carries its summary. When ETL retention is enabled,
 `OutputMetadata.CaptureDenials.EtlPath` identifies the retained trace. If
 capture finalization fails after retaining the trace,
 `OutputMetadata.CaptureDenialsError` carries both the failure and its path.
-After deleting a retained ETL, also remove its now-empty per-run parent
-directory.
+Delete every reported ETL file after use. Do not delete its parent directory
+unless your application independently owns or positively recognizes that
+directory; it may be a shared location such as the system temporary directory
+or the configured output directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
@@ -87,11 +89,15 @@ foreach (string warning in result.Warnings)
 ```
 
 `OutputPath`'s parent directory must already exist. When it is omitted, MXC
-uses a managed temporary location. If `RetainEtl` is `true`, delete the
-reported ETL after use and remove its now-empty per-run parent directory.
+uses a run-unique file in the system temporary directory. Delete every reported
+ETL file after use, including an ETL reported through
+`CaptureDenialsError.EtlPath`; do not delete its parent directory unless your
+application independently owns or positively recognizes that directory.
 `CaptureDenialsMode.Allow` intentionally weakens deny-by-default containment;
-always inspect `RunResult.Warnings`. Linux and macOS accept the policy for
-cross-platform parity but do not act on it.
+always inspect `RunResult.Warnings`. Streaming processes currently do not
+expose warnings, so use `Run` or `RunAsync` when warning inspection is required.
+Linux and macOS accept the policy for cross-platform parity but do not act on
+it.
 
 ### Streaming
 

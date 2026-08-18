@@ -52,6 +52,10 @@ public enum CaptureDenialsMode
 
     /// <summary>
     /// Allow and record the access. This relaxes containment for the run and emits a warning.
+    /// <see cref="MxcSandbox.Run(SandboxPolicy, string)"/> and
+    /// <see cref="MxcSandbox.RunAsync(SandboxPolicy, string, CancellationToken)"/> expose that
+    /// warning; streaming processes returned by
+    /// <see cref="MxcSandbox.Spawn(SandboxPolicy, string)"/> currently do not.
     /// </summary>
     Allow,
 }
@@ -69,15 +73,17 @@ public sealed class CaptureDenialsPolicy
     /// <summary>
     /// Optional absolute path for the JSON denials document. The parent directory must exist.
     /// MXC inserts a per-run identifier into the file stem and reports the actual path through
-    /// output metadata. When omitted, MXC uses a managed temporary path.
+    /// output metadata. When omitted, MXC uses a run-unique file in the system temporary
+    /// directory.
     /// </summary>
     [JsonPropertyName("outputPath")]
     public string? OutputPath { get; set; }
 
     /// <summary>
     /// Preserve the sealed ETL trace and report its path through output metadata. Retained traces
-    /// can contain sensitive paths and identifiers; callers must delete both the trace and its
-    /// now-empty per-run parent directory.
+    /// can contain sensitive paths and identifiers; callers must delete the reported trace after
+    /// use. Do not delete its parent directory unless the caller independently owns or positively
+    /// recognizes that directory.
     /// </summary>
     [JsonPropertyName("retainEtl")]
     public bool RetainEtl { get; set; }

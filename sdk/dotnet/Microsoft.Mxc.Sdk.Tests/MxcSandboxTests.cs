@@ -2,7 +2,6 @@
 // Licensed under the MIT License.
 
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using Microsoft.Mxc.Sdk;
 using Xunit;
 
@@ -59,12 +58,7 @@ public class MxcSandboxTests
             },
         };
 
-        var options = new JsonSerializerOptions
-        {
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-        };
-        var json = JsonSerializer.Serialize(policy, options);
+        var json = MxcSandbox.SerializePolicy(policy);
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -87,13 +81,7 @@ public class MxcSandboxTests
             Version = "0.8.0-alpha",
             CaptureDenials = new CaptureDenialsPolicy(),
         };
-        var options = new JsonSerializerOptions
-        {
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-        };
-
-        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(policy, options));
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
         var capture = doc.RootElement.GetProperty("captureDenials");
 
         Assert.Equal("block", capture.GetProperty("mode").GetString());
@@ -105,13 +93,7 @@ public class MxcSandboxTests
     public void SandboxPolicy_OmitsCaptureDenialsWhenNotConfigured()
     {
         var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
-        var options = new JsonSerializerOptions
-        {
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-        };
-
-        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(policy, options));
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
 
         Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
     }

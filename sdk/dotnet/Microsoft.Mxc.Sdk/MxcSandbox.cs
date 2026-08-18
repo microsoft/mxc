@@ -57,7 +57,7 @@ public static class MxcSandbox
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
 
-        var policyJson = JsonSerializer.Serialize(policy, PolicyJsonOptions);
+        var policyJson = SerializePolicy(policy);
         var policyBuf = ToNullTerminatedUtf8(policyJson);
         var commandBuf = ToNullTerminatedUtf8(command);
 
@@ -122,7 +122,7 @@ public static class MxcSandbox
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(command);
 
-        var policyJson = JsonSerializer.Serialize(policy, PolicyJsonOptions);
+        var policyJson = SerializePolicy(policy);
         var policyBuf = ToNullTerminatedUtf8(policyJson);
         var commandBuf = ToNullTerminatedUtf8(command);
 
@@ -155,6 +155,12 @@ public static class MxcSandbox
         Encoding.UTF8.GetBytes(value, 0, value.Length, buffer, 0);
         buffer[byteCount] = 0;
         return buffer;
+    }
+
+    internal static string SerializePolicy(SandboxPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        return JsonSerializer.Serialize(policy, PolicyJsonOptions);
     }
 
     private static unsafe string? PtrToString(byte* p) =>
