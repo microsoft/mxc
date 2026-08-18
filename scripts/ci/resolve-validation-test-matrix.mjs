@@ -158,9 +158,9 @@ function validateBackendDelayedStart(catalog) {
     }
     seen.add(entry.backend);
 
-    if (!Number.isInteger(entry.minutes) || entry.minutes < 0) {
+    if (!Number.isInteger(entry.seconds) || entry.seconds < 0) {
       throw new Error(
-        `backendDelayedStart ${entry.backend} minutes must be a non-negative integer`
+        `backendDelayedStart ${entry.backend} seconds must be a non-negative integer`
       );
     }
   }
@@ -228,7 +228,7 @@ export function resolvePlan(catalog, plan) {
 // pool shares one egress address, so simultaneous starts concentrate that
 // traffic into a burst that draws rate limiting and stalled downloads.
 //
-// The entry's minutes value is the gap between consecutive jobs of that
+// The entry's seconds value is the gap between consecutive jobs of that
 // backend, counted independently per backend. Applied after sorting so the
 // assignment follows the emitted order and stays reproducible.
 function applyDelayedStart(matrices, delays) {
@@ -237,17 +237,17 @@ function applyDelayedStart(matrices, delays) {
     return;
   }
 
-  const stepMinutes = new Map(delays.map(entry => [entry.backend, entry.minutes]));
+  const stepSeconds = new Map(delays.map(entry => [entry.backend, entry.seconds]));
   const scheduled = new Map();
 
   for (const family of FAMILIES) {
     for (const entry of matrices[family]) {
-      const step = stepMinutes.get(entry.backend);
+      const step = stepSeconds.get(entry.backend);
       if (step === undefined) {
-        entry.startup_delay_minutes = 0;
+        entry.startup_delay_seconds = 0;
       } else {
         const position = scheduled.get(entry.backend) ?? 0;
-        entry.startup_delay_minutes = position * step;
+        entry.startup_delay_seconds = position * step;
         scheduled.set(entry.backend, position + 1);
       }
     }
@@ -258,7 +258,7 @@ function applyDelayedStart(matrices, delays) {
 function setDefaultDelays(matrices) {
   for (const family of FAMILIES) {
     for (const entry of matrices[family]) {
-      entry.startup_delay_minutes = 0;
+      entry.startup_delay_seconds = 0;
     }
   }
 }

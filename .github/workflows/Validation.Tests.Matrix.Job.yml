@@ -51,15 +51,15 @@ jobs:
           path: artifacts/bin
 
       - name: Delayed start
-        if: matrix.startup_delay_minutes > 0
+        if: matrix.startup_delay_seconds > 0
         shell: pwsh
         run: |
           # Spreads network-heavy setup across the pool's shared egress address
           # instead of issuing every job's downloads at once. Configured by
           # backendDelayedStart in scripts/ci/validation-test-matrix.json.
-          $minutes = ${{ matrix.startup_delay_minutes }}
-          Write-Host "Waiting $minutes minute(s) before downloading prerequisites."
-          Start-Sleep -Seconds ($minutes * 60)
+          $seconds = ${{ matrix.startup_delay_seconds }}
+          Write-Host "Waiting $seconds second(s) before downloading prerequisites."
+          Start-Sleep -Seconds $seconds
 
       - name: Prepare backend prerequisites
         timeout-minutes: 15
@@ -125,16 +125,16 @@ jobs:
           path: artifacts/bin
 
       - name: Delayed start
-        if: matrix.startup_delay_minutes > 0
+        if: matrix.startup_delay_seconds > 0
         shell: bash
         run: |
           # Spreads network-heavy setup across the pool's shared egress address
           # instead of issuing every job's downloads at once. Configured by
           # backendDelayedStart in scripts/ci/validation-test-matrix.json.
           set -euo pipefail
-          minutes=${{ matrix.startup_delay_minutes }}
-          echo "Waiting $minutes minute(s) before downloading prerequisites."
-          sleep $(( minutes * 60 ))
+          seconds=${{ matrix.startup_delay_seconds }}
+          echo "Waiting $seconds second(s) before downloading prerequisites."
+          sleep "$seconds"
 
       - name: Prepare backend prerequisites
         timeout-minutes: 15
@@ -188,16 +188,16 @@ jobs:
           path: artifacts/bin
 
       - name: Delayed start
-        if: matrix.startup_delay_minutes > 0
+        if: matrix.startup_delay_seconds > 0
         shell: bash
         run: |
           # Spreads network-heavy setup across the pool's shared egress address
           # instead of issuing every job's downloads at once. Configured by
           # backendDelayedStart in scripts/ci/validation-test-matrix.json.
           set -euo pipefail
-          minutes=${{ matrix.startup_delay_minutes }}
-          echo "Waiting $minutes minute(s) before starting tests."
-          sleep $(( minutes * 60 ))
+          seconds=${{ matrix.startup_delay_seconds }}
+          echo "Waiting $seconds second(s) before starting tests."
+          sleep "$seconds"
 
       - name: Run backend tests
         timeout-minutes: 60

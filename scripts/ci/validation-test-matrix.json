@@ -328,7 +328,7 @@
   "backendDelayedStart": [
     {
       "backend": "wslc",
-      "minutes": 2
+      "seconds": 45
     }
   ],
   "triggers": {

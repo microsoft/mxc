@@ -163,7 +163,7 @@ them all begin at once:
 
 ```json
 "backendDelayedStart": [
-  { "backend": "wslc", "minutes": 5 }
+  { "backend": "wslc", "seconds": 300 }
 ]
 ```
 
@@ -172,12 +172,12 @@ pulls down a large runtime or several container images concentrates all that
 traffic into a burst the moment its jobs start together. Public registries
 answer with rate limiting and stalled downloads.
 
-`minutes` is the gap between consecutive jobs of that backend, counted per
+`seconds` is the gap between consecutive jobs of that backend, counted per
 backend and following the resolved job order. With the entry above, four WSLC
-jobs start at 0, 5, 10, and 15 minutes.
+jobs start at 0, 300, 600, and 900 seconds.
 
 The resolver puts the offset on every matrix entry as
-`startup_delay_minutes` — `0` where no stagger applies — and the job sleeps
+`startup_delay_seconds` — `0` where no stagger applies — and the job sleeps
 that long before its first network step. Job timeout is a flat 180 minutes,
 with plenty of room for any wait you'd reasonably configure.
 
