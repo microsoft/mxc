@@ -26,6 +26,25 @@ use learning_mode_core::{
 };
 use wxc_common::models::CaptureDenialsOutput;
 
+/// Directory name of the protected retained-ETL store. Sealed ETLs are promoted
+/// out of working storage into a per-run directory beneath a sibling directory
+/// with this name (`.../capture-denials/retained/<run>/`). Owned here so
+/// consumers that need to recognize a promoted retained-capture directory —
+/// e.g. `wxc-exec --audit` relocating and pruning the run directory — do not
+/// duplicate the literal.
+pub const RETAINED_CAPTURE_DIR_NAME: &str = "retained";
+
+/// Whether `directory` is a per-run directory sitting directly beneath the
+/// retained-capture store (`.../retained/<run>`). Recognizes the promoted
+/// location produced by the BaseContainer capture path so callers can safely
+/// prune it once its ETL has moved out, without hard-coding the store name.
+pub fn is_retained_capture_run_dir(directory: &Path) -> bool {
+    directory
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|name| name.eq_ignore_ascii_case(RETAINED_CAPTURE_DIR_NAME))
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct DenialsOutputPaths {
     pub denials: PathBuf,

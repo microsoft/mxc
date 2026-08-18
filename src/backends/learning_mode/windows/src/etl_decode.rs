@@ -78,6 +78,7 @@ pub(crate) struct ProcessLifetimeIndex {
 
 pub(crate) struct RelogSelection {
     pub(crate) selected_event_indices: Vec<usize>,
+    pub(crate) selected_event_pids: Vec<u32>,
     pub(crate) total_event_count: usize,
 }
 
@@ -132,6 +133,7 @@ struct Accumulator<'visitor> {
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
     relog_selected_event_indices: Vec<usize>,
+    relog_selected_event_pids: Vec<u32>,
     relog_event_count: usize,
     raw_event_count: usize,
     processed_event_count: usize,
@@ -154,6 +156,7 @@ impl<'visitor> Accumulator<'visitor> {
             truncated: false,
             raw_visitor: None,
             relog_selected_event_indices: Vec::new(),
+            relog_selected_event_pids: Vec::new(),
             relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
@@ -183,6 +186,7 @@ impl<'visitor> Accumulator<'visitor> {
             truncated: false,
             raw_visitor: Some(visitor),
             relog_selected_event_indices: Vec::new(),
+            relog_selected_event_pids: Vec::new(),
             relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
@@ -205,6 +209,7 @@ impl<'visitor> Accumulator<'visitor> {
             truncated: false,
             raw_visitor: None,
             relog_selected_event_indices: Vec::new(),
+            relog_selected_event_pids: Vec::new(),
             relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
@@ -599,6 +604,7 @@ pub(crate) fn select_learning_mode_events_for_relogging(
     }
     Ok(RelogSelection {
         selected_event_indices: accumulator.relog_selected_event_indices,
+        selected_event_pids: accumulator.relog_selected_event_pids,
         total_event_count: accumulator.relog_event_count,
     })
 }
@@ -747,6 +753,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
+
     if matches!(acc.mode, CollectionMode::SelectForRelogging) {
         if crate::extractors::provider_category(provider).is_none() {
             return;
@@ -781,6 +788,10 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         return;
     }
 
+    // Establish scope before charging the event against the shared processing
+    // budget. Brokered capability events are scoped after decoding their
+    // effective workload PID below; all other supported events can use the
+    // header PID directly.
     let mut analyze_filetime = None;
 
     if matches!(acc.mode, CollectionMode::Analyze) {
@@ -935,6 +946,7 @@ fn select_event_for_relogging(
         return;
     }
     acc.relog_selected_event_indices.push(event_index);
+    acc.relog_selected_event_pids.push(pid);
 }
 
 /// Extracts denials from one decoded, in-vocabulary event and feeds them

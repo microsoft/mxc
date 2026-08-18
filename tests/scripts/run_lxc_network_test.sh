@@ -15,6 +15,5 @@ if [ ! -f "$LXC_EXEC" ]; then
     exit 1
 fi
 
-echo "Running LXC network test..."
 "$LXC_EXEC" "$REPO_DIR/tests/configs/lxc_network_test.json"
 echo "LXC network test complete."

@@ -11,7 +11,9 @@
 //! it to the dispatcher only for requests that actually need the fallback
 //! (`request.policy.capture_denials.is_some()` on a non-native tier).
 
-use appcontainer_common::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
+use appcontainer_common::guarded_capture::{
+    AnalyzedTrace, GuardedCaptureFactory, GuardedCaptureSession,
+};
 use learning_mode_core::AnalysisResult;
 use std::os::windows::ffi::OsStringExt;
 use windows::core::PCWSTR;
@@ -185,10 +187,23 @@ impl GuardedCaptureSession for PlmGuardedCaptureSession {
     fn stop_analyzed_with_trace(
         &mut self,
         trace_destination: &std::path::Path,
-    ) -> Result<AnalysisResult, String> {
-        self.session
+    ) -> Result<AnalyzedTrace, String> {
+        // `Err` is an analysis failure. A trace-transfer failure after a
+        // successful analysis is carried inside `AnalyzedTraceTransfer` and
+        // mapped to `AnalyzedTrace::trace_retention` — never allowed to discard
+        // the decoded analysis.
+        let plm::elevated::AnalyzedTraceTransfer {
+            analysis,
+            trace_transfer,
+        } = self
+            .session
             .stop_analyzed_with_trace(trace_destination)
-            .map_err(|e| format!("guarded WPR stop/analyze/trace transfer failed: {e:#}"))
+            .map_err(|e| format!("guarded WPR stop/analyze failed: {e:#}"))?;
+        Ok(AnalyzedTrace {
+            analysis,
+            trace_retention: trace_transfer
+                .map_err(|e| format!("guarded WPR trace transfer failed: {e:#}")),
+        })
     }
 }
 

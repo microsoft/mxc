@@ -24,7 +24,7 @@ jobs:
             clippy-args: --locked --all-targets --all-features --release
           - os_label: macos
             component: MAC
-            runner: macos-14
+            runner: macos-26
             target: aarch64-apple-darwin
             working-directory: src
             # Workspace has Windows-only crates, so --all-features won't build on macOS.

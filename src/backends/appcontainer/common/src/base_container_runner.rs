@@ -44,7 +44,8 @@ use crate::capture_output::{
     write_stderr_line_best_effort,
 };
 use crate::guarded_capture::{
-    transferred_trace_error_metadata, GuardedCaptureFactory, GuardedCaptureSession,
+    finalize_guarded_capture, validate_retain_etl_supported, GuardedCaptureFactory,
+    GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::{
@@ -2318,20 +2319,6 @@ struct BaseChild {
     retain_capture_etl: bool,
 }
 
-fn validate_guarded_etl_retention(
-    use_process_security_environment: bool,
-    retain_etl: bool,
-    allows_trace_transfer: bool,
-) -> Result<(), ScriptResponse> {
-    if !use_process_security_environment && retain_etl && !allows_trace_transfer {
-        return Err(ScriptResponse {
-            failure_phase: FailurePhase::BackendUnavailable,
-            ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
-        });
-    }
-    Ok(())
-}
-
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         let capture_denials = request.policy.capture_denials.is_some();
@@ -2346,8 +2333,10 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
-        validate_guarded_etl_retention(
-            use_process_security_environment,
+        // BaseContainer's native PSEC/V2 capture seals its own ETL, so when it
+        // is selected retainEtl is honored natively regardless of the guarded
+        // provider's transfer capability (the native-capture exception).
+        validate_retain_etl_supported(
             request
                 .policy
                 .capture_denials
@@ -2356,6 +2345,7 @@ impl SandboxBackend for BaseContainerRunner {
             self.guarded_capture_factory
                 .as_ref()
                 .is_some_and(|factory| factory.allows_trace_transfer()),
+            use_process_security_environment,
         )?;
         if capture_denials
             && !use_process_security_environment
@@ -2701,52 +2691,35 @@ impl BaseContainerSandboxProcess {
             self.managed_capture.take();
             Ok(None)
         };
-        let guarded_capture_result = if let Some(mut session) = self.guarded_capture_session.take()
-        {
-            let output_path = self.capture_output_path.take();
-            let etl_path = self
-                .guarded_capture_etl_path
-                .take()
-                .filter(|_| allow_retention);
-            let exit_code = self.last_exit_code.unwrap_or(-1);
-            let stop_result = match etl_path.as_deref() {
-                Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
-                None => session.stop_analyzed(),
-            };
-            let etl_was_transferred = etl_path.is_some() && stop_result.is_ok();
-            let result = stop_result
-                .map_err(|error| {
-                    std::io::Error::other(format!(
-                        "captureDenials failed to stop and analyze guarded WPR: {error}"
-                    ))
-                })
-                .and_then(|analysis| {
-                    let output_path = output_path.ok_or_else(|| {
-                        std::io::Error::other("captureDenials output path was not initialized")
-                    })?;
-                    write_denials_document(analysis, exit_code, &output_path).map(|mut metadata| {
-                        metadata.etl_path = etl_path
-                            .as_ref()
-                            .map(|path| path.to_string_lossy().into_owned());
-                        metadata
-                    })
-                });
-            if let Ok(metadata) = &result {
-                self.output_metadata = Some(SandboxOutputMetadata {
-                    capture_denials: Some(metadata.clone()),
-                    capture_denials_error: None,
-                });
-            } else if let Err(error) = &result {
-                self.output_metadata = transferred_trace_error_metadata(
-                    error,
-                    etl_path.as_deref(),
-                    etl_was_transferred,
+        let guarded_capture_result: std::io::Result<Option<CaptureDenialsOutput>> =
+            if let Some(mut session) = self.guarded_capture_session.take() {
+                let output_path = self.capture_output_path.take();
+                let etl_path = self
+                    .guarded_capture_etl_path
+                    .take()
+                    .filter(|_| allow_retention);
+                let exit_code = self.last_exit_code.unwrap_or(-1);
+                let stop = match etl_path.as_deref() {
+                    Some(destination) => GuardedStop::AnalyzeAndRetain { destination },
+                    None => GuardedStop::AnalyzeOnly,
+                };
+                // The shared finalizer owns every analysis-vs-retention state
+                // transition so this native-tier guarded fallback and the
+                // AppContainer guarded tier stay byte-for-byte identical.
+                let finalization = finalize_guarded_capture(
+                    session.as_mut(),
+                    output_path.as_deref(),
+                    stop,
+                    exit_code,
                 );
-            }
-            result.map(Some)
-        } else {
-            Ok(None)
-        };
+                self.output_metadata = finalization.metadata;
+                finalization
+                    .result
+                    .map(|()| None)
+                    .map_err(std::io::Error::other)
+            } else {
+                Ok(None)
+            };
         self.security_environment.take();
 
         if self.destroy_on_exit {
@@ -3142,7 +3115,7 @@ fn promote_capture_for_retention(
     let capture_root = working_root
         .parent()
         .ok_or_else(|| std::io::Error::other("captureDenials working root has no parent"))?;
-    let retained_root = capture_root.join("retained");
+    let retained_root = capture_root.join(crate::capture_output::RETAINED_CAPTURE_DIR_NAME);
     std::fs::create_dir_all(&retained_root)?;
     wxc_common::filesystem_dacl::set_owner_only_dacl(&retained_root, true)
         .map_err(std::io::Error::other)?;
@@ -4623,71 +4596,7 @@ mod tests {
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 0);
     }
 
-    #[test]
-    fn validate_runner_rejects_etl_retention_when_guarded_fallback_is_selected() {
-        let runner = BaseContainerRunner::default();
-        let mut request = ExecutionRequest::default();
-        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
-            retain_etl: true,
-            ..Default::default()
-        });
-
-        let error = validate_guarded_etl_retention(
-            false,
-            request
-                .policy
-                .capture_denials
-                .as_ref()
-                .is_some_and(|config| config.retain_etl),
-            runner
-                .guarded_capture_factory
-                .as_ref()
-                .is_some_and(|factory| factory.allows_trace_transfer()),
-        )
-        .expect_err("the configured guarded provider cannot transfer ETL");
-
-        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
-        assert_eq!(
-            error.error_message,
-            crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG
-        );
-    }
-
-    #[test]
-    fn validate_runner_allows_guarded_etl_when_provider_supports_transfer() {
-        struct NeverStartedFactory;
-        impl GuardedCaptureFactory for NeverStartedFactory {
-            fn allows_trace_transfer(&self) -> bool {
-                true
-            }
-
-            fn start(&self, _owner_pid: u32) -> Result<Box<dyn GuardedCaptureSession>, String> {
-                Err("not started during validation".to_string())
-            }
-        }
-
-        let runner = BaseContainerRunner {
-            guarded_capture_factory: Some(Arc::new(NeverStartedFactory)),
-            ..Default::default()
-        };
-        let mut request = ExecutionRequest::default();
-        request.policy.capture_denials = Some(wxc_common::models::CaptureDenialsConfig {
-            retain_etl: true,
-            ..Default::default()
-        });
-
-        validate_guarded_etl_retention(
-            false,
-            request
-                .policy
-                .capture_denials
-                .as_ref()
-                .is_some_and(|config| config.retain_etl),
-            runner
-                .guarded_capture_factory
-                .as_ref()
-                .is_some_and(|factory| factory.allows_trace_transfer()),
-        )
-        .expect("a transfer-capable guarded provider should permit ETL retention");
-    }
+    // ETL-retention capability validation (the retainEtl gate, including the
+    // BaseContainer native-PSEC exception) is exercised as a consolidated
+    // matrix in `crate::guarded_capture`'s tests, so it is not duplicated here.
 }

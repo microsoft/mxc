@@ -43,6 +43,60 @@ build.bat --with-microvm   # Include NanVix micro-VM binaries
 
 Requires Xcode Command Line Tools and Rust. Produces an unsigned `mxc-exec-mac` binary (codesigning + notarization happen at release time). Schema `0.7.0-alpha` or later required for macOS/Seatbelt backend.
 
+### GitHub Actions
+
+`.github/workflows/Build.yml` is the PR/CI entry point. It fans out to the
+workflow-call-only `Build.Windows.Job.yml`, `Build.Linux.Job.yml`, and
+`Build.MacOS.Job.yml`, which build and upload the per-target artifacts in
+parallel, then to the lint / versioning / SDK jobs.
+
+**Validation (E2E) test infrastructure.** Fully documented in
+[`docs/ci-validation-infrastructure.md`](../docs/ci-validation-infrastructure.md)
+(matrix contents, job names, per-backend coverage and status, and the runbook
+for adding/removing an OS, backend, or plan). Backend E2E tests run from those
+same build artifacts — never from a fresh build — so artifact production and
+consumption stay in one workflow run:
+
+- `.github/workflows/Validation.Tests.Scheduled.yml` — scheduled entry point.
+  The `nightly` plan runs Mon–Sat; Sunday runs `nightly` *and* `weekly`.
+  `workflow_dispatch` takes a `plan` input to run one on demand.
+- `.github/workflows/Validation.Tests.Matrix.Job.yml` — workflow-call-only,
+  takes a `plan` input. Its `resolve` job expands the plan into per-family
+  matrices, then the `windows` / `linux` / `macos` jobs each download the
+  artifact, prepare the host, and run the backend suite.
+
+An entry point must build the artifacts (call the three `Build.*.Job.yml`
+workflows) before calling the matrix job.
+
+**The matrix is declarative:**
+
+- `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
+  with per-architecture target/artifact/1ES pool and the backends that platform
+  supports) and `triggers` (which OS/backend pairs each plan runs). The
+  `triggers` keys *are* the plan list — the resolver reads them at run time, so
+  adding a plan needs no script change.
+- `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
+  expands a plan (currently `pr`, `nightly`, `weekly`, `enabled`) into GitHub
+  Actions matrices. It rejects an invalid catalog before any specialized test
+  runner is allocated, so add a backend to a trigger only where the platform
+  declares it.
+- A non-macOS platform architecture with an empty `pool` is never scheduled,
+  which is how a catalog entry stays declared but dormant. macOS entries use a
+  GitHub-hosted `runner` instead of a 1ES `pool`.
+
+**Host preparation** happens in the matrix job before the tests, keyed by the
+matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
+`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
+explicit no-op, so the step runs unconditionally for every entry.
+
+**Test dispatch** goes through `tests/scripts/run_ci_backend_tests.ps1`
+(Windows) and `tests/scripts/run_ci_backend_tests.sh` (Linux/macOS), which map
+the matrix `backend` id to the repository's existing backend suite. Ids that
+share a suite get their own case (`process-t1` and `process-t3` both run
+`WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
+host's own `--probe`). A backend with no wired suite fails loudly rather than
+reporting a false success.
+
 ### Individual components
 
 ```
@@ -98,6 +152,18 @@ tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, req
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
+
+# WSLC has no cargo E2E suite — it is covered by tests\scripts\run_wslc_all_tests.ps1,
+# which the validation matrix runs via tests\scripts\run_ci_backend_tests.ps1.
+
+# CI validation entry points — run a backend suite against a downloaded artifact
+# the way the validation matrix does. Take the matrix backend id exactly as it
+# appears in scripts/ci/validation-test-matrix.json.
+tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
+tests\scripts\run_ci_backend_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
+
+# Resolve a plan locally to see exactly what CI would schedule
+node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
 ```
 
 ## Architecture
@@ -154,6 +220,7 @@ Core references:
 - `docs/authoring-a-new-feature.md` — step-by-step guide for adding experimental features (which files to touch, in what order)
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
+- `docs/ci-validation-infrastructure.md` — validation (E2E) test matrix: workflows and job names, catalog format, per-backend coverage and status, and the runbook for adding/removing an OS, backend, or plan
 - `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/0.7.0/policy.md` — sandbox policy 0.7.0 specification
 

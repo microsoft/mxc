@@ -13,9 +13,11 @@ jobs:
           - arch: x64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            features: hyperlight
           - arch: arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            features: ''
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -54,12 +56,26 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
 
       - name: Build lxc
-        run: cargo build --locked --release --target ${{ matrix.target }}
-             --no-default-features --features hyperlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ -n "${{ matrix.features }}" ]]; then
+            features=(--features "${{ matrix.features }}")
+          fi
+          cargo build --locked --release --target "${{ matrix.target }}" \
+            --no-default-features "${features[@]}"
 
       - name: Test lxc
-        run: cargo test --locked --release --target ${{ matrix.target }}
-             --no-default-features --features hyperlight
+        shell: bash
+        run: |
+          set -euo pipefail
+          features=()
+          if [[ -n "${{ matrix.features }}" ]]; then
+            features=(--features "${{ matrix.features }}")
+          fi
+          cargo test --locked --release --target "${{ matrix.target }}" \
+            --no-default-features "${features[@]}"
 
       # Bubblewrap is required to run the executor characterization tests in
       # wxc_e2e_tests (they skip via has_bwrap() when it is absent). lxc-exec
@@ -81,7 +97,7 @@ jobs:
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
              -p wxc_e2e_tests
-
+             
       # PLM (Permissive Learning Mode) is functionally Windows-only, but the
       # crate builds cross-platform: the lib's helper modules compile on every
       # target, and the binary has a no-op stub `fn main()` for non-Windows so

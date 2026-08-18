@@ -1,0 +1,54 @@
+name: Scheduled Validation Tests
+
+on:
+  schedule:
+    - cron: '0 8 * * 1-6'
+    - cron: '0 8 * * 0'
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: Test plan to run.
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - weekly
+
+concurrency:
+  group: test-matrix-e2e-${{ github.ref }}-${{ github.event.schedule || inputs.plan }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  dependency-feed-check:
+    uses: ./.github/workflows/Dependency.Feed.Check.Job.yml
+
+  windows:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Windows.Job.yml
+
+  linux:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.Linux.Job.yml
+
+  macos:
+    needs: dependency-feed-check
+    uses: ./.github/workflows/Build.MacOS.Job.yml
+
+  test-nightly:
+    needs: [windows, linux, macos]
+    if: github.event_name == 'schedule' || inputs.plan == 'nightly'
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
+    with:
+      plan: nightly
+
+  test-weekly:
+    needs: [windows, linux, macos]
+    if: (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0') || inputs.plan == 'weekly'
+    uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
+    with:
+      plan: weekly

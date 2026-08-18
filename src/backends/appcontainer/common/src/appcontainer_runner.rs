@@ -33,7 +33,8 @@ use windows_core::{PCWSTR, PWSTR};
 
 use crate::capture_output;
 use crate::guarded_capture::{
-    transferred_trace_error_metadata, GuardedCaptureFactory, GuardedCaptureSession,
+    finalize_guarded_capture, validate_retain_etl_supported, GuardedCaptureFactory,
+    GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
 use crate::process_mitigation;
@@ -1504,21 +1505,19 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        if request
-            .policy
-            .capture_denials
-            .as_ref()
-            .is_some_and(|config| config.retain_etl)
-            && !self
-                .guarded_capture_factory
+        // AppContainer fallback tiers have no native capture path, so retainEtl
+        // is honored only by a guarded-WPR provider that can transfer the ETL.
+        validate_retain_etl_supported(
+            request
+                .policy
+                .capture_denials
                 .as_ref()
-                .is_some_and(|factory| factory.allows_trace_transfer())
-        {
-            return Err(ScriptResponse {
-                failure_phase: FailurePhase::BackendUnavailable,
-                ..ScriptResponse::error(crate::guarded_capture::RETAIN_ETL_UNSUPPORTED_MSG)
-            });
-        }
+                .is_some_and(|config| config.retain_etl),
+            self.guarded_capture_factory
+                .as_ref()
+                .is_some_and(|factory| factory.allows_trace_transfer()),
+            false,
+        )?;
         if request.policy.capture_denials.is_some() && self.guarded_capture_factory.is_none() {
             return Err(ScriptResponse {
                 failure_phase: FailurePhase::BackendUnavailable,
@@ -1696,10 +1695,10 @@ impl AppContainerSandboxProcess {
 
         // Stop and analyze the guarded WPR capture now that the child has
         // exited and been reaped (both `wait` and `Drop` kill + reap before
-        // calling this). All callers receive the bounded, process-scoped
-        // `AnalysisResult`; requests with `retainEtl` also receive the sealed
-        // trace. Write the analysis through the same shared `capture_output`
-        // plumbing the native BaseContainer path uses.
+        // calling this). The shared finalizer owns every analysis-vs-retention
+        // state transition (JSON write, metadata success/error, retention
+        // failure surfacing) so this legacy tier and the BaseContainer guarded
+        // tier cannot drift.
         let result: std::io::Result<()> = if let Some(mut session) = self.capture_session.take() {
             let output_path = self.capture_output_path.take();
             let etl_path = self
@@ -1707,47 +1706,14 @@ impl AppContainerSandboxProcess {
                 .take()
                 .filter(|_| allow_trace_transfer);
             let exit_code = self.last_exit_code.unwrap_or(-1);
-            let capture_result = match etl_path.as_deref() {
-                Some(etl_path) => session.stop_analyzed_with_trace(etl_path),
-                None => session.stop_analyzed(),
+            let stop = match etl_path.as_deref() {
+                Some(destination) => GuardedStop::AnalyzeAndRetain { destination },
+                None => GuardedStop::AnalyzeOnly,
             };
-            let etl_was_transferred = etl_path.is_some() && capture_result.is_ok();
-            let capture_result = match capture_result {
-                Ok(analysis) => match output_path {
-                    Some(output_path) => {
-                        capture_output::write_denials_document(analysis, exit_code, &output_path)
-                            .map(|mut metadata| {
-                                metadata.etl_path = etl_path
-                                    .as_ref()
-                                    .map(|path| path.to_string_lossy().into_owned());
-                                metadata
-                            })
-                    }
-                    None => Err(std::io::Error::other(
-                        "captureDenials internal output path was not initialized",
-                    )),
-                },
-                Err(error) => Err(std::io::Error::other(format!(
-                    "captureDenials failed to stop and analyze the guarded WPR session: {error}"
-                ))),
-            };
-            match capture_result {
-                Ok(metadata) => {
-                    self.output_metadata = Some(SandboxOutputMetadata {
-                        capture_denials: Some(metadata),
-                        capture_denials_error: None,
-                    });
-                    Ok(())
-                }
-                Err(error) => {
-                    self.output_metadata = transferred_trace_error_metadata(
-                        &error,
-                        etl_path.as_deref(),
-                        etl_was_transferred,
-                    );
-                    Err(error)
-                }
-            }
+            let finalization =
+                finalize_guarded_capture(session.as_mut(), output_path.as_deref(), stop, exit_code);
+            self.output_metadata = finalization.metadata;
+            finalization.result.map_err(std::io::Error::other)
         } else {
             Ok(())
         };
@@ -2216,10 +2182,13 @@ mod tests {
                 fn stop_analyzed_with_trace(
                     &mut self,
                     trace_destination: &std::path::Path,
-                ) -> Result<AnalysisResult, String> {
+                ) -> Result<crate::guarded_capture::AnalyzedTrace, String> {
                     std::fs::write(trace_destination, b"fake etl")
                         .map_err(|error| error.to_string())?;
-                    Ok(AnalysisResult::complete(Vec::new()))
+                    Ok(crate::guarded_capture::AnalyzedTrace {
+                        analysis: AnalysisResult::complete(Vec::new()),
+                        trace_retention: Ok(()),
+                    })
                 }
             }
             Ok(Box::new(FakeSession))
@@ -2298,7 +2267,7 @@ mod tests {
         fn stop_analyzed_with_trace(
             &mut self,
             _trace_destination: &std::path::Path,
-        ) -> Result<AnalysisResult, String> {
+        ) -> Result<crate::guarded_capture::AnalyzedTrace, String> {
             unreachable!()
         }
     }
