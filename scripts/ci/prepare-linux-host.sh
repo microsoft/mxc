@@ -129,6 +129,37 @@ start_lxc_bridge() {
     ip addr show "$bridge" || true
 }
 
+# Outbound container traffic leaves the bridge subnet with a private source
+# address, so it needs a MASQUERADE rule to reach anything off-host. lxc-net
+# normally installs one, but it skips its firewall setup when it believes
+# another manager owns the ruleset, leaving a bridge that hands out leases the
+# container cannot use. The symptom is a name-resolution failure inside the
+# guest, which reads like a policy problem and is not one.
+ensure_bridge_nat() {
+    local bridge="${LXC_BRIDGE:-lxcbr0}"
+    local subnet
+
+    subnet="$(ip -4 -o addr show "$bridge" 2>/dev/null | awk '{print $4}' | head -n 1)"
+    if [[ -z "$subnet" ]]; then
+        echo "WARNING: $bridge has no IPv4 subnet; skipping NAT setup." >&2
+        return 0
+    fi
+
+    # Match on the source subnet rather than the rule text: lxc-net's own rule
+    # and ours are equivalent however they are spelled.
+    if sudo iptables -t nat -S POSTROUTING 2>/dev/null |
+        grep -q -- "-s ${subnet%%/*}"; then
+        echo "NAT for $subnet is already present."
+        return 0
+    fi
+
+    if sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -d "$subnet" -j MASQUERADE; then
+        echo "Installed MASQUERADE for $subnet."
+    else
+        echo "WARNING: could not install MASQUERADE for $subnet; containers will not reach off-host destinations." >&2
+    fi
+}
+
 # Container network policy is programmed as iptables rules reached from
 # FORWARD, which only sees bridged traffic when br_netfilter is loaded and
 # bridge-nf-call-iptables is enabled. Neither is guaranteed on a fresh image,
@@ -185,7 +216,7 @@ report_lxc_network_diagnostics() {
     pgrep -af dnsmasq 2>/dev/null | sed 's/^/  /' || echo "  (none)"
 
     echo "NAT rules for the bridge subnet:"
-    sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E '10\.0\.3|MASQUERADE' |
+    sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E 'MASQUERADE|SNAT' |
         sed 's/^/  /' || echo "  (none found)"
 
     # A vacuous pass depends on this policy, so print it verbatim. grep reads
@@ -228,6 +259,48 @@ report_lxc_network_diagnostics() {
     echo "--- end diagnostics ---"
 }
 
+# Boot a throwaway container and confirm it gets an IPv4 lease and can reach
+# off-host. Every host-side check can pass while a container still comes up
+# IPv6-only, which surfaces as an unrelated-looking resolution failure much
+# later in the suite. Purely diagnostic: never fails the job.
+report_lxc_container_connectivity() {
+    local container="mxc-ci-netcheck-$$"
+
+    echo "--- LXC container connectivity probe ---"
+
+    if ! sudo lxc-create -n "$container" -t download -- \
+        --dist alpine --release 3.23 --arch "$(dpkg --print-architecture 2>/dev/null || arch)" \
+        >/dev/null 2>&1; then
+        echo "  could not create the probe container; skipping."
+        echo "--- end probe ---"
+        return 0
+    fi
+
+    if sudo lxc-start -n "$container" >/dev/null 2>&1; then
+        # The suite's own containers wait about this long for an address.
+        sudo lxc-wait -n "$container" -s RUNNING -t 15 >/dev/null 2>&1 || true
+        sleep 5
+
+        echo "  addresses:"
+        sudo lxc-info -n "$container" -iH 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+
+        if sudo lxc-info -n "$container" -iH 2>/dev/null | grep -qE '^[0-9]+\.'; then
+            echo "  IPv4: present"
+        else
+            echo "  WARNING: no IPv4 address; DHCPv4 on the bridge is not working." >&2
+        fi
+
+        echo "  resolution from inside the container:"
+        sudo lxc-attach -n "$container" -- getent hosts api.github.com 2>&1 |
+            sed 's/^/    /' || echo "    FAILED - the container cannot resolve"
+    else
+        echo "  probe container failed to start."
+    fi
+
+    sudo lxc-destroy -n "$container" -f >/dev/null 2>&1 || true
+    echo "--- end probe ---"
+}
+
 chmod +x "$binary_directory/lxc-exec"
 case "$backend" in
     bubblewrap)
@@ -251,7 +324,9 @@ case "$backend" in
         start_lxc_bridge
         enable_bridge_netfilter
         allow_host_forwarding
+        ensure_bridge_nat
         report_lxc_network_diagnostics
+        report_lxc_container_connectivity
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do
