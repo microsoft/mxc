@@ -4,7 +4,7 @@
 //! Transactional staging for the canonical and Data Loop output pair.
 
 use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -79,7 +79,8 @@ impl PromotedOutput {
     }
 }
 
-fn file_digest(reader: &mut impl Read) -> std::io::Result<[u8; 32]> {
+fn file_digest(reader: &mut (impl Read + Seek)) -> std::io::Result<[u8; 32]> {
+    reader.rewind()?;
     let mut digest = Sha256::new();
     let mut buffer = [0u8; 16 * 1024];
     loop {
@@ -352,8 +353,8 @@ fn restore_output(
     backup_path: Option<&Path>,
     promoted: Option<PromotedOutput>,
 ) -> std::io::Result<()> {
-    if let Some(promoted) = promoted {
-        remove_promoted_output_if_owned(final_path, promoted, backup_path)?;
+    let cleanup_error = if let Some(promoted) = promoted {
+        remove_promoted_output_if_owned(final_path, promoted, backup_path)?
     } else if backup_path.is_some() && final_path.try_exists()? {
         return Err(std::io::Error::new(
             std::io::ErrorKind::AlreadyExists,
@@ -363,28 +364,30 @@ fn restore_output(
                 backup_path.map_or_else(|| "<none>".into(), |path| path.display().to_string())
             ),
         ));
-    }
-    if let Some(backup_path) = backup_path {
-        restore_backup_noclobber(backup_path, final_path)?;
-    }
-    Ok(())
+    } else {
+        None
+    };
+    let restore_result = backup_path.map_or(Ok(()), |backup_path| {
+        restore_backup_noclobber(backup_path, final_path)
+    });
+    finish_restore(final_path, cleanup_error, restore_result)
 }
 
 fn remove_promoted_output_if_owned(
     final_path: &Path,
     promoted: PromotedOutput,
     backup_path: Option<&Path>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<std::io::Error>> {
     let quarantine_path = vacant_sibling_path("paired output rollback", final_path, "promoted")?;
     match persist_existing_file_noclobber(final_path, &quarantine_path) {
         Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     }
     let matches = promoted.matches_path(&quarantine_path);
     drop(promoted);
     match matches {
-        Ok(true) => remove_if_present(&quarantine_path),
+        Ok(true) => Ok(remove_if_present(&quarantine_path).err()),
         Ok(false) => {
             let restore_result = persist_existing_file_noclobber(&quarantine_path, final_path);
             if let Err(restore_error) = restore_result {
@@ -406,6 +409,21 @@ fn remove_promoted_output_if_owned(
             let _ = persist_existing_file_noclobber(&quarantine_path, final_path);
             Err(error)
         }
+    }
+}
+
+fn finish_restore(
+    final_path: &Path,
+    cleanup_error: Option<std::io::Error>,
+    restore_result: std::io::Result<()>,
+) -> std::io::Result<()> {
+    match (cleanup_error, restore_result) {
+        (None, Ok(())) => Ok(()),
+        (None, Err(error)) | (Some(error), Ok(())) => Err(error),
+        (Some(cleanup_error), Err(restore_error)) => Err(std::io::Error::other(format!(
+            "{cleanup_error}; additionally failed to restore {}: {restore_error}",
+            final_path.display()
+        ))),
     }
 }
 
@@ -578,6 +596,22 @@ mod tests {
 
         assert_eq!(std::fs::read(final_path).unwrap(), b"previous");
         assert!(!backup_path.exists());
+    }
+
+    #[test]
+    fn rollback_reports_cleanup_failure_after_attempting_restore() {
+        let cleanup_error = std::io::Error::other("quarantine cleanup failed");
+        let restore_error = std::io::Error::other("backup restore failed");
+
+        let error = finish_restore(
+            Path::new("denials.json"),
+            Some(cleanup_error),
+            Err(restore_error),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("quarantine cleanup failed"));
+        assert!(error.to_string().contains("backup restore failed"));
     }
 
     #[test]
