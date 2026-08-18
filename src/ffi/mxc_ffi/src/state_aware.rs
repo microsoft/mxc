@@ -254,6 +254,45 @@ mod tests {
         out
     }
 
+    /// The state-aware result carries the same API detail as the
+    /// run-to-completion one, and maps the code the same way.
+    #[test]
+    fn from_sdk_error_carries_the_api_detail() {
+        let mut error =
+            mxc_sdk::Error::new(crate::ErrorCode::StaleId, "The provision was not found.");
+        error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
+        error.native_code = Some("0x80070490".to_string());
+        error.remediation = Some("Re-provision the sandbox.".to_string());
+
+        let mut result = MxcStateAwareResult::from_sdk_error(&error);
+        assert_eq!(result.status, crate::MXC_STATUS_STALE_ID);
+        assert!(result.response_json_utf8.is_null());
+
+        // SAFETY: every pointer was produced by `alloc_cstring` just above.
+        unsafe {
+            assert_eq!(
+                std::ffi::CStr::from_ptr(result.error.operation_utf8)
+                    .to_str()
+                    .unwrap(),
+                "IsoSessionOps.StopSessionAsync"
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(result.error.native_code_utf8)
+                    .to_str()
+                    .unwrap(),
+                "0x80070490"
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(result.error.remediation_utf8)
+                    .to_str()
+                    .unwrap(),
+                "Re-provision the sandbox."
+            );
+        }
+
+        result.error.free_strings();
+    }
+
     #[test]
     fn one_shot_config_is_malformed_request() {
         let mut out = call(

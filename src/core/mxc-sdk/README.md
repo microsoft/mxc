@@ -79,11 +79,10 @@ if let Some(hint) = &error.remediation {
 
 [`Error::operation`] and [`Error::native_code`] are **absent** for a failure
 raised before any API call was reached — a malformed policy, say — so their
-presence tells you which side of the boundary the failure came from. A native
-code only ever appears alongside the operation it belongs to, and an API that
+presence tells you which side of the boundary the failure came from. An API that
 names the call it failed in without supplying a status is a normal, tested
-shape. [`Error::remediation`] carries no such coupling: it is present whenever
-the failure has an actionable hint.
+shape. [`Error::remediation`] is present whenever the failure has an actionable
+hint.
 
 [`Error`] is `#[non_exhaustive]` — read its fields freely, but build one with
 [`Error::new`] rather than by literal, so a field added later costs you nothing.

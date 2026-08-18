@@ -9,18 +9,10 @@ namespace Microsoft.Mxc.Sdk;
 /// carries the human-readable detail.
 /// </summary>
 /// <remarks>
-/// <para>
 /// When the failure came from an underlying platform API, <see cref="Operation"/>
-/// names the call and <see cref="NativeCode"/> carries its status. Both are
-/// <see langword="null"/> for failures raised before any API call was reached —
-/// a malformed policy, say. <see cref="Remediation"/> holds an actionable hint
-/// whenever the failure has one.
-/// </para>
-/// <para>
-/// <see cref="NativeCode"/> is non-null only when <see cref="Operation"/> is: a
-/// status with no call to attribute it to is not something the native layer can
-/// express. <see cref="Remediation"/> carries no such coupling.
-/// </para>
+/// names the call and <see cref="NativeCode"/> carries its status.
+/// <see cref="Remediation"/> holds an actionable hint whenever the failure has
+/// one.
 /// </remarks>
 public sealed class MxcException : Exception
 {
@@ -36,7 +28,7 @@ public sealed class MxcException : Exception
 
     /// <summary>
     /// The underlying platform status, for example <c>0x80070490</c>.
-    /// <see langword="null"/> unless <see cref="Operation"/> is set.
+    /// <see langword="null"/> when the failure carries none.
     /// </summary>
     public string? NativeCode { get; }
 
@@ -56,14 +48,6 @@ public sealed class MxcException : Exception
     /// Create an exception carrying the failing API call alongside the code and
     /// message.
     /// </summary>
-    /// <remarks>
-    /// Deliberately <see langword="internal"/>: keeping the overload internal is
-    /// what makes the documented implication — a native code implies an
-    /// operation — hold by construction rather than by convention. A public
-    /// overload taking three independent nullable strings would let a caller
-    /// build the state the documentation says cannot exist, and
-    /// <see cref="ToString"/> would then silently drop the status.
-    /// </remarks>
     internal MxcException(
         ErrorCode code,
         string message,

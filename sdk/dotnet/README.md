@@ -40,8 +40,7 @@ When the failure came from an underlying platform API, `MxcException` also
 carries which call failed and why: `Operation` names the call and `NativeCode`
 carries its status (e.g. `0x80070490`), with `Remediation` holding an
 actionable hint whenever the failure has one. `Operation` and `NativeCode` are
-`null` for failures raised before any API call — a malformed policy, say — and
-`NativeCode` is non-null only when `Operation` is. `ToString()` appends the
+`null` for failures raised before any API call. `ToString()` appends the
 operation and status, so logging the exception alone keeps the diagnosis:
 
 ```csharp

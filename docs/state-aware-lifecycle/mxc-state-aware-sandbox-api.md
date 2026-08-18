@@ -816,11 +816,10 @@ logic on `code` first.
 
 **Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 
-**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
-`operation` marks that an API operation was in flight; the other two refine it, and
-neither ever appears alone. A failure MXC raises before or outside any API call — a
-malformed request or id, a policy rejection, or an internal failure of MXC's own
-machinery — carries only `code` and `message`.
+**Invariant:** `operation` marks that an API operation was in flight. A failure
+MXC raises before or outside any API call — a malformed request or id, a policy
+rejection, or an internal failure of MXC's own machinery — carries only `code`
+and `message`.
 
 **Which fields earn a place here.** A named top-level field is for a **backend-neutral**
 concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows

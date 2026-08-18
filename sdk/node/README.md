@@ -285,7 +285,7 @@ try {
 }
 ```
 
-`operation`, `nativeCode` and `remediation` are optional and travel together: `nativeCode` and `remediation` never appear without `operation`. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
+`operation`, `nativeCode` and `remediation` are optional. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
 
 These three are currently populated only by **IsolationSession state-aware** operations. Windows Sandbox has no semantic error channel to derive them from, and the one-shot surface folds the same detail into `message` instead, so they are uniformly absent there — always treat them as optional.
 

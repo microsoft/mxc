@@ -402,8 +402,7 @@ that is the API's own message, passed through verbatim.
 | MXC-internal failure (relay threads, console handles) | — | — | — |
 | `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
 
-**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
-`operation` marks that an API operation was in flight; neither refinement appears alone.
+**Invariant:** `operation` marks that an API operation was in flight.
 
 `operation` is the interface-qualified member name — for example
 `IsoSessionOps.StopSessionAsync`. It is deliberately low-cardinality and free of call

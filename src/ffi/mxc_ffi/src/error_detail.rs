@@ -10,12 +10,9 @@
 //! failed and with what platform status* from any of them, and frees them all
 //! the same way.
 //!
-//! ## Invariant
+//! ## Ownership
 //!
-//! `native_code_utf8` is non-null only when `operation_utf8` is — a status with
-//! no call to attribute it to is not something a producer can express.
-//! `remediation_utf8` carries no such coupling: it is populated from its own
-//! field on the SDK error, independently of the other two.
+//! Every non-null field is owned by the caller and must be released.
 
 use std::ffi::c_char;
 use std::panic::catch_unwind;
@@ -39,11 +36,10 @@ pub struct MxcErrorDetail {
     /// parameters, so it can be grouped in telemetry. Null when the failure was
     /// raised before any API call, as a malformed request is.
     pub operation_utf8: *mut c_char,
-    /// The underlying platform status, e.g. `0x80070490`. Null unless
-    /// `operation_utf8` is non-null.
+    /// The underlying platform status, e.g. `0x80070490`. Null when the failure
+    /// carries none.
     pub native_code_utf8: *mut c_char,
-    /// An actionable hint, when the failure carries one. Null otherwise — this
-    /// field does not depend on `operation_utf8`.
+    /// An actionable hint, when the failure carries one. Null otherwise.
     pub remediation_utf8: *mut c_char,
 }
 
@@ -185,8 +181,7 @@ mod tests {
         detail.free_strings();
     }
 
-    /// A failure raised before any API call carries a message and nothing else,
-    /// which is what upholds "a native code implies an operation".
+    /// A failure raised before any API call carries a message and nothing else.
     #[test]
     fn a_library_raised_failure_carries_only_a_message() {
         let mut detail = MxcErrorDetail::from_message("policy JSON pointer is null");

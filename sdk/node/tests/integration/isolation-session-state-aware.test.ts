@@ -258,8 +258,7 @@ describe('IsolationSession state-aware policy validation', { skip: policyValidat
   // Full chain, negative case. An oversized appId is rejected by MXC's
   // own validation, before any IsolationSession API call is made. The
   // structured failure fields describe an API operation that was in flight;
-  // none was, so they must reach the caller absent rather than empty —
-  // `nativeCode` and `remediation` never appear without `operation`.
+  // none was, so they must reach the caller absent rather than empty.
   //
   // The canonical network acknowledgment is supplied so the only thing wrong
   // with this request is the appId; that keeps the assertion on the message

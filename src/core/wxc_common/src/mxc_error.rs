@@ -505,10 +505,8 @@ mod tests {
         assert_eq!(err.remediation(), Some("Re-provision the sandbox."));
     }
 
-    /// `native_code` and `remediation` live inside `ApiFailure`, so the
-    /// normal construction path cannot set them without an `operation` —
-    /// the envelope invariant holds by construction rather than by
-    /// convention.
+    /// `native_code` and `remediation` live inside `ApiFailure`, so the normal
+    /// construction path cannot set them without an `operation`.
     #[test]
     fn structured_detail_always_carries_an_operation() {
         let err = MxcError::backend_error("boom")

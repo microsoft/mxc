@@ -488,4 +488,85 @@ mod tests {
             mxc_string_free(ptr::null_mut());
         }
     }
+
+    /// `alloc_cstring` sanitizes interior NULs before `CString::new`, which is
+    /// that call's only failure mode, so it never returns null. Callers rely on
+    /// this: a null `message_utf8` means success, so a failure that allocated
+    /// null would read as one.
+    #[test]
+    fn alloc_cstring_never_returns_null() {
+        for input in [
+            &b""[..],
+            b"plain",
+            b"interior\0nul",
+            b"\0leading",
+            b"trailing\0",
+            b"\0\0\0",
+            &[0xff, 0xfe, 0x00, 0x41][..],
+        ] {
+            let mut p = alloc_cstring(input);
+            assert!(!p.is_null(), "returned null for {input:?}");
+            free_cstr(&mut p);
+        }
+    }
+
+    /// A failure from the SDK reaches the caller with its API detail intact,
+    /// and the code maps to the matching `MXC_STATUS_*`.
+    #[test]
+    fn from_sdk_error_carries_the_api_detail() {
+        let mut error =
+            mxc_sdk::Error::new(ErrorCode::BackendError, "The provision was not found.");
+        error.operation = Some("IsoSessionOps.StopSessionAsync".to_string());
+        error.native_code = Some("0x80070490".to_string());
+        error.remediation = Some("Re-provision the sandbox.".to_string());
+
+        let mut result = MxcRunResult::from_sdk_error(&error);
+        assert_eq!(result.status, MXC_STATUS_BACKEND_ERROR);
+
+        // SAFETY: every pointer was produced by `alloc_cstring` just above.
+        unsafe {
+            assert_eq!(
+                CStr::from_ptr(result.error.message_utf8).to_str().unwrap(),
+                "The provision was not found."
+            );
+            assert_eq!(
+                CStr::from_ptr(result.error.operation_utf8)
+                    .to_str()
+                    .unwrap(),
+                "IsoSessionOps.StopSessionAsync"
+            );
+            assert_eq!(
+                CStr::from_ptr(result.error.native_code_utf8)
+                    .to_str()
+                    .unwrap(),
+                "0x80070490"
+            );
+            assert_eq!(
+                CStr::from_ptr(result.error.remediation_utf8)
+                    .to_str()
+                    .unwrap(),
+                "Re-provision the sandbox."
+            );
+        }
+
+        result.free_strings();
+    }
+
+    /// An empty version parses as JSON but fails `build_request`, which is the
+    /// arm that carries an SDK error rather than a message this library wrote.
+    /// The message is asserted because the JSON-parse arm returns the same
+    /// status.
+    #[test]
+    fn a_failing_build_request_reports_the_sdk_error() {
+        let mut out = run_with(r#"{"version":""}"#, Some("echo hi"));
+        assert_eq!(out.status, MXC_STATUS_MALFORMED_REQUEST);
+        // SAFETY: `out` was filled by `mxc_run`.
+        let message = unsafe { CStr::from_ptr(out.error.message_utf8) }
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(message, "Policy version is required");
+        // SAFETY: `out` was filled by `mxc_run`.
+        unsafe { mxc_run_result_free(&mut out) };
+    }
 }

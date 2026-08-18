@@ -91,9 +91,8 @@ pub struct Error {
     /// parameters, so it can be grouped in telemetry. Absent when the failure
     /// was raised before any API call.
     pub operation: Option<String>,
-    /// The underlying platform status, e.g. `0x80070490`. Only ever present
-    /// alongside [`operation`](Self::operation): a status with no call to
-    /// attribute it to is not something a producer can express.
+    /// The underlying platform status, e.g. `0x80070490`. Absent when the
+    /// failure carries none.
     pub native_code: Option<String>,
     /// An actionable "how to fix it" hint, when the failure carries one.
     pub remediation: Option<String>,
