@@ -379,12 +379,28 @@ fn remove_promoted_output_if_owned(
     match persist_existing_file_noclobber(final_path, &quarantine_path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error),
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "failed to quarantine promoted output {} at {}: {error}",
+                final_path.display(),
+                quarantine_path.display()
+            )))
+        }
     }
-    let matches = promoted.matches_path(&quarantine_path);
+    let matches = promoted.matches_path(&quarantine_path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to verify ownership of quarantined output {}: {error}",
+            quarantine_path.display()
+        ))
+    });
     drop(promoted);
     match matches {
-        Ok(true) => Ok(remove_if_present(&quarantine_path).err()),
+        Ok(true) => Ok(remove_if_present(&quarantine_path).err().map(|error| {
+            std::io::Error::other(format!(
+                "failed to remove quarantined promoted output {}: {error}",
+                quarantine_path.display()
+            ))
+        })),
         Ok(false) => {
             let restore_result = persist_existing_file_noclobber(&quarantine_path, final_path);
             if let Err(restore_error) = restore_result {
@@ -443,7 +459,13 @@ fn finish_restore(
 }
 
 fn restore_backup_noclobber(backup_path: &Path, final_path: &Path) -> std::io::Result<()> {
-    persist_existing_file_noclobber(backup_path, final_path)
+    persist_existing_file_noclobber(backup_path, final_path).map_err(|error| {
+        std::io::Error::other(format!(
+            "failed to restore backup {} to {}: {error}",
+            backup_path.display(),
+            final_path.display()
+        ))
+    })
 }
 
 fn persist_existing_file_noclobber(source_path: &Path, final_path: &Path) -> std::io::Result<()> {
@@ -463,8 +485,22 @@ fn remove_backups(
     canonical_backup: Option<&Path>,
     data_loop_backup: Option<&Path>,
 ) -> std::io::Result<()> {
-    let canonical_result = canonical_backup.map_or(Ok(()), remove_if_present);
-    let data_loop_result = data_loop_backup.map_or(Ok(()), remove_if_present);
+    let canonical_result = canonical_backup.map_or(Ok(()), |path| {
+        remove_if_present(path).map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to remove canonical backup {}: {error}",
+                path.display()
+            ))
+        })
+    });
+    let data_loop_result = data_loop_backup.map_or(Ok(()), |path| {
+        remove_if_present(path).map_err(|error| {
+            std::io::Error::other(format!(
+                "failed to remove Data Loop backup {}: {error}",
+                path.display()
+            ))
+        })
+    });
     match (canonical_result, data_loop_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
@@ -654,6 +690,37 @@ mod tests {
             .to_string()
             .contains("failed to roll back output pair"));
         assert!(error.to_string().contains("restore failed"));
+    }
+
+    #[test]
+    fn backup_restore_error_names_source_and_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("backup.json");
+        let final_path = directory.path().join("denials.json");
+        std::fs::write(&backup_path, b"previous").unwrap();
+        std::fs::write(&final_path, b"concurrent").unwrap();
+
+        let error = restore_backup_noclobber(&backup_path, &final_path).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(&backup_path.display().to_string()));
+        assert!(error
+            .to_string()
+            .contains(&final_path.display().to_string()));
+    }
+
+    #[test]
+    fn backup_cleanup_error_names_the_failed_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical_backup = directory.path().join("canonical-backup");
+        std::fs::create_dir(&canonical_backup).unwrap();
+
+        let error = remove_backups(Some(&canonical_backup), None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains(&canonical_backup.display().to_string()));
     }
 
     #[test]
