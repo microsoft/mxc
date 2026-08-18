@@ -1,0 +1,15 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -s --max-time 5 https://example.com > /dev/null 2>&1 && echo DEGRADE_TO_ALLOW_ALL_CONFIRMED || echo NON_LISTED_HOST_BLOCKED",
+        "timeout": 15000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "allowedHosts": ["api.github.com"]
+    }
+}

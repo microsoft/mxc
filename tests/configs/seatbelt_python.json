@@ -1,0 +1,15 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "python3 -c \"import sys, os; print('PYTHON_EXEC_OK', sys.version.split()[0]); print('HOME_CLEARED_OK' if os.environ.get('HOME') is None else 'HOME_LEAK:' + os.environ.get('HOME')); print('PATH_BASELINE_OK' if os.environ.get('PATH') == '/usr/bin:/bin:/usr/sbin:/sbin' else 'PATH_UNEXPECTED:' + str(os.environ.get('PATH')))\"",
+        "cwd": "/tmp",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

@@ -1,0 +1,15 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "if cat /tmp/mxc_seatbelt_fs_test/rw/denied_subdir/secret.txt 2>/dev/null | grep -q DENIED_SECRET; then echo READ_LEAK; else echo READ_BLOCKED_OK; fi; if echo blocked > /tmp/mxc_seatbelt_fs_test/rw/denied_subdir/should_not_exist.txt 2>/dev/null; then echo WRITE_LEAK; else echo WRITE_BLOCKED_OK; fi",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp/mxc_seatbelt_fs_test/rw"],
+        "deniedPaths": ["/tmp/mxc_seatbelt_fs_test/rw/denied_subdir"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

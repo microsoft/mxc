@@ -1,0 +1,16 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -fsSL --max-time 5 https://api.github.com/zen && echo PROXY_OK",
+        "timeout": 15000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "block",
+        "allowedHosts": ["api.github.com"],
+        "proxy": { "builtinTestServer": true }
+    }
+}

@@ -1,0 +1,14 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'sandbox wrote this' > /tmp/mxc_seatbelt_fs_test/rw/output.txt && cat /tmp/mxc_seatbelt_fs_test/rw/output.txt && echo WRITE_READ_OK",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp/mxc_seatbelt_fs_test/rw"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

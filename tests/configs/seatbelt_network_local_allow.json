@@ -1,0 +1,15 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "nc -l 127.0.0.1 38173 & LPID=$!; sleep 0.5; if nc -z -w 2 127.0.0.1 38173; then echo LOCAL_LISTEN_OK; else echo LOCAL_LISTEN_BLOCKED; fi; kill $LPID 2>/dev/null; wait $LPID 2>/dev/null; true",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "allow",
+        "allowLocalNetwork": true
+    }
+}

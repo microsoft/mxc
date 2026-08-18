@@ -1,0 +1,15 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "if cat /tmp/mxc_seatbelt_fs_test/rw/readonly_subdir/seed.txt 2>/dev/null | grep -q NESTED_RO_MARKER; then echo READ_OK; else echo READ_FAIL; fi; if echo blocked > /tmp/mxc_seatbelt_fs_test/rw/readonly_subdir/should_not_exist.txt 2>/dev/null; then echo WRITE_LEAK; else echo WRITE_BLOCKED_OK; fi",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp/mxc_seatbelt_fs_test/rw"],
+        "readonlyPaths": ["/tmp/mxc_seatbelt_fs_test/rw/readonly_subdir"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

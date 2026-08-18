@@ -1,0 +1,12 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo SHOULD_NOT_RUN",
+        "timeout": 10000
+    },
+    "network": {
+        "defaultPolicy": "allow",
+        "blockedHosts": ["evil.example.com"]
+    }
+}

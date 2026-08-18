@@ -1,0 +1,14 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "printf '#!/bin/sh\\necho SCRIPT_FILE_EXEC_OK\\necho arg1=$1\\nexit 7\\n' > /tmp/mxc_seatbelt_script_test.sh && chmod +x /tmp/mxc_seatbelt_script_test.sh && /tmp/mxc_seatbelt_script_test.sh hello; echo EXIT_CODE=$?",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

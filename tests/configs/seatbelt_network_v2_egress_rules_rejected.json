@@ -1,0 +1,16 @@
+{
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo SHOULD_NOT_RUN",
+        "timeout": 10000
+    },
+    "network": {
+        "egress": {
+            "default": "deny",
+            "allow": [
+                { "to": [{ "cidr": "10.0.0.0/8" }] }
+            ]
+        }
+    }
+}

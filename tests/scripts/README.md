@@ -25,6 +25,7 @@ Linux / macOS (`.sh`):
   example `bwrap` for Bubblewrap, the LXC stack for LXC)
 
 ## Scripts
+### Windows suites
 
 | Script | Description | Extra prerequisites |
 |--------|-------------|---------------------|
@@ -52,6 +53,14 @@ Linux / macOS (`.sh`):
 
 Individual `run_bwrap_*.sh` / `run_lxc_*.sh` scripts run one case each; the
 aggregate scripts above are what CI dispatches to.
+
+### macOS suites
+
+| Script | Description | Extra prerequisites |
+|--------|-------------|---------------------|
+| `run_seatbelt_all_tests.sh` | All Seatbelt tests | `mxc-exec-mac`, `unix-test-proxy` |
+
+`run_seatbelt_all_tests.sh` runs every `run_seatbelt_*_test.sh` script and is what CI dispatches to; the individual scripts each run one case and can also be invoked directly during local development.
 
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does

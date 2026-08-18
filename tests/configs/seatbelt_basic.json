@@ -1,0 +1,14 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo SEATBELT_BASIC_OK && pwd && id",
+        "timeout": 10000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    }
+}

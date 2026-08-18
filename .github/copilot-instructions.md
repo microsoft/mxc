@@ -148,6 +148,7 @@ tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap)
+tests\scripts\run_seatbelt_all_tests.sh       # All Seatbelt tests (macOS, requires mxc-exec-mac + unix-test-proxy; covers Python/Rust/script-file execution, filesystem rw/readonly/denied, and legacy + schema-v2 network policy)
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly

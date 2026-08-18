@@ -53,8 +53,10 @@ case "$backend" in
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"
         test -x "$binary_directory/unix-test-proxy"
-        echo "The Seatbelt CI backend is not wired to an existing test entry point yet." >&2
-        exit 2
+        mkdir -p "$release_directory"
+        cp -a "$binary_directory/." "$release_directory/"
+        chmod +x "$release_directory/mxc-exec-mac" "$release_directory/unix-test-proxy"
+        bash "$script_root/run_seatbelt_all_tests.sh"
         ;;
     *)
         usage

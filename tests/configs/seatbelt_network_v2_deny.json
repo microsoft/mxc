@@ -1,0 +1,15 @@
+{
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -s --max-time 5 --noproxy '*' https://example.com > /dev/null 2>&1 && echo NETWORK_LEAK || echo NETWORK_BLOCKED_OK",
+        "timeout": 15000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "egress": { "default": "deny" },
+        "ingress": { "default": "deny", "hostLoopback": "deny" }
+    }
+}

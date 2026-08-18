@@ -1,0 +1,14 @@
+{
+    "version": "0.7.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "curl -s --max-time 5 https://api.github.com/zen > /dev/null 2>&1 && echo HOST1_ALLOW_OK || echo HOST1_UNEXPECTED_BLOCK; curl -s --max-time 5 https://www.google.com > /dev/null 2>&1 && echo HOST2_ALLOW_OK || echo HOST2_UNEXPECTED_BLOCK",
+        "timeout": 20000
+    },
+    "filesystem": {
+        "readwritePaths": ["/tmp"]
+    },
+    "network": {
+        "defaultPolicy": "allow"
+    }
+}
