@@ -201,17 +201,64 @@ pub unsafe fn decode_event_parts(
     schema_cache: &mut EventSchemaCache,
 ) -> Result<DecodedEventParts, DecodeError> {
     let event = unsafe { &*event_record };
-    let key = EventSchemaKey::from_record(event);
     let mut uncached_schema = None;
+    let buffer = unsafe { event_schema(event_record, event, schema_cache, &mut uncached_schema) }?;
+    let info = unsafe { &*buffer.as_ptr() };
+
+    let header = event.EventHeader;
+    let event_id = header.EventDescriptor.Id;
+    let pointer_size = pointer_size_from_header_flags(header.Flags);
+    let event_name = schema_event_name(buffer.as_bytes(), info);
+    let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size)
+        .map_err(|error| map_property_decode_error(error, event_name))?;
+
+    Ok(DecodedEventParts {
+        provider: header.ProviderId,
+        event_id,
+        props,
+    })
+}
+
+/// Decodes one named property without decoding properties that follow it.
+///
+/// # Safety
+/// `event_record` must satisfy the same requirements as [`decode_event_parts`].
+pub unsafe fn decode_event_property(
+    event_record: *mut EVENT_RECORD,
+    schema_cache: &mut EventSchemaCache,
+    property_name: &str,
+) -> Result<Option<String>, DecodeError> {
+    let event = unsafe { &*event_record };
+    let mut uncached_schema = None;
+    let buffer = unsafe { event_schema(event_record, event, schema_cache, &mut uncached_schema) }?;
+    let info = unsafe { &*buffer.as_ptr() };
+    let event_name = schema_event_name(buffer.as_bytes(), info);
+    decode_named_property(
+        buffer.as_bytes(),
+        info,
+        event_record,
+        pointer_size_from_header_flags(event.EventHeader.Flags),
+        property_name,
+    )
+    .map_err(|error| map_property_decode_error(error, event_name))
+}
+
+unsafe fn event_schema<'a>(
+    event_record: *mut EVENT_RECORD,
+    event: &EVENT_RECORD,
+    schema_cache: &'a mut EventSchemaCache,
+    uncached_schema: &'a mut Option<TdhInfoBuffer>,
+) -> Result<&'a TdhInfoBuffer, DecodeError> {
+    let key = EventSchemaKey::from_record(event);
     let cacheable = !unsafe { has_trace_logging_schema(event) };
     if !cacheable {
-        uncached_schema = Some(unsafe { load_event_schema(event_record) }?);
+        *uncached_schema = Some(unsafe { load_event_schema(event_record) }?);
     } else if !schema_cache.schemas.contains_key(&key) {
         let schema = unsafe { load_event_schema(event_record) }?;
         if schema_cache.schemas.len() < MAX_SCHEMA_CACHE_ENTRIES {
             schema_cache.schemas.insert(key, schema);
         } else {
-            uncached_schema = Some(schema);
+            *uncached_schema = Some(schema);
         }
     }
     let buffer = if cacheable {
@@ -224,36 +271,29 @@ pub unsafe fn decode_event_parts(
             .as_ref()
             .ok_or_else(|| DecodeError::Schema("uncached event schema missing".to_string()))?
     };
-    let info = unsafe { &*buffer.as_ptr() };
+    Ok(buffer)
+}
 
-    let header = event.EventHeader;
-    let event_id = header.EventDescriptor.Id;
-    let pointer_size = pointer_size_from_header_flags(header.Flags);
-    let event_name = schema_event_name(buffer.as_bytes(), info);
-    let props = decode_properties(buffer.as_bytes(), info, event_record, pointer_size).map_err(
-        |error| match error.kind {
-            PropertyDecodeErrorKind::Schema => DecodeError::Schema(error.message),
-            PropertyDecodeErrorKind::PayloadMalformed => {
-                DecodeError::event(EventDecodeKind::PayloadMalformed, error.message, event_name)
-            }
-            PropertyDecodeErrorKind::DecoderLimitReached => DecodeError::event(
-                EventDecodeKind::DecoderLimitReached,
-                error.message,
-                event_name,
-            ),
-            PropertyDecodeErrorKind::UnsupportedPropertyEncoding => DecodeError::event(
-                EventDecodeKind::UnsupportedPropertyEncoding,
-                error.message,
-                event_name,
-            ),
-        },
-    )?;
-
-    Ok(DecodedEventParts {
-        provider: header.ProviderId,
-        event_id,
-        props,
-    })
+fn map_property_decode_error(
+    error: PropertyDecodeError,
+    event_name: Option<String>,
+) -> DecodeError {
+    match error.kind {
+        PropertyDecodeErrorKind::Schema => DecodeError::Schema(error.message),
+        PropertyDecodeErrorKind::PayloadMalformed => {
+            DecodeError::event(EventDecodeKind::PayloadMalformed, error.message, event_name)
+        }
+        PropertyDecodeErrorKind::DecoderLimitReached => DecodeError::event(
+            EventDecodeKind::DecoderLimitReached,
+            error.message,
+            event_name,
+        ),
+        PropertyDecodeErrorKind::UnsupportedPropertyEncoding => DecodeError::event(
+            EventDecodeKind::UnsupportedPropertyEncoding,
+            error.message,
+            event_name,
+        ),
+    }
 }
 
 fn schema_event_name(info_buf: &[u8], info: &TRACE_EVENT_INFO) -> Option<String> {
@@ -396,6 +436,62 @@ fn decode_properties(
     }
 
     Ok(results)
+}
+
+fn decode_named_property(
+    info_buf: &[u8],
+    info: &TRACE_EVENT_INFO,
+    event_record: *mut EVENT_RECORD,
+    pointer_size: usize,
+    property_name: &str,
+) -> Result<Option<String>, PropertyDecodeError> {
+    // SAFETY: caller passes a valid EVENT_RECORD; the field accesses
+    // are reads of POD fields.
+    let event = unsafe { &*event_record };
+    let user_data = event.UserData as *const u8;
+    let user_data_len = event.UserDataLength as usize;
+    if user_data.is_null() || user_data_len == 0 {
+        return Ok(None);
+    }
+
+    let property_count = info.PropertyCount as usize;
+    let prop_count = info.TopLevelPropertyCount as usize;
+    if prop_count > property_count {
+        return Err(PropertyDecodeError::schema(format!(
+            "top-level property count {prop_count} exceeds property count {property_count}"
+        )));
+    }
+
+    let mut numeric_values = vec![None; property_count];
+    let mut offset = 0;
+    let mut work_remaining = MAX_DECODE_WORK;
+    let mut decoded = Vec::new();
+    let context = PropertyDecodeContext {
+        info_buf,
+        info,
+        user_data,
+        user_data_len,
+        pointer_size,
+    };
+    for index in 0..prop_count {
+        decode_property(
+            index,
+            &context,
+            &mut offset,
+            &mut numeric_values,
+            0,
+            &mut work_remaining,
+            &mut decoded,
+        )?;
+        if let Some((_, value)) = decoded
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(property_name))
+        {
+            return Ok(Some(value.clone()));
+        }
+        decoded.clear();
+    }
+    Ok(None)
 }
 
 struct PropertyDecodeContext<'a> {

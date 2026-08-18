@@ -765,22 +765,16 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         if event_id == crate::extractors::CAPABILITY_DENIAL_EVENT_ID
             && is_learning_mode_event(provider, event_id)
         {
-            match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
-                Ok(parts) => select_decoded_event_for_relogging(
-                    acc,
-                    event_index,
-                    &parts,
-                    header.ProcessId,
-                    filetime,
-                ),
-                Err(error) => {
-                    acc.decode_error = Some(format!(
-                        "failed to decode brokered capability event while scoping guarded trace: {error}"
-                    ));
-                    acc.stop_requested = true;
-                    return;
-                }
-            }
+            let process_id = unsafe {
+                tdh_decode::decode_event_property(event_record, &mut acc.schema_cache, "ProcessId")
+            };
+            select_capability_decode_result_for_relogging(
+                acc,
+                event_index,
+                process_id,
+                header.ProcessId,
+                filetime,
+            );
         } else {
             select_event_for_relogging(acc, event_index, header.ProcessId, filetime);
         }
@@ -847,17 +841,45 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     }
 }
 
-fn select_decoded_event_for_relogging(
+fn select_capability_decode_result_for_relogging(
     acc: &mut Accumulator<'_>,
     event_index: usize,
-    parts: &DecodedEventParts,
+    process_id: Result<Option<String>, tdh_decode::DecodeError>,
     header_pid: u32,
     filetime: u64,
 ) {
-    let Some(effective_pid) = crate::extractors::effective_event_pid(parts, header_pid) else {
-        acc.decode_error =
-            Some("brokered capability event has no valid payload ProcessId".to_string());
-        acc.stop_requested = true;
+    match process_id {
+        Ok(process_id) => select_capability_event_for_relogging(
+            acc,
+            event_index,
+            process_id.as_deref(),
+            header_pid,
+            filetime,
+        ),
+        Err(error) if error.is_schema_error() => {
+            acc.decode_error = Some(format!(
+                "failed to decode brokered capability event while scoping guarded trace: {error}"
+            ));
+            acc.stop_requested = true;
+        }
+        Err(_) => {
+            select_capability_event_for_relogging(acc, event_index, None, header_pid, filetime);
+        }
+    }
+}
+
+fn select_capability_event_for_relogging(
+    acc: &mut Accumulator<'_>,
+    event_index: usize,
+    process_id: Option<&str>,
+    header_pid: u32,
+    filetime: u64,
+) {
+    let Some(effective_pid) = crate::extractors::effective_capability_event_pid(process_id) else {
+        // The event cannot be attributed to a workload without its brokered
+        // payload PID. Retain it only when the emitter itself is in scope so
+        // the analysis pass can classify the malformed payload.
+        select_event_for_relogging(acc, event_index, header_pid, filetime);
         return;
     };
     select_event_for_relogging(acc, event_index, effective_pid, filetime);
@@ -1054,38 +1076,55 @@ mod tests {
             start_filetime: 100,
             end_filetime: 200,
         }]);
-        let parts = DecodedEventParts {
-            provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
-            event_id: crate::extractors::CAPABILITY_DENIAL_EVENT_ID,
-            props: vec![("ProcessId".to_string(), "42".to_string())],
-        };
-
-        select_decoded_event_for_relogging(&mut accumulator, 0, &parts, 9000, 150);
+        select_capability_event_for_relogging(&mut accumulator, 0, Some("42"), 9000, 150);
 
         assert_eq!(accumulator.relog_selected_event_indices, [0]);
     }
 
     #[test]
-    fn relog_selection_rejects_brokered_capability_without_payload_pid() {
+    fn relog_selection_skips_unscopable_brokered_capability_without_payload_pid() {
         let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
             pid: 42,
             start_filetime: 100,
             end_filetime: 200,
         }]);
-        let parts = DecodedEventParts {
-            provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
-            event_id: crate::extractors::CAPABILITY_DENIAL_EVENT_ID,
-            props: Vec::new(),
-        };
-
-        select_decoded_event_for_relogging(&mut accumulator, 0, &parts, 42, 150);
+        select_capability_event_for_relogging(&mut accumulator, 0, None, 9000, 150);
 
         assert!(accumulator.relog_selected_event_indices.is_empty());
-        assert!(accumulator.stop_requested);
-        assert!(accumulator
-            .decode_error
-            .as_deref()
-            .is_some_and(|error| error.contains("payload ProcessId")));
+        assert!(!accumulator.stop_requested);
+        assert!(accumulator.decode_error.is_none());
+    }
+
+    #[test]
+    fn relog_selection_retains_malformed_capability_from_in_scope_emitter() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        select_capability_event_for_relogging(&mut accumulator, 0, None, 42, 150);
+
+        assert_eq!(accumulator.relog_selected_event_indices, [0]);
+    }
+
+    #[test]
+    fn relog_selection_skips_payload_decode_failure_from_unrelated_emitter() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        let error = tdh_decode::DecodeError::event(
+            tdh_decode::EventDecodeKind::PayloadMalformed,
+            "truncated ProcessId".to_string(),
+            None,
+        );
+
+        select_capability_decode_result_for_relogging(&mut accumulator, 0, Err(error), 9000, 150);
+
+        assert!(accumulator.relog_selected_event_indices.is_empty());
+        assert!(!accumulator.stop_requested);
+        assert!(accumulator.decode_error.is_none());
     }
 
     #[test]

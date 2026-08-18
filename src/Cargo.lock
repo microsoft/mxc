@@ -1273,6 +1273,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "learning_mode_core"
 version = "0.7.0"
 dependencies = [
+ "same-file",
  "serde",
  "serde_json",
  "tempfile",

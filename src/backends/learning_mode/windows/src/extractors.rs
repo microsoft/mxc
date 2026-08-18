@@ -209,10 +209,16 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
 
 pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
     if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
-        find_prop(&parts.props, "ProcessId").and_then(|value| parse_u32(value))
+        effective_capability_event_pid(
+            find_prop(&parts.props, "ProcessId").map(std::string::String::as_str),
+        )
     } else {
         Some(header_pid)
     }
+}
+
+pub(crate) fn effective_capability_event_pid(process_id: Option<&str>) -> Option<u32> {
+    process_id.and_then(parse_u32)
 }
 
 /// Maps a raw ETW provider GUID to its symbolic Data Loop category.
@@ -389,14 +395,15 @@ pub(crate) fn redact_username_in_path(value: &str) -> String {
 pub(crate) fn bound_properties(mut properties: Vec<(String, String)>) -> Vec<(String, String)> {
     properties.truncate(MAX_SIGNATURE_PROPERTIES);
     for (_, value) in &mut properties {
-        if value.chars().count() > MAX_SIGNATURE_VALUE_LEN {
-            *value = bound_property_value(value);
+        let char_count = value.chars().count();
+        if char_count > MAX_SIGNATURE_VALUE_LEN {
+            *value = bound_property_value(value, char_count);
         }
     }
     properties
 }
 
-fn bound_property_value(value: &str) -> String {
+fn bound_property_value(value: &str, char_count: usize) -> String {
     let digest = Sha256::digest(value.as_bytes());
     let marker = format!("...<sha256={digest:x}>...");
     debug_assert_eq!(marker.len(), BOUNDED_VALUE_MARKER_LEN);
@@ -406,11 +413,7 @@ fn bound_property_value(value: &str) -> String {
     let prefix = value.chars().take(prefix_len).collect::<String>();
     let suffix = value
         .chars()
-        .rev()
-        .take(suffix_len)
-        .collect::<String>()
-        .chars()
-        .rev()
+        .skip(char_count - suffix_len)
         .collect::<String>();
     format!("{prefix}{marker}{suffix}")
 }
@@ -1690,6 +1693,10 @@ mod tests {
         let short = "unchanged".to_string();
         let bounded_short = bound_properties(vec![("ObjectName".to_string(), short.clone())]);
         assert_eq!(bounded_short[0].1, short);
+
+        let exact = "x".repeat(MAX_SIGNATURE_VALUE_LEN);
+        let bounded_exact = bound_properties(vec![("ObjectName".to_string(), exact.clone())]);
+        assert_eq!(bounded_exact[0].1, exact);
 
         let long = format!("{}尾", "é".repeat(MAX_SIGNATURE_VALUE_LEN * 2));
         let bounded_long = bound_properties(vec![("ObjectName".to_string(), long)]);

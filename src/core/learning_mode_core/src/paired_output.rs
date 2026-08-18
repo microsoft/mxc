@@ -55,6 +55,18 @@ impl Drop for OutputPairLock {
     }
 }
 
+#[derive(Debug)]
+struct PromotedOutput {
+    handle: same_file::Handle,
+}
+
+impl PromotedOutput {
+    fn matches_path(&self, path: &Path) -> std::io::Result<bool> {
+        let path_handle = same_file::Handle::from_path(path)?;
+        Ok(self.handle == path_handle)
+    }
+}
+
 /// Controls how an existing output pair is handled during promotion.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ExistingOutputPolicy {
@@ -105,7 +117,7 @@ pub fn write_paired_output_files(
             Err(error) => {
                 return Err(combine_error_with_cleanup(
                     error,
-                    restore_output(canonical_path, canonical_backup.as_deref(), false),
+                    restore_output(canonical_path, canonical_backup.as_deref(), None),
                     canonical_path,
                 ))
             }
@@ -114,37 +126,44 @@ pub fn write_paired_output_files(
         None
     };
 
-    if let Err(error) = promote_output_file(operation, data_loop_temp, data_loop_path, "Data Loop")
-    {
-        return Err(combine_error_with_cleanup(
-            error,
-            restore_output_pair(
-                canonical_path,
-                canonical_backup.as_deref(),
-                false,
-                data_loop_path,
-                data_loop_backup.as_deref(),
-                false,
-            ),
-            data_loop_path,
-        ));
-    }
-    if let Err(error) = promote_output_file(operation, canonical_temp, canonical_path, "canonical")
-    {
-        return Err(combine_error_with_cleanup(
-            error,
-            restore_output_pair(
-                canonical_path,
-                canonical_backup.as_deref(),
-                false,
-                data_loop_path,
-                data_loop_backup.as_deref(),
-                true,
-            ),
-            canonical_path,
-        ));
-    }
+    let data_loop_promoted =
+        match promote_output_file(operation, data_loop_temp, data_loop_path, "Data Loop") {
+            Ok(promoted) => promoted,
+            Err(error) => {
+                return Err(combine_error_with_cleanup(
+                    error,
+                    restore_output_pair(
+                        canonical_path,
+                        canonical_backup.as_deref(),
+                        None,
+                        data_loop_path,
+                        data_loop_backup.as_deref(),
+                        None,
+                    ),
+                    data_loop_path,
+                ))
+            }
+        };
+    let canonical_promoted =
+        match promote_output_file(operation, canonical_temp, canonical_path, "canonical") {
+            Ok(promoted) => promoted,
+            Err(error) => {
+                return Err(combine_error_with_cleanup(
+                    error,
+                    restore_output_pair(
+                        canonical_path,
+                        canonical_backup.as_deref(),
+                        None,
+                        data_loop_path,
+                        data_loop_backup.as_deref(),
+                        Some(data_loop_promoted),
+                    ),
+                    canonical_path,
+                ))
+            }
+        };
 
+    drop((canonical_promoted, data_loop_promoted));
     remove_backups(canonical_backup.as_deref(), data_loop_backup.as_deref())
 }
 
@@ -217,9 +236,21 @@ fn promote_output_file(
     temp: tempfile::NamedTempFile,
     final_path: &Path,
     kind: &str,
-) -> std::io::Result<()> {
+) -> std::io::Result<PromotedOutput> {
+    let identity_file = temp.reopen().map_err(|error| {
+        std::io::Error::other(format!(
+            "{operation} failed to identify temporary {kind} output file for {}: {error}",
+            final_path.display()
+        ))
+    })?;
+    let handle = same_file::Handle::from_file(identity_file).map_err(|error| {
+        std::io::Error::other(format!(
+            "{operation} failed to identify temporary {kind} output file for {}: {error}",
+            final_path.display()
+        ))
+    })?;
     temp.persist_noclobber(final_path)
-        .map(|_| ())
+        .map(|_| PromotedOutput { handle })
         .map_err(|error| {
             std::io::Error::other(format!(
                 "{operation} failed to promote {kind} output file {}: {}",
@@ -243,20 +274,7 @@ fn backup_existing_output(
         return Ok(None);
     }
 
-    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
-    let backup = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
-        std::io::Error::other(format!(
-            "{operation} failed to reserve backup for {kind} output file {}: {error}",
-            final_path.display()
-        ))
-    })?;
-    let backup_path = backup.path().to_path_buf();
-    backup.close().map_err(|error| {
-        std::io::Error::other(format!(
-            "{operation} failed to prepare backup for {kind} output file {}: {error}",
-            final_path.display()
-        ))
-    })?;
+    let backup_path = vacant_sibling_path(operation, final_path, kind)?;
     std::fs::rename(final_path, &backup_path).map_err(|error| {
         std::io::Error::other(format!(
             "{operation} failed to back up {kind} output file {}: {error}",
@@ -266,13 +284,31 @@ fn backup_existing_output(
     Ok(Some(backup_path))
 }
 
+fn vacant_sibling_path(operation: &str, final_path: &Path, kind: &str) -> std::io::Result<PathBuf> {
+    let parent = final_path.parent().unwrap_or_else(|| Path::new("."));
+    let backup = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        std::io::Error::other(format!(
+            "{operation} failed to reserve temporary path for {kind} output file {}: {error}",
+            final_path.display()
+        ))
+    })?;
+    let backup_path = backup.path().to_path_buf();
+    backup.close().map_err(|error| {
+        std::io::Error::other(format!(
+            "{operation} failed to prepare temporary path for {kind} output file {}: {error}",
+            final_path.display()
+        ))
+    })?;
+    Ok(backup_path)
+}
+
 fn restore_output_pair(
     canonical_path: &Path,
     canonical_backup: Option<&Path>,
-    canonical_promoted: bool,
+    canonical_promoted: Option<PromotedOutput>,
     data_loop_path: &Path,
     data_loop_backup: Option<&Path>,
-    data_loop_promoted: bool,
+    data_loop_promoted: Option<PromotedOutput>,
 ) -> std::io::Result<()> {
     let data_loop_result = restore_output(data_loop_path, data_loop_backup, data_loop_promoted);
     let canonical_result = restore_output(canonical_path, canonical_backup, canonical_promoted);
@@ -289,35 +325,91 @@ fn restore_output_pair(
 fn restore_output(
     final_path: &Path,
     backup_path: Option<&Path>,
-    promoted: bool,
+    promoted: Option<PromotedOutput>,
 ) -> std::io::Result<()> {
-    if promoted {
-        remove_if_present(final_path)?;
+    if let Some(promoted) = promoted {
+        remove_promoted_output_if_owned(final_path, promoted, backup_path)?;
+    } else if backup_path.is_some() && final_path.try_exists()? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            format!(
+                "cannot restore {} because another writer created it; backup retained at {}",
+                final_path.display(),
+                backup_path.map_or_else(|| "<none>".into(), |path| path.display().to_string())
+            ),
+        ));
     }
     if let Some(backup_path) = backup_path {
-        std::fs::hard_link(backup_path, final_path).map_err(|error| {
-            std::io::Error::other(format!(
-                "failed to restore {} from retained backup {}: {error}",
-                final_path.display(),
-                backup_path.display()
-            ))
-        })?;
-        std::fs::remove_file(backup_path)?;
+        restore_backup_noclobber(backup_path, final_path)?;
     }
     Ok(())
+}
+
+fn remove_promoted_output_if_owned(
+    final_path: &Path,
+    promoted: PromotedOutput,
+    backup_path: Option<&Path>,
+) -> std::io::Result<()> {
+    let quarantine_path = vacant_sibling_path("paired output rollback", final_path, "promoted")?;
+    std::fs::rename(final_path, &quarantine_path)?;
+    let matches = promoted.matches_path(&quarantine_path);
+    drop(promoted);
+    match matches {
+        Ok(true) => remove_if_present(&quarantine_path),
+        Ok(false) => {
+            let restore_result = persist_existing_file_noclobber(&quarantine_path, final_path);
+            if let Err(restore_error) = restore_result {
+                return Err(std::io::Error::other(format!(
+                    "cannot restore {} because another writer replaced the promoted output; \
+                     unowned file retained at {} and backup retained at {}: {restore_error}",
+                    final_path.display(),
+                    quarantine_path.display(),
+                    backup_path.map_or_else(|| "<none>".into(), |path| path.display().to_string())
+                )));
+            }
+            Err(std::io::Error::other(format!(
+                "cannot restore {} because another writer replaced the promoted output; backup retained at {}",
+                final_path.display(),
+                backup_path.map_or_else(|| "<none>".into(), |path| path.display().to_string())
+            )))
+        }
+        Err(error) => {
+            let _ = persist_existing_file_noclobber(&quarantine_path, final_path);
+            Err(error)
+        }
+    }
+}
+
+fn restore_backup_noclobber(backup_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    persist_existing_file_noclobber(backup_path, final_path)
+}
+
+fn persist_existing_file_noclobber(source_path: &Path, final_path: &Path) -> std::io::Result<()> {
+    let file = std::fs::OpenOptions::new().read(true).open(source_path)?;
+    let temp_path = tempfile::TempPath::try_from_path(source_path.to_path_buf())?;
+    let mut source = tempfile::NamedTempFile::from_parts(file, temp_path);
+    // On a failed no-clobber promotion the original file is the recovery
+    // artifact, so it must outlive the temporary wrapper.
+    source.disable_cleanup(true);
+    source
+        .persist_noclobber(final_path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 fn remove_backups(
     canonical_backup: Option<&Path>,
     data_loop_backup: Option<&Path>,
 ) -> std::io::Result<()> {
-    if let Some(path) = canonical_backup {
-        remove_if_present(path)?;
+    let canonical_result = canonical_backup.map_or(Ok(()), remove_if_present);
+    let data_loop_result = data_loop_backup.map_or(Ok(()), remove_if_present);
+    match (canonical_result, data_loop_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(first), Err(second)) => Err(std::io::Error::other(format!(
+            "{first}; additionally failed to remove Data Loop backup: {second}"
+        ))),
     }
-    if let Some(path) = data_loop_backup {
-        remove_if_present(path)?;
-    }
-    Ok(())
 }
 
 fn remove_if_present(path: &Path) -> std::io::Result<()> {
@@ -397,11 +489,55 @@ mod tests {
         std::fs::write(&final_path, b"concurrent").unwrap();
         std::fs::write(&backup_path, b"previous").unwrap();
 
-        let error = restore_output(&final_path, Some(&backup_path), false).unwrap_err();
+        let error = restore_output(&final_path, Some(&backup_path), None).unwrap_err();
 
-        assert!(error.to_string().contains("failed to restore"));
+        assert!(error.to_string().contains("cannot restore"));
         assert_eq!(std::fs::read(final_path).unwrap(), b"concurrent");
         assert_eq!(std::fs::read(backup_path).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn rollback_does_not_delete_replacement_of_promoted_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let final_path = directory.path().join("denials.json");
+        let displaced_path = directory.path().join("displaced.json");
+        let backup_path = directory.path().join("backup.json");
+        std::fs::write(&final_path, b"promoted").unwrap();
+        let promoted = PromotedOutput {
+            handle: same_file::Handle::from_file(std::fs::File::open(&final_path).unwrap())
+                .unwrap(),
+        };
+        std::fs::rename(&final_path, &displaced_path).unwrap();
+        std::fs::write(&final_path, b"concurrent").unwrap();
+        std::fs::write(&backup_path, b"previous").unwrap();
+
+        let error = restore_output(&final_path, Some(&backup_path), Some(promoted)).unwrap_err();
+
+        assert!(error.to_string().contains("another writer replaced"));
+        assert_eq!(std::fs::read(final_path).unwrap(), b"concurrent");
+        assert_eq!(std::fs::read(backup_path).unwrap(), b"previous");
+    }
+
+    #[test]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn rollback_restores_read_only_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let backup_path = directory.path().join("backup.json");
+        let final_path = directory.path().join("denials.json");
+        std::fs::write(&backup_path, b"previous").unwrap();
+        let mut permissions = std::fs::metadata(&backup_path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&backup_path, permissions).unwrap();
+
+        persist_existing_file_noclobber(&backup_path, &final_path).unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"previous");
+        #[cfg(windows)]
+        {
+            let mut permissions = std::fs::metadata(&final_path).unwrap().permissions();
+            permissions.set_readonly(false);
+            std::fs::set_permissions(final_path, permissions).unwrap();
+        }
     }
 
     #[test]
