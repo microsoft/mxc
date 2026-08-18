@@ -826,19 +826,52 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
         },
         Err(error) => {
             if matches!(acc.mode, CollectionMode::Analyze) {
-                if !acc.event_in_scope(
-                    header.ProcessId,
-                    analyze_filetime.expect("analyze mode has normalized FILETIME"),
-                ) || !acc.begin_event()
-                {
+                if error.is_schema_error() {
+                    acc.record_event_decode_error(provider, event_id, header.ProcessId, error);
                     return;
                 }
+                let filetime = analyze_filetime.expect("analyze mode has normalized FILETIME");
+                let pid = if event_id == crate::extractors::CAPABILITY_DENIAL_EVENT_ID {
+                    let process_id = unsafe {
+                        tdh_decode::decode_event_property(
+                            event_record,
+                            &mut acc.schema_cache,
+                            "ProcessId",
+                        )
+                    }
+                    .ok()
+                    .flatten();
+                    decode_error_effective_pid(
+                        process_id.as_deref(),
+                        header.ProcessId,
+                        acc.event_in_scope(header.ProcessId, filetime),
+                    )
+                } else {
+                    Some(header.ProcessId)
+                };
+                let Some(pid) = pid else {
+                    return;
+                };
+                if !acc.event_in_scope(pid, filetime) || !acc.begin_event() {
+                    return;
+                }
+                acc.record_event_decode_error(provider, event_id, pid, error);
+                return;
             } else if !acc.begin_event() {
                 return;
             }
             acc.record_event_decode_error(provider, event_id, header.ProcessId, error);
         }
     }
+}
+
+fn decode_error_effective_pid(
+    process_id: Option<&str>,
+    header_pid: u32,
+    header_in_scope: bool,
+) -> Option<u32> {
+    crate::extractors::effective_capability_event_pid(process_id)
+        .or_else(|| header_in_scope.then_some(header_pid))
 }
 
 fn select_capability_decode_result_for_relogging(
@@ -1178,6 +1211,16 @@ mod tests {
             .decode_error
             .as_deref()
             .is_some_and(|error| error.contains("manifest unavailable")));
+    }
+
+    #[test]
+    fn capability_decode_error_prefers_payload_pid_and_fails_closed_without_scope() {
+        assert_eq!(
+            decode_error_effective_pid(Some("42"), 9000, false),
+            Some(42)
+        );
+        assert_eq!(decode_error_effective_pid(None, 42, true), Some(42));
+        assert_eq!(decode_error_effective_pid(None, 9000, false), None);
     }
 
     #[test]
