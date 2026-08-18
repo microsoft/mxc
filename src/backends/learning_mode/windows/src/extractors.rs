@@ -396,8 +396,8 @@ fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&s
     if !normalized.equals("objectname") && !normalized.equals("resource") {
         return false;
     }
-    if let Some(object_type) = object_type {
-        return object_type.eq_ignore_ascii_case("File");
+    if object_type.is_some_and(|object_type| object_type.eq_ignore_ascii_case("File")) {
+        return true;
     }
 
     let bytes = value.as_bytes();
@@ -1435,6 +1435,11 @@ mod tests {
             r"\Device\HarddiskVolume3\secret.txt",
             Some("Section")
         ));
+        assert!(looks_like_file_path_property(
+            "ObjectName",
+            r"C:\Users\alice\secret.txt",
+            Some("Section")
+        ));
         assert!(!looks_like_file_path_property(
             "ObjectName",
             r"\BaseNamedObjects\shared-cache",
@@ -1535,6 +1540,22 @@ mod tests {
         let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         assert_eq!(value_for("UserName"), Some(REDACTED_USER));
         assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+    }
+
+    #[test]
+    fn sanitize_properties_redacts_absolute_path_despite_non_file_object_type() {
+        let props = vec![
+            ("ObjectType".to_string(), "\"Section\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"C:\\Users\\alice\\secret.txt\"".to_string(),
+            ),
+        ];
+
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+        assert_eq!(value_for("ObjectType"), Some("Section"));
     }
 
     #[test]
