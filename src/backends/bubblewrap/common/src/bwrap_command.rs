@@ -264,6 +264,11 @@ pub(crate) fn build_args_classified_with_mode(
     if !network_mode.uses_external_userns() {
         args.push("--unshare-user".into());
     }
+    // SECURITY: proxy mode joins the supervisor's user namespace rather than
+    // unsharing, leaving that descriptor open in the workload. It is inert only
+    // because bwrap empties the capability sets before exec — asserted by
+    // run_bwrap_network_proxy_test.sh, explained in
+    // docs/bwrap-support/bubblewrap-backend.md.
     args.extend(
         ["--unshare-pid", "--unshare-ipc", "--unshare-uts"]
             .into_iter()
@@ -387,6 +392,61 @@ mod tests {
             working_directory: "/home/user".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_schema_gate_selects_the_private_namespace_only_from_0_8_onward() {
+        // The gate decides whether a proxy run gets the 0.8 private namespace
+        // or keeps the legacy shared-host-network behavior GHCP depends on, so
+        // its boundaries are pinned explicitly.
+        let cases = [
+            ("0.6.0-alpha", ResolvedNetworkMode::LegacyProxy),
+            ("0.7.0-alpha", ResolvedNetworkMode::LegacyProxy),
+            ("0.7.99", ResolvedNetworkMode::LegacyProxy),
+            ("0.8.0", ResolvedNetworkMode::ProxyOnly),
+            ("0.8.0-alpha", ResolvedNetworkMode::ProxyOnly),
+            ("0.8.0-beta", ResolvedNetworkMode::ProxyOnly),
+            ("0.9.0", ResolvedNetworkMode::ProxyOnly),
+            ("0.10.0", ResolvedNetworkMode::ProxyOnly),
+            ("1.0.0", ResolvedNetworkMode::ProxyOnly),
+            ("2.1.0", ResolvedNetworkMode::ProxyOnly),
+            // Anything unparsable fails closed onto the legacy path: the old
+            // behavior is the compatible one, so an unreadable version must
+            // never silently opt a caller into the new namespace model.
+            ("", ResolvedNetworkMode::LegacyProxy),
+            ("0.8", ResolvedNetworkMode::ProxyOnly),
+            ("0", ResolvedNetworkMode::LegacyProxy),
+            ("0.8-beta", ResolvedNetworkMode::LegacyProxy),
+            ("v0.8.0", ResolvedNetworkMode::LegacyProxy),
+            ("not-a-version", ResolvedNetworkMode::LegacyProxy),
+        ];
+
+        for (version, expected) in cases {
+            let request = ExecutionRequest {
+                schema_version: version.into(),
+                ..base_request()
+            };
+            assert_eq!(
+                ResolvedNetworkMode::from_request(&request, true),
+                expected,
+                "schema version {version:?} resolved to the wrong network mode"
+            );
+        }
+    }
+
+    #[test]
+    fn the_schema_gate_does_not_apply_when_no_proxy_is_active() {
+        // Without an active proxy the version is irrelevant — a 0.8 request
+        // still classifies on policy alone (default policy is block, so this
+        // lands on the plain isolated namespace, not the proxy one).
+        let request = ExecutionRequest {
+            schema_version: "0.8.0".into(),
+            ..base_request()
+        };
+        assert_eq!(
+            ResolvedNetworkMode::from_request(&request, false),
+            ResolvedNetworkMode::Isolated
+        );
     }
 
     #[test]

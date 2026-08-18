@@ -330,6 +330,41 @@ request fails if its private namespace cannot be configured.
 
 ### Caveats
 
+- **Host loopback moves to the gateway address (breaking change in 0.8+
+  proxy mode)**: the sandbox gets its own network namespace, so inside it
+  `127.0.0.1` now means *the sandbox itself*, not the host. A config that
+  reaches a host-local service by loopback address — a database on
+  `127.0.0.1:5432`, a metadata endpoint, a second proxy — silently stops
+  connecting to the host and starts connecting to nothing. Under the schema
+  0.6/0.7 legacy proxy path the sandbox shared the **host's own network
+  namespace**, so `127.0.0.1` did reach the host; that is the behavior
+  changing here.
+
+  Host-local services remain reachable, but at slirp's gateway address
+  `10.0.2.2` instead — which is exactly how the runner rewrites a
+  `localhost` proxy endpoint so the sandbox can still find it.
+
+  **This reachability is not limited to the configured proxy.** slirp runs
+  without `--disable-host-loopback`, so the workload can open a connection
+  to *any* service bound to host loopback via `10.0.2.2:<port>` — a local
+  database, a metadata endpoint, an unrelated daemon. That is a deliberate
+  exception to the private-network boundary and a more sensitive one than
+  generic outbound internet egress, because host-loopback services often
+  assume that only host-local callers can reach them. `--disable-host-loopback`
+  would close the path, but it would also break the proxy rewrite above, so
+  the gateway stays reachable until a single-port forwarding mechanism
+  replaces it. Restricting egress to the configured proxy endpoint is the
+  job of the proxy-only enforcement work that builds on this change.
+- **The supervisor's user namespace is visible to the sandbox**: in proxy
+  mode `bwrap` joins the supervisor's user namespace via `--userns` rather
+  than creating its own, and the namespace descriptor stays open in the
+  workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
+  to close it. Re-entering the namespace with `setns` requires
+  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
+  capability bounding set before `exec`, so the workload runs with
+  `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
+  those are zero, because that assumption is what makes the exposed
+  descriptor inert.
 - **Cooperative model**: the runner enforces by injecting
   `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox environment, so only
   well-behaved clients that honor those vars are routed through the
@@ -382,9 +417,9 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec |
-| Network isolation | iptables + veth | `--unshare-net` or iptables |
-| Dependencies | `lxc-*` tools, templates | Single `bwrap` binary |
+| Startup | Create → Start → Attach | Single `bwrap` exec (proxy mode adds a namespace supervisor) |
+| Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns` and util-linux `unshare` |
 | Lifecycle | Create/destroy containers | Process dies on exit |
 
 **When to use Bubblewrap:**

@@ -6,7 +6,9 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -24,11 +26,20 @@ set -eu
 state_dir="$1"
 ready_fd="$2"
 exit_fd="$3"
+pid_fd="$4"
 printf ready > "$state_dir/userns.ready"
-while [ ! -s "$state_dir/child.pid" ]; do
-    sleep 0.01
-done
-child_pid="$(cat "$state_dir/child.pid")"
+# Block on the parent-owned PID pipe rather than polling for a file: if the
+# parent dies before it can publish the PID, the read ends at EOF and this
+# supervisor exits instead of spinning forever as an orphan.
+eval "exec 3<&$pid_fd"
+if ! IFS= read -r child_pid <&3; then
+    child_pid="${child_pid:-}"
+fi
+exec 3<&-
+if [ -z "$child_pid" ]; then
+    echo "mxc: parent exited before publishing the sandbox PID" >&2
+    exit 1
+fi
 exec slirp4netns --configure --mtu=65520 \
     --ready-fd "$ready_fd" --exit-fd "$exit_fd" \
     "$child_pid" tap0
@@ -40,9 +51,18 @@ pub(crate) struct BwrapStartup {
     info_writer: Option<OwnedFd>,
     gate_reader: Option<OwnedFd>,
     gate_writer: Option<OwnedFd>,
+    /// Descriptors bwrap must inherit, cleared of `FD_CLOEXEC` in the child
+    /// only. See [`inherit_descriptors`].
+    inheritable: Vec<RawFd>,
 }
 
 impl BwrapStartup {
+    /// Arrange for bwrap -- and only bwrap -- to inherit the startup
+    /// descriptors.
+    pub(crate) fn prepare_command(&self, command: &mut Command) {
+        inherit_descriptors(command, self.inheritable.clone());
+    }
+
     /// Close the parent copies of the descriptors inherited by Bubblewrap.
     pub(crate) fn child_spawned(&mut self) {
         self.info_writer.take();
@@ -111,14 +131,20 @@ pub(crate) struct ProxyNetworkNamespace {
     state_dir: TempDir,
     supervisor: Child,
     exit_writer: Option<OwnedFd>,
-    userns: File,
+    /// Write end of the pipe carrying the sandbox PID to the supervisor.
+    /// Dropping it without writing ends the supervisor's wait at EOF.
+    pid_writer: Option<OwnedFd>,
+    /// Handle to the supervisor's user namespace, passed to bwrap as
+    /// `--userns`. Released once bwrap owns it; see [`Self::userns_handed_off`].
+    userns: Option<File>,
 }
 
 impl ProxyNetworkNamespace {
     /// Create the capability-retaining namespace supervisor.
+    ///
+    /// Callers reach this only after `BwrapRunner::validate` has already run
+    /// [`probe_dependencies`], so the probe is not repeated here.
     pub(crate) fn start(logger: &mut Logger) -> Result<Self, String> {
-        probe_dependencies()?;
-
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
             .tempdir()
@@ -136,11 +162,11 @@ impl ProxyNetworkNamespace {
             .map_err(|error| {
                 format!("Bubblewrap: failed to create slirp readiness file: {error}")
             })?;
-        clear_cloexec(ready.as_raw_fd())?;
 
         let (exit_reader, exit_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        clear_cloexec(exit_reader.as_raw_fd())?;
+        let (pid_reader, pid_writer) =
+            pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
 
         let mut command = Command::new("unshare");
         command
@@ -157,14 +183,26 @@ impl ProxyNetworkNamespace {
             .arg(state_dir.path())
             .arg(ready.as_raw_fd().to_string())
             .arg(exit_reader.as_raw_fd().to_string())
+            .arg(pid_reader.as_raw_fd().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
+        // These stay CLOEXEC in this process, so a concurrent spawn from
+        // another thread cannot inherit them; only the supervisor gets them.
+        inherit_descriptors(
+            &mut command,
+            vec![
+                ready.as_raw_fd(),
+                exit_reader.as_raw_fd(),
+                pid_reader.as_raw_fd(),
+            ],
+        );
 
         let mut supervisor = command.spawn().map_err(|error| {
             format!("Bubblewrap: failed to start proxy-network supervisor: {error}")
         })?;
         drop(exit_reader);
+        drop(pid_reader);
         drop(ready);
 
         if let Err(error) = wait_for_file(
@@ -187,14 +225,14 @@ impl ProxyNetworkNamespace {
                 ));
             }
         };
-        clear_cloexec(userns.as_raw_fd())?;
         logger.log_line("Bubblewrap: created rootless proxy network namespace supervisor");
 
         Ok(Self {
             state_dir,
             supervisor,
             exit_writer: Some(exit_writer),
-            userns,
+            pid_writer: Some(pid_writer),
+            userns: Some(userns),
         })
     }
 
@@ -204,12 +242,15 @@ impl ProxyNetworkNamespace {
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         let (gate_reader, gate_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
-        clear_cloexec(info_writer.as_raw_fd())?;
-        clear_cloexec(gate_reader.as_raw_fd())?;
+
+        let userns = self
+            .userns
+            .as_ref()
+            .ok_or_else(|| "Bubblewrap: proxy user namespace is already handed off".to_string())?;
 
         let runtime_args = [
             "--userns".to_string(),
-            self.userns.as_raw_fd().to_string(),
+            userns.as_raw_fd().to_string(),
             "--info-fd".to_string(),
             info_writer.as_raw_fd().to_string(),
             "--block-fd".to_string(),
@@ -218,6 +259,11 @@ impl ProxyNetworkNamespace {
         args.splice(0..0, runtime_args);
 
         Ok(BwrapStartup {
+            inheritable: vec![
+                userns.as_raw_fd(),
+                info_writer.as_raw_fd(),
+                gate_reader.as_raw_fd(),
+            ],
             info_reader: File::from(info_reader),
             info_writer: Some(info_writer),
             gate_reader: Some(gate_reader),
@@ -225,13 +271,27 @@ impl ProxyNetworkNamespace {
         })
     }
 
+    /// Drop this process's handle to the user namespace once bwrap holds it.
+    ///
+    /// The namespace itself stays alive through the supervisor, which is a
+    /// member of it. Releasing here bounds the window in which a concurrent
+    /// spawn could pick the descriptor up to the bwrap spawn itself, rather
+    /// than the whole sandbox lifetime.
+    pub(crate) fn userns_handed_off(&mut self) {
+        self.userns.take();
+    }
+
     /// Give the supervisor the Bubblewrap child PID and wait for slirp readiness.
     pub(crate) fn attach(&mut self, child_pid: u32, logger: &mut Logger) -> Result<(), String> {
-        fs::write(
-            self.state_dir.path().join("child.pid"),
-            child_pid.to_string(),
-        )
-        .map_err(|error| format!("Bubblewrap: failed to publish bwrap child PID: {error}"))?;
+        let mut writer = self
+            .pid_writer
+            .take()
+            .map(File::from)
+            .ok_or_else(|| "Bubblewrap: sandbox PID was already published".to_string())?;
+        writer
+            .write_all(format!("{child_pid}\n").as_bytes())
+            .map_err(|error| format!("Bubblewrap: failed to publish bwrap child PID: {error}"))?;
+        drop(writer);
 
         wait_for_file(
             self.state_dir.path().join("slirp.ready"),
@@ -245,6 +305,9 @@ impl ProxyNetworkNamespace {
 
     /// Stop slirp and reap the namespace supervisor.
     pub(crate) fn stop(&mut self, logger: &mut Logger) {
+        // Release the PID pipe too: a supervisor still waiting for the sandbox
+        // PID sees EOF and exits rather than lingering.
+        self.pid_writer.take();
         self.exit_writer.take();
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         loop {
@@ -282,11 +345,14 @@ impl Drop for ProxyNetworkNamespace {
 /// Return the proxy endpoint visible through slirp's host gateway.
 pub(crate) fn sandbox_proxy_address(address: &ProxyAddress) -> Result<ProxyAddress, String> {
     let host = address.host().trim_matches(['[', ']']);
-    let is_loopback = host.eq_ignore_ascii_case("localhost")
+    // `0.0.0.0` / `::` name the host itself just as `127.0.0.1` does: a proxy
+    // bound to the wildcard is reachable on the host's loopback, which the
+    // sandbox's private namespace cannot see. Both need the gateway rewrite.
+    let is_host_local = host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback());
-    if !is_loopback {
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
+    if !is_host_local {
         return Ok(address.clone());
     }
 
@@ -311,6 +377,21 @@ pub(crate) fn sandbox_proxy_address(address: &ProxyAddress) -> Result<ProxyAddre
 }
 
 pub(crate) fn probe_dependencies() -> Result<(), String> {
+    // Probing costs two subprocess spawns, and the host's tooling does not
+    // change under a running process often enough to pay that on every
+    // sandbox. Cache the *success* only: a failure is usually "the operator
+    // has not installed slirp4netns yet", and caching that would keep failing
+    // long after they did.
+    static PROBED: OnceLock<()> = OnceLock::new();
+    if PROBED.get().is_some() {
+        return Ok(());
+    }
+    probe_dependencies_uncached()?;
+    let _ = PROBED.set(());
+    Ok(())
+}
+
+fn probe_dependencies_uncached() -> Result<(), String> {
     let slirp = Command::new("slirp4netns")
         .arg("--version")
         .output()
@@ -370,18 +451,44 @@ fn wait_for_file(
             ));
         }
         if Instant::now() >= deadline {
+            // Include whatever the component wrote to stderr: on a timeout it
+            // is usually the only evidence of *why* startup stalled, and the
+            // process is still alive so no exit status will explain it.
+            let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
+            let stderr = stderr.trim();
+            let detail = if stderr.is_empty() {
+                "no stderr output".to_string()
+            } else {
+                format!("stderr: {stderr}")
+            };
             return Err(format!(
-                "Bubblewrap: timed out waiting for {component} startup"
+                "Bubblewrap: timed out waiting for {component} startup after {STARTUP_TIMEOUT:?} \
+                 ({detail})"
             ));
         }
         thread::sleep(Duration::from_millis(10));
     }
 }
 
-fn clear_cloexec(fd: RawFd) -> Result<(), String> {
-    fcntl(fd, FcntlArg::F_SETFD(FdFlag::empty()))
-        .map(|_| ())
-        .map_err(|error| format!("Bubblewrap: failed to make descriptor inheritable: {error}"))
+/// Hand `fds` to one specific child, without exposing them process-wide.
+///
+/// `FD_CLOEXEC` is per-process, so clearing it on the parent's copy would leak
+/// the descriptors to every concurrent `Command::spawn` -- a real window, since
+/// this crate is reachable from the SDK and FFI. Clearing it in the forked child
+/// instead gives them to the intended child and no one else.
+fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `fcntl` is async-signal-safe and
+    // this closure allocates nothing -- `fds` is captured by move and holds
+    // plain integers.
+    unsafe {
+        command.pre_exec(move || {
+            for fd in &fds {
+                fcntl(*fd, FcntlArg::F_SETFD(FdFlag::empty())).map_err(std::io::Error::from)?;
+            }
+            Ok(())
+        });
+    }
 }
 
 fn set_nonblocking(fd: RawFd) -> Result<(), String> {
@@ -429,5 +536,65 @@ mod tests {
         let translated = sandbox_proxy_address(&address).unwrap();
 
         assert_eq!(translated.to_url(), address.to_url());
+    }
+
+    /// A proxy bound to the wildcard address is reachable on the host's
+    /// loopback, which the sandbox's private namespace cannot see, so it needs
+    /// the same gateway rewrite `127.0.0.1` gets.
+    #[test]
+    fn translates_wildcard_proxy_to_slirp_gateway() {
+        let address = ProxyAddress::new("0.0.0.0".into(), 8080);
+        let translated = sandbox_proxy_address(&address).unwrap();
+
+        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(translated.port(), 8080);
+    }
+
+    #[test]
+    fn translates_bracketed_ipv6_wildcard_proxy_to_slirp_gateway() {
+        let address = ProxyAddress::from_url("http://[::]:3128/", "[::]".into(), 3128);
+        let translated = sandbox_proxy_address(&address).unwrap();
+
+        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(translated.port(), 3128);
+        assert_eq!(translated.to_url(), "http://10.0.2.2:3128/");
+    }
+
+    /// The descriptor must reach the child that was prepared and no other. The
+    /// obvious alternative -- clearing `FD_CLOEXEC` on the parent's copy --
+    /// passes the first assertion and fails the other two.
+    #[test]
+    fn inherited_descriptors_reach_only_the_prepared_child() {
+        let (reader, _writer) = pipe2(OFlag::O_CLOEXEC).expect("pipe");
+        let fd = reader.as_raw_fd();
+        let probe = format!("test -e /proc/self/fd/{fd} && echo present || echo absent");
+
+        let mut prepared = Command::new("sh");
+        prepared.arg("-c").arg(&probe);
+        inherit_descriptors(&mut prepared, vec![fd]);
+        let prepared_out = prepared.output().expect("spawn prepared child");
+
+        let bystander = Command::new("sh")
+            .arg("-c")
+            .arg(&probe)
+            .output()
+            .expect("spawn bystander child");
+
+        assert_eq!(
+            String::from_utf8_lossy(&prepared_out.stdout).trim(),
+            "present",
+            "the prepared child did not inherit the descriptor"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&bystander.stdout).trim(),
+            "absent",
+            "an unrelated child inherited the descriptor"
+        );
+
+        let flags = FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).expect("F_GETFD"));
+        assert!(
+            flags.contains(FdFlag::FD_CLOEXEC),
+            "the parent's own descriptor was left inheritable"
+        );
     }
 }

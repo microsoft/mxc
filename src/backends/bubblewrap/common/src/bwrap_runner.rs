@@ -275,7 +275,7 @@ impl BubblewrapScriptRunner {
             Some(network) => match network.configure_bwrap(&mut args) {
                 Ok(startup) => Some(startup),
                 Err(error) => {
-                    proxy_network.take();
+                    stop_proxy_network(&mut proxy_network, logger);
                     proxy.stop(logger);
                     return Err(ScriptResponse::error(&error));
                 }
@@ -354,13 +354,16 @@ impl BubblewrapScriptRunner {
         if group {
             command.process_group(0);
         }
+        if let Some(startup) = network_startup.as_ref() {
+            startup.prepare_command(&mut command);
+        }
 
         let mut child = match command.spawn() {
             Ok(process) => process,
             Err(error) => {
                 let mut fw_manager = fw_manager;
                 cleanup_iptables(&mut fw_manager, logger);
-                proxy_network.take();
+                stop_proxy_network(&mut proxy_network, logger);
                 proxy.stop(logger);
                 return Err(ScriptResponse::error(&format!(
                     "Bubblewrap: failed to spawn bwrap: {}",
@@ -371,6 +374,9 @@ impl BubblewrapScriptRunner {
 
         if let Some(mut startup) = network_startup.take() {
             startup.child_spawned();
+            if let Some(network) = proxy_network.as_mut() {
+                network.userns_handed_off();
+            }
             let startup_result = startup
                 .child_pid(&mut child)
                 .and_then(|child_pid| {
@@ -388,7 +394,7 @@ impl BubblewrapScriptRunner {
                 let _ = child.wait();
                 let mut fw_manager = fw_manager;
                 cleanup_iptables(&mut fw_manager, logger);
-                proxy_network.take();
+                stop_proxy_network(&mut proxy_network, logger);
                 proxy.stop(logger);
                 return Err(ScriptResponse::error(&error));
             }
@@ -412,7 +418,7 @@ impl BubblewrapScriptRunner {
                     let _ = child.wait();
                     let mut fw_manager = fw_manager;
                     cleanup_iptables(&mut fw_manager, logger);
-                    proxy_network.take();
+                    stop_proxy_network(&mut proxy_network, logger);
                     proxy.stop(logger);
                     let error = out_result.err().or(err_result.err());
                     return Err(ScriptResponse::error(&format!(
@@ -631,6 +637,20 @@ fn cleanup_iptables(manager: &mut Option<NetworkIptablesManager>, logger: &mut L
         if mgr.rules_applied() {
             let _ = mgr.remove_firewall_rules(logger);
         }
+    }
+}
+
+/// Tear down the proxy network namespace against the caller's logger.
+///
+/// `Drop` would also stop it, but only through a throwaway in-memory logger, so
+/// warnings about slirp needing forced termination are lost on exactly the
+/// startup paths that already failed.
+fn stop_proxy_network(
+    network: &mut Option<proxy_network::ProxyNetworkNamespace>,
+    logger: &mut Logger,
+) {
+    if let Some(mut network) = network.take() {
+        network.stop(logger);
     }
 }
 
