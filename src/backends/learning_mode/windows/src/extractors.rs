@@ -400,17 +400,36 @@ fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&s
         return true;
     }
 
+    crate::path_norm::is_user_visible_absolute(value)
+        || looks_like_dos_device_filesystem_path(value)
+        || looks_like_nt_filesystem_path(value)
+}
+
+fn looks_like_dos_device_filesystem_path(value: &str) -> bool {
+    let rest = [r"\??\", r"\\?\", r"\\.\"]
+        .into_iter()
+        .find_map(|prefix| strip_prefix_ignore_ascii_case(value, prefix));
+    let Some(rest) = rest else {
+        return false;
+    };
+    if looks_like_drive_absolute_path(rest)
+        || strip_prefix_ignore_ascii_case(rest, r"UNC\").is_some()
+    {
+        return true;
+    }
+
+    let Some(volume) = strip_prefix_ignore_ascii_case(rest, "Volume{") else {
+        return false;
+    };
+    volume.contains(r"}\")
+}
+
+fn looks_like_drive_absolute_path(value: &str) -> bool {
     let bytes = value.as_bytes();
-    let drive_absolute = bytes.len() >= 3
+    bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/');
-    drive_absolute
-        || value.starts_with(r"\\")
-        || value.starts_with(r"\??\")
-        || value.starts_with(r"\\?\")
-        || value.starts_with(r"\\.\")
-        || looks_like_nt_filesystem_path(value)
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 fn looks_like_nt_filesystem_path(value: &str) -> bool {
@@ -1475,6 +1494,8 @@ mod tests {
             r"\Device\HarddiskVolume3\Users\alice\secret.txt",
             r"\device\mup\server\share\Users\alice\secret.txt",
             r"\Device\LanmanRedirector\;Z:0000000000001234\server\share\secret.txt",
+            r"\??\C:\Users\alice\secret.txt",
+            r"\??\UNC\server\share\Users\alice\secret.txt",
         ] {
             assert!(looks_like_file_path_property(
                 "ObjectName",
@@ -1502,6 +1523,13 @@ mod tests {
             r"\Device\MountPointManager",
             Some("Section")
         ));
+        for identifier in [r"\??\FDC#GENERIC_FLOPPY_DRIVE", r"\\.\PhysicalDrive0"] {
+            assert!(!looks_like_file_path_property(
+                "ObjectName",
+                identifier,
+                Some("SymbolicLink")
+            ));
+        }
     }
 
     #[test]
