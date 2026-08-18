@@ -125,12 +125,14 @@ pub fn finalize(
     let final_etl = context.log_dir.join("trace.etl");
     relocate_artifacts(
         capture,
-        &source_denials,
-        &final_denials,
-        &source_data_loop,
-        &final_data_loop,
-        &source_etl,
-        &final_etl,
+        &ArtifactRelocation {
+            source_denials: &source_denials,
+            final_denials: &final_denials,
+            source_data_loop: &source_data_loop,
+            final_data_loop: &final_data_loop,
+            source_etl: &source_etl,
+            final_etl: &final_etl,
+        },
         move_new_file,
     )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
@@ -180,33 +182,37 @@ fn validate_metadata(
 ///
 /// `move_file` is injected so tests can force a second-move failure
 /// deterministically; production passes [`move_new_file`].
+struct ArtifactRelocation<'a> {
+    source_denials: &'a Path,
+    final_denials: &'a Path,
+    source_data_loop: &'a Path,
+    final_data_loop: &'a Path,
+    source_etl: &'a Path,
+    final_etl: &'a Path,
+}
+
 fn relocate_artifacts(
     capture: &mut wxc_common::models::CaptureDenialsOutput,
-    source_denials: &Path,
-    final_denials: &Path,
-    source_data_loop: &Path,
-    final_data_loop: &Path,
-    source_etl: &Path,
-    final_etl: &Path,
+    paths: &ArtifactRelocation<'_>,
     mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    ensure_destination_available(source_denials, final_denials)?;
-    ensure_destination_available(source_data_loop, final_data_loop)?;
-    ensure_destination_available(source_etl, final_etl)?;
+    ensure_destination_available(paths.source_denials, paths.final_denials)?;
+    ensure_destination_available(paths.source_data_loop, paths.final_data_loop)?;
+    ensure_destination_available(paths.source_etl, paths.final_etl)?;
 
     // Primary denials JSON first: publish its final path the instant it moves so
     // a later ETL failure can never leave `output_path` referencing a file that
     // has already been renamed away.
-    move_file(source_denials, final_denials)?;
-    capture.output_path = final_denials.to_string_lossy().into_owned();
+    move_file(paths.source_denials, paths.final_denials)?;
+    capture.output_path = paths.final_denials.to_string_lossy().into_owned();
 
-    move_file(source_data_loop, final_data_loop)?;
+    move_file(paths.source_data_loop, paths.final_data_loop)?;
 
     // Retained ETL second: on failure it stays at its source and `etl_path`
     // still points there (unchanged), so each artifact remains individually
     // truthful even though the relocation as a whole failed.
-    move_file(source_etl, final_etl)?;
-    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
+    move_file(paths.source_etl, paths.final_etl)?;
+    capture.etl_path = Some(paths.final_etl.to_string_lossy().into_owned());
     Ok(())
 }
 
@@ -218,23 +224,22 @@ fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
     match std::fs::rename(source, destination) {
         Ok(()) => Ok(()),
         Err(rename_error) => {
-            if let Err(copy_error) = std::fs::copy(source, destination) {
-                let cleanup_error = std::fs::remove_file(destination)
-                    .err()
-                    .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
-                return Err(match cleanup_error {
+            if let Err(copy_error) = copy_to_new_file(source, destination) {
+                return Err(match copy_error.cleanup_error {
                     Some(cleanup_error) => format!(
                         "failed to move audit artifact {} to {}: {rename_error}; \
-                         copy fallback failed: {copy_error}; partial destination cleanup failed: \
+                         copy fallback failed: {}; partial destination cleanup failed: \
                          {cleanup_error}",
                         source.display(),
-                        destination.display()
+                        destination.display(),
+                        copy_error.error
                     ),
                     None => format!(
                         "failed to move audit artifact {} to {}: {rename_error}; \
-                         copy fallback failed: {copy_error}",
+                         copy fallback failed: {}",
                         source.display(),
-                        destination.display()
+                        destination.display(),
+                        copy_error.error
                     ),
                 });
             }
@@ -248,6 +253,37 @@ fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
             })
         }
     }
+}
+
+struct CopyNewFileError {
+    error: std::io::Error,
+    cleanup_error: Option<std::io::Error>,
+}
+
+fn copy_to_new_file(source: &Path, destination: &Path) -> Result<(), CopyNewFileError> {
+    let mut source_file = std::fs::File::open(source).map_err(|error| CopyNewFileError {
+        error,
+        cleanup_error: None,
+    })?;
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| CopyNewFileError {
+            error,
+            cleanup_error: None,
+        })?;
+    if let Err(error) = std::io::copy(&mut source_file, &mut destination_file) {
+        drop(destination_file);
+        let cleanup_error = std::fs::remove_file(destination)
+            .err()
+            .filter(|cleanup_error| cleanup_error.kind() != std::io::ErrorKind::NotFound);
+        return Err(CopyNewFileError {
+            error,
+            cleanup_error,
+        });
+    }
+    Ok(())
 }
 
 fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
@@ -486,6 +522,22 @@ mod tests {
     }
 
     #[test]
+    fn copy_fallback_never_clobbers_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let destination = directory.path().join("destination.json");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+
+        let error = copy_to_new_file(&source, &destination).unwrap_err();
+
+        assert_eq!(error.error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(error.cleanup_error.is_none());
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+    }
+
+    #[test]
     fn finalize_rejects_missing_data_loop_output() {
         let directory = tempfile::tempdir().unwrap();
         let log_dir = directory.path().join("audit");
@@ -536,12 +588,14 @@ mod tests {
         let mut calls = 0;
         let error = relocate_artifacts(
             &mut capture,
-            &source_denials,
-            &final_denials,
-            &source_data_loop,
-            &final_data_loop,
-            &source_etl,
-            &final_etl,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &final_denials,
+                source_data_loop: &source_data_loop,
+                final_data_loop: &final_data_loop,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
             |source, destination| {
                 calls += 1;
                 if calls <= 2 {
