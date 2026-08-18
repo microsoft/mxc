@@ -85,6 +85,11 @@ pub fn resolve_runner(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, Error> {
+    #[cfg(target_os = "windows")]
+    {
+        resolve_runner_inner_windows(request, logger).map_err(Error::from)
+    }
+    #[cfg(not(target_os = "windows"))]
     resolve_runner_inner(request, logger).map_err(Error::from)
 }
 
@@ -107,7 +112,7 @@ pub fn run(request: &ExecutionRequest, logger: &mut Logger) -> Result<ScriptResp
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-fn resolve_runner_inner(
+fn resolve_runner_inner_windows(
     request: &ExecutionRequest,
     logger: &mut Logger,
 ) -> Result<ResolvedRunner, MxcError> {
@@ -116,11 +121,18 @@ fn resolve_runner_inner(
     match request.containment {
         ContainmentBackend::ProcessContainer => {
             // ProcessContainer resolves to a concrete Windows backend purely by
-            // host capability: `dispatch_with_fallback` prefers the native
-            // BaseContainer (OS sandbox API) when usable and otherwise falls
-            // back to AppContainer tiers (BFS / DACL). The schema version does
-            // not influence this choice.
-            match appcontainer_common::dispatcher::dispatch_with_fallback(request) {
+            // host capability: `dispatch_with_fallback_and_capture` prefers
+            // the native BaseContainer (OS sandbox API) when usable and
+            // otherwise falls back to AppContainer tiers (BFS / DACL). The
+            // schema version does not influence this choice. When the request
+            // sets `captureDenials`, `factory_for_request` hands the guarded
+            // WPR fallback factory to the dispatcher so an AppContainer
+            // fallback tier can still honor it instead of failing closed.
+            let capture_factory = crate::guarded_capture::factory_for_request(request);
+            match appcontainer_common::dispatcher::dispatch_with_fallback_and_capture(
+                request,
+                capture_factory,
+            ) {
                 Ok(dispatched) => {
                     for w in &dispatched.warnings {
                         let _ = writeln!(logger, "warning: {w}");
@@ -396,7 +408,7 @@ mod tests {
         for config in [None, Some(WindowsSandboxConfig::default())] {
             let request = windows_sandbox_request(config);
             let mut logger = Logger::new(Mode::Buffer);
-            resolve_runner_inner(&request, &mut logger).unwrap();
+            resolve_runner_inner_windows(&request, &mut logger).unwrap();
             assert!(logger.get_buffer().is_empty());
         }
     }
@@ -410,7 +422,7 @@ mod tests {
         let request = windows_sandbox_request(Some(config));
         let mut logger = Logger::new(Mode::Buffer);
 
-        resolve_runner_inner(&request, &mut logger).unwrap();
+        resolve_runner_inner_windows(&request, &mut logger).unwrap();
 
         let warning = logger.get_buffer();
         assert!(warning.contains("idleTimeoutMs"));

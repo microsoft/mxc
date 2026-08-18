@@ -4,29 +4,30 @@
 use super::network::Network;
 use super::primitives::{NonEmptyString, OptionalField};
 
+#[rustfmt::skip]
+string_enum! {
 /// The exact version marker accepted by this contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Version {
     /// The published `0.6.0-alpha` contract.
-    #[serde(rename = "0.6.0-alpha")]
-    V0_6_0Alpha,
+    V0_6_0Alpha => ["0.6.0-alpha"],
+}
 }
 
+#[rustfmt::skip]
+string_enum! {
 /// Stable containment selections available in `0.6.0-alpha`.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub enum Containment {
     /// Select the host's native process-containment backend.
-    #[serde(rename = "process")]
-    Process,
+    Process => ["process"],
     /// Select the Windows ProcessContainer backend.
-    #[serde(rename = "processcontainer", alias = "appcontainer")]
-    ProcessContainer,
+    ProcessContainer => ["processcontainer", "appcontainer"],
     /// Select the Linux LXC backend.
-    #[serde(rename = "lxc")]
-    Lxc,
+    Lxc => ["lxc"],
     /// Select the Linux Bubblewrap backend.
-    #[serde(rename = "bubblewrap")]
-    Bubblewrap,
+    Bubblewrap => ["bubblewrap"],
+}
 }
 
 /// Container lifecycle settings.
@@ -82,21 +83,20 @@ pub struct Fallback {
     pub allow_dacl_mutation: OptionalField<bool>,
 }
 
+#[rustfmt::skip]
+string_enum! {
 /// Clipboard access granted to the contained process.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub enum UiClipboard {
     /// Deny clipboard reads and writes.
-    #[serde(rename = "none")]
-    None,
+    None => ["none"],
     /// Allow clipboard reads.
-    #[serde(rename = "read")]
-    Read,
+    Read => ["read"],
     /// Allow clipboard writes.
-    #[serde(rename = "write")]
-    Write,
+    Write => ["write"],
     /// Allow clipboard reads and writes.
-    #[serde(rename = "all")]
-    All,
+    All => ["all"],
+}
 }
 
 /// Cross-platform user-interface policy.
@@ -114,21 +114,20 @@ pub struct Ui {
     pub injection: OptionalField<bool>,
 }
 
+#[rustfmt::skip]
+string_enum! {
 /// Isolation level for ProcessContainer desktop resources.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub enum ProcessContainerUiIsolation {
     /// Isolate the complete container user-interface environment.
-    #[serde(rename = "container")]
-    Container,
+    Container => ["container"],
     /// Isolate desktop resources.
-    #[serde(rename = "desktop")]
-    Desktop,
+    Desktop => ["desktop"],
     /// Isolate user-interface handles.
-    #[serde(rename = "handles")]
-    Handles,
+    Handles => ["handles"],
     /// Isolate user-interface atoms.
-    #[serde(rename = "atoms")]
-    Atoms,
+    Atoms => ["atoms"],
+}
 }
 
 /// ProcessContainer-specific user-interface policy.

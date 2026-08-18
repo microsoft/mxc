@@ -29,4 +29,7 @@ pub mod start;
 pub mod stop;
 
 #[cfg(target_os = "windows")]
+pub mod trust;
+
+#[cfg(target_os = "windows")]
 pub mod wpr_path;

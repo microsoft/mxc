@@ -465,6 +465,26 @@ fn normalize_filesystem_paths(policy: &mut ContainerPolicy, logger: &mut Logger)
 
 // ---------- Conversion from wire model to domain model ----------
 
+/// Whether `host` names a loopback endpoint: 127.0.0.0/8, ::1, or the name
+/// "localhost".
+///
+/// Inside a container's network namespace a loopback address names the
+/// container's own loopback rather than the host's, so an endpoint reachable
+/// that way on the host is not reachable from the container.
+///
+/// Brackets are stripped first: a URL host component keeps them around an IPv6
+/// literal, and that is the form a parsed proxy URL stores.
+fn host_is_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let candidate = crate::models::unbracket_host(host);
+    candidate
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Convert a typed `wire::Proxy` block into the validated domain `ProxyConfig`.
 /// Exactly one of `builtinTestServer` / `localhost` / `url` may be set.
 fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
@@ -507,6 +527,13 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
     }
 
     if let Some(url_str) = url {
+        // Redact once, up front, and use this in every diagnostic below. A
+        // proxy URL commonly carries basic-auth credentials, and every error in
+        // this block reaches the diagnostic/log stream. Redacting at each site
+        // instead leaves one missed site enough to leak the password, and
+        // these errors all fire before the LXC credential guard downstream
+        // runs.
+        let redacted = crate::proxy_env::redact_proxy_url(&url_str);
         let parsed = url::Url::parse(&url_str)
             .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
 
@@ -515,10 +542,6 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
         // by many clients, which fails open under WSLc's defaultPolicy=allow.
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
-            // Redact any embedded userinfo (`user:password@`) before it reaches
-            // the diagnostic/log stream — a proxy URL commonly carries basic-auth
-            // credentials, and the scheme alone diagnoses the failure.
-            let redacted = crate::proxy_env::redact_proxy_url(&url_str);
             return Err(WxcError::ConfigParse(format!(
                 "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
             )));
@@ -528,13 +551,13 @@ fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
             .host_str()
             .ok_or_else(|| {
                 WxcError::ConfigParse(format!(
-                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {url_str}"
+                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {redacted}"
                 ))
             })?
             .to_string();
         let port = parsed.port().ok_or_else(|| {
             WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {url_str}"
+                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {redacted}"
             ))
         })?;
 
@@ -1096,15 +1119,40 @@ fn convert_wire_config(
             || net.egress.is_some()
             || net.ingress.is_some();
         if let Some(proxy) = net.proxy {
+            // Capture which shorthand was used before the wire proxy is
+            // consumed — LXC can't reach a localhost/loopback proxy.
+            let proxy_used_localhost = proxy.localhost.is_some();
             let proxy_config = convert_wire_proxy(proxy)?;
             if proxy_config.is_enabled()
                 && containment != ContainmentBackend::ProcessContainer
                 && containment != ContainmentBackend::Bubblewrap
+                && containment != ContainmentBackend::Lxc
                 && containment != ContainmentBackend::Seatbelt
                 && containment != ContainmentBackend::Wslc
             {
                 let msg = "Network proxy is only supported with the 'processcontainer', \
-                           'bubblewrap', 'seatbelt', or 'wslc' containment backends";
+                           'bubblewrap', 'lxc', 'seatbelt', or 'wslc' containment backends";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            if containment == ContainmentBackend::Lxc && proxy_config.builtin_test_server {
+                let msg = "LXC: network.proxy.builtinTestServer is not supported; \
+                           use network.proxy.url";
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+
+            // `network.proxy.localhost` maps to 127.0.0.1, which inside an LXC
+            // network namespace is the container's own loopback rather than the
+            // host. The injected HTTP(S)_PROXY would be unreachable and the
+            // iptables proxy-allow rule would never match, so require a routable
+            // host via `network.proxy.url` instead.
+            if containment == ContainmentBackend::Lxc && proxy_used_localhost {
+                let msg = "LXC: network.proxy.localhost is not reachable from the \
+                           container network namespace (127.0.0.1 is the container \
+                           loopback); use network.proxy.url with a host routable from \
+                           inside the container";
                 logger.log_line(msg);
                 return Err(WxcError::ConfigParse(msg.to_string()));
             }
@@ -1126,6 +1174,34 @@ fn convert_wire_config(
                                cannot reach a host-loopback proxy.";
                     logger.log_line(msg);
                     return Err(WxcError::ConfigParse(msg.to_string()));
+                }
+            }
+
+            // Under LXC a loopback-literal proxy host names the container's own
+            // network-namespace loopback rather than the host, so it can never
+            // be the proxy: the chain opens egress to the proxy endpoint across
+            // the veth and the address is pinned into the container's
+            // /etc/hosts, both of which assume a routable host.
+            //
+            // WSLc is deliberately excluded. Its supported topology puts the
+            // proxy *inside* the container -- `tests/configs/wslc_network_proxy.json`
+            // runs one on 127.0.0.1:8888 -- because loopback is the only address
+            // both the client and a self-hosted proxy can reach. The forms that
+            // name a host-run proxy, `localhost` and `builtinTestServer`, are
+            // already rejected for WSLc just above; that check is the one doing
+            // the work there, and this one would only break the case WSLc
+            // supports.
+            if containment == ContainmentBackend::Lxc {
+                if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
+                    if host_is_loopback(host) {
+                        let msg = "network.proxy.url host is a loopback address \
+                                   (127.0.0.0/8, ::1, or localhost), which names the \
+                                   container's own network-namespace loopback rather than \
+                                   the host; use a proxy host routable from inside the \
+                                   container";
+                        logger.log_line(msg);
+                        return Err(WxcError::ConfigParse(msg.to_string()));
+                    }
                 }
             }
 
@@ -1311,6 +1387,68 @@ fn convert_wire_config(
                        under deny.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // LXC is the inverse of the two guards above: it *does* have a
+        // privileged packet-filter layer, and that layer is the only thing that
+        // makes the proxy an exception rather than a suggestion. Under the
+        // default `Capabilities` mode `apply_firewall_rules` installs nothing,
+        // so the runner would inject HTTP(S)_PROXY while leaving direct egress
+        // wide open -- a config that reads as deny-all-except-proxy and
+        // enforces neither half. Reject it rather than auto-promoting, so the
+        // user's stated enforcement is never silently rewritten.
+        if containment == ContainmentBackend::Lxc
+            && policy.network_proxy.is_enabled()
+            && !matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "LXC: network.proxy requires network.enforcementMode='firewall' \
+                       or 'both'. Under the default 'capabilities' mode no iptables \
+                       rules are installed, so the proxy environment variables would be \
+                       injected while direct egress stayed unrestricted -- any client \
+                       that ignores HTTP_PROXY would bypass the proxy entirely.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // A proxy URL may carry `user:pass@` userinfo, and neither LXC nor
+        // Bubblewrap keeps that value out of process argv: LXC turns each env
+        // entry into an `lxc-attach --set-var=KEY=VALUE` argument, and
+        // Bubblewrap serializes it into a `bwrap --setenv KEY VALUE` argument
+        // (bwrap_command.rs). argv is world-readable through /proc/<pid>/cmdline
+        // for the command's lifetime, and neither helper offers an argv-free way
+        // to pass a variable, so refuse the credential rather than leak it.
+        if matches!(
+            containment,
+            ContainmentBackend::Lxc | ContainmentBackend::Bubblewrap
+        ) && policy
+            .network_proxy
+            .address
+            .as_ref()
+            .map(|address| address.to_url())
+            .is_some_and(|url| crate::proxy_env::proxy_url_has_credentials(&url))
+        {
+            // Built from the redacted form so the rejection cannot become the
+            // leak it is rejecting.
+            let msg = format!(
+                "network.proxy.url must not carry credentials ('{}'). LXC and Bubblewrap \
+                 pass the proxy URL to the sandbox helper as a command-line argument \
+                 (lxc-attach --set-var, bwrap --setenv), and process arguments are \
+                 world-readable through /proc/<pid>/cmdline, so the password would be \
+                 visible to every local user while the command runs. Use a proxy that does \
+                 not require inline credentials, or supply them to the proxy itself rather \
+                 than through the URL.",
+                policy
+                    .network_proxy
+                    .address
+                    .as_ref()
+                    .map(|address| crate::proxy_env::redact_proxy_url(&address.to_url()))
+                    .unwrap_or_default()
+            );
+            logger.log_line(&msg);
+            return Err(WxcError::ConfigParse(msg));
         }
 
         // External proxy (`url` / `localhost`) enforces its own policy — the
@@ -1741,6 +1879,10 @@ fn mask_state_aware_experimental<'a>(
 
     Ok(Cow::Owned(masked))
 }
+
+#[cfg(test)]
+#[path = "config_parser_loopback_spec_tests.rs"]
+mod loopback_spec_tests;
 
 #[cfg(test)]
 mod tests {
@@ -4060,13 +4202,220 @@ mod tests {
     }
 
     #[test]
-    fn proxy_rejected_with_non_processcontainer() {
+    fn proxy_rejected_with_an_unsupported_backend() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"vm","network":{"proxy":{"localhost":8080}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("Network proxy is only supported"),
+            "expected the supported-backend gate to reject 'vm', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_accepted_with_lxc() {
+        // LXC requires a routable proxy host: localhost/127.0.0.1 is the
+        // container loopback and unreachable, so use network.proxy.url.
+        // A firewall mode is required, because that is what makes the proxy an
+        // exception to deny-all rather than an unenforced suggestion.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+        let addr = req.policy.network_proxy.address.as_ref().unwrap();
+        assert_eq!(addr.host(), "proxy.example.com");
+        assert_eq!(addr.port(), 8080);
+    }
+
+    #[test]
+    fn proxy_with_lxc_accepts_both_mode() {
+        // 'both' also installs the iptables rules, so it satisfies the guard.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"both"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn proxy_with_lxc_and_omitted_enforcement_mode_is_rejected() {
+        // enforcementMode defaults to 'capabilities', under which
+        // apply_firewall_rules installs nothing. Accepting this config would
+        // inject HTTP(S)_PROXY while leaving direct egress unrestricted, so
+        // anything ignoring the environment variables bypasses the proxy.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
+            "expected the LXC enforcement-mode rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_with_lxc_and_explicit_capabilities_mode_is_rejected() {
+        // Stating 'capabilities' explicitly is the same fail-open as omitting
+        // it, so it must be rejected identically rather than read as consent.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
+            "expected the LXC enforcement-mode rejection, got: {}",
+            err
+        );
+    }
+
+    // The credential guard runs after `convert_wire_proxy`, so a
+    // credential-bearing URL that fails an *earlier* check never reaches it.
+    // Those earlier errors have to redact on their own, or they leak the
+    // password the guard exists to keep out of the diagnostic stream.
+    #[test]
+    fn a_malformed_credential_bearing_proxy_url_does_not_leak_the_password() {
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+
+        assert!(
+            msg.contains("must include a port"),
+            "expected the port diagnostic, got: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2"),
+            "the password leaked into the port diagnostic: {msg}"
+        );
+        assert!(
+            !msg.contains("alice:hunter2"),
+            "the userinfo leaked into the port diagnostic: {msg}"
+        );
+    }
+    #[test]
+    fn proxy_url_with_credentials_is_rejected_for_lxc() {
+        // LXC forwards the URL to lxc-attach as `--set-var=HTTP_PROXY=...`, and
+        // argv is world-readable via /proc/<pid>/cmdline, so accepting this
+        // would publish the password to every local user.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must not carry credentials"),
+            "expected the LXC credential rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_lxc_credential_rejection_does_not_leak_the_password() {
+        // The error is the one place a rejected secret could still escape, so
+        // it must name the URL only in redacted form.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("alice"),
+            "credentials leaked into the rejection: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example.com:8080"),
+            "expected the redacted authority in the rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_credential_free_proxy_url_is_still_accepted_for_lxc() {
+        // Negative control: without this, a guard that rejected every LXC
+        // proxy URL would pass both tests above.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn an_at_sign_in_the_path_is_not_mistaken_for_credentials() {
+        // `@` after the authority is an ordinary path character. Rejecting on
+        // a bare `@` would refuse a URL that carries no secret at all.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080/route@v2"},"enforcementMode":"firewall"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn proxy_localhost_rejected_with_lxc() {
+        // network.proxy.localhost maps to 127.0.0.1, unreachable from inside
+        // the LXC network namespace — it must be rejected at parse time.
         let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"localhost":8080}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
-        let result = load_request(&encoded, &mut logger, true);
-        assert!(result.is_err());
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(
+            format!("{}", err).contains("network.proxy.localhost is not reachable"),
+            "expected the LXC localhost rejection, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn proxy_loopback_url_rejected_with_lxc() {
+        // The url form names the container's own loopback just as the
+        // localhost shorthand does, so it is rejected for the same reason.
+        // WSLc is deliberately the other way: see
+        // `proxy_loopback_url_accepted_with_wslc`.
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let json = format!(
+                r#"{{"process":{{"commandLine":"x"}},"containment":"lxc","network":{{"proxy":{{"url":"{}"}}}}}}"#,
+                url
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let err = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(
+                format!("{}", err).contains("loopback address"),
+                "expected the LXC loopback-url rejection for {}, got: {}",
+                url,
+                err
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_builtin_test_server_rejected_with_lxc() {
+        // LXC enforces a configured proxy address with iptables; it does not
+        // launch the builtin testing proxy.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"builtinTestServer":true}}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(format!("{}", err).contains("builtinTestServer is not supported"));
     }
 
     #[test]
@@ -4509,6 +4858,54 @@ mod tests {
     }
 
     #[test]
+    fn proxy_url_with_credentials_is_rejected_for_bubblewrap() {
+        // Bubblewrap serializes the URL into a `bwrap --setenv HTTP_PROXY ...`
+        // argument, and argv is world-readable via /proc/<pid>/cmdline, so
+        // accepting this would publish the password to every local user.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("must not carry credentials"),
+            "expected the Bubblewrap credential rejection, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn the_bubblewrap_credential_rejection_does_not_leak_the_password() {
+        // The rejection is the one place a refused secret could still escape,
+        // so it must name the URL only in redacted form.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://alice:hunter2@proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let msg = format!("{}", load_request(&encoded, &mut logger, true).unwrap_err());
+        assert!(
+            !msg.contains("hunter2") && !msg.contains("alice"),
+            "credentials leaked into the rejection: {msg}"
+        );
+        assert!(
+            msg.contains("***@proxy.example.com:8080"),
+            "expected the redacted authority in the rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_credential_free_proxy_url_is_still_accepted_for_bubblewrap() {
+        // Negative control: the guard must reject only credential-bearing URLs,
+        // not every Bubblewrap proxy URL.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"bubblewrap","network":{"proxy":{"url":"http://proxy.example.com:8080"},"defaultPolicy":"allow"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
     fn proxy_accepted_with_wslc_url_form() {
         // WSLc supports the cooperative env-var proxy via a routable `url`.
         let json = r#"{
@@ -4568,6 +4965,45 @@ mod tests {
             format!("{err}").contains("WSLc: network.proxy must use the 'url' form"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn proxy_loopback_url_accepted_with_wslc() {
+        // A WSLc container runs in its own network namespace, and the supported
+        // topology puts the proxy *inside* it. `tests/configs/wslc_network_proxy.json`
+        // starts a marker server on 127.0.0.1:8888 and points the proxy at it,
+        // because loopback is the only address both the client and a self-hosted
+        // proxy can reach -- `run_wslc_proxy_test.ps1` says so directly.
+        //
+        // The `localhost` and `builtinTestServer` forms stay rejected above:
+        // those name a proxy MXC runs on the *host*, which is the unreachable
+        // one. The distinction is which side of the namespace the proxy is on,
+        // not whether the literal is a loopback address.
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let json = format!(
+                r#"{{"process":{{"commandLine":"x"}},"containment":"wslc","network":{{"proxy":{{"url":"{}"}},"defaultPolicy":"allow"}}}}"#,
+                url
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let req = load_request(&encoded, &mut logger, true).unwrap_or_else(|e| {
+                panic!("WSLc must accept its in-container proxy {url}, got: {e}")
+            });
+            assert_eq!(
+                req.policy
+                    .network_proxy
+                    .address
+                    .as_ref()
+                    .expect("the proxy address must survive parsing")
+                    .to_url(),
+                url
+            );
+        }
     }
 
     #[test]

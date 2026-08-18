@@ -97,6 +97,17 @@ if (-not $SkipSetup) {
     }
 }
 
+# Helper: StrictMode-safe property read; returns $null when the property (or the
+# object) is absent. Lets the optional-config-field reads below work under the
+# Set-StrictMode -Version Latest that run_ci_backend_tests.ps1 imposes.
+function Get-JsonProperty {
+    param($Object, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Object) { return $null }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $null }
+    return $prop.Value
+}
+
 # Helper: run a single WSLC test config
 function Run-WslcTest {
     param(
@@ -114,9 +125,12 @@ function Run-WslcTest {
         return @{ Name = $ConfigFile; Pass = $true; Skipped = $true; Reason = "File not found" }
     }
 
-    # Skip if the config references a tar file that doesn't exist locally
+    # Skip if the config references a tar file that doesn't exist locally.
+    # Read the chain defensively: this suite inherits Set-StrictMode -Version
+    # Latest from run_ci_backend_tests.ps1, under which touching a missing
+    # property is a terminating error, and most configs have no wslc.imageTarPath.
     $configJson = Get-Content $configPath -Raw | ConvertFrom-Json
-    $tarPath = $configJson.experimental.wslc.imageTarPath
+    $tarPath = Get-JsonProperty (Get-JsonProperty (Get-JsonProperty $configJson 'experimental') 'wslc') 'imageTarPath'
     if ($tarPath -and -not (Test-Path $tarPath)) {
         Write-Host "  $ConfigFile ... " -NoNewline
         Write-Host "SKIP (tar not found: $tarPath)" -ForegroundColor Yellow
@@ -169,7 +183,7 @@ function Run-WslcTest {
     # PostExitCheck runs after exit/output gates pass. Receives ($id, $output)
     # and must return truthy. Use for externally-observable state assertions.
     if ($pass -and $PostExitCheck) {
-        $containerId = $configJson.containerId
+        $containerId = Get-JsonProperty $configJson 'containerId'
         try {
             $checkResult = & $PostExitCheck $containerId $output
             if (-not $checkResult) {
@@ -215,10 +229,39 @@ $null = $results.Add((Run-WslcTest "wslc_stderr.json" -OutputContains "stdout me
 $null = $results.Add((Run-WslcTest "wslc_large_output.json"))
 
 Write-Host "`n--- Filesystem Tests ---" -ForegroundColor Cyan
-# wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
-$null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
-    -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
-$null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+
+# Fixed paths must match tests\configs\wslc_filesystem.json and
+# tests\configs\wslc_readonly_mount.json.
+$fsFixtureDir = "C:\wslcfs"
+$readonlyFixtureDir = "C:\wslcro"
+$readonlyFixture = Join-Path $readonlyFixtureDir "test.txt"
+
+function Remove-FilesystemFixtures {
+    Remove-Item -Recurse -Force $fsFixtureDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $readonlyFixtureDir -ErrorAction SilentlyContinue
+}
+
+# Both filesystem configs mount a host directory the suite owns outright, so a
+# run needs nothing hand-made and never touches C:\workspace, where the
+# prerequisites above tell the developer to keep alpine.tar.  wslc_filesystem
+# only needs its mount target to exist; wslc_readonly_mount also reads
+# test.txt, seeded the way the LXC and bubblewrap suites seed theirs
+# (run_lxc_filesystem_test.sh:21, run_bwrap_filesystem_test.sh:25).  The
+# finally removes both roots, including the probe file a wrongly-writable
+# mount would leave behind.
+Remove-FilesystemFixtures
+try {
+    $null = New-Item -ItemType Directory -Path $fsFixtureDir -Force
+    $null = New-Item -ItemType Directory -Path $readonlyFixtureDir -Force
+    Set-Content -Path $readonlyFixture -Value "test content" -Encoding ascii
+
+    # wslc_filesystem.json also asserts cpuCount + memoryMb enforcement via nproc and /proc/meminfo.
+    $null = $results.Add((Run-WslcTest "wslc_filesystem.json" `
+        -OutputMatches "(?s)PASS: filesystem mount visible.*PASS: cpuCount enforced.*PASS: memoryMb enforced"))
+    $null = $results.Add((Run-WslcTest "wslc_readonly_mount.json" -OutputContains "Read succeeded"))
+} finally {
+    Remove-FilesystemFixtures
+}
 
 Write-Host "`n--- Object Validation Tests ---" -ForegroundColor Cyan
 # Object-based validation (roadmap D6): a directory under readwritePaths and a

@@ -5,29 +5,30 @@ use std::num::NonZeroU16;
 
 use super::primitives::{OptionalField, True};
 
+#[rustfmt::skip]
+string_enum! {
 /// The default outbound network policy.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub enum DefaultNetworkPolicy {
     /// Allow outbound network access by default.
-    #[serde(rename = "allow")]
-    Allow,
+    Allow => ["allow"],
     /// Block outbound network access by default.
-    #[serde(rename = "block")]
-    Block,
+    Block => ["block"],
+}
 }
 
+#[rustfmt::skip]
+string_enum! {
 /// The mechanism used to enforce network policy.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug)]
 pub enum NetworkEnforcementMode {
     /// Enforce policy through containment capabilities.
-    #[serde(rename = "capabilities")]
-    Capabilities,
+    Capabilities => ["capabilities"],
     /// Enforce policy through host firewall rules.
-    #[serde(rename = "firewall")]
-    Firewall,
+    Firewall => ["firewall"],
     /// Enforce policy through both capabilities and firewall rules.
-    #[serde(rename = "both")]
-    Both,
+    Both => ["both"],
+}
 }
 
 /// One of the proxy configurations accepted by the `0.6.0-alpha` contract.

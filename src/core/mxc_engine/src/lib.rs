@@ -31,6 +31,8 @@
 
 mod dispatch;
 mod error;
+#[cfg(target_os = "windows")]
+mod guarded_capture;
 mod platform;
 pub mod policy;
 mod probe;

@@ -24,11 +24,13 @@
 //! direction; shared generic TDH primitives can be extracted later if another
 //! runtime consumer needs them.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
-use learning_mode_core::{AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource};
+use learning_mode_core::{
+    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
+};
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, OpenTraceW, ProcessTrace, EVENT_RECORD, EVENT_TRACE_LOGFILEW,
@@ -36,6 +38,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 
 use crate::extractors::{extract_denial, is_learning_mode_event, DecodedEventParts, RawDenial};
+use crate::process_lifetime::{attested_process_lifetimes, JobMembershipSnapshot};
 use crate::{path_norm, tdh_decode};
 
 /// `OpenTraceW` returns this sentinel (`(TRACEHANDLE)-1`) on failure.
@@ -55,18 +58,79 @@ struct CollectedEvent {
 enum CollectionMode {
     Analyze,
     Raw,
+    SelectForRelogging,
 }
 
 type RawEventVisitor<'a> = dyn FnMut(&DecodedEventParts) -> std::io::Result<()> + 'a;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LifetimeRange {
+    start_filetime: u64,
+    end_filetime: u64,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ProcessLifetimeIndex {
+    ranges_by_pid: HashMap<u32, Vec<LifetimeRange>>,
+}
+
+pub(crate) struct RelogSelection {
+    pub(crate) selected_event_indices: Vec<usize>,
+    pub(crate) total_event_count: usize,
+}
+
+impl ProcessLifetimeIndex {
+    pub(crate) fn new(process_lifetimes: &[ProcessLifetime]) -> Self {
+        let mut ranges_by_pid =
+            HashMap::<u32, Vec<LifetimeRange>>::with_capacity(process_lifetimes.len());
+        for lifetime in process_lifetimes {
+            ranges_by_pid
+                .entry(lifetime.pid)
+                .or_default()
+                .push(LifetimeRange {
+                    start_filetime: lifetime.start_filetime,
+                    end_filetime: lifetime.end_filetime,
+                });
+        }
+
+        for ranges in ranges_by_pid.values_mut() {
+            ranges.sort_unstable_by_key(|range| range.start_filetime);
+            let mut merged = Vec::<LifetimeRange>::with_capacity(ranges.len());
+            for range in ranges.drain(..) {
+                if let Some(previous) = merged.last_mut() {
+                    if range.start_filetime <= previous.end_filetime {
+                        previous.end_filetime = previous.end_filetime.max(range.end_filetime);
+                        continue;
+                    }
+                }
+                merged.push(range);
+            }
+            *ranges = merged;
+        }
+
+        Self { ranges_by_pid }
+    }
+
+    pub(crate) fn contains(&self, pid: u32, filetime: u64) -> bool {
+        let Some(ranges) = self.ranges_by_pid.get(&pid) else {
+            return false;
+        };
+        let candidate = ranges.partition_point(|range| range.start_filetime <= filetime);
+        candidate > 0 && filetime <= ranges[candidate - 1].end_filetime
+    }
+}
 
 /// Accumulates bounded analysis results or streams raw diagnostic events
 /// during a `ProcessTrace` pass.
 struct Accumulator<'visitor> {
     mode: CollectionMode,
+    process_lifetimes: Option<ProcessLifetimeIndex>,
     denials: Vec<DeniedResource>,
     seen: HashSet<(String, learning_mode_core::AccessType)>,
     truncated: bool,
     raw_visitor: Option<&'visitor mut RawEventVisitor<'visitor>>,
+    relog_selected_event_indices: Vec<usize>,
+    relog_event_count: usize,
     raw_event_count: usize,
     processed_event_count: usize,
     processing_limit_reached: bool,
@@ -80,10 +144,13 @@ impl<'visitor> Accumulator<'visitor> {
     fn analyze() -> Self {
         Self {
             mode: CollectionMode::Analyze,
+            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: None,
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -91,16 +158,26 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
+        }
+    }
+
+    fn analyze_for_process_lifetimes(process_lifetimes: &[ProcessLifetime]) -> Self {
+        Self {
+            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
+            ..Self::analyze()
         }
     }
 
     fn raw(visitor: &'visitor mut RawEventVisitor<'visitor>) -> Self {
         Self {
             mode: CollectionMode::Raw,
+            process_lifetimes: None,
             denials: Vec::new(),
             seen: HashSet::new(),
             truncated: false,
             raw_visitor: Some(visitor),
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
             raw_event_count: 0,
             processed_event_count: 0,
             processing_limit_reached: false,
@@ -111,7 +188,43 @@ impl<'visitor> Accumulator<'visitor> {
         }
     }
 
+    fn select_for_relogging(process_lifetimes: &[ProcessLifetime]) -> Self {
+        Self {
+            mode: CollectionMode::SelectForRelogging,
+            process_lifetimes: Some(ProcessLifetimeIndex::new(process_lifetimes)),
+            denials: Vec::new(),
+            seen: HashSet::new(),
+            truncated: false,
+            raw_visitor: None,
+            relog_selected_event_indices: Vec::new(),
+            relog_event_count: 0,
+            raw_event_count: 0,
+            processed_event_count: 0,
+            processing_limit_reached: false,
+            stop_requested: false,
+            decode_error: None,
+            panic_payload: None,
+            schema_cache: tdh_decode::EventSchemaCache::default(),
+        }
+    }
+
+    /// Whether an event for `pid` at `filetime` falls within the attested
+    /// sandbox process lifetimes. Legacy full-trace analysis (no lifetime
+    /// index) treats every event as in scope.
+    fn in_analysis_scope(&self, pid: u32, filetime: u64) -> bool {
+        self.process_lifetimes
+            .as_ref()
+            .is_none_or(|lifetimes| lifetimes.contains(pid, filetime))
+    }
+
     fn add_raw_denial(&mut self, raw: RawDenial) {
+        if self
+            .process_lifetimes
+            .as_ref()
+            .is_some_and(|lifetimes| !lifetimes.contains(raw.pid, raw.filetime))
+        {
+            return;
+        }
         let resource = if raw.resource_type == learning_mode_core::ResourceType::File {
             match path_norm::to_user_visible(&raw.object_name) {
                 Some(resource) if path_norm::is_user_visible_absolute(&resource) => resource,
@@ -203,6 +316,43 @@ impl<'visitor> Accumulator<'visitor> {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct EtlDenialAnalyzer;
 
+impl EtlDenialAnalyzer {
+    /// Analyzes only events belonging to the supplied process lifetimes.
+    ///
+    /// This is the mandatory decode path for host-wide WPR fallback traces.
+    /// An empty lifetime set intentionally yields an empty analysis rather than
+    /// exposing unscoped host events.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalyzeError`] if the trace cannot be opened or decoded.
+    pub fn analyze_for_process_lifetimes(
+        &self,
+        source_path: &Path,
+        process_lifetimes: &[ProcessLifetime],
+    ) -> Result<AnalysisResult, AnalyzeError> {
+        let mut accumulator = Accumulator::analyze_for_process_lifetimes(process_lifetimes);
+        process_trace_file(source_path, &mut accumulator)?;
+        accumulator.into_analysis()
+    }
+
+    /// Analyzes denials only for exact process generations attested by retained
+    /// handles belonging to the sandbox job.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AnalyzeError`] when job evidence is incomplete or inconsistent,
+    /// or when the trace cannot be decoded.
+    pub fn analyze_for_job_membership(
+        &self,
+        source_path: &Path,
+        membership: &JobMembershipSnapshot,
+    ) -> Result<AnalysisResult, AnalyzeError> {
+        let process_lifetimes = attested_process_lifetimes(membership)?;
+        self.analyze_for_process_lifetimes(source_path, &process_lifetimes)
+    }
+}
+
 impl DenialAnalyzer for EtlDenialAnalyzer {
     fn analyze(&self, source_path: &Path) -> Result<AnalysisResult, AnalyzeError> {
         let mut accumulator = Accumulator::analyze();
@@ -219,6 +369,14 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// provider manifests registered on the machine).
 #[cfg(test)]
 fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
+    resources_from_events_for_process_lifetimes(events, None)
+}
+
+#[cfg(test)]
+fn resources_from_events_for_process_lifetimes(
+    events: &[CollectedEvent],
+    process_lifetimes: Option<&[ProcessLifetime]>,
+) -> AnalysisResult {
     let mut raws = Vec::new();
     for event in events {
         if let Some(raw) = extract_denial(&event.parts, event.pid, event.filetime) {
@@ -230,7 +388,19 @@ fn resources_from_events(events: &[CollectedEvent]) -> AnalysisResult {
             event.filetime,
         ));
     }
-    dedup_to_resources(raws)
+    let mut accumulator = match process_lifetimes {
+        Some(lifetimes) => Accumulator::analyze_for_process_lifetimes(lifetimes),
+        None => Accumulator::analyze(),
+    };
+    for raw in raws {
+        accumulator.add_raw_denial(raw);
+        if accumulator.stop_requested {
+            break;
+        }
+    }
+    accumulator
+        .into_analysis()
+        .expect("pure denial accumulation cannot decode-fail")
 }
 
 /// Streams every decoded event in the ETL to `visitor` for schema discovery
@@ -255,6 +425,25 @@ pub fn visit_raw_events(
         return Err(AnalyzeError::Decode(error));
     }
     Ok(accumulator.raw_event_count)
+}
+
+/// Builds a bounded decision vector for supported Learning Mode events in
+/// source order. `ProcessTrace` normalizes each timestamp to FILETIME before
+/// the exact process-generation test, so Trace Relogger can replay these
+/// decisions without comparing its raw trace-clock timestamps.
+pub(crate) fn select_learning_mode_events_for_relogging(
+    source_path: &Path,
+    process_lifetimes: &[ProcessLifetime],
+) -> Result<RelogSelection, AnalyzeError> {
+    let mut accumulator = Accumulator::select_for_relogging(process_lifetimes);
+    process_trace_file(source_path, &mut accumulator)?;
+    if let Some(error) = accumulator.decode_error {
+        return Err(AnalyzeError::Decode(error));
+    }
+    Ok(RelogSelection {
+        selected_event_indices: accumulator.relog_selected_event_indices,
+        total_event_count: accumulator.relog_event_count,
+    })
 }
 
 /// De-duplicates raw denials by `(user-visible resource, accessType)`,
@@ -363,9 +552,6 @@ unsafe extern "system" fn event_record_callback(event_record: *mut EVENT_RECORD)
     if acc.stop_requested || acc.decode_error.is_some() || acc.panic_payload.is_some() {
         return;
     }
-    if !acc.begin_event() {
-        return;
-    }
 
     run_callback_guard(acc, |acc| {
         // SAFETY: ETW supplied a valid record, and `acc` is the live callback
@@ -407,28 +593,94 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let header = unsafe { (*event_record).EventHeader };
     let provider = header.ProviderId;
     let event_id = header.EventDescriptor.Id;
-    if matches!(acc.mode, CollectionMode::Analyze) && !is_learning_mode_event(provider, event_id) {
+
+    if matches!(acc.mode, CollectionMode::SelectForRelogging) {
+        if !is_learning_mode_event(provider, event_id) {
+            return;
+        }
+        let event_index = acc.relog_event_count;
+        let Some(next_event_count) = acc.relog_event_count.checked_add(1) else {
+            acc.decode_error =
+                Some("trace contained too many Learning Mode events to index".to_string());
+            acc.stop_requested = true;
+            return;
+        };
+        acc.relog_event_count = next_event_count;
+        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+            return;
+        };
+        if acc.in_analysis_scope(header.ProcessId, filetime) {
+            if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
+                acc.decode_error = Some(format!(
+                    "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
+                ));
+                acc.stop_requested = true;
+                return;
+            }
+            acc.relog_selected_event_indices.push(event_index);
+        }
         return;
     }
 
-    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
-        Ok(parts) => match acc.mode {
-            CollectionMode::Analyze => {
-                if let Some(raw) = extract_denial(&parts, header.ProcessId, header.TimeStamp as u64)
+    // Establish scope BEFORE charging the event against the shared processing
+    // budget. Provider, event id, PID and timestamp all live in the event
+    // header, so the scope test needs no (comparatively expensive) TDH decode.
+    // Out-of-scope host events — a foreign provider, or a PID/time outside the
+    // attested sandbox process lifetimes — must not consume the budget;
+    // otherwise a noisy host could exhaust the limit before a single in-scope
+    // sandbox denial is ever decoded, truncating the analysis of an innocent
+    // sandbox.
+    if matches!(acc.mode, CollectionMode::Analyze) {
+        if !is_learning_mode_event(provider, event_id) {
+            return;
+        }
+        let Some(filetime) = normalized_filetime(header.TimeStamp, acc) else {
+            return;
+        };
+        if !acc.in_analysis_scope(header.ProcessId, filetime) {
+            return;
+        }
+        if !acc.begin_event() {
+            return;
+        }
+        match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+            Ok(parts) => {
+                if let Some(raw) = extract_denial(&parts, header.ProcessId, filetime) {
+                    acc.add_raw_denial(raw);
+                }
+                for raw in
+                    crate::capability_dacl::extract_denials(&parts, header.ProcessId, filetime)
                 {
                     acc.add_raw_denial(raw);
                 }
-                for raw in crate::capability_dacl::extract_denials(
-                    &parts,
-                    header.ProcessId,
-                    header.TimeStamp as u64,
-                ) {
-                    acc.add_raw_denial(raw);
-                }
             }
-            CollectionMode::Raw => acc.visit_raw_event(&parts),
-        },
+            Err(error) => acc.record_event_decode_error(provider, event_id, error),
+        }
+        return;
+    }
+
+    // Raw diagnostic mode has no provider/lifetime scoping, so every decoded
+    // event legitimately counts against the budget.
+    if !acc.begin_event() {
+        return;
+    }
+    match unsafe { tdh_decode::decode_event_parts(event_record, &mut acc.schema_cache) } {
+        Ok(parts) => acc.visit_raw_event(&parts),
         Err(error) => acc.record_event_decode_error(provider, event_id, error),
+    }
+}
+
+fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64> {
+    // PROCESS_TRACE_MODE_RAW_TIMESTAMP is deliberately not set, so ProcessTrace
+    // has already converted the record timestamp to 100-nanosecond FILETIME.
+    match u64::try_from(timestamp) {
+        Ok(filetime) => Some(filetime),
+        Err(_) => {
+            acc.decode_error = Some(format!(
+                "ETW returned a negative normalized FILETIME timestamp ({timestamp})"
+            ));
+            None
+        }
     }
 }
 
@@ -436,6 +688,79 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
 mod tests {
     use super::*;
     use learning_mode_core::{AccessType, ResourceType};
+
+    #[test]
+    fn process_lifetime_index_matches_pid_and_merged_time_ranges() {
+        let index = ProcessLifetimeIndex::new(&[
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 20,
+                end_filetime: 30,
+            },
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 10,
+                end_filetime: 25,
+            },
+            ProcessLifetime {
+                pid: 7,
+                start_filetime: 40,
+                end_filetime: 50,
+            },
+            ProcessLifetime {
+                pid: 8,
+                start_filetime: 15,
+                end_filetime: 45,
+            },
+        ]);
+
+        assert!(index.contains(7, 10));
+        assert!(index.contains(7, 30));
+        assert!(!index.contains(7, 35));
+        assert!(index.contains(7, 40));
+        assert!(!index.contains(7, 51));
+        assert!(index.contains(8, 35));
+        assert!(!index.contains(9, 20));
+    }
+
+    #[test]
+    fn empty_process_lifetime_index_fails_closed() {
+        let index = ProcessLifetimeIndex::new(&[]);
+
+        assert!(!index.contains(7, 10));
+    }
+
+    #[test]
+    fn relog_selection_tracks_supported_event_ordinals_and_exact_lifetimes() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+
+        let mut visit = |provider, event_id, pid, filetime| {
+            // SAFETY: this zeroed record is used only by selection mode, which
+            // reads the initialized POD header fields below and never decodes
+            // payload pointers.
+            let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+            record.EventHeader.ProviderId = provider;
+            record.EventHeader.EventDescriptor.Id = event_id;
+            record.EventHeader.ProcessId = pid;
+            record.EventHeader.TimeStamp = filetime;
+            // SAFETY: `record` remains live for this synchronous call.
+            unsafe { process_event_record(&mut record, &mut accumulator) };
+        };
+
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 42, 100);
+        visit(windows::core::GUID::from_u128(1), 14, 42, 150);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 27, 42, 201);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 28, 42, 200);
+        visit(crate::extractors::KERNEL_GENERAL_PROVIDER, 14, 43, 150);
+
+        assert_eq!(accumulator.relog_event_count, 4);
+        assert_eq!(accumulator.relog_selected_event_indices, [0, 2]);
+        assert!(accumulator.decode_error.is_none());
+    }
 
     #[test]
     fn raw_visitor_panic_is_captured_inside_callback_state() {
@@ -630,6 +955,27 @@ mod tests {
         assert!(accumulator.processing_limit_reached);
         assert!(accumulator.stop_requested);
         assert!(accumulator.truncated);
+    }
+
+    #[test]
+    fn out_of_scope_events_are_excluded_before_consuming_the_budget() {
+        // Lifetime scoping gates the shared processing budget: an event whose
+        // PID/time falls outside the attested sandbox lifetimes is not in
+        // scope, so `process_event_record` skips it before ever calling
+        // `begin_event`. This asserts the scope predicate that drives that
+        // early return; legacy (no-lifetime) analysis treats everything as in
+        // scope.
+        let scoped = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
+            pid: 7,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        assert!(scoped.in_analysis_scope(7, 150));
+        assert!(!scoped.in_analysis_scope(7, 250), "outside the time range");
+        assert!(!scoped.in_analysis_scope(9, 150), "unrelated PID");
+
+        let legacy = Accumulator::analyze();
+        assert!(legacy.in_analysis_scope(9, 150), "no lifetime filter");
     }
 
     #[test]
@@ -837,6 +1183,80 @@ mod tests {
             kernel_event(28, 0, 3, &[("ProcessId", "0x20"), ("Denied", "true")]),
         ];
         assert!(resources_from_events(&events).denials.is_empty());
+    }
+
+    #[test]
+    fn process_lifetimes_filter_unrelated_events_and_pid_reuse() {
+        let events = vec![
+            kernel_event(
+                14,
+                42,
+                99,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\before.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                42,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\owned.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                43,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\unrelated.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                42,
+                201,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\reused-pid.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+        ];
+        let lifetimes = [ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }];
+
+        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&lifetimes));
+
+        assert_eq!(analysis.denials.len(), 1);
+        assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
+    }
+
+    #[test]
+    fn empty_process_lifetimes_fail_closed() {
+        let events = vec![kernel_event(
+            14,
+            42,
+            150,
+            &[
+                ("ObjectType", "\"File\""),
+                ("ObjectName", "\"C:\\host.txt\""),
+                ("AccessMask", "0x1"),
+            ],
+        )];
+
+        let analysis = resources_from_events_for_process_lifetimes(&events, Some(&[]));
+
+        assert!(analysis.denials.is_empty());
     }
 
     /// Non-actionable object types and not-denied capability records are

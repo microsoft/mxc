@@ -282,7 +282,7 @@ fn accepts_process_container() {
 }
 
 #[test]
-fn accepts_app_container_alias() {
+fn accepts_app_container_section_alias() {
     let json = r#"{
         "version": "0.6.0-alpha",
         "appContainer": {
@@ -297,7 +297,7 @@ fn accepts_app_container_alias() {
 }
 
 #[test]
-fn rejects_process_container_and_app_container_alias_together() {
+fn rejects_process_container_and_app_container_section_alias_together() {
     let json = r#"{
             "version": "0.6.0-alpha",
             "processContainer": {
@@ -357,7 +357,7 @@ fn rejects_non_string_process_env_items() {
 }
 
 #[test]
-fn rejects_non_string_filesystem_read_only_path_items() {
+fn rejects_non_string_filesystem_readonly_path_items() {
     let json = r#"{
         "version": "0.6.0-alpha",
         "process": {
@@ -372,7 +372,7 @@ fn rejects_non_string_filesystem_read_only_path_items() {
 }
 
 #[test]
-fn rejects_non_string_filesystem_read_write_path_items() {
+fn rejects_non_string_filesystem_readwrite_path_items() {
     let json = r#"{
         "version": "0.6.0-alpha",
         "process": {

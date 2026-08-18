@@ -28,7 +28,7 @@ use crate::id::parse_sandbox_id_prefix;
 use crate::models::ContainmentBackend;
 use crate::mxc_error::{MxcError, ResponseEnvelope};
 use crate::state_aware_backend::{
-    DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
+    DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
 use crate::state_aware_request::{ParsedStateAwareRequest, Phase};
@@ -280,8 +280,8 @@ struct RelayStreams {
 /// `Err` directly and observe the exec being terminated and then reaped.
 fn relay_prepared_streams(
     streams: Result<RelayStreams, MxcError>,
-    waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    terminator: Box<dyn FnOnce() + Send>,
+    waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
 ) -> Result<i32, MxcError> {
     let streams = match streams {
         Ok(streams) => streams,
@@ -311,7 +311,7 @@ fn relay_prepared_streams(
     // `terminator` stays alive until the end of this scope: the closure may own
     // resources tied to the running process, and the waiter-error path below
     // still needs to invoke it.
-    let exit_code = waiter();
+    let outcome = waiter();
 
     // A waiter error means "I could not determine the exit", not "the child is
     // dead" -- so the workload may still be running and still holding the write
@@ -319,14 +319,29 @@ fn relay_prepared_streams(
     // is bounded, so the cost of getting this order wrong is not a hang: it is a
     // stall for the whole grace period, followed by the loss of whatever output
     // was still buffered behind those write ends.
-    if exit_code.is_err() {
-        terminator();
+    if outcome.is_err() {
+        let _ = terminator();
     }
 
     // Drain what the child wrote before it exited. Bounded -- see `drain_pumps`.
     drain_pumps(pumps);
 
-    exit_code
+    // `ExecOutcome::TimedOut` is not reachable here, and the mapping says so out
+    // loud rather than inventing an exit code for it. A backend serving
+    // `ExecConsumer::Executor` has already run the workload to completion by the
+    // time it returns, so it reports `Exited`; and the executor has nowhere to
+    // put a timeout anyway, since `ScriptResponse` carries an exit code and no
+    // timeout field. Surfacing a contract violation beats fabricating a number
+    // the CLI would then report as the workload's own.
+    match outcome {
+        Ok(ExecOutcome::Exited(code)) => Ok(code),
+        Ok(ExecOutcome::TimedOut) => Err(MxcError::backend_error(
+            "backend reported a timeout to the executor relay, which has no way \
+             to represent one; a backend serving ExecConsumer::Executor must \
+             report ExecOutcome::Exited",
+        )),
+        Err(error) => Err(error),
+    }
 }
 
 /// Join `pumps`, giving them at most [`POST_EXIT_DRAIN_GRACE`] between them.
@@ -418,12 +433,12 @@ impl Pump {
 /// The waiter's own outcome is discarded: the setup error is what the caller
 /// needs to see, and masking it with a teardown result would hide the cause.
 fn abort_relay(
-    waiter: Box<dyn FnOnce() -> Result<i32, MxcError> + Send>,
-    terminator: Box<dyn FnOnce() + Send>,
+    waiter: Box<dyn FnOnce() -> Result<ExecOutcome, MxcError> + Send>,
+    terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
     pumps: Vec<Pump>,
     error: MxcError,
 ) -> Result<i32, MxcError> {
-    terminator();
+    let _ = terminator();
     drain_pumps(pumps);
     let _ = waiter();
     Err(error)
@@ -1214,10 +1229,37 @@ mod tests {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(42)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(42))),
+            terminator: Box::new(|| Ok(())),
         };
         assert_eq!(relay_exec_to_stdio(handle).unwrap(), 42);
+    }
+
+    /// A backend that reports a timeout to the executor relay has broken the
+    /// contract, and the relay says so rather than inventing an exit code.
+    ///
+    /// `ExecOutcome::TimedOut` is unreachable here by construction — a backend
+    /// serving `ExecConsumer::Executor` has run the workload to completion
+    /// before returning, and `ScriptResponse` has no timeout field to carry one
+    /// anyway. The regression this pins is the tempting alternative: mapping it
+    /// to some sentinel code, which the CLI would then report as the workload's
+    /// own exit status.
+    #[test]
+    fn relay_refuses_a_timeout_rather_than_inventing_an_exit_code() {
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: null_pipe_handle(),
+            waiter: Box::new(|| Ok(ExecOutcome::TimedOut)),
+            terminator: Box::new(|| Ok(())),
+        };
+        let err =
+            relay_exec_to_stdio(handle).expect_err("the executor relay cannot represent a timeout");
+        assert!(
+            err.message.contains("ExecConsumer::Executor"),
+            "the refusal should name the contract it is enforcing: {}",
+            err.message
+        );
     }
 
     /// A waiter error still surfaces unchanged through the relay.
@@ -1228,7 +1270,7 @@ mod tests {
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
             waiter: Box::new(|| Err(MxcError::backend_error("waiter blew up"))),
-            terminator: Box::new(|| {}),
+            terminator: Box::new(|| Ok(())),
         };
         let err = relay_exec_to_stdio(handle).unwrap_err();
         assert_eq!(err.code, MxcErrorCode::BackendError);
@@ -1265,8 +1307,8 @@ mod tests {
             stdout: reader_handle(&reader),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(3)),
-            terminator: Box::new(|| {}),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(3))),
+            terminator: Box::new(|| Ok(())),
         };
 
         assert_eq!(relay_exec_to_stdio(handle).unwrap(), 3);
@@ -1300,10 +1342,11 @@ mod tests {
             )),
             Box::new(move || {
                 let _ = waiter_tx.send("waiter");
-                Ok(0)
+                Ok(ExecOutcome::Exited(0))
             }),
             Box::new(move || {
                 let _ = tx.send("terminator");
+                Ok(())
             }),
         );
 
@@ -1334,9 +1377,10 @@ mod tests {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(|| Ok(0)),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
             terminator: Box::new(move || {
                 let _ = tx.send(());
+                Ok(())
             }),
         };
         assert_eq!(relay_exec_to_stdio(handle).unwrap(), 0);
@@ -1476,10 +1520,10 @@ mod tests {
                 }
                 started += 1;
             }
-            Ok(0)
+            Ok(ExecOutcome::Exited(0))
         });
 
-        let result = relay_prepared_streams(Ok(streams), waiter, Box::new(|| {}));
+        let result = relay_prepared_streams(Ok(streams), waiter, Box::new(|| Ok(())));
         assert_eq!(
             result.expect("the pumps must be draining while the waiter waits"),
             0
@@ -1517,6 +1561,7 @@ mod tests {
             Box::new(move || {
                 flag.store(true, Ordering::Relaxed);
                 closer.lock().expect("writer lock").take();
+                Ok(())
             }),
         );
         let elapsed = started.elapsed();
@@ -1640,9 +1685,10 @@ mod tests {
 
         let started = Instant::now();
         let result = abort_relay(
-            Box::new(|| Ok(0)),
+            Box::new(|| Ok(ExecOutcome::Exited(0))),
             Box::new(move || {
                 closer.lock().expect("writer lock").take();
+                Ok(())
             }),
             vec![pump],
             MxcError::backend_error("stream setup failed"),

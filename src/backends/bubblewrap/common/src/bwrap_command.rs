@@ -167,7 +167,7 @@ pub fn build_args(request: &ExecutionRequest, proxy_address: Option<&ProxyAddres
 /// - drops `--unshare-net` (the sandbox needs to reach the loopback proxy on
 ///   the host's network namespace),
 /// - strips any caller-supplied `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` /
-///   `NO_PROXY` entries from `request.env`,
+///   `FTP_PROXY` / `NO_PROXY` entries from `request.env`,
 /// - emits `--setenv` for the proxy keys (all but `NO_PROXY`) pointing at the
 ///   proxy URL.
 ///
@@ -731,6 +731,9 @@ mod tests {
             "HTTP_PROXY=http://attacker.example:9999".into(),
             "https_proxy=http://attacker.example:9999".into(),
             "ALL_PROXY=http://attacker.example:9999".into(),
+            "FTP_PROXY=http://attacker.example:9999".into(),
+            "ftp_proxy=http://attacker.example:9999".into(),
+            "NO_PROXY=*".into(),
             "PATH=/usr/bin".into(),
         ];
         let addr = ProxyAddress::new("127.0.0.1".into(), 9000);
@@ -749,6 +752,25 @@ mod tests {
         // The proxy URL is the one we set, not the attacker's.
         let http_pos = args.iter().position(|a| a == "HTTP_PROXY").unwrap();
         assert_eq!(args[http_pos + 1], "http://127.0.0.1:9000");
+
+        // FTP variables point at the configured proxy rather than a
+        // caller-controlled alternative.
+        for key in ["FTP_PROXY", "ftp_proxy"] {
+            let pos = args
+                .iter()
+                .position(|arg| arg == key)
+                .unwrap_or_else(|| panic!("missing --setenv {key} in {args:?}"));
+            assert_eq!(args[pos + 1], "http://127.0.0.1:9000");
+        }
+
+        // Bypass variables remain absent after clearing the caller's
+        // environment.
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert!(
+                !args.iter().any(|arg| arg == key),
+                "proxy mode must not emit caller-controlled {key}: {args:?}"
+            );
+        }
     }
 
     #[test]

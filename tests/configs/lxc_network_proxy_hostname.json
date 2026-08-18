@@ -1,0 +1,20 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-Network-Proxy-Hostname",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "ok=PROXY_FAIL; if wget -qO- --timeout=10 http://sentinel.invalid/ 2>/dev/null | grep -q MXC_PROXY_SENTINEL; then ok=PROXY_OK; fi; echo \"$ok\"; if grep -q '#mxc-proxy-pin' /etc/hosts; then echo PIN_PRESENT; else echo PIN_ABSENT; fi; if grep -q 'proxy.mxc.test' /etc/hosts; then echo PIN_NAMES_PROXY; else echo PIN_MISSING_PROXY; fi; echo \"PINNED_LINE=$(grep 'proxy.mxc.test' /etc/hosts | head -1)\"; if http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= all_proxy= ALL_PROXY= wget -qO- --timeout=5 http://1.1.1.1/ >/dev/null 2>&1; then echo DIRECT_IPV4_LEAK; else echo DIRECT_IPV4_BLOCKED; fi; if nslookup example.com 1.1.1.1 >/dev/null 2>&1; then echo FORWARDED_DNS_LEAK; else echo FORWARDED_DNS_BLOCKED; fi"
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "proxy": { "url": "http://proxy.mxc.test:3128" }
+  }
+}

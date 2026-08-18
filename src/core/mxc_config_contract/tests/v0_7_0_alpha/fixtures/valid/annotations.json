@@ -1,0 +1,10 @@
+{
+  "$schema": "https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json",
+  "_comment": {
+    "purpose": "Demonstrate 0.7 authoring annotations"
+  },
+  "version": "0.7.0-alpha",
+  "process": {
+    "commandLine": "echo annotations"
+  }
+}

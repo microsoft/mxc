@@ -6,8 +6,7 @@ on:
 jobs:
   build:
     name: arm64
-    # macos-14 / macos-latest are Apple Silicon (arm64); older labels are Intel.
-    runs-on: macos-14
+    runs-on: macos-15
     defaults:
       run:
         working-directory: src
@@ -54,6 +53,18 @@ jobs:
       - name: Test
         run: cargo test --locked --release --target aarch64-apple-darwin
              -p mxc_darwin -p seatbelt_common -p wxc_common -p wxc_e2e_tests
+
+      - name: Verify artifact payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_dir="target/aarch64-apple-darwin/release"
+          for file in mxc-exec-mac unix-test-proxy; do
+            if [[ ! -f "$bin_dir/$file" ]]; then
+              echo "Missing artifact file: $file" >&2
+              exit 1
+            fi
+          done
 
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

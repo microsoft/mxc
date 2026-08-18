@@ -98,7 +98,7 @@ plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
 
 ### `plm log`
 
-Interactive iteration mode: press Enter to start a trace, run the workload, press Enter again to stop. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview.
+Interactive iteration mode: press Enter to start a host-wide trace, run the operator-selected workload, then press Enter again to stop. Because this standalone flow has no sandbox job to define a process scope, the elevated guardian analyzes the source trace in protected scratch and returns only the bounded canonical findings; the host-wide ETL never crosses the privilege boundary. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview. Automated `--audit` and `captureDenials` flows instead attach an authenticated sandbox job and analyze or retain only the process-scoped filtered trace.
 
 It also has no public `--wprp` or destination override flags.
 
@@ -118,6 +118,110 @@ cargo build -p plm --target x86_64-pc-windows-msvc --release
 ```
 
 The WPR profile is embedded into `plm.exe` itself (see `src/profile_gen.rs`) and is materialized only inside the elevated child's internal temporary scratch area. `build.bat` from the repo root builds `plm.exe` and stages it next to `wxc-exec.exe` for the `--audit` integration.
+
+## Guarded WPR `captureDenials` fallback
+
+Besides `--audit`, `plm.exe` also serves as the elevated **guardian** for the
+`processContainer.captureDenials` legacy-tier fallback (`src/elevated.rs`). When
+the native PSEC/V2 Learning Mode capture path is unavailable, MXC starts a
+guarded WPR session that is scoped to the sandbox's job object and its exact
+process generations, then stops/analyzes it after the sandbox exits.
+
+### Discovery and pre-launch trust gate
+
+MXC locates `plm.exe` **module-relative to the loaded MXC native binary** — the
+directory that holds `wxc-exec.exe` (the executor) and `mxc_ffi.dll` (the native
+asset directory used by the FFI/C# SDK). `current_exe()` is deliberately not
+used, because a framework-dependent .NET host reports `dotnet.exe` rather than
+the loaded MXC module.
+
+Co-location only *discovers* the guardian; it does not attest it. Because
+`plm.exe` self-elevates, the PLM launch path enforces a **runtime trust gate**
+(`src/trust.rs`) immediately before `ShellExecuteExW("runas")`, failing closed
+on any of:
+
+1. **Authenticode trust** — `WinVerifyTrust` (generic verify-v2) must succeed
+   (signed, untampered, chaining to a trusted root). Revocation is checked
+   across the whole chain, excluding the self-signed root
+   (`WTD_REVOKE_WHOLECHAIN` + `WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT`).
+2. **Microsoft signer identity** — the embedded PKCS#7 signer certificate's
+   Organization (`O`) must be `Microsoft Corporation`. This is keyed on the
+   organization name, not a fixed thumbprint, so it survives certificate
+   rollover.
+3. **Directory & ancestry integrity** — every directory from the one containing
+   `plm.exe` (the *leaf*) up through the volume root must be **owned** by a
+   privileged principal (SYSTEM, Administrators, or TrustedInstaller — an owner
+   has implicit `WRITE_DAC`), and its DACL must not grant a non-privileged
+   principal dangerous rights. The masks are differentiated: the leaf rejects
+   any *side-load/create/replace* right (create-file/create-subdir,
+   delete-child, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`, generic write/all);
+   ancestors reject only rights that let someone delete/rename/re-secure the
+   protected subtree (`FILE_DELETE_CHILD`, `DELETE`, `WRITE_DAC`, `WRITE_OWNER`,
+   `GENERIC_ALL`) — harmless "create a sibling" rights at, say, a drive root are
+   deliberately *not* over-rejected. Broad principals (Everyone, Authenticated
+   Users, BUILTIN\Users) and ordinary users are non-privileged. Inherited ACEs
+   are honored; inherit-only ACEs are skipped; a NULL DACL or any ACE type that
+   is not a standard allow/deny **fails closed**.
+
+To close the check-then-launch (TOCTOU) window, the gate opens `plm.exe` first
+with a share mode that denies write and delete, resolves the pinned object's
+stable canonical local path with `GetFinalPathNameByHandleW` (collapsing SUBST /
+DOS-device / junction / symlink aliases, and rejecting UNC/remote or non-DOS
+paths), and **holds that handle across `ShellExecuteExW`** while launching the
+*resolved* path — never the caller's original, possibly-aliased string.
+Authenticode is verified against the pinned handle itself, and the signer/
+ancestor checks all run on the resolved path. So the exact object verified is
+the exact object launched: it cannot be renamed, deleted, overwritten, or
+alias-substituted in between.
+
+**DLL side-loading.** `plm.exe` is a self-contained Rust/MSVC binary with no
+private adjacent DLL dependencies (it links only system DLLs resolved from
+`System32`). As defense-in-depth atop the leaf/ancestor integrity checks, the
+elevated child additionally calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)`
+at startup so runtime `LoadLibrary` calls cannot resolve a bare DLL name to an
+adjacent file.
+
+Runtime verification is therefore **enforced**; an unsigned, non-Microsoft, or
+user-replaceable `plm.exe` is refused before any elevation. On unsigned local/
+dev builds the gate deliberately refuses to elevate. Consequently, locally
+built `plm.exe` binaries cannot run guarded-WPR end-to-end scenarios; those
+validations must use a signed packaged binary in a protected directory.
+Producing that signed `plm.exe` alongside `wxc-exec.exe` / `mxc_ffi.dll` is
+owned by **#834**.
+
+The same constraint applies to Rust SDK consumers. `mxc-sdk` is compiled into
+the consuming executable, so module-relative discovery normally points at the
+consumer's local Cargo output directory. A locally built or user-writable
+adjacent `plm.exe` is intentionally rejected, which means native PSEC capture
+may remain available but the guarded-WPR legacy fallback is unavailable.
+
+### Bounded discard-confirmation
+
+If discarding a guarded session fails, MXC confirms that the elevated guardian
+actually released the sandbox before continuing. Each confirmation is given a
+**short 10-second bound** (not `plm`'s multi-minute WPR stop timeout) and is
+retried only a small, bounded number of times, so a failed discard can never
+block teardown for tens of minutes. If release still cannot be confirmed after
+the bounded attempts, MXC aborts to preserve sandbox enforcement rather than
+proceeding with an unconfirmed live guardian.
+
+### Short-lived descendant attestation race
+
+Job completion-port notifications carry a PID, and Windows documents (see
+`JOBOBJECT_ASSOCIATE_COMPLETION_PORT`) that such a PID may already refer to an
+**inactive or recycled** process unless an open handle is held. The guardian
+authenticates every `NEW_PROCESS` PID by opening a process **handle** and
+checking `IsProcessInJob` (plus a PID re-read and a non-zero creation time)
+before retaining it — a PID is never trusted on its own.
+
+A short-lived descendant can exit before the guardian manages to open it. That
+observation race is **recorded, not fatal to the sandbox**: the running sandbox
+is *never* terminated because of it. Instead, the guardian fails the capture
+**analysis closed** after the sandbox has completed, and **no denials artifact
+is emitted** for that run (the operator gets an explicit error rather than a
+partial or mis-scoped denials report). Genuine tracker corruption (e.g. a
+duplicate active-process start, or an exit with no tracked start that is not a
+recorded race) still fails closed and terminates the job.
 
 ## Limitations
 

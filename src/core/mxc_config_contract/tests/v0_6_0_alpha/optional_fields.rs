@@ -60,7 +60,7 @@ fn accepts_empty_optional_arrays() {
 }
 
 #[test]
-fn optional_fields_may_be_absent() {
+fn accepts_absent_optional_fields() {
     let json = r#"{
             "version": "0.6.0-alpha",
             "process": {"commandLine": "echo"}
@@ -70,7 +70,7 @@ fn optional_fields_may_be_absent() {
 }
 
 #[test]
-fn optional_fields_reject_null() {
+fn rejects_null_optional_fields() {
     let version = r#""version": "0.6.0-alpha""#;
     let process = r#""process": {"commandLine": "echo"}"#;
     let version_and_process = format!("{version}, {process}");

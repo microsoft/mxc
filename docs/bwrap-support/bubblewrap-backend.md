@@ -260,10 +260,10 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
    supply their own proxy via `localhost: <port>` or `url: <url>`.
 2. The sandbox is then started **without** `--unshare-net` so the sandbox
    shares the host network namespace and can reach the loopback proxy.
-3. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, and
-   `https_proxy` inside the sandbox via `bwrap --setenv` (any
-   caller-supplied values for these keys, including `NO_PROXY` /
-   `no_proxy`, are stripped before injection). The runner deliberately
+3. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+   `FTP_PROXY`, and their lowercase variants inside the sandbox via
+   `bwrap --setenv` (caller-supplied values for these keys, including
+   `NO_PROXY` / `no_proxy`, are stripped before injection). The runner deliberately
    does **not** set `NO_PROXY`: since the sandbox shares the host netns,
    a `NO_PROXY=localhost,127.0.0.1` entry would let cooperating clients
    bypass the proxy for host-loopback destinations, defeating

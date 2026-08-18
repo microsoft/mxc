@@ -1,5 +1,7 @@
 name: Hyperlight E2E Tests
 
+# Retained until the unified test matrix has equivalent Hyperlight coverage.
+
 on:
   push:
     branches: [main]

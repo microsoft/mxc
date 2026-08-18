@@ -155,7 +155,6 @@ fn rejects_invalid_process_container_ui_isolation_value() {
 }
 
 #[test]
-#[ignore = "rolling parser currently accepts Serde's externally tagged object encoding. Design decision needed to determine whether this format should be rejected"]
 fn rejects_object_encoding_for_fieldless_enums() {
     let cases = [
         r#"{
@@ -199,7 +198,7 @@ fn rejects_object_encoding_for_fieldless_enums() {
 use mxc_config_contract::published::v0_6_0_alpha::{Containment, Request};
 
 #[test]
-fn appcontainer_containment_alias_maps_to_process_container() {
+fn appcontainer_containment_value_alias_maps_to_process_container() {
     let json = r#"{
         "version": "0.6.0-alpha",
         "containment": "appcontainer",

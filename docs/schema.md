@@ -58,9 +58,16 @@ production configs and the dev schema when working on experimental features:
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
-                                           // WSLC supports the cooperative proxy too, but only via
-                                           // { "url": "http://proxy.example:8080" } (own-netns:
-                                           //  localhost/builtinTestServer are unreachable, rejected)
+                                           // WSLC and LXC support the cooperative proxy too, but
+                                           // only via { "url": "http://proxy.example:8080" }
+                                           // (own-netns: localhost/builtinTestServer are
+                                           //  unreachable, rejected)
+                                           // Under LXC the proxy is enforced: forwarded egress is
+                                           //  restricted to the proxy endpoint and nothing else, so
+                                           //  the allow/block host lists and DNS are not opened.
+                                           //  The chain hooks FORWARD, so traffic addressed to the
+                                           //  bridge gateway itself is delivered locally via INPUT
+                                           //  and is outside what this chain governs.
     },
 
     "ui": {
@@ -84,10 +91,13 @@ production configs and the dev schema when working on experimental features:
                                            // path in output metadata. Defaults to false.
                                            // Retention requires a terminal wait; abandoning the
                                            // process handle deletes the internal trace.
+                                           // Requires native PSEC/V2 capture; guarded-WPR fallback
+                                           // rejects retention rather than exposing a host-wide ETL.
         }
                                            // Omit outputPath for a managed JSON output file.
-                                           // captureDenials cannot be combined with leastPrivilege.
-                                           // captureDenials cannot currently be combined with network.proxy.
+                                           // Native PSEC/V2 capture cannot combine with leastPrivilege
+                                           // or network.proxy. Hosts without that complete native set
+                                           // retain an eligible legacy containment tier and use guarded WPR.
     },
 
     "lxc": {                               // LXC-specific

@@ -19,8 +19,8 @@ use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
-    null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ProvisionResult, StartResult,
-    StatefulSandboxBackend, StopResult,
+    null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult,
+    StartResult, StatefulSandboxBackend, StopResult,
 };
 use wxc_common::wire::WslcProvisionPhase;
 
@@ -137,8 +137,17 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         sandbox_id: &str,
         request: &ExecutionRequest,
         _config: Option<()>,
-        _consumer: ExecConsumer,
+        consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
+        // Before any work: this backend relays to the executor's stdio, so it
+        // cannot serve an in-process caller, and running the workload first
+        // would make the refusal a lie about what has already happened.
+        if consumer == ExecConsumer::Library {
+            return Err(wxc_common::state_aware_backend::unsupported_library_exec(
+                "WSLc",
+            ));
+        }
+
         // Cooperative proxy: inject HTTP(S)_PROXY (and scrub caller-supplied
         // proxy vars). `exec_proxy_url` yields the routable URL only when the
         // proxy is enabled *and* in the required `url` form — `validate_exec`
@@ -202,8 +211,15 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
-            waiter: Box::new(move || Ok(exit_code)),
-            terminator: Box::new(|| {}),
+            // `Exited`, not `TimedOut`: this backend relays internally and has
+            // already run the workload to completion by the time it returns, so
+            // `exit_code` is whatever the container reported — including for a
+            // workload the daemon timed out. Reporting a timeout as such needs
+            // the `Library` path this backend does not have yet.
+            waiter: Box::new(move || Ok(ExecOutcome::Exited(exit_code))),
+            // Nothing to terminate: the workload is already gone. `Ok(())` is
+            // the truthful answer here, not a placeholder.
+            terminator: Box::new(|| Ok(())),
         })
     }
 
@@ -412,6 +428,41 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use wxc_common::models::ContainerPolicy;
+
+    /// A `Library` exec is refused before the backend touches the daemon.
+    ///
+    /// This backend writes the workload's output to *this process's* stdout and
+    /// stderr, so it cannot serve an in-process caller. The refusal has to come
+    /// first: the workload is arbitrary and may not be idempotent, so refusing
+    /// after running it would report "unsupported" for something that already
+    /// happened, with its output delivered somewhere the caller never asked for.
+    ///
+    /// The sandbox id is well-formed but names nothing, and there is no daemon
+    /// to connect to. Any error other than the refusal means the guard ran too
+    /// late — the code reached the daemon before checking who was asking.
+    #[test]
+    fn a_library_exec_is_refused_before_the_workload_runs() {
+        let mut runner = WslcStateAwareRunner::new();
+        let err = runner
+            .exec(
+                "wslc:0123456789abcdef0123456789abcdef",
+                &ExecutionRequest::default(),
+                None,
+                ExecConsumer::Library,
+            )
+            .expect_err("an in-process caller must be refused");
+        assert!(
+            err.message
+                .contains("does not support exec for an in-process caller"),
+            "expected the shared refusal before any daemon work, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Nothing has been run"),
+            "the refusal must state that no workload ran: {}",
+            err.message
+        );
+    }
 
     #[test]
     fn backend_key_matches_wire_format() {

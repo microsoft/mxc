@@ -66,6 +66,15 @@ run_test "LXC Network IPv6+CIDR" "$SCRIPT_DIR/run_lxc_network_ipv6_cidr_test.sh"
 run_test "LXC Network Invalid CIDR" "$SCRIPT_DIR/run_lxc_network_invalid_cidr_test.sh"
 run_test "LXC Network Dual-Stack Hostname" "$SCRIPT_DIR/run_lxc_network_dualstack_test.sh"
 run_test "LXC Network CIDR Boundary" "$SCRIPT_DIR/run_lxc_network_cidr_boundary_test.sh"
+run_test "LXC Network Enforcement" "$SCRIPT_DIR/run_lxc_network_enforcement_test.sh"
+run_test "LXC Network Deny Precedence" "$SCRIPT_DIR/run_lxc_network_deny_precedence_test.sh"
+run_test "LXC Network Proxy" "$SCRIPT_DIR/run_lxc_network_proxy_test.sh"
+run_test "LXC Network Proxy Hostname (off-host)" "$SCRIPT_DIR/run_lxc_network_proxy_hostname_test.sh"
+run_test "LXC Network Proxy Credentials" "$SCRIPT_DIR/run_lxc_network_proxy_credentials_test.sh"
+run_test "LXC Network Proxy Reuse" "$SCRIPT_DIR/run_lxc_network_proxy_reuse_test.sh"
+run_test "LXC Network Preserve Policy" "$SCRIPT_DIR/run_lxc_network_preserve_policy_test.sh"
+run_test "LXC Network Bridge Fail-Closed" "$SCRIPT_DIR/run_lxc_network_bridge_fail_closed_test.sh"
+run_test "LXC Inbound Default-Deny" "$SCRIPT_DIR/run_lxc_inbound_deny_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
 
@@ -78,6 +87,22 @@ fi
 # visibly distinct from a real pass.
 if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
     echo "WARNING: no tests actually executed; every test was skipped."
+fi
+# Strict mode, for continuous integration. A developer box legitimately lacks
+# ip6tables or LXC and should be able to run what it can, so a skip is only a
+# warning there. On a runner provisioned to execute this suite, a skip means a
+# prerequisite silently disappeared, and the gate would then go green while
+# testing nothing -- which is the precise way an unenforced firewall shipped.
+if [ "${MXC_LXC_TESTS_REQUIRE_EXECUTION:-0}" != "0" ]; then
+    if [ "$PASSED" -eq 0 ] && [ "$FAILED" -eq 0 ]; then
+        echo "ERROR: strict mode: no test executed. Refusing to report success."
+        exit 1
+    fi
+    if [ "$SKIPPED" -gt 0 ]; then
+        echo "ERROR: strict mode: $SKIPPED test(s) skipped a prerequisite that this"
+        echo "environment is supposed to provide. Refusing to report success."
+        exit 1
+    fi
 fi
 if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"

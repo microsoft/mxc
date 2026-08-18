@@ -15,7 +15,7 @@ jobs:
           - os_label: linux
             runner: ubuntu-latest
           - os_label: macos
-            runner: macos-14
+            runner: macos-26
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

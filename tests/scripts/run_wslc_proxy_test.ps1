@@ -96,6 +96,15 @@ if ($pass -and ($childLine -match 'attacker\.invalid')) {
     $reason = "caller-supplied proxy env var leaked to the child (attacker.invalid not scrubbed)"
 }
 
+# The FTP family is set to the proxy as well, so an image-baked ftp_proxy
+# cannot send FTP traffic somewhere the operator did not choose. Matched
+# case-sensitively: -notmatch would let the upper-case entry satisfy both
+# checks and leave the lower-case one untested.
+if ($pass -and (($childLine -cnotmatch 'FTP_PROXY=\[http://127\.0\.0\.1:8888\]') -or ($childLine -cnotmatch 'ftp_proxy=\[http://127\.0\.0\.1:8888\]'))) {
+    $pass = $false
+    $reason = "runner did not inject/scrub the FTP proxy family (expected http://127.0.0.1:8888)"
+}
+
 # NO_PROXY / no_proxy must be neutralized to empty so an image-baked or
 # caller-supplied exemption (e.g. NO_PROXY=*) cannot disable the proxy.
 if ($pass -and (($childLine -notmatch 'NO_PROXY=\[\]') -or ($childLine -notmatch 'no_proxy=\[\]'))) {
