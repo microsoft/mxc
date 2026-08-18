@@ -199,8 +199,8 @@ get fixed or wired.
 | Process T1 | ✅ Good | Prerelease Windows only. Remaining failures are genuine MXC bugs or harness limitations. |
 | Process T3 | ✅ Good | Non-prerelease Windows builds only, until the testing suite is updated. |
 | Bubblewrap | ✅ Good | |
-| LXC | ⚠️ Mostly good | Some networking tests fail on distros other than Ubuntu 24.04; host-vs-MXC cause not yet isolated. |
-| WSLC | ⚠️ Mostly good | Can hit a download rate limit while updating WSL / pulling container images. Planned fix: split into several jobs spaced ~15 min apart. |
+| LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
+| WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
 | IsolationSession | ⚠️ Blocked | `Feature_AgentSessionsBaseSupport` is not enabled on the pool image yet. |
 | Windows Sandbox | ⛔ Not scheduled | Dispatcher case is wired; no trigger entry yet. |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
