@@ -384,6 +384,18 @@
           "bubblewrap",
           "lxc"
         ]
+      },
+      {
+        "os": "macos-26",
+        "backends": [
+          "seatbelt"
+        ]
+      },
+      {
+        "os": "macos-15",
+        "backends": [
+          "seatbelt"
+        ]
       }
     ],
     "weekly": [],
