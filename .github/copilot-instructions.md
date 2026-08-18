@@ -72,9 +72,10 @@ workflows) before calling the matrix job.
 
 - `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
   with per-architecture target/artifact/1ES pool and the backends that platform
-  supports) and `triggers` (which OS/backend pairs each plan runs). The
-  `triggers` keys *are* the plan list — the resolver reads them at run time, so
-  adding a plan needs no script change.
+  supports), `triggers` (which OS/backend pairs each plan runs), and the
+  optional `backendDelayedStart` (per-backend job-start stagger, in seconds).
+  The `triggers` keys *are* the plan list — the resolver reads them at run time,
+  so adding a plan needs no script change.
 - `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
   expands a plan (currently `pr`, `nightly`, `weekly`, `enabled`) into GitHub
   Actions matrices. It rejects an invalid catalog before any specialized test
@@ -95,7 +96,9 @@ the matrix `backend` id to the repository's existing backend suite. Ids that
 share a suite get their own case (`process-t1` and `process-t3` both run
 `WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
 host's own `--probe`). A backend with no wired suite fails loudly rather than
-reporting a false success.
+reporting a false success. The Windows dispatcher points `TEMP` at
+`$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
+directory is picked up by the job's log upload without per-file CI wiring.
 
 ### Individual components
 
