@@ -932,7 +932,7 @@ fn handle_decoded_event(
         return;
     }
     let Some(pid) = crate::extractors::effective_event_pid(parts, header_pid) else {
-        if acc.process_lifetimes.is_none() && acc.begin_event() {
+        if acc.event_in_scope(header_pid, filetime) && acc.begin_event() {
             acc.record_outcome(
                 category,
                 parts.event_id,
@@ -1108,6 +1108,33 @@ mod tests {
     }
 
     #[test]
+    fn scoped_analysis_classifies_malformed_capability_from_in_scope_emitter() {
+        let mut accumulator = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+        let parts = DecodedEventParts {
+            provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
+            event_id: crate::extractors::CAPABILITY_DENIAL_EVENT_ID,
+            props: Vec::new(),
+        };
+
+        handle_decoded_event(&parts, 42, 150, &mut accumulator);
+        let analysis = accumulator.into_analysis().unwrap();
+
+        assert_eq!(
+            find_signature(
+                &analysis.data_loop,
+                crate::extractors::CAPABILITY_DENIAL_EVENT_ID
+            )
+            .signature
+            .reason,
+            DataLoopExclusionReason::EventPayloadMalformed
+        );
+    }
+
+    #[test]
     fn relog_selection_skips_payload_decode_failure_from_unrelated_emitter() {
         let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
             pid: 42,
@@ -1125,6 +1152,32 @@ mod tests {
         assert!(accumulator.relog_selected_event_indices.is_empty());
         assert!(!accumulator.stop_requested);
         assert!(accumulator.decode_error.is_none());
+    }
+
+    #[test]
+    fn relog_selection_stops_on_capability_schema_failure() {
+        let mut accumulator = Accumulator::select_for_relogging(&[ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }]);
+
+        select_capability_decode_result_for_relogging(
+            &mut accumulator,
+            0,
+            Err(tdh_decode::DecodeError::Schema(
+                "manifest unavailable".to_string(),
+            )),
+            9000,
+            150,
+        );
+
+        assert!(accumulator.relog_selected_event_indices.is_empty());
+        assert!(accumulator.stop_requested);
+        assert!(accumulator
+            .decode_error
+            .as_deref()
+            .is_some_and(|error| error.contains("manifest unavailable")));
     }
 
     #[test]

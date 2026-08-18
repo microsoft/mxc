@@ -261,17 +261,21 @@ unsafe fn event_schema<'a>(
             *uncached_schema = Some(schema);
         }
     }
-    let buffer = if cacheable {
-        schema_cache
-            .schemas
-            .get(&key)
-            .ok_or_else(|| DecodeError::Schema("event schema cache lookup failed".to_string()))?
-    } else {
-        uncached_schema
-            .as_ref()
-            .ok_or_else(|| DecodeError::Schema("uncached event schema missing".to_string()))?
-    };
-    Ok(buffer)
+    schema_buffer(schema_cache, &key, uncached_schema)
+}
+
+fn schema_buffer<'a>(
+    schema_cache: &'a EventSchemaCache,
+    key: &EventSchemaKey,
+    uncached_schema: &'a Option<TdhInfoBuffer>,
+) -> Result<&'a TdhInfoBuffer, DecodeError> {
+    if let Some(buffer) = uncached_schema {
+        return Ok(buffer);
+    }
+    schema_cache
+        .schemas
+        .get(key)
+        .ok_or_else(|| DecodeError::Schema("event schema cache lookup failed".to_string()))
 }
 
 fn map_property_decode_error(
@@ -991,6 +995,47 @@ mod tests {
             .collect()
     }
 
+    fn uint32_property_buffer(names: &[&str]) -> TdhInfoBuffer {
+        assert!(!names.is_empty());
+        let encoded_names = names
+            .iter()
+            .map(|name| utf16_bytes(name))
+            .collect::<Vec<_>>();
+        let metadata_len = std::mem::size_of::<TRACE_EVENT_INFO>()
+            + (names.len() - 1) * std::mem::size_of::<EVENT_PROPERTY_INFO>();
+        let mut offsets = Vec::with_capacity(names.len());
+        let mut next_offset = metadata_len;
+        for name in &encoded_names {
+            offsets.push(next_offset);
+            next_offset += name.len();
+        }
+
+        let mut buffer = TdhInfoBuffer::new(next_offset);
+        for (name, offset) in encoded_names.iter().zip(&offsets) {
+            buffer.as_bytes_mut()[*offset..*offset + name.len()].copy_from_slice(name);
+        }
+        let info = unsafe { &mut *buffer.as_mut_ptr() };
+        info.PropertyCount = names.len() as u32;
+        info.TopLevelPropertyCount = names.len() as u32;
+        let properties =
+            std::ptr::addr_of_mut!(info.EventPropertyInfoArray) as *mut EVENT_PROPERTY_INFO;
+        for (index, offset) in offsets.into_iter().enumerate() {
+            let property = unsafe { &mut *properties.add(index) };
+            property.NameOffset = offset as u32;
+            property.Anonymous1.nonStructType.InType = TDH_INTYPE_UINT32;
+            property.Anonymous2.count = 1;
+            property.Anonymous3.length = 4;
+        }
+        buffer
+    }
+
+    fn event_record_for_payload(payload: &[u8]) -> EVENT_RECORD {
+        let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+        record.UserData = payload.as_ptr().cast_mut().cast();
+        record.UserDataLength = payload.len() as u16;
+        record
+    }
+
     #[test]
     fn tdh_info_buffer_is_aligned_and_initialized() {
         let mut buffer = TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>() + 7);
@@ -1002,6 +1047,18 @@ mod tests {
             0
         );
         assert!(buffer.as_bytes().iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn uncached_schema_is_used_when_cache_does_not_contain_key() {
+        let cache = EventSchemaCache::default();
+        let record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+        let key = EventSchemaKey::from_record(&record);
+        let uncached = Some(TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>()));
+
+        let selected = schema_buffer(&cache, &key, &uncached).unwrap();
+
+        assert!(std::ptr::eq(selected, uncached.as_ref().unwrap()));
     }
 
     #[test]
@@ -1067,6 +1124,50 @@ mod tests {
             ]
         );
         assert_eq!(offset, payload.len());
+    }
+
+    #[test]
+    fn decode_named_property_stops_after_requested_property() {
+        let buffer = uint32_property_buffer(&["Count", "ProcessId", "Trailing"]);
+        let payload = [7u32, 42, 99]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut record = event_record_for_payload(&payload);
+        let info = unsafe { &*buffer.as_ptr() };
+
+        let process_id =
+            decode_named_property(buffer.as_bytes(), info, &mut record, 8, "processid").unwrap();
+
+        assert_eq!(process_id.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn decode_named_property_reports_missing_and_truncated_properties() {
+        let buffer = uint32_property_buffer(&["Count", "ProcessId"]);
+        let payload = [7u32, 42]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        let mut record = event_record_for_payload(&payload);
+        let info = unsafe { &*buffer.as_ptr() };
+
+        assert_eq!(
+            decode_named_property(buffer.as_bytes(), info, &mut record, 8, "Missing").unwrap(),
+            None
+        );
+
+        let truncated_payload = 7u32.to_le_bytes();
+        let mut truncated_record = event_record_for_payload(&truncated_payload);
+        let error = decode_named_property(
+            buffer.as_bytes(),
+            info,
+            &mut truncated_record,
+            8,
+            "ProcessId",
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, PropertyDecodeErrorKind::PayloadMalformed);
     }
 
     fn decode_single_property(

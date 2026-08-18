@@ -275,7 +275,7 @@ fn backup_existing_output(
     }
 
     let backup_path = vacant_sibling_path(operation, final_path, kind)?;
-    std::fs::rename(final_path, &backup_path).map_err(|error| {
+    persist_existing_file_noclobber(final_path, &backup_path).map_err(|error| {
         std::io::Error::other(format!(
             "{operation} failed to back up {kind} output file {}: {error}",
             final_path.display()
@@ -351,7 +351,11 @@ fn remove_promoted_output_if_owned(
     backup_path: Option<&Path>,
 ) -> std::io::Result<()> {
     let quarantine_path = vacant_sibling_path("paired output rollback", final_path, "promoted")?;
-    std::fs::rename(final_path, &quarantine_path)?;
+    match persist_existing_file_noclobber(final_path, &quarantine_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let matches = promoted.matches_path(&quarantine_path);
     drop(promoted);
     match matches {
@@ -516,6 +520,25 @@ mod tests {
         assert!(error.to_string().contains("another writer replaced"));
         assert_eq!(std::fs::read(final_path).unwrap(), b"concurrent");
         assert_eq!(std::fs::read(backup_path).unwrap(), b"previous");
+    }
+
+    #[test]
+    fn rollback_restores_backup_when_promoted_output_was_deleted() {
+        let directory = tempfile::tempdir().unwrap();
+        let final_path = directory.path().join("denials.json");
+        let backup_path = directory.path().join("backup.json");
+        std::fs::write(&final_path, b"promoted").unwrap();
+        let promoted = PromotedOutput {
+            handle: same_file::Handle::from_file(std::fs::File::open(&final_path).unwrap())
+                .unwrap(),
+        };
+        std::fs::remove_file(&final_path).unwrap();
+        std::fs::write(&backup_path, b"previous").unwrap();
+
+        restore_output(&final_path, Some(&backup_path), Some(promoted)).unwrap();
+
+        assert_eq!(std::fs::read(final_path).unwrap(), b"previous");
+        assert!(!backup_path.exists());
     }
 
     #[test]
