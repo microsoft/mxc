@@ -233,4 +233,86 @@ for sentinel in CONTROL_PROXY_REACHABLE_OK DIRECT_EGRESS_BLOCKED_OK LOOPBACK_EXE
 done
 echo "PASS: proxy-only egress enforcement"
 
+# Hostname proxy endpoints. The endpoint is resolved on the host and pinned
+# into the sandbox's /etc/hosts, because DNS is closed inside the sandbox.
+#
+# The host's own name is used because it resolves everywhere without editing
+# /etc/hosts (which would need root), and it resolves to loopback -- the case
+# the pin has to redirect to slirp's gateway rather than carry through.
+echo "Running Bubblewrap hostname proxy pin test..."
+PROXY_HOST="$(hostname)"
+if ! getent hosts "$PROXY_HOST" >/dev/null; then
+    echo "SKIP: hostname proxy pin (host name '$PROXY_HOST' does not resolve)"
+else
+    TEST_PROXY="$REPO_DIR/src/target/release/unix-test-proxy"
+    if [ ! -x "$TEST_PROXY" ]; then
+        TEST_PROXY="$REPO_DIR/src/target/debug/unix-test-proxy"
+    fi
+    if [ ! -x "$TEST_PROXY" ]; then
+        echo "FAIL: hostname proxy pin (unix-test-proxy not built)"
+        exit 1
+    fi
+
+    PIN_DIR="$(mktemp -d)"
+    PIN_PROXY_PID=""
+    cleanup_pin() {
+        if [ -n "$PIN_PROXY_PID" ]; then
+            kill "$PIN_PROXY_PID" 2>/dev/null || true
+            wait "$PIN_PROXY_PID" 2>/dev/null || true
+        fi
+        exec 9>&- 2>/dev/null || true
+        rm -rf "$PIN_DIR"
+    }
+    trap cleanup_pin EXIT
+
+    # The proxy exits when its stdin reaches EOF, which is how the coordinator
+    # stops an orphan. Driving it from a script means supplying that pipe here:
+    # the fifo is opened read-write so the open does not block, and the script
+    # holding it keeps the proxy alive for the run.
+    mkfifo "$PIN_DIR/parent.pipe"
+    exec 9<>"$PIN_DIR/parent.pipe"
+
+    # The proxy binds an OS-assigned port and publishes it, so the config is
+    # generated per run rather than committed with a fixed port.
+    "$TEST_PROXY" --ready-file "$PIN_DIR/ready.port" --bind-address 127.0.0.1 \
+        <"$PIN_DIR/parent.pipe" >"$PIN_DIR/proxy.log" 2>&1 &
+    PIN_PROXY_PID=$!
+    for _ in $(seq 1 100); do
+        [ -s "$PIN_DIR/ready.port" ] && break
+        if ! kill -0 "$PIN_PROXY_PID" 2>/dev/null; then
+            cat "$PIN_DIR/proxy.log"
+            echo "FAIL: hostname proxy pin (test proxy exited before publishing its port)"
+            exit 1
+        fi
+        sleep 0.1
+    done
+    PROXY_PORT="$(cat "$PIN_DIR/ready.port" 2>/dev/null || true)"
+    if [ -z "$PROXY_PORT" ]; then
+        cat "$PIN_DIR/proxy.log"
+        echo "FAIL: hostname proxy pin (test proxy did not publish a port)"
+        exit 1
+    fi
+
+    sed -e "s/{{PROXY_HOST}}/$PROXY_HOST/g" -e "s/{{PROXY_PORT}}/$PROXY_PORT/g" \
+        "$REPO_DIR/tests/configs/bubblewrap_network_proxy_hostname.json" \
+        >"$PIN_DIR/hostname.json"
+
+    if ! PIN_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+        "$PIN_DIR/hostname.json" 2>&1); then
+        echo "$PIN_OUT"
+        echo "FAIL: hostname proxy pin (lxc-exec returned non-zero)"
+        exit 1
+    fi
+    for sentinel in PIN_PRESENT_OK PIN_PROXY_OK PIN_DIRECT_BLOCKED_OK; do
+        if ! grep -q "$sentinel" <<<"$PIN_OUT"; then
+            echo "$PIN_OUT"
+            echo "FAIL: hostname proxy pin (sentinel '$sentinel' not found in output)"
+            exit 1
+        fi
+    done
+    cleanup_pin
+    trap - EXIT
+    echo "PASS: hostname proxy pin"
+fi
+
 echo "Bubblewrap network proxy tests complete."

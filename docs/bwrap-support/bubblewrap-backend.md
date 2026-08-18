@@ -411,22 +411,44 @@ request fails if its private namespace cannot be configured.
   private network namespace. Clients that ignore the env vars (raw sockets,
   custom HTTP clients) can no longer reach the network directly: only loopback
   and the proxy endpoint are permitted. DNS is deliberately **not** opened —
-  the proxy resolves on the workload's behalf — so the proxy endpoint must be
-  an IPv4 literal. IPv6 egress is denied outright.
+  the proxy resolves on the workload's behalf. IPv6 egress is denied outright.
 
-  Consequently the only accepted host-local proxy endpoints are `localhost`,
-  `127.0.0.0/8` and the wildcards `0.0.0.0` / `::`, each rewritten to
-  `10.0.2.2`. `::1` is **rejected at validation time**: a proxy bound only to
-  the IPv6 loopback cannot accept the IPv4 connection slirp's gateway
-  produces, so translating it would hand the sandbox an address nothing
-  answers on. Bind such a proxy to `127.0.0.1` or to a dual-stack wildcard
-  instead.
+  Host-local proxy endpoints — `localhost`, `127.0.0.0/8` and the wildcards
+  `0.0.0.0` / `::` — are rewritten to `10.0.2.2`. `::1` is **rejected at
+  validation time**: a proxy bound only to the IPv6 loopback cannot accept the
+  IPv4 connection slirp's gateway produces, so translating it would hand the
+  sandbox an address nothing answers on. Bind such a proxy to `127.0.0.1` or to
+  a dual-stack wildcard instead.
+
   On schema **0.6/0.7** the legacy behavior applies: the sandbox shares the
   host network namespace, no egress rules are installed, and only the
   cooperative env-var routing is in effect — a client that ignores
   `HTTP_PROXY`/`HTTPS_PROXY` reaches the network directly. For strict
   whole-network isolation on those versions, omit `network.proxy` so the
   runner can apply `--unshare-net` instead.
+- **Hostname proxy endpoints are pinned, not resolved in the sandbox**: because
+  DNS is closed, a hostname in `network.proxy.url` cannot be resolved by the
+  workload. The runner resolves it **once on the host** before the sandbox
+  starts, opens the egress chain for that address, and pins
+  `<address> <hostname>` as the first line of a generated `/etc/hosts` that is
+  bind-mounted read-only over the sandbox's copy. The workload therefore sees
+  the URL exactly as configured, so `Host` headers and proxy-auth realms match.
+  Consequences worth knowing:
+  - The name is resolved **once**, at start. A proxy whose address changes
+    mid-run is not followed.
+  - Only the pinned address is opened in the egress chain, so a resolver that
+    bypasses `/etc/hosts` (for example a client that speaks DNS directly, which
+    is itself blocked) cannot reach a different address. The failure is closed.
+  - IP **literals** are rewritten rather than pinned, per the rules above. A
+    hostname that resolves to a loopback address is likewise pinned to the
+    gateway.
+  - `localhost` is always rewritten, never pinned. It is reserved to loopback
+    (RFC 6761) and a pin is a sandbox-wide mapping, so pinning it would
+    redirect the workload's own loopback traffic to the host.
+  - The generated `/etc/hosts` preserves the host's existing entries after the
+    pin line, so `localhost` and friends keep working. A `readwritePaths` entry
+    covering `/etc/hosts` is overridden by the pin mount.
+  - IPv6-only proxy hostnames are rejected, matching the IPv6 egress denial.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`
   or `"both"` is rejected at config-parse time. (The rejection message cites a

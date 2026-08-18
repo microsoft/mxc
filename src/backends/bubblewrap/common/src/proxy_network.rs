@@ -5,9 +5,10 @@
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::thread;
@@ -17,7 +18,7 @@ use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::{access, dup2, pipe2, AccessFlags};
 use tempfile::TempDir;
 use wxc_common::logger::Logger;
-use wxc_common::models::ProxyAddress;
+use wxc_common::models::{ProxyAddress, ProxyHostPin};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -51,6 +52,11 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
+/// The gateway as an address, for rules and pins. Kept in step with
+/// [`SLIRP_HOST_GATEWAY`] by [`tests::gateway_constants_agree`].
+const SLIRP_HOST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+/// Path the hosts-file pin is mounted over inside the sandbox.
+const SANDBOX_HOSTS_PATH: &str = "/etc/hosts";
 /// Egress chain installed inside the sandbox's own network namespace.
 const EGRESS_CHAIN: &str = "MXC_EGRESS";
 /// Descriptor numbers the supervisor script hardcodes. They must stay single
@@ -144,36 +150,201 @@ wait "$slirp_pid"
 
 /// The single destination a proxy-only sandbox may reach.
 ///
-/// Must be an IPv4 literal: rules are IPv4 `iptables`, and DNS is closed inside
-/// the sandbox, so a hostname could not be resolved even if a rule existed for
-/// its address. LXC solves that with a hosts-file pin; Bubblewrap has no
-/// equivalent yet and fails closed instead.
+/// The address is IPv4 because the rule is emitted with IPv4 `iptables`. A
+/// hostname endpoint is resolved on the host and carried here as its address
+/// plus the [`ProxyHostPin`] the sandbox needs to agree with it: DNS is closed
+/// inside the sandbox, so a hosts-file pin is the only way the workload can
+/// reach a name the firewall has authorized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProxyEgress {
-    ip: std::net::Ipv4Addr,
+    ip: Ipv4Addr,
     port: u16,
+    pin: Option<ProxyHostPin>,
 }
 
 impl ProxyEgress {
-    /// Derive the permitted endpoint from the sandbox-visible proxy address.
-    pub(crate) fn from_address(address: &ProxyAddress) -> Result<Self, String> {
-        let host = address.host().trim_matches(['[', ']']);
-        let ip = host.parse::<std::net::Ipv4Addr>().map_err(|_| {
-            format!(
-                "Bubblewrap: proxy-only egress requires an IPv4 proxy endpoint, but the \
-                 sandbox-visible proxy host is '{host}'. Proxy-only egress is enforced with \
-                 IPv4 iptables rules and DNS is closed inside the sandbox, so a hostname or \
-                 IPv6 endpoint cannot be reached. Use a loopback or IPv4 proxy address."
-            )
-        })?;
-        if address.port() == 0 {
+    /// The hosts-file pin the sandbox needs, if the endpoint is a hostname.
+    pub(crate) fn pin(&self) -> Option<&ProxyHostPin> {
+        self.pin.as_ref()
+    }
+}
+
+/// The proxy as the sandbox sees it: the URL handed to the workload, and the
+/// single endpoint the egress chain opens for it.
+///
+/// Both come from one host-side lookup. Resolving twice can disagree -- DNS
+/// round-robin reorders, or a TTL expires between the calls -- and a sandbox
+/// pinned to an address the chain did not authorize cannot reach its proxy at
+/// all.
+#[derive(Debug)]
+pub(crate) struct SandboxProxy {
+    address: ProxyAddress,
+    egress: ProxyEgress,
+}
+
+impl SandboxProxy {
+    /// Derive the sandbox-visible proxy from the configured one.
+    ///
+    /// A hostname keeps its URL and is pinned, rather than being rewritten to
+    /// an address: the workload then presents the `Host` header and proxy-auth
+    /// realm the operator configured. An IP literal has no name to pin, so a
+    /// loopback literal is rewritten to slirp's gateway instead.
+    pub(crate) fn resolve(configured: &ProxyAddress) -> Result<Self, String> {
+        Self::resolve_with(configured, resolve_ipv4)
+    }
+
+    /// [`Self::resolve`] against an injected resolver.
+    ///
+    /// Resolution is the one step that depends on the host's DNS, so it is a
+    /// parameter: the decisions layered on top of it are then testable without
+    /// a lookup whose answer the test does not control.
+    fn resolve_with(
+        configured: &ProxyAddress,
+        resolve: impl Fn(&str, u16) -> Result<Ipv4Addr, String>,
+    ) -> Result<Self, String> {
+        if configured.port() == 0 {
             return Err("Bubblewrap: proxy-only egress requires a non-zero proxy port".to_string());
         }
+        let host = configured.host().trim_matches(['[', ']']);
+
+        // `localhost` is reserved to loopback (RFC 6761), so it is rewritten
+        // rather than pinned. A pin is a sandbox-wide mapping: pointing this
+        // name at the gateway would redirect the workload's own loopback
+        // traffic to the host.
+        let is_reserved_loopback_name = host.eq_ignore_ascii_case("localhost");
+
+        if let Ok(ip) = host.parse::<Ipv4Addr>() {
+            // A literal cannot be pinned, so loopback and the wildcard are
+            // reached by rewriting the URL to the address slirp maps back to
+            // the host. `0.0.0.0` names the host just as `127.0.0.1` does.
+            return if ip.is_loopback() || ip.is_unspecified() {
+                Ok(Self::rewritten(configured)?)
+            } else {
+                Ok(Self {
+                    address: configured.clone(),
+                    egress: ProxyEgress {
+                        ip,
+                        port: configured.port(),
+                        pin: None,
+                    },
+                })
+            };
+        }
+
+        if let Ok(ip) = host.parse::<Ipv6Addr>() {
+            // A dual-stack wildcard listener accepts the gateway's IPv4
+            // connection, so `::` can be rewritten. `::1` cannot: it listens
+            // on the IPv6 loopback only, so the rewrite would hand the sandbox
+            // an address nothing answers on -- failing at connect time rather
+            // than at policy time.
+            if ip.is_unspecified() {
+                return Self::rewritten(configured);
+            }
+            if ip.is_loopback() {
+                return Err(format!(
+                    "Bubblewrap: proxy address '{}' uses the IPv6 loopback, which the private \
+                     network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
+                     wildcard address instead. The egress rule is emitted with IPv4 iptables.",
+                    configured.host()
+                ));
+            }
+            return Err(ipv6_unsupported(host));
+        }
+
+        if is_reserved_loopback_name {
+            return Self::rewritten(configured);
+        }
+
+        let ip = sandbox_facing_ip(resolve(host, configured.port())?);
+        let pin = configured
+            .host_pin(IpAddr::V4(ip))
+            .map_err(|error| format!("Bubblewrap: {error}"))?;
+
         Ok(Self {
-            ip,
-            port: address.port(),
+            address: configured.clone(),
+            egress: ProxyEgress {
+                ip,
+                port: configured.port(),
+                pin,
+            },
         })
     }
+
+    /// The proxy reached by rewriting its URL to slirp's gateway.
+    fn rewritten(configured: &ProxyAddress) -> Result<Self, String> {
+        Ok(Self {
+            address: rewrite_to_gateway(configured)?,
+            egress: ProxyEgress {
+                ip: SLIRP_HOST_GATEWAY_IP,
+                port: configured.port(),
+                pin: None,
+            },
+        })
+    }
+
+    /// The proxy URL the workload is given.
+    pub(crate) fn address(&self) -> &ProxyAddress {
+        &self.address
+    }
+
+    /// The endpoint the egress chain opens.
+    pub(crate) fn egress(&self) -> &ProxyEgress {
+        &self.egress
+    }
+}
+
+/// The address the sandbox reaches a host-resolved endpoint at.
+///
+/// slirp gives the sandbox its own loopback, so a name that resolves to the
+/// host's loopback is pinned to the gateway instead: pinning it verbatim would
+/// aim the workload at itself.
+fn sandbox_facing_ip(resolved: Ipv4Addr) -> Ipv4Addr {
+    if resolved.is_loopback() {
+        SLIRP_HOST_GATEWAY_IP
+    } else {
+        resolved
+    }
+}
+
+/// Resolve `host` to the address the egress chain will open.
+///
+/// Only the first IPv4 answer is used, and it is the same one the sandbox is
+/// pinned to. Opening the rest would widen the chain to addresses the sandbox
+/// can no longer select: with DNS closed, the pin is its only resolution path.
+fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+    let resolved: Vec<IpAddr> = (host, port)
+        .to_socket_addrs()
+        .map_err(|error| {
+            format!(
+                "Bubblewrap: could not resolve proxy host '{host}': {error}. The proxy endpoint \
+                 is resolved on the host because DNS is closed inside the sandbox."
+            )
+        })?
+        .map(|addr| addr.ip())
+        .collect();
+
+    if let Some(IpAddr::V4(ip)) = resolved.iter().find(|ip| ip.is_ipv4()) {
+        return Ok(*ip);
+    }
+
+    // A name with AAAA records and no A records is the same unenforceable case
+    // as an IPv6 literal, so say so rather than claiming it does not resolve.
+    if resolved.is_empty() {
+        Err(format!(
+            "Bubblewrap: proxy host '{host}' did not resolve to any address."
+        ))
+    } else {
+        Err(ipv6_unsupported(host))
+    }
+}
+
+/// The error for an endpoint that only IPv6 can reach.
+fn ipv6_unsupported(host: &str) -> String {
+    format!(
+        "Bubblewrap: proxy-only egress requires an IPv4 proxy endpoint, but '{host}' is reachable \
+         over IPv6 only. The egress rule is emitted with IPv4 iptables, so an IPv6 endpoint would \
+         be silently dropped. Use an IPv4 proxy address."
+    )
 }
 
 /// Runtime file descriptors Bubblewrap needs while establishing its child.
@@ -268,6 +439,8 @@ pub(crate) struct ProxyNetworkNamespace {
     /// Handle to the supervisor's user namespace, passed to bwrap as
     /// `--userns`. Released once bwrap owns it; see [`Self::userns_handed_off`].
     userns: Option<File>,
+    /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
+    hosts: Option<PathBuf>,
 }
 
 impl ProxyNetworkNamespace {
@@ -354,17 +527,39 @@ impl ProxyNetworkNamespace {
         };
         logger.log_line("Bubblewrap: created rootless proxy network namespace supervisor");
 
+        let hosts = match egress.pin() {
+            Some(pin) => {
+                let path = state_dir.path().join("hosts");
+                if let Err(error) = write_pinned_hosts(&path, pin) {
+                    terminate_child(&mut supervisor);
+                    return Err(error);
+                }
+                logger.log_line(&format!(
+                    "Bubblewrap: pinned proxy host '{}' to {} for the sandbox",
+                    pin.hostname(),
+                    pin.ip()
+                ));
+                Some(path)
+            }
+            None => None,
+        };
+
         Ok(Self {
             state_dir,
             supervisor,
             exit_writer: Some(exit_writer),
             pid_writer: Some(pid_writer),
             userns: Some(userns),
+            hosts,
         })
     }
 
     /// Add the dynamic namespace and startup-barrier descriptors to bwrap.
-    pub(crate) fn configure_bwrap(&self, args: &mut Vec<String>) -> Result<BwrapStartup, String> {
+    pub(crate) fn configure_bwrap(
+        &self,
+        args: &mut Vec<String>,
+        logger: &mut Logger,
+    ) -> Result<BwrapStartup, String> {
         let (info_reader, info_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         let (gate_reader, gate_writer) =
@@ -374,6 +569,18 @@ impl ProxyNetworkNamespace {
             .userns
             .as_ref()
             .ok_or_else(|| "Bubblewrap: proxy user namespace is already handed off".to_string())?;
+
+        if let Some(hosts) = &self.hosts {
+            let path = hosts
+                .to_str()
+                .ok_or_else(|| "Bubblewrap: proxy hosts pin path is not valid UTF-8".to_string())?;
+            if insert_hosts_bind(args, path)? {
+                logger.log_line(
+                    "Bubblewrap: the proxy host pin overrides an earlier mount of \
+                     /etc/hosts; the sandbox sees the pinned file",
+                );
+            }
+        }
 
         let runtime_args = [
             "--userns".to_string(),
@@ -492,35 +699,11 @@ impl Drop for ProxyNetworkNamespace {
     }
 }
 
-/// Return the proxy endpoint visible through slirp's host gateway.
-pub(crate) fn sandbox_proxy_address(address: &ProxyAddress) -> Result<ProxyAddress, String> {
-    let host = address.host().trim_matches(['[', ']']);
-    let parsed = host.parse::<std::net::IpAddr>().ok();
-
-    // slirp's gateway reaches the host's *IPv4* loopback only. A proxy bound
-    // to `::1` listens on the IPv6 loopback exclusively, so rewriting it to
-    // the gateway would hand the sandbox an address nothing answers on --
-    // failing at connect time rather than at policy time. Reject it instead.
-    if matches!(parsed, Some(std::net::IpAddr::V6(ip)) if ip.is_loopback()) {
-        return Err(format!(
-            "Bubblewrap: proxy address '{}' uses the IPv6 loopback, which the private \
-             network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
-             wildcard address instead",
-            address.host()
-        ));
-    }
-
-    // `0.0.0.0` / `::` name the host itself just as `127.0.0.1` does: a proxy
-    // bound to the wildcard is reachable on the host's loopback, which the
-    // sandbox's private namespace cannot see. Both need the gateway rewrite.
-    // `::` is safe to rewrite to IPv4 because a dual-stack wildcard listener
-    // accepts IPv4 connections, which `::1` does not.
-    let is_host_local = host.eq_ignore_ascii_case("localhost")
-        || parsed.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified());
-    if !is_host_local {
-        return Ok(address.clone());
-    }
-
+/// Rewrite a loopback or wildcard proxy URL to slirp's host gateway.
+///
+/// Only IP literals reach here. A hostname is pinned instead, so that the URL
+/// the workload receives is the one the operator configured.
+fn rewrite_to_gateway(address: &ProxyAddress) -> Result<ProxyAddress, String> {
     if let Some(original_url) = &address.original_url {
         let mut url = url::Url::parse(original_url).map_err(|error| {
             format!("Bubblewrap: failed to translate proxy URL for private networking: {error}")
@@ -595,6 +778,62 @@ fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
         let _ = pipe.read_to_string(&mut stdout);
     }
     Ok(ProbeOutput { status, stdout })
+}
+
+/// Write the sandbox's `/etc/hosts`: the pin, then the host's own entries.
+///
+/// The pin goes first because the first match wins in a hosts file. A host
+/// whose `/etc/hosts` already maps the proxy name -- to a stale address, or to
+/// one the egress chain never authorized -- would otherwise shadow the pin and
+/// leave the sandbox unable to reach its proxy.
+///
+/// The host's entries are kept rather than discarded so the sandbox retains
+/// the mappings a workload expects (`localhost` above all). They are read
+/// before the file is created, so a read failure cannot leave a half-written
+/// pin behind.
+fn write_pinned_hosts(path: &PathBuf, pin: &ProxyHostPin) -> Result<(), String> {
+    // The host file is optional: a host without one simply contributes no
+    // entries, which is not a reason to refuse to pin.
+    let existing = match fs::read_to_string(SANDBOX_HOSTS_PATH) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "Bubblewrap: failed to read {SANDBOX_HOSTS_PATH} while pinning the proxy host: \
+                 {error}"
+            ))
+        }
+    };
+
+    let contents = format!("{}\n{}", pin.hosts_line(), existing);
+    fs::write(path, contents)
+        .map_err(|error| format!("Bubblewrap: failed to write the proxy hosts pin: {error}"))
+}
+
+/// Splice the pinned-hosts bind in just before the command separator.
+///
+/// bwrap applies mounts in argument order and the last mount at a path wins,
+/// so the bind must come after every baseline and user-policy mount for the
+/// pin to survive -- including one that would otherwise expose the host's own
+/// `/etc/hosts`. Returns `true` when an earlier mount already targeted
+/// `/etc/hosts`, so the caller can report that the pin overrides it.
+fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, String> {
+    let separator = args
+        .iter()
+        .position(|arg| arg == "--")
+        .ok_or_else(|| "Bubblewrap: argument list has no command separator".to_string())?;
+    let overrides = args[..separator]
+        .iter()
+        .any(|arg| arg == SANDBOX_HOSTS_PATH);
+    args.splice(
+        separator..separator,
+        [
+            "--ro-bind".to_string(),
+            hosts_path.to_string(),
+            SANDBOX_HOSTS_PATH.to_string(),
+        ],
+    );
+    Ok(overrides)
 }
 
 pub(crate) fn probe_dependencies() -> Result<(), String> {
@@ -880,51 +1119,138 @@ mod tests {
     use super::*;
 
     #[test]
-    fn egress_opens_the_translated_loopback_proxy() {
-        // Rules must open the translated address, not the original loopback.
-        let address = ProxyAddress::new("127.0.0.1".into(), 8080);
-        let translated = sandbox_proxy_address(&address).unwrap();
-        let egress = ProxyEgress::from_address(&translated).unwrap();
+    fn gateway_constants_agree() {
+        // The rule and the pin are written from the address; the URL rewrite
+        // from the string. A drift between them would open one endpoint and
+        // point the workload at another.
+        assert_eq!(SLIRP_HOST_GATEWAY_IP.to_string(), SLIRP_HOST_GATEWAY);
+    }
 
-        assert_eq!(egress.ip.to_string(), SLIRP_HOST_GATEWAY);
-        assert_eq!(egress.port, 8080);
+    #[test]
+    fn egress_opens_the_gateway_for_a_loopback_literal() {
+        // A literal has no name to pin, so the URL is rewritten and the rule
+        // must open the rewritten address, not the original loopback.
+        let address = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let resolved = SandboxProxy::resolve(&address).unwrap();
+
+        assert_eq!(resolved.address().host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(resolved.egress().ip.to_string(), SLIRP_HOST_GATEWAY);
+        assert_eq!(resolved.egress().port, 8080);
+        assert!(resolved.egress().pin().is_none());
     }
 
     #[test]
     fn egress_accepts_a_routable_ipv4_proxy() {
         let address = ProxyAddress::new("10.1.2.3".into(), 3128);
-        let egress = ProxyEgress::from_address(&address).unwrap();
+        let resolved = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(egress.ip.to_string(), "10.1.2.3");
-        assert_eq!(egress.port, 3128);
+        assert_eq!(resolved.address().host(), "10.1.2.3");
+        assert_eq!(resolved.egress().ip.to_string(), "10.1.2.3");
+        assert_eq!(resolved.egress().port, 3128);
+        assert!(resolved.egress().pin().is_none());
+    }
+
+    /// A resolver that answers every name with `ip`, so pin decisions can be
+    /// tested without a lookup the test does not control.
+    fn resolver(ip: [u8; 4]) -> impl Fn(&str, u16) -> Result<Ipv4Addr, String> {
+        move |_, _| Ok(Ipv4Addr::from(ip))
     }
 
     #[test]
-    fn egress_rejects_a_hostname_proxy() {
-        // DNS is closed, so a name the workload cannot resolve must fail loudly
-        // rather than yield a rule that is never reachable.
+    fn pins_a_hostname_and_keeps_its_url() {
+        // The workload must present the configured name -- proxy-auth realms
+        // and Host headers are keyed on it -- so the name is pinned rather
+        // than rewritten to an address.
         let address = ProxyAddress::from_url(
-            "http://proxy.corp.example:3128",
+            "http://proxy.corp.example:3128/",
             "proxy.corp.example".into(),
             3128,
         );
-        let error = ProxyEgress::from_address(&address).unwrap_err();
+        let resolved = SandboxProxy::resolve_with(&address, resolver([10, 1, 2, 3])).unwrap();
 
-        assert!(
-            error.contains("proxy.corp.example"),
-            "error should name the offending host: {error}"
+        assert_eq!(
+            resolved.address().to_url(),
+            "http://proxy.corp.example:3128/"
         );
-        assert!(
-            error.contains("IPv4"),
-            "error should explain the IPv4 requirement: {error}"
+
+        let pin = resolved.egress().pin().expect("hostname must be pinned");
+        assert_eq!(pin.hostname(), "proxy.corp.example");
+        assert_eq!(pin.ip().to_string(), "10.1.2.3");
+        assert_eq!(resolved.egress().ip.to_string(), "10.1.2.3");
+    }
+
+    #[test]
+    fn pins_a_loopback_hostname_to_the_gateway() {
+        // slirp gives the sandbox its own loopback, so a name resolving to the
+        // host's loopback must be pinned to the gateway -- pinning it verbatim
+        // would aim the workload at itself.
+        let address = ProxyAddress::from_url("http://proxy.local:3128", "proxy.local".into(), 3128);
+        let resolved = SandboxProxy::resolve_with(&address, resolver([127, 0, 1, 1])).unwrap();
+
+        let pin = resolved.egress().pin().expect("hostname must be pinned");
+        assert_eq!(pin.ip().to_string(), SLIRP_HOST_GATEWAY);
+        assert_eq!(resolved.egress().ip.to_string(), SLIRP_HOST_GATEWAY);
+    }
+
+    #[test]
+    fn rewrites_localhost_instead_of_pinning_it() {
+        // `localhost` is reserved to loopback (RFC 6761). A pin is sandbox
+        // wide, so pinning it would redirect the workload's own loopback
+        // traffic to the host.
+        let address = ProxyAddress::from_url("http://localhost:3128/", "localhost".into(), 3128);
+        let resolved =
+            SandboxProxy::resolve_with(&address, |_, _| panic!("localhost must not be resolved"))
+                .unwrap();
+
+        assert_eq!(resolved.address().host(), SLIRP_HOST_GATEWAY);
+        assert!(resolved.egress().pin().is_none());
+        assert_eq!(resolved.egress().ip.to_string(), SLIRP_HOST_GATEWAY);
+    }
+
+    #[test]
+    fn pins_a_routable_hostname_to_its_resolved_address() {
+        // Only a loopback answer is redirected to the gateway; a routable one
+        // is reached directly through slirp.
+        assert_eq!(
+            sandbox_facing_ip(Ipv4Addr::new(10, 1, 2, 3)),
+            Ipv4Addr::new(10, 1, 2, 3)
+        );
+        assert_eq!(
+            sandbox_facing_ip(Ipv4Addr::new(127, 0, 0, 1)),
+            SLIRP_HOST_GATEWAY_IP
         );
     }
 
     #[test]
     fn egress_rejects_an_ipv6_proxy() {
         // Rules are IPv4-only, so an IPv6 endpoint would never be opened.
+        let loopback = ProxyAddress::new("[::1]".into(), 8080);
+        let error = SandboxProxy::resolve(&loopback).unwrap_err();
+        assert!(
+            error.contains("IPv4"),
+            "error should explain the IPv4 requirement: {error}"
+        );
+
         let routable = ProxyAddress::new("2001:db8::1".into(), 8080);
-        assert!(ProxyEgress::from_address(&routable).is_err());
+        assert!(SandboxProxy::resolve(&routable).is_err());
+    }
+
+    #[test]
+    fn egress_rejects_an_unresolvable_hostname() {
+        // `.invalid` is reserved by RFC 2606 and never resolves, so a name
+        // that cannot be pinned must fail loudly rather than yield a rule the
+        // sandbox can never reach.
+        let address = ProxyAddress::from_url(
+            "http://proxy.corp.invalid:3128",
+            "proxy.corp.invalid".into(),
+            3128,
+        );
+        let error = SandboxProxy::resolve(&address).unwrap_err();
+
+        assert!(
+            error.contains("proxy.corp.invalid"),
+            "error should name the offending host: {error}"
+        );
     }
 
     /// `::1` used to be rewritten to the IPv4 gateway, which handed the sandbox
@@ -935,7 +1261,7 @@ mod tests {
     fn rejects_an_ipv6_loopback_proxy_instead_of_translating_it() {
         for host in ["[::1]", "::1"] {
             let address = ProxyAddress::new(host.into(), 8080);
-            let error = sandbox_proxy_address(&address).unwrap_err();
+            let error = SandboxProxy::resolve(&address).unwrap_err();
 
             assert!(
                 error.contains("IPv6 loopback"),
@@ -949,15 +1275,15 @@ mod tests {
     #[test]
     fn ipv6_loopback_rejection_leaves_the_ipv6_wildcard_translatable() {
         let address = ProxyAddress::new("[::]".into(), 8080);
-        let translated = sandbox_proxy_address(&address).unwrap();
+        let translated = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(translated.address().host(), SLIRP_HOST_GATEWAY);
     }
 
     #[test]
     fn egress_rejects_a_zero_port() {
         let address = ProxyAddress::new("10.0.2.2".into(), 0);
-        let error = ProxyEgress::from_address(&address).unwrap_err();
+        let error = SandboxProxy::resolve(&address).unwrap_err();
 
         assert!(
             error.contains("non-zero"),
@@ -974,6 +1300,102 @@ mod tests {
     /// present on all of them.
     fn normalised_script() -> String {
         SUPERVISOR_SCRIPT.replace(r#" -w "$lock_wait""#, "")
+    }
+
+    /// The pin a hostname proxy produces, for the hosts-file tests.
+    fn test_pin() -> ProxyHostPin {
+        ProxyAddress::new("proxy.example".into(), 3128)
+            .host_pin(IpAddr::V4(SLIRP_HOST_GATEWAY_IP))
+            .expect("hostname must be pinnable")
+            .expect("a hostname needs a pin")
+    }
+
+    #[test]
+    fn pinned_hosts_file_puts_the_pin_first() {
+        // First match wins in a hosts file, so a host entry for the same name
+        // must not be able to shadow the pin.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        write_pinned_hosts(&path, &test_pin()).unwrap();
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents.lines().next().unwrap(),
+            format!("{SLIRP_HOST_GATEWAY} proxy.example")
+        );
+    }
+
+    #[test]
+    fn pinned_hosts_file_keeps_the_host_entries() {
+        // Dropping them would cost the sandbox `localhost`, which workloads
+        // and the loopback exemption both rely on.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        write_pinned_hosts(&path, &test_pin()).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        let host_file = fs::read_to_string(SANDBOX_HOSTS_PATH).unwrap_or_default();
+        for line in host_file.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                written.contains(line),
+                "host entry should be preserved: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn hosts_bind_is_applied_after_policy_mounts() {
+        // bwrap applies mounts in order and the last at a path wins, so the
+        // pin must land past every policy mount -- including one that would
+        // otherwise expose the host's own /etc/hosts.
+        let mut args = vec![
+            "--ro-bind-try".to_string(),
+            "/etc".to_string(),
+            "/etc".to_string(),
+            "--bind".to_string(),
+            "/etc/hosts".to_string(),
+            "/etc/hosts".to_string(),
+            "--".to_string(),
+            "sh".to_string(),
+        ];
+        insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap();
+
+        let pin = args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/tmp/pin/hosts", SANDBOX_HOSTS_PATH])
+            .expect("pin bind should be present");
+        let policy = args
+            .windows(3)
+            .position(|window| window == ["--bind", "/etc/hosts", "/etc/hosts"])
+            .expect("policy mount should be retained");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+
+        assert!(pin > policy, "pin must be applied after the policy mount");
+        assert!(pin < separator, "pin must precede the command separator");
+    }
+
+    #[test]
+    fn hosts_bind_reports_an_overridden_policy_mount() {
+        // Silently shadowing a user's own /etc/hosts mount would make the
+        // sandbox's view of the file inexplicable from the config alone.
+        let mut args = vec![
+            "--bind".to_string(),
+            "/custom/hosts".to_string(),
+            "/etc/hosts".to_string(),
+            "--".to_string(),
+        ];
+        assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap());
+
+        let mut untouched = vec!["--ro-bind-try".to_string(), "--".to_string()];
+        assert!(!insert_hosts_bind(&mut untouched, "/tmp/pin/hosts").unwrap());
+    }
+
+    #[test]
+    fn hosts_bind_requires_a_command_separator() {
+        // Appending blindly to an argument list with no separator would pass
+        // the bind to the workload as arguments and leave it unpinned.
+        let mut args = vec!["--ro-bind-try".to_string(), "/etc".to_string()];
+        assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").is_err());
     }
 
     /// Byte offset of `needle` in the normalised supervisor script.
@@ -1072,32 +1494,35 @@ mod tests {
     }
 
     #[test]
-    fn translates_loopback_proxy_to_slirp_gateway() {
+    fn translates_loopback_literal_to_slirp_gateway() {
         let address = ProxyAddress::new("127.0.0.1".into(), 8080);
-        let translated = sandbox_proxy_address(&address).unwrap();
+        let resolved = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
-        assert_eq!(translated.port(), 8080);
-        assert_eq!(translated.to_url(), "http://10.0.2.2:8080");
+        assert_eq!(resolved.address().host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(resolved.address().port(), 8080);
+        assert_eq!(resolved.address().to_url(), "http://10.0.2.2:8080");
     }
 
     #[test]
     fn translates_loopback_url_without_losing_url_components() {
-        let address = ProxyAddress::from_url("http://localhost:3128/", "localhost".into(), 3128);
-        let translated = sandbox_proxy_address(&address).unwrap();
+        let address =
+            ProxyAddress::from_url("http://user:pass@127.0.0.1:3128/", "127.0.0.1".into(), 3128);
+        let resolved = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
-        assert_eq!(translated.port(), 3128);
-        assert_eq!(translated.to_url(), "http://10.0.2.2:3128/");
+        assert_eq!(resolved.address().host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(resolved.address().port(), 3128);
+        assert_eq!(
+            resolved.address().to_url(),
+            "http://user:pass@10.0.2.2:3128/"
+        );
     }
 
     #[test]
-    fn leaves_remote_proxy_unchanged() {
-        let address =
-            ProxyAddress::from_url("https://proxy.example:8443", "proxy.example".into(), 8443);
-        let translated = sandbox_proxy_address(&address).unwrap();
+    fn leaves_a_routable_literal_proxy_unchanged() {
+        let address = ProxyAddress::from_url("https://10.1.2.3:8443", "10.1.2.3".into(), 8443);
+        let resolved = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.to_url(), address.to_url());
+        assert_eq!(resolved.address().to_url(), address.to_url());
     }
 
     /// A proxy bound to the wildcard address is reachable on the host's
@@ -1106,20 +1531,20 @@ mod tests {
     #[test]
     fn translates_wildcard_proxy_to_slirp_gateway() {
         let address = ProxyAddress::new("0.0.0.0".into(), 8080);
-        let translated = sandbox_proxy_address(&address).unwrap();
+        let translated = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
-        assert_eq!(translated.port(), 8080);
+        assert_eq!(translated.address().host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(translated.address().port(), 8080);
     }
 
     #[test]
     fn translates_bracketed_ipv6_wildcard_proxy_to_slirp_gateway() {
         let address = ProxyAddress::from_url("http://[::]:3128/", "[::]".into(), 3128);
-        let translated = sandbox_proxy_address(&address).unwrap();
+        let translated = SandboxProxy::resolve(&address).unwrap();
 
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
-        assert_eq!(translated.port(), 3128);
-        assert_eq!(translated.to_url(), "http://10.0.2.2:3128/");
+        assert_eq!(translated.address().host(), SLIRP_HOST_GATEWAY);
+        assert_eq!(translated.address().port(), 3128);
+        assert_eq!(translated.address().to_url(), "http://10.0.2.2:3128/");
     }
 
     /// The descriptor must reach the child that was prepared and no other. The

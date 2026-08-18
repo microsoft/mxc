@@ -112,13 +112,19 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
-        // Proxy-only networking rewrites the configured endpoint to slirp's
-        // host gateway and then opens exactly that address in the egress
-        // chain. Both steps can reject an endpoint (an IPv6 loopback the
-        // gateway cannot reach, a routable IPv6 literal the IPv4-only rules
-        // cannot express, a zero port). Running them here means the caller
-        // learns at policy time instead of after a namespace, a slirp instance
-        // and a rule set have already been built and torn down.
+        // Proxy-only networking derives the sandbox-visible endpoint from the
+        // configured one and then opens exactly that address in the egress
+        // chain. That step can reject an endpoint (an IPv6 loopback the
+        // gateway cannot reach, a routable or IPv6-only endpoint the IPv4-only
+        // rules cannot express, a zero port, a hostname that does not resolve).
+        // Running it here means the caller learns at policy time instead of
+        // after a namespace, a slirp instance and a rule set have already been
+        // built and torn down.
+        //
+        // A hostname costs a DNS lookup here, which `run` repeats -- the
+        // resolved address is deliberately not carried over, since the one the
+        // egress chain opens must come from the same lookup that produces the
+        // pin the sandbox is given.
         //
         // The builtin test server has no address until it is started (the
         // parser leaves a port-0 placeholder), so its endpoint stays on the
@@ -128,9 +134,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 == ResolvedNetworkMode::ProxyOnly;
         if proxy_only && !request.policy.network_proxy.builtin_test_server {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
-                let egress = proxy_network::sandbox_proxy_address(address)
-                    .and_then(|translated| proxy_network::ProxyEgress::from_address(&translated));
-                if let Err(error) = egress {
+                if let Err(error) = proxy_network::SandboxProxy::resolve(address) {
                     return Err(ScriptResponse::error(&error));
                 }
             }
@@ -247,10 +251,10 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
-        let sandbox_proxy_address = if network_mode == ResolvedNetworkMode::ProxyOnly {
+        let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             match proxy.address() {
-                Some(address) => match proxy_network::sandbox_proxy_address(address) {
-                    Ok(address) => Some(address),
+                Some(address) => match proxy_network::SandboxProxy::resolve(address) {
+                    Ok(resolved) => Some(resolved),
                     Err(error) => {
                         proxy.stop(logger);
                         return Err(ScriptResponse::error(&error));
@@ -266,34 +270,24 @@ impl BubblewrapScriptRunner {
         } else {
             None
         };
-        let proxy_address = sandbox_proxy_address.as_ref().or_else(|| proxy.address());
+        let proxy_address = sandbox_proxy
+            .as_ref()
+            .map(|resolved| resolved.address())
+            .or_else(|| proxy.address());
 
-        let mut proxy_network = if network_mode == ResolvedNetworkMode::ProxyOnly {
+        let mut proxy_network = match sandbox_proxy.as_ref() {
             // The workload dials the sandbox-visible address, so that is what
             // the egress rule must open.
-            let egress = match sandbox_proxy_address
-                .as_ref()
-                .ok_or_else(|| {
-                    "Bubblewrap: proxy-only networking requires a resolved proxy address"
-                        .to_string()
-                })
-                .and_then(proxy_network::ProxyEgress::from_address)
-            {
-                Ok(egress) => egress,
-                Err(error) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(&error));
-                }
-            };
-            match proxy_network::ProxyNetworkNamespace::start(&egress, logger) {
-                Ok(network) => Some(network),
-                Err(error) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(&error));
+            Some(resolved) => {
+                match proxy_network::ProxyNetworkNamespace::start(resolved.egress(), logger) {
+                    Ok(network) => Some(network),
+                    Err(error) => {
+                        proxy.stop(logger);
+                        return Err(ScriptResponse::error(&error));
+                    }
                 }
             }
-        } else {
-            None
+            None => None,
         };
 
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
@@ -311,7 +305,7 @@ impl BubblewrapScriptRunner {
             network_mode,
         );
         let mut network_startup = match proxy_network.as_ref() {
-            Some(network) => match network.configure_bwrap(&mut args) {
+            Some(network) => match network.configure_bwrap(&mut args, logger) {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
