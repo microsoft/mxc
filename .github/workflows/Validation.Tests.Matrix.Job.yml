@@ -83,16 +83,22 @@ jobs:
             Tee-Object -FilePath (Join-Path $env:RUNNER_TEMP 'mxc-ci.log') -Append
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload failure logs
-        if: failure() || cancelled()
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/mxc-ci.log
-            ${{ runner.temp }}/mxc-wpc-tests/logs
-            ${{ runner.temp }}/WinProcessContainer-Tests.results.*
+            ${{ runner.temp }}/mxc-wpc-tests
+            ${{ runner.temp }}/mxc-t3-workloads
             ${{ runner.temp }}/mxc_concurrent_oneshot
+            ${{ runner.temp }}/mxc_etw_test
+            ${{ runner.temp }}/wxc-wsb
+            ${{ runner.temp }}/wxc-sandbox-rendezvous
+            ${{ runner.temp }}/mxc-diagnostics-*
+            ${{ runner.temp }}/WinProcessContainer-Tests.results.*
+            ${{ runner.temp }}/WinProcessContainer-Tests.cargo.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -138,8 +144,8 @@ jobs:
               tee -a "$RUNNER_TEMP/mxc-ci.log"
           fi
 
-      - name: Upload failure logs
-        if: failure() || cancelled()
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}
@@ -175,8 +181,8 @@ jobs:
             '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
             tee "$RUNNER_TEMP/mxc-ci.log"
 
-      - name: Upload failure logs
-        if: failure() || cancelled()
+      - name: Upload logs
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: logs-${{ inputs.plan }}-${{ matrix.os }}-${{ matrix.architecture }}-${{ matrix.backend }}-${{ github.run_attempt }}

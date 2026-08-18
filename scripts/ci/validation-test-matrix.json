@@ -397,25 +397,15 @@
       {
         "os": "ubuntu-26.04",
         "backends": [
+          "bubblewrap",
           "lxc"
         ]
       },
       {
-        "os": "ubuntu-24.04",
+        "os": "windows-prerelease-process-container",
         "backends": [
-          "lxc"
-        ]
-      },
-      {
-        "os": "rhel-10",
-        "backends": [
-          "lxc"
-        ]
-      },
-      {
-        "os": "debian-13",
-        "backends": [
-          "lxc"
+          "wslc",
+          "process-t1"
         ]
       },
       {
