@@ -141,10 +141,9 @@ pub fn write_paired_output_files(
         match backup_existing_output(operation, data_loop_path, "Data Loop") {
             Ok(backup) => backup,
             Err(error) => {
-                return Err(combine_error_with_cleanup(
+                return Err(combine_error_with_rollback(
                     error,
                     restore_output(canonical_path, canonical_backup.as_deref(), None),
-                    canonical_path,
                 ))
             }
         }
@@ -156,7 +155,7 @@ pub fn write_paired_output_files(
         match promote_output_file(operation, data_loop_temp, data_loop_path, "Data Loop") {
             Ok(promoted) => promoted,
             Err(error) => {
-                return Err(combine_error_with_cleanup(
+                return Err(combine_error_with_rollback(
                     error,
                     restore_output_pair(
                         canonical_path,
@@ -166,7 +165,6 @@ pub fn write_paired_output_files(
                         data_loop_backup.as_deref(),
                         None,
                     ),
-                    data_loop_path,
                 ))
             }
         };
@@ -174,7 +172,7 @@ pub fn write_paired_output_files(
         match promote_output_file(operation, canonical_temp, canonical_path, "canonical") {
             Ok(promoted) => promoted,
             Err(error) => {
-                return Err(combine_error_with_cleanup(
+                return Err(combine_error_with_rollback(
                     error,
                     restore_output_pair(
                         canonical_path,
@@ -184,7 +182,6 @@ pub fn write_paired_output_files(
                         data_loop_backup.as_deref(),
                         Some(data_loop_promoted),
                     ),
-                    canonical_path,
                 ))
             }
         };
@@ -405,10 +402,28 @@ fn remove_promoted_output_if_owned(
                 backup_path.map_or_else(|| "<none>".into(), |path| path.display().to_string())
             )))
         }
-        Err(error) => {
-            let _ = persist_existing_file_noclobber(&quarantine_path, final_path);
-            Err(error)
-        }
+        Err(error) => combine_error_with_restore(
+            error,
+            persist_existing_file_noclobber(&quarantine_path, final_path),
+            &quarantine_path,
+            final_path,
+        ),
+    }
+}
+
+fn combine_error_with_restore(
+    error: std::io::Error,
+    restore: std::io::Result<()>,
+    source_path: &Path,
+    final_path: &Path,
+) -> std::io::Result<Option<std::io::Error>> {
+    match restore {
+        Ok(()) => Err(error),
+        Err(restore_error) => Err(std::io::Error::other(format!(
+            "{error}; additionally failed to restore {} to {}: {restore_error}",
+            source_path.display(),
+            final_path.display()
+        ))),
     }
 }
 
@@ -467,16 +482,14 @@ fn remove_if_present(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn combine_error_with_cleanup(
+fn combine_error_with_rollback(
     error: std::io::Error,
-    cleanup: std::io::Result<()>,
-    cleanup_path: &Path,
+    rollback: std::io::Result<()>,
 ) -> std::io::Error {
-    match cleanup {
+    match rollback {
         Ok(()) => error,
-        Err(cleanup_error) => std::io::Error::other(format!(
-            "{error}; additionally failed to remove {}: {cleanup_error}",
-            cleanup_path.display()
+        Err(rollback_error) => std::io::Error::other(format!(
+            "{error}; additionally failed to roll back output pair: {rollback_error}"
         )),
     }
 }
@@ -612,6 +625,35 @@ mod tests {
 
         assert!(error.to_string().contains("quarantine cleanup failed"));
         assert!(error.to_string().contains("backup restore failed"));
+    }
+
+    #[test]
+    fn rollback_reports_failed_quarantine_restore() {
+        let error = combine_error_with_restore(
+            std::io::Error::other("identity check failed"),
+            Err(std::io::Error::other("restore failed")),
+            Path::new("quarantine.tmp"),
+            Path::new("denials.json"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("identity check failed"));
+        assert!(error.to_string().contains("quarantine.tmp"));
+        assert!(error.to_string().contains("restore failed"));
+    }
+
+    #[test]
+    fn promotion_error_describes_rollback_failure() {
+        let error = combine_error_with_rollback(
+            std::io::Error::other("promotion failed"),
+            Err(std::io::Error::other("restore failed")),
+        );
+
+        assert!(error.to_string().contains("promotion failed"));
+        assert!(error
+            .to_string()
+            .contains("failed to roll back output pair"));
+        assert!(error.to_string().contains("restore failed"));
     }
 
     #[test]

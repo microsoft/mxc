@@ -1219,6 +1219,14 @@ mod tests {
             decode_error_effective_pid(Some("42"), 9000, false),
             Some(42)
         );
+        assert_eq!(
+            decode_error_effective_pid(Some("\"broker\""), 42, true),
+            Some(42)
+        );
+        assert_eq!(
+            decode_error_effective_pid(Some("\"broker\""), 9000, false),
+            None
+        );
         assert_eq!(decode_error_effective_pid(None, 42, true), Some(42));
         assert_eq!(decode_error_effective_pid(None, 9000, false), None);
     }
