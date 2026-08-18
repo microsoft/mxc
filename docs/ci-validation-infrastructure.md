@@ -75,9 +75,9 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_ci_backend_tests.sh <backend id>`. No host-prep step. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
-the architecture). Job timeout 60 min; host prep 15 min; the test step 45 min
-(60 on macOS), so a hung backend fails while the log is still useful. On failure
-or cancellation the job uploads `mxc-ci.log` plus the Process Container log
+the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
+(60 on macOS), so a hung backend fails while the log is still useful. The job
+uploads `mxc-ci.log` plus the Process Container log
 directories as `logs-<plan>-<os>-<arch>-<backend>-<attempt>`, kept 7 days.
 
 ## The catalog
@@ -177,10 +177,10 @@ limiting from public registries and stalled downloads.
 independently per backend, following the resolved job order. With the entry
 above, four WSLC jobs start at 0, 5, 10, and 15 minutes.
 
-The resolver emits the offset as `startup_delay_minutes` on each affected
-matrix entry. The job sleeps that long before its first network step, and its
-`timeout-minutes` grows by the same amount so a delayed entry keeps the full
-test budget. Entries for other backends carry no such field and never wait.
+The resolver emits the offset as `startup_delay_minutes` on every matrix entry
+(`0` where no stagger applies). The job sleeps that long before its first
+network step; the job timeout is a fixed 180 minutes, wide enough to absorb any
+configured wait.
 
 Omit the section (or leave it empty) to have every job start as soon as its
 runner is ready. A backend id that no plan schedules is accepted and simply

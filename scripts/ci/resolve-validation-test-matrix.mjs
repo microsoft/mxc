@@ -233,6 +233,7 @@ export function resolvePlan(catalog, plan) {
 // assignment follows the emitted order and stays reproducible.
 function applyDelayedStart(matrices, delays) {
   if (!Array.isArray(delays) || delays.length === 0) {
+    setDefaultDelays(matrices);
     return;
   }
 
@@ -243,11 +244,21 @@ function applyDelayedStart(matrices, delays) {
     for (const entry of matrices[family]) {
       const step = stepMinutes.get(entry.backend);
       if (step === undefined) {
-        continue;
+        entry.startup_delay_minutes = 0;
+      } else {
+        const position = scheduled.get(entry.backend) ?? 0;
+        entry.startup_delay_minutes = position * step;
+        scheduled.set(entry.backend, position + 1);
       }
-      const position = scheduled.get(entry.backend) ?? 0;
-      entry.startup_delay_minutes = position * step;
-      scheduled.set(entry.backend, position + 1);
+    }
+  }
+}
+
+// Every entry carries the field so the workflow's step condition is uniform.
+function setDefaultDelays(matrices) {
+  for (const family of FAMILIES) {
+    for (const entry of matrices[family]) {
+      entry.startup_delay_minutes = 0;
     }
   }
 }
