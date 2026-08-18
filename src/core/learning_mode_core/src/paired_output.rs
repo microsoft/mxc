@@ -3,7 +3,8 @@
 
 //! Transactional staging for the canonical and Data Loop output pair.
 
-use std::io::Write;
+use sha2::{Digest, Sha256};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -58,13 +59,37 @@ impl Drop for OutputPairLock {
 #[derive(Debug)]
 struct PromotedOutput {
     handle: same_file::Handle,
+    digest: [u8; 32],
 }
 
 impl PromotedOutput {
-    fn matches_path(&self, path: &Path) -> std::io::Result<bool> {
-        let path_handle = same_file::Handle::from_path(path)?;
-        Ok(self.handle == path_handle)
+    fn from_file(mut file: std::fs::File) -> std::io::Result<Self> {
+        let handle = same_file::Handle::from_file(file.try_clone()?)?;
+        let digest = file_digest(&mut file)?;
+        Ok(Self { handle, digest })
     }
+
+    fn matches_path(&self, path: &Path) -> std::io::Result<bool> {
+        let mut file = std::fs::File::open(path)?;
+        let path_handle = same_file::Handle::from_file(file.try_clone()?)?;
+        if self.handle != path_handle {
+            return Ok(false);
+        }
+        Ok(self.digest == file_digest(&mut file)?)
+    }
+}
+
+fn file_digest(reader: &mut impl Read) -> std::io::Result<[u8; 32]> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
 }
 
 /// Controls how an existing output pair is handled during promotion.
@@ -243,14 +268,14 @@ fn promote_output_file(
             final_path.display()
         ))
     })?;
-    let handle = same_file::Handle::from_file(identity_file).map_err(|error| {
+    let promoted = PromotedOutput::from_file(identity_file).map_err(|error| {
         std::io::Error::other(format!(
             "{operation} failed to identify temporary {kind} output file for {}: {error}",
             final_path.display()
         ))
     })?;
     temp.persist_noclobber(final_path)
-        .map(|_| PromotedOutput { handle })
+        .map(|_| promoted)
         .map_err(|error| {
             std::io::Error::other(format!(
                 "{operation} failed to promote {kind} output file {}: {}",
@@ -507,10 +532,8 @@ mod tests {
         let displaced_path = directory.path().join("displaced.json");
         let backup_path = directory.path().join("backup.json");
         std::fs::write(&final_path, b"promoted").unwrap();
-        let promoted = PromotedOutput {
-            handle: same_file::Handle::from_file(std::fs::File::open(&final_path).unwrap())
-                .unwrap(),
-        };
+        let promoted =
+            PromotedOutput::from_file(std::fs::File::open(&final_path).unwrap()).unwrap();
         std::fs::rename(&final_path, &displaced_path).unwrap();
         std::fs::write(&final_path, b"concurrent").unwrap();
         std::fs::write(&backup_path, b"previous").unwrap();
@@ -523,15 +546,31 @@ mod tests {
     }
 
     #[test]
+    fn rollback_does_not_delete_in_place_overwrite_of_promoted_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let final_path = directory.path().join("denials.json");
+        let backup_path = directory.path().join("backup.json");
+        std::fs::write(&final_path, b"promoted").unwrap();
+        let promoted =
+            PromotedOutput::from_file(std::fs::File::open(&final_path).unwrap()).unwrap();
+        std::fs::write(&final_path, b"replaced").unwrap();
+        std::fs::write(&backup_path, b"previous").unwrap();
+
+        let error = restore_output(&final_path, Some(&backup_path), Some(promoted)).unwrap_err();
+
+        assert!(error.to_string().contains("another writer replaced"));
+        assert_eq!(std::fs::read(final_path).unwrap(), b"replaced");
+        assert_eq!(std::fs::read(backup_path).unwrap(), b"previous");
+    }
+
+    #[test]
     fn rollback_restores_backup_when_promoted_output_was_deleted() {
         let directory = tempfile::tempdir().unwrap();
         let final_path = directory.path().join("denials.json");
         let backup_path = directory.path().join("backup.json");
         std::fs::write(&final_path, b"promoted").unwrap();
-        let promoted = PromotedOutput {
-            handle: same_file::Handle::from_file(std::fs::File::open(&final_path).unwrap())
-                .unwrap(),
-        };
+        let promoted =
+            PromotedOutput::from_file(std::fs::File::open(&final_path).unwrap()).unwrap();
         std::fs::remove_file(&final_path).unwrap();
         std::fs::write(&backup_path, b"previous").unwrap();
 

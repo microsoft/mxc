@@ -255,13 +255,22 @@ unsafe fn event_schema<'a>(
         *uncached_schema = Some(unsafe { load_event_schema(event_record) }?);
     } else if !schema_cache.schemas.contains_key(&key) {
         let schema = unsafe { load_event_schema(event_record) }?;
-        if schema_cache.schemas.len() < MAX_SCHEMA_CACHE_ENTRIES {
-            schema_cache.schemas.insert(key, schema);
-        } else {
-            *uncached_schema = Some(schema);
-        }
+        cache_or_retain_schema(schema_cache, key, schema, uncached_schema);
     }
     schema_buffer(schema_cache, &key, uncached_schema)
+}
+
+fn cache_or_retain_schema(
+    schema_cache: &mut EventSchemaCache,
+    key: EventSchemaKey,
+    schema: TdhInfoBuffer,
+    uncached_schema: &mut Option<TdhInfoBuffer>,
+) {
+    if schema_cache.schemas.len() < MAX_SCHEMA_CACHE_ENTRIES {
+        schema_cache.schemas.insert(key, schema);
+    } else {
+        *uncached_schema = Some(schema);
+    }
 }
 
 fn schema_buffer<'a>(
@@ -1050,15 +1059,34 @@ mod tests {
     }
 
     #[test]
-    fn uncached_schema_is_used_when_cache_does_not_contain_key() {
-        let cache = EventSchemaCache::default();
-        let record: EVENT_RECORD = unsafe { core::mem::zeroed() };
-        let key = EventSchemaKey::from_record(&record);
-        let uncached = Some(TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>()));
+    fn schema_is_retained_uncached_at_cache_capacity() {
+        let mut cache = EventSchemaCache::default();
+        for id in 0..MAX_SCHEMA_CACHE_ENTRIES {
+            let mut record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+            record.EventHeader.EventDescriptor.Id = id as u16;
+            let mut uncached = None;
+            cache_or_retain_schema(
+                &mut cache,
+                EventSchemaKey::from_record(&record),
+                TdhInfoBuffer::new(1),
+                &mut uncached,
+            );
+            assert!(uncached.is_none());
+        }
 
-        let selected = schema_buffer(&cache, &key, &uncached).unwrap();
+        let mut overflow_record: EVENT_RECORD = unsafe { core::mem::zeroed() };
+        overflow_record.EventHeader.EventDescriptor.Id = MAX_SCHEMA_CACHE_ENTRIES as u16;
+        let overflow_key = EventSchemaKey::from_record(&overflow_record);
+        let mut uncached = None;
+        cache_or_retain_schema(
+            &mut cache,
+            overflow_key,
+            TdhInfoBuffer::new(std::mem::size_of::<TRACE_EVENT_INFO>()),
+            &mut uncached,
+        );
 
-        assert!(std::ptr::eq(selected, uncached.as_ref().unwrap()));
+        assert_eq!(cache.schemas.len(), MAX_SCHEMA_CACHE_ENTRIES);
+        assert!(schema_buffer(&cache, &overflow_key, &uncached).is_ok());
     }
 
     #[test]
@@ -1129,7 +1157,7 @@ mod tests {
     #[test]
     fn decode_named_property_stops_after_requested_property() {
         let buffer = uint32_property_buffer(&["Count", "ProcessId", "Trailing"]);
-        let payload = [7u32, 42, 99]
+        let payload = [7u32, 42]
             .into_iter()
             .flat_map(u32::to_le_bytes)
             .collect::<Vec<_>>();
