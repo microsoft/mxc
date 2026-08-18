@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Username-redacted, deduplicated diagnostics for Learning Mode events,
+//! Sensitive-value-redacted, deduplicated diagnostics for Learning Mode events,
 //! including every canonical denial occurrence.
 
 use std::io::{self, Write};
@@ -83,7 +83,7 @@ pub struct DataLoopSignature {
     /// Classified resource type when the event produced a denial candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<crate::ResourceType>,
-    /// Sorted, bounded, username-redacted event properties.
+    /// Sorted, bounded, sensitive-value-redacted event properties.
     pub properties: Vec<(String, String)>,
 }
 
@@ -380,10 +380,7 @@ mod tests {
             access_type: None,
             resource_type: None,
             properties: vec![
-                (
-                    "ObjectName".to_string(),
-                    r"C:\Users\<redacted-user>\x".to_string(),
-                ),
+                ("ObjectName".to_string(), "<REDACTED>".to_string()),
                 ("Sid".to_string(), "S-1-15-3-1".to_string()),
             ],
         };
@@ -398,7 +395,7 @@ mod tests {
         write_data_loop_document(&mut bytes, &DataLoopDocument::new(&summary)).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("S-1-15-3-1"));
-        assert!(text.contains("<redacted-user>"));
+        assert!(text.contains("<REDACTED>"));
         assert!(text.contains("providerGuid"));
         assert!(text.contains("\"pid\": 42"));
         assert!(!text.contains("accessType"));

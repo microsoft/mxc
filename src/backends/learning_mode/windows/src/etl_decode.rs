@@ -287,9 +287,9 @@ impl<'visitor> Accumulator<'visitor> {
     }
 
     /// Records an outcome for an already-built [`RawDenial`]. Retains the
-    /// resolved resource/capability identity (redacting only its
-    /// user-profile path segment, if any) plus the resource/access type —
-    /// never the exact `filetime`.
+    /// resolved resource/capability identity plus the resource/access type,
+    /// redacting complete file paths and never retaining the exact
+    /// `filetime`.
     fn record_raw_denial_outcome(
         &mut self,
         raw: &RawDenial,
@@ -304,6 +304,16 @@ impl<'visitor> Accumulator<'visitor> {
         let has_object_name = properties
             .keys()
             .any(|name| name.eq_ignore_ascii_case("ObjectName"));
+        if raw.resource_type == learning_mode_core::ResourceType::File {
+            for (name, value) in &mut properties {
+                if name.eq_ignore_ascii_case("ObjectName")
+                    || name.to_ascii_lowercase().contains("path")
+                    || name.to_ascii_lowercase().ends_with("filename")
+                {
+                    *value = crate::extractors::REDACTED_PATH.to_string();
+                }
+            }
+        }
         if !matches!(
             raw.resource_type,
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other
@@ -311,7 +321,11 @@ impl<'visitor> Accumulator<'visitor> {
         {
             properties.insert(
                 "resource".to_string(),
-                crate::extractors::redact_username_in_path(resource),
+                if raw.resource_type == learning_mode_core::ResourceType::File {
+                    crate::extractors::REDACTED_PATH.to_string()
+                } else {
+                    resource.to_string()
+                },
             );
         }
         let properties =
@@ -1392,22 +1406,13 @@ mod tests {
             .iter()
             .filter(|group| group.signature.reason == DataLoopExclusionReason::UnusableResourcePath)
             .collect::<Vec<_>>();
-        assert_eq!(excluded.len(), 4);
+        assert_eq!(excluded.len(), 1);
         assert!(excluded.iter().all(|group| {
             group.signature.access_type == Some(AccessType::Read)
                 && group.signature.resource_type == Some(ResourceType::File)
-                && group.count == 1
+                && group.count == 4
         }));
-        for expected in [
-            r"\Device\UnknownVolume\file.txt",
-            r"C:relative.txt",
-            r"PIPE\name",
-            r"\\server\pipe\name",
-        ] {
-            assert!(excluded
-                .iter()
-                .any(|group| property(&group.signature, "resource") == expected));
-        }
+        assert_eq!(property(&excluded[0].signature, "resource"), "<REDACTED>");
     }
 
     #[test]
@@ -1979,10 +1984,7 @@ mod tests {
         assert_eq!(group.signature.pid, 1996);
         assert_eq!(group.signature.access_type, Some(AccessType::Read));
         assert_eq!(group.signature.resource_type, Some(ResourceType::File));
-        assert_eq!(
-            property(&group.signature, "ObjectName"),
-            r"\Device\MountPointManager"
-        );
+        assert_eq!(property(&group.signature, "ObjectName"), "<REDACTED>");
     }
 
     #[test]
@@ -2175,6 +2177,10 @@ mod tests {
 
         let out = resources_from_events(&events);
         assert_eq!(out.denials.len(), 1, "duplicates collapse to one denial");
+        assert_eq!(
+            out.denials[0].resource, r"D:\profiles\jsmith\dup.txt",
+            "canonical output must retain the actionable path"
+        );
 
         let canonical_group = out
             .data_loop
@@ -2201,7 +2207,7 @@ mod tests {
         );
         assert_eq!(
             property(&canonical_group.signature, "ObjectName"),
-            r"D:\profiles\<redacted-user>\dup.txt"
+            "<REDACTED>"
         );
         assert_eq!(
             property(&canonical_group.signature, "UserName"),
@@ -2323,7 +2329,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_event_id_signature_redacts_only_the_username_segment_of_a_path() {
+    fn unknown_event_id_signature_redacts_the_entire_file_path() {
         let events = vec![kernel_event(
             9999,
             7,
@@ -2340,8 +2346,8 @@ mod tests {
         );
         assert_eq!(
             property(&group.signature, "ObjectName"),
-            r"C:\Users\<redacted-user>\secret.txt",
-            "the rest of the path must survive redaction unchanged"
+            "<REDACTED>",
+            "no part of the path may survive redaction"
         );
     }
 

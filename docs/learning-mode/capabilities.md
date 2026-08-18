@@ -225,7 +225,7 @@ sandbox policy:
 
 Every successful decode also writes a deterministic sibling file:
 `denials.<run-id>.json` produces `denials.<run-id>.data-loop.json`. This Data
-Loop artifact is a bounded, username-redacted superset containing canonical
+Loop artifact is a bounded, sensitive-value-redacted superset containing canonical
 denial occurrences plus outcomes omitted from canonical denials:
 
 ```json
@@ -243,7 +243,7 @@ denial occurrences plus outcomes omitted from canonical denials:
         "resourceType": "file",
         "properties": [
           ["PackageSid", "S-1-15-3-1"],
-          ["resource", "C:\\Users\\<redacted-user>\\data.txt"]
+          ["resource", "<REDACTED>"]
         ]
       },
       "count": 37
@@ -263,9 +263,9 @@ denial occurrences plus outcomes omitted from canonical denials:
 Signatures are keyed by symbolic provider category, provider GUID,
 provider-scoped event ID, closed exclusion reason, PID, and sorted sanitized
 properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
-resource values are retained. Standalone user/account names and username
-components inside paths or resource names are replaced with
-`<redacted-user>`; the rest of each value remains available for diagnostics.
+non-file resource values are retained. Complete file paths are replaced with
+`<REDACTED>`; standalone user/account names remain replaced with
+`<redacted-user>`.
 Exact header timestamps and timestamp-like properties are omitted so otherwise
 identical events deduplicate, and free-form decoder errors are never serialized.
 
@@ -291,9 +291,8 @@ reason and their sanitized event properties:
 Property values longer than 256 characters retain bounded prefix and suffix
 context plus a SHA-256 digest of the complete sanitized value. This keeps long
 named-object resources individually identifiable when they share a prefix
-without exceeding the per-property bound. Username redaction occurs before the
-digest is computed, so neither the retained context nor the digest is derived
-from the original username.
+without exceeding the per-property bound. Redaction occurs before the digest is computed, so neither retained context nor
+a digest is derived from a sensitive value.
 
 Unknown event IDs from known Learning Mode providers are classified as
 `unsupportedEventSchema`; the real ETL path retains their provider GUID and

@@ -14,7 +14,7 @@
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
 //!    written to the canonical JSON output that host applications read to
 //!    regenerate policy. A deterministic Data Loop sibling contains bounded,
-//!    username-redacted signatures for excluded decoder outcomes.
+//!    sensitive-value-redacted signatures for excluded decoder outcomes.
 //!
 //! This crate is the cross-platform hinge between stages 2 and 3: it
 //! defines the public [`DeniedResource`] model, the [`DenialSummary`]

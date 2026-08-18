@@ -110,7 +110,7 @@ pub struct RawDenial {
     /// Symbolic category of the originating provider, for Data Loop
     /// aggregation. Never a raw provider GUID.
     pub provider: DataLoopProvider,
-    /// Bounded username-redacted properties retained for Data Loop signatures.
+    /// Bounded sensitive-value-redacted properties retained for Data Loop signatures.
     pub data_loop_properties: Vec<(String, String)>,
 }
 
@@ -270,15 +270,17 @@ fn format_guid(guid: GUID) -> String {
 //
 // A Data Loop signature retains identifiers useful for triage (SIDs,
 // capability names, PIDs, provider/object GUIDs) but must never leak a
-// human account/user name, an exact timestamp, or a free-form decoder error
-// message. These bounds apply uniformly to every decoded property, in a
-// fixed order: drop timestamp-like properties outright, redact
-// account/user-identity content, *then* bound the surviving property count
-// and value length — sanitizing always happens before truncation so a
-// redaction is never chopped in half by a length cap.
+// human account/user name, a file path, an exact timestamp, or a free-form
+// decoder error message. These bounds apply uniformly to every decoded
+// property, in a fixed order: drop timestamp-like properties outright,
+// redact sensitive content, *then* bound the surviving property count and
+// value length — sanitizing always happens before truncation so a redaction
+// is never chopped in half by a length cap.
 
 /// Fixed replacement for any redacted username/account-name value.
 pub(crate) const REDACTED_USER: &str = "<redacted-user>";
+/// Fixed replacement for a complete file path.
+pub(crate) const REDACTED_PATH: &str = "<REDACTED>";
 /// Maximum number of `(name, value)` properties retained in one Data Loop
 /// signature. Bounds pathological/huge TDH property lists; sanitization
 /// (never raw decoding) determines which survive, via deterministic
@@ -339,48 +341,32 @@ fn is_identity_property(name: &str) -> bool {
         || lower.ends_with("upn")
 }
 
-/// Redacts the user-profile segment of a Windows path, preserving
-/// everything else. Matches a `\Users\` or legacy `\Documents and
-/// Settings\` segment (case-insensitively, on an exact path-segment
-/// boundary so e.g. `usersdata` never matches) and replaces the segment
-/// immediately following it with [`REDACTED_USER`].
-///
-/// Values that aren't path-shaped (capability names, SIDs, GUIDs, small
-/// enums, ...) never contain a matching segment, so they pass through
-/// unchanged — this is intentionally a single sanitizer applied uniformly
-/// rather than a per-property-name allowlist.
-pub(crate) fn redact_username_in_path(value: &str) -> String {
-    const USER_PROFILE_MARKERS: [&str; 2] = ["users", "documents and settings"];
-    if !value.contains(['\\', '/']) {
-        return value.to_string();
-    }
-    let mut redact_next = false;
-    let mut result = String::with_capacity(value.len());
-    let mut segment_start = 0;
-    for (index, separator) in value
-        .char_indices()
-        .filter(|(_, character)| matches!(character, '\\' | '/'))
+fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
+    let normalized_name = name.to_ascii_lowercase().replace(['_', '-'], "");
+    if normalized_name.contains("filepath")
+        || normalized_name == "path"
+        || normalized_name.ends_with("filename")
     {
-        let segment = &value[segment_start..index];
-        if redact_next && !segment.is_empty() {
-            result.push_str(REDACTED_USER);
-            redact_next = false;
-        } else {
-            result.push_str(segment);
-            redact_next = USER_PROFILE_MARKERS
-                .iter()
-                .any(|marker| segment.eq_ignore_ascii_case(marker));
-        }
-        result.push(separator);
-        segment_start = index + separator.len_utf8();
+        return true;
     }
-    let segment = &value[segment_start..];
-    if redact_next && !segment.is_empty() {
-        result.push_str(REDACTED_USER);
-    } else {
-        result.push_str(segment);
+
+    if normalized_name != "objectname" && normalized_name != "resource" {
+        return false;
     }
-    result
+    if let Some(object_type) = object_type {
+        return object_type.eq_ignore_ascii_case("File");
+    }
+
+    let bytes = value.as_bytes();
+    let drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    drive_absolute
+        || value.starts_with(r"\\")
+        || value.starts_with(r"\??\")
+        || value.starts_with(r"\\?\")
+        || value.starts_with(r"\\.\")
 }
 
 /// Bounds an already-sanitized property list to [`MAX_SIGNATURE_PROPERTIES`]
@@ -427,13 +413,18 @@ fn bound_property_value(value: &str, char_count: usize) -> String {
 /// so exact-timestamp differences between otherwise-identical events don't
 /// prevent their signatures from deduplicating. SIDs, capability names,
 /// PIDs carried as properties, and GUID-shaped values are retained
-/// verbatim; only account/user-identity content is redacted.
+/// verbatim; account/user-identity content and complete file paths are
+/// redacted.
 pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, String)> {
     let usernames = props
         .iter()
         .filter(|(name, _)| is_identity_property(name))
         .flat_map(|(_, value)| username_match_candidates(value.trim_matches('"')))
         .collect::<Vec<_>>();
+    let object_type = props
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("ObjectType"))
+        .map(|(_, value)| value.trim_matches('"'));
     let mut sanitized = std::collections::BTreeMap::new();
     for (name, raw_value) in props {
         if is_timestamp_like_property(name) {
@@ -442,8 +433,10 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
         let value = raw_value.trim_matches('"');
         let sanitized_value = if is_identity_property(name) {
             REDACTED_USER.to_string()
+        } else if looks_like_file_path_property(name, value, object_type) {
+            REDACTED_PATH.to_string()
         } else {
-            redact_known_username_components(&redact_username_in_path(value), &usernames)
+            redact_known_username_components(value, &usernames)
         };
         sanitized.insert(name.clone(), sanitized_value);
     }
@@ -1388,44 +1381,32 @@ mod tests {
     // ---- Data Loop signature sanitization ----------------------------------
 
     #[test]
-    fn redact_username_in_path_replaces_only_the_profile_segment() {
-        assert_eq!(
-            redact_username_in_path(r"C:\Users\jsmith\Documents\secret.txt"),
-            format!(r"C:\Users\{REDACTED_USER}\Documents\secret.txt")
-        );
-        assert_eq!(
-            redact_username_in_path(r"\Device\HarddiskVolume3\Users\jane.doe\AppData\x"),
-            format!(r"\Device\HarddiskVolume3\Users\{REDACTED_USER}\AppData\x")
-        );
-        assert_eq!(
-            redact_username_in_path(r"\??\C:\Documents and Settings\bob\Desktop\x"),
-            format!(r"\??\C:\Documents and Settings\{REDACTED_USER}\Desktop\x")
-        );
-        assert_eq!(
-            redact_username_in_path("C:/Users/alice/Documents/secret.txt"),
-            format!("C:/Users/{REDACTED_USER}/Documents/secret.txt")
-        );
-    }
-
-    #[test]
-    fn redact_username_in_path_is_case_insensitive_on_the_marker_only() {
-        assert_eq!(
-            redact_username_in_path(r"C:\USERS\Alice\file.txt"),
-            format!(r"C:\USERS\{REDACTED_USER}\file.txt")
-        );
-    }
-
-    #[test]
-    fn redact_username_in_path_leaves_unrelated_paths_untouched() {
-        // Registry hive segment "USER" (singular) must not be mistaken for
-        // the "Users" (plural) profile-directory marker.
-        let registry_path = r"\REGISTRY\USER\S-1-5-21-1-2-3-1000\Software\Test";
-        assert_eq!(redact_username_in_path(registry_path), registry_path);
-        assert_eq!(redact_username_in_path("internetClient"), "internetClient");
-        assert_eq!(
-            redact_username_in_path(r"C:\data\test\bin\"),
-            r"C:\data\test\bin\"
-        );
+    fn file_path_detection_preserves_non_file_identifiers() {
+        assert!(looks_like_file_path_property(
+            "ObjectName",
+            r"C:\Users\jsmith\secret.txt",
+            None
+        ));
+        assert!(looks_like_file_path_property(
+            "FilePath",
+            r"\Device\HarddiskVolume3\secret.txt",
+            Some("Section")
+        ));
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\BaseNamedObjects\shared-cache",
+            Some("Section")
+        ));
+        assert!(!looks_like_file_path_property(
+            "ObjectName",
+            r"\REGISTRY\USER\S-1-5-21-1-2-3-1000\Software\Test",
+            Some("Key")
+        ));
+        assert!(!looks_like_file_path_property(
+            "resource",
+            "internetClient",
+            None
+        ));
     }
 
     #[test]
@@ -1472,7 +1453,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_properties_redacts_username_segment_inside_a_path_value() {
+    fn sanitize_properties_redacts_the_entire_file_path() {
         let props = vec![(
             "ObjectName".to_string(),
             "\"C:\\Users\\jsmith\\secret.txt\"".to_string(),
@@ -1480,15 +1461,12 @@ mod tests {
         let out = sanitize_properties(&props);
         assert_eq!(
             out,
-            vec![(
-                "ObjectName".to_string(),
-                format!(r"C:\Users\{REDACTED_USER}\secret.txt")
-            )]
+            vec![("ObjectName".to_string(), REDACTED_PATH.to_string())]
         );
     }
 
     #[test]
-    fn sanitize_properties_redacts_known_username_in_arbitrary_resource_path() {
+    fn sanitize_properties_redacts_arbitrary_file_path() {
         let props = vec![
             ("UserName".to_string(), "\"jsmith\"".to_string()),
             (
@@ -1499,14 +1477,29 @@ mod tests {
         let out = sanitize_properties(&props);
         let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         assert_eq!(value_for("UserName"), Some(REDACTED_USER));
+        assert_eq!(value_for("ObjectName"), Some(REDACTED_PATH));
+    }
+
+    #[test]
+    fn sanitize_properties_still_redacts_username_in_non_file_identifier() {
+        let props = vec![
+            ("ObjectType".to_string(), "\"Section\"".to_string()),
+            ("UserName".to_string(), "\"jsmith\"".to_string()),
+            (
+                "ObjectName".to_string(),
+                "\"\\BaseNamedObjects\\jsmith\\cache\"".to_string(),
+            ),
+        ];
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| out.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         assert_eq!(
             value_for("ObjectName"),
-            Some(r"D:\profiles\<redacted-user>\secret.txt")
+            Some(r"\BaseNamedObjects\<redacted-user>\cache")
         );
     }
 
     #[test]
-    fn sanitize_properties_redacts_qualified_username_in_arbitrary_resource_path() {
+    fn sanitize_properties_redacts_path_with_qualified_username() {
         for (property_name, identity) in [
             ("UserName", r"CONTOSO\jsmith"),
             ("UserPrincipalName", "jsmith@example.com"),
@@ -1526,7 +1519,7 @@ mod tests {
             };
             assert_eq!(
                 value_for("ObjectName").map(String::as_str),
-                Some(r"D:\profiles\<redacted-user>\secret.txt")
+                Some(REDACTED_PATH)
             );
             assert_eq!(
                 value_for(property_name).map(String::as_str),
@@ -1561,7 +1554,7 @@ mod tests {
             );
             assert_eq!(
                 value_for("ObjectName").map(String::as_str),
-                Some(r"D:\profiles\<redacted-user>\secret.txt")
+                Some(REDACTED_PATH)
             );
         }
     }
@@ -1580,7 +1573,7 @@ mod tests {
             out.iter()
                 .find(|(name, _)| name == "ObjectName")
                 .map(|(_, value)| value.as_str()),
-            Some(r"D:\profiles\<redacted-user>\secret.txt")
+            Some(REDACTED_PATH)
         );
     }
 
@@ -1611,7 +1604,7 @@ mod tests {
     }
 
     #[test]
-    fn bound_properties_preserves_identity_within_count_and_value_limits() {
+    fn bound_properties_preserves_redaction_within_count_and_value_limits() {
         let long_value = format!(
             r"C:\Users\{}\{}",
             "jsmith",
@@ -1626,7 +1619,14 @@ mod tests {
         }
         let sanitized: Vec<(String, String)> = props
             .into_iter()
-            .map(|(name, value)| (name, redact_username_in_path(&value)))
+            .map(|(name, value)| {
+                let value = if looks_like_file_path_property(&name, &value, None) {
+                    REDACTED_PATH.to_string()
+                } else {
+                    value
+                };
+                (name, value)
+            })
             .collect();
 
         let out = bound_properties(sanitized);
@@ -1637,12 +1637,12 @@ mod tests {
             .find(|(name, _)| name == "ObjectName")
             .expect("ObjectName retained (sorted first)");
         assert!(
-            object_name.1.contains(REDACTED_USER),
+            object_name.1.contains(REDACTED_PATH),
             "redaction must survive bounding: {}",
             object_name.1
         );
-        assert!(object_name.1.contains("<sha256="));
-        assert_eq!(object_name.1.chars().count(), MAX_SIGNATURE_VALUE_LEN);
+        assert!(!object_name.1.contains("<sha256="));
+        assert_eq!(object_name.1, REDACTED_PATH);
     }
 
     #[test]
