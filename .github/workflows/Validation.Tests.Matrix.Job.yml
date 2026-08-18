@@ -38,8 +38,6 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.windows) }}
     runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
-    # Resolved per entry: the test budget plus any startup stagger, so a
-    # delayed entry keeps its full budget. Workflow expressions cannot add.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -72,8 +70,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run backend tests
-        # A backend that hangs (rather than failing) would otherwise burn the
-        # full job timeout. Fail fast enough to keep the log useful.
         timeout-minutes: 45
         shell: pwsh
         run: |
