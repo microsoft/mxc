@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.linux) }}
-    runs-on: [ self-hosted, "1ES.Pool=${{ matrix.pool }}", "JobId=mxc-e2e-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}" ]
+    runs-on: ["${{ matrix.pool }}"]
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
