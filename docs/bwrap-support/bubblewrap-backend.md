@@ -41,6 +41,19 @@ requiring root privileges or a container runtime.
   # Alpine
   apk add slirp4netns util-linux iptables
   ```
+  `iptables` must resolve to the **`nf_tables` backend** (the default on
+  Debian 10+, Ubuntu 20.10+, RHEL 8+, and Alpine). The legacy backend opens
+  `/run/xtables.lock` before touching any table, and the rules are installed by
+  an unprivileged supervisor that keeps the caller's uid — so on a stock host,
+  where `/run` is root-owned, it cannot take that lock. `validate` refuses such
+  a host with a message naming the backend, rather than letting the supervisor
+  die at the first rule. If a host is pinned to legacy, switch it:
+  ```bash
+  sudo update-alternatives --set iptables /usr/sbin/iptables-nft
+  sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-nft
+  ```
+  (A legacy backend is still accepted where the lock *is* writable — for
+  example when running as root — since it works there.)
   Proxy mode fails explicitly if any of these is unavailable; it never falls
   back to sharing the host network namespace or to running without egress
   rules. The host must also provide the util-linux `unshare` command with
@@ -284,7 +297,11 @@ request fails if its private namespace cannot be configured.
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
    `--keep-caps`), `nsenter`, `iptables`, and `ip6tables` — so a host that is
    missing one fails immediately with a message naming it, rather than partway
-   through supervisor startup. Each probe is bounded by a short timeout: a
+   through supervisor startup. For `iptables`/`ip6tables` presence is not
+   enough: the probe also reads the backend from the version banner and refuses
+   a legacy backend whose `/run/xtables.lock` this user cannot open, because
+   the unprivileged supervisor would otherwise die at the first rule. Each
+   probe is bounded by a short timeout: a
    wedged binary is reported as hung and named, instead of stalling every
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
@@ -326,7 +343,7 @@ request fails if its private namespace cannot be configured.
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.8.0-alpha",
   "platform": "linux",
   "containment": "bubblewrap",
   "process": {
@@ -344,7 +361,7 @@ request fails if its private namespace cannot be configured.
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.8.0-alpha",
   "containment": "bubblewrap",
   "process": { "commandLine": "curl -fsSL https://example.com" },
   "network": {
@@ -352,6 +369,11 @@ request fails if its private namespace cannot be configured.
   }
 }
 ```
+
+> Both examples declare `0.8.0-alpha` deliberately: the private-namespace and
+> egress-enforcement behavior described above is selected by the schema version,
+> so the same config on `0.6`/`0.7` runs the legacy shared-host-network proxy
+> path instead.
 
 ### Caveats
 
@@ -391,6 +413,14 @@ request fails if its private namespace cannot be configured.
   and the proxy endpoint are permitted. DNS is deliberately **not** opened —
   the proxy resolves on the workload's behalf — so the proxy endpoint must be
   an IPv4 literal. IPv6 egress is denied outright.
+
+  Consequently the only accepted host-local proxy endpoints are `localhost`,
+  `127.0.0.0/8` and the wildcards `0.0.0.0` / `::`, each rewritten to
+  `10.0.2.2`. `::1` is **rejected at validation time**: a proxy bound only to
+  the IPv6 loopback cannot accept the IPv4 connection slirp's gateway
+  produces, so translating it would hand the sandbox an address nothing
+  answers on. Bind such a proxy to `127.0.0.1` or to a dual-stack wildcard
+  instead.
   On schema **0.6/0.7** the legacy behavior applies: the sandbox shares the
   host network namespace, no egress rules are installed, and only the
   cooperative env-var routing is in effect — a client that ignores
@@ -439,10 +469,10 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec (proxy mode adds a namespace supervisor) |
+| Startup | Create → Start → Attach | Single `bwrap` exec; proxy mode adds a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
 | Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns` and util-linux `unshare` |
-| Lifecycle | Create/destroy containers | Process dies on exit |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
+| Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
 - Quick sandboxing without root access

@@ -3,22 +3,44 @@
 
 //! Rootless private networking for Bubblewrap proxy mode.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
-use nix::unistd::pipe2;
+use nix::unistd::{access, dup2, pipe2, AccessFlags};
 use tempfile::TempDir;
 use wxc_common::logger::Logger;
 use wxc_common::models::ProxyAddress;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
+///
+/// Only the legacy backend takes that lock, and `nsenter --net` leaves the mount
+/// namespace alone, so there it is shared with every other sandbox. Waiting is
+/// what makes concurrent provisioning work; the ceiling keeps a wedged lock from
+/// hanging startup. `nf_tables` takes no lock and ignores the wait.
+const XTABLES_LOCK_WAIT: Duration = Duration::from_secs(5);
+/// Lock file the legacy `iptables` backend opens before touching any table.
+/// `nf_tables` does not use it. See [`iptables_backend_is_usable`].
+const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
+/// Number of `iptables`/`ip6tables` calls the supervisor makes. Only used to
+/// size the rule-installation budget, so it is asserted against the script.
+const RULE_COMMAND_COUNT: u32 = 9;
+/// Budget for the rule-installation phase, which begins once slirp is up.
+///
+/// Sized so that lock contention -- the expected reason a rule stalls -- cannot
+/// exhaust the budget before `-w` has had a chance to succeed. A single
+/// [`STARTUP_TIMEOUT`] cannot cover this: it would reject a viable sandbox the
+/// moment one call waited on a busy host.
+const RULE_INSTALL_TIMEOUT: Duration =
+    Duration::from_secs(XTABLES_LOCK_WAIT.as_secs() * RULE_COMMAND_COUNT as u64);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
@@ -26,6 +48,14 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
 /// Egress chain installed inside the sandbox's own network namespace.
 const EGRESS_CHAIN: &str = "MXC_EGRESS";
+/// Descriptor numbers the supervisor script hardcodes. They must stay single
+/// digit and below [`FD_STAGING_BASE`]: dash cannot name a descriptor >= 10 in
+/// a redirection, which is the whole reason the parent pins them.
+const SUPERVISOR_PID_FD: RawFd = 3;
+const SUPERVISOR_EXIT_FD: RawFd = 4;
+/// Descriptors are staged above every target before being landed, so a source
+/// already sitting on a target cannot be clobbered mid-remap.
+const FD_STAGING_BASE: RawFd = 10;
 /// Brings up the private network, then closes it down to the proxy before the
 /// workload runs.
 ///
@@ -37,17 +67,20 @@ const EGRESS_CHAIN: &str = "MXC_EGRESS";
 const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
-ready_fd="$2"
-exit_fd="$3"
-pid_fd="$4"
-proxy_ip="$5"
-proxy_port="$6"
-chain="$7"
+proxy_ip="$2"
+proxy_port="$3"
+chain="$4"
+lock_wait="$5"
+# Inherited descriptors are remapped to fixed numbers by the parent (see
+# `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
+# They are hardcoded rather than passed in argv because /bin/sh is dash on
+# Debian/Ubuntu, which rejects a *variable* descriptor >= 10 ("Bad fd number")
+# at parse time -- a failure that depends on how many files the parent happens
+# to hold open, so it surfaces nondeterministically and never in unit tests.
 printf ready > "$state_dir/userns.ready"
 # Block on the parent-owned PID pipe rather than polling for a file: if the
 # parent dies before it can publish the PID, the read ends at EOF and this
 # supervisor exits instead of spinning forever as an orphan.
-eval "exec 3<&$pid_fd"
 if ! IFS= read -r child_pid <&3; then
     child_pid="${child_pid:-}"
 fi
@@ -58,10 +91,12 @@ if [ -z "$child_pid" ]; then
 fi
 
 # slirp signals readiness internally so the supervisor, not slirp, decides when
-# the sandbox is ready -- the rules below must be in place first.
+# the sandbox is ready -- the rules below must be in place first. Descriptor 9
+# is safe to hardcode: the parent hands this child exactly 0-4, so nothing else
+# can be sitting on it.
 exec 9> "$state_dir/slirp.internal"
 slirp4netns --configure --mtu=65520 \
-    --ready-fd 9 --exit-fd "$exit_fd" \
+    --ready-fd 9 --exit-fd 4 \
     "$child_pid" tap0 &
 slirp_pid=$!
 trap 'kill "$slirp_pid" 2>/dev/null || true' TERM INT
@@ -78,19 +113,27 @@ ns="/proc/$child_pid/ns/net"
 # loopback, so it never leaves the sandbox. Port 53 is deliberately not opened
 # -- the proxy resolves on the workload's behalf, so an accept would only be a
 # DNS-tunnel exfil path out of a proxy-only posture.
-nsenter --net="$ns" -- iptables -N "$chain"
-nsenter --net="$ns" -- iptables -A "$chain" -o lo -j ACCEPT
-nsenter --net="$ns" -- iptables -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
-nsenter --net="$ns" -- iptables -A "$chain" -j DROP
-nsenter --net="$ns" -- iptables -A OUTPUT -j "$chain"
+#
+# -w matters only on the legacy backend, the one that takes a lock: nsenter
+# enters the network namespace but not the mount namespace, so concurrent
+# sandboxes contend for the *host's* /run/xtables.lock, and set -e turns a lost
+# race into a dead supervisor. nf_tables takes no lock and ignores the wait.
+# A backend that cannot take the lock at all is refused by probe_dependencies.
+nsenter --net="$ns" -- iptables -w "$lock_wait" -N "$chain"
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -o lo -j ACCEPT
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -j DROP
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A OUTPUT -j "$chain"
 # The proxy rule is IPv4 only, so v6 carries its closing DROP alone: IPv6
 # egress fails closed rather than being left open.
-nsenter --net="$ns" -- ip6tables -N "$chain"
-nsenter --net="$ns" -- ip6tables -A "$chain" -o lo -j ACCEPT
-nsenter --net="$ns" -- ip6tables -A "$chain" -j DROP
-nsenter --net="$ns" -- ip6tables -A OUTPUT -j "$chain"
+nsenter --net="$ns" -- ip6tables -w "$lock_wait" -N "$chain"
+nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A "$chain" -o lo -j ACCEPT
+nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A "$chain" -j DROP
+nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A OUTPUT -j "$chain"
 
-eval "printf ready >&$ready_fd"
+# Signalled by path, not through a descriptor: this is a plain file the parent
+# polls, so it needs no shell redirection and cannot hit dash's fd limit.
+printf ready > "$state_dir/slirp.ready"
 wait "$slirp_pid"
 "#;
 
@@ -241,14 +284,6 @@ impl ProxyNetworkNamespace {
         let stderr = File::create(&stderr_path).map_err(|error| {
             format!("Bubblewrap: failed to create proxy-network diagnostics: {error}")
         })?;
-        let ready = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(state_dir.path().join("slirp.ready"))
-            .map_err(|error| {
-                format!("Bubblewrap: failed to create slirp readiness file: {error}")
-            })?;
-
         let (exit_reader, exit_writer) =
             pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("Bubblewrap: pipe failed: {error}"))?;
         let (pid_reader, pid_writer) =
@@ -267,23 +302,21 @@ impl ProxyNetworkNamespace {
                 "mxc-bwrap-proxy-supervisor",
             ])
             .arg(state_dir.path())
-            .arg(ready.as_raw_fd().to_string())
-            .arg(exit_reader.as_raw_fd().to_string())
-            .arg(pid_reader.as_raw_fd().to_string())
             .arg(egress.ip.to_string())
             .arg(egress.port.to_string())
             .arg(EGRESS_CHAIN)
+            .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
-        // These stay CLOEXEC in this process, so a concurrent spawn from
-        // another thread cannot inherit them; only the supervisor gets them.
-        inherit_descriptors(
+        // Both pipes stay CLOEXEC in this process, so a concurrent spawn from
+        // another thread cannot inherit them; only the supervisor gets them,
+        // and only at the fixed numbers its script names.
+        remap_descriptors(
             &mut command,
-            vec![
-                ready.as_raw_fd(),
-                exit_reader.as_raw_fd(),
-                pid_reader.as_raw_fd(),
+            [
+                (pid_reader.as_raw_fd(), SUPERVISOR_PID_FD),
+                (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
             ],
         );
 
@@ -292,13 +325,13 @@ impl ProxyNetworkNamespace {
         })?;
         drop(exit_reader);
         drop(pid_reader);
-        drop(ready);
 
         if let Err(error) = wait_for_file(
             state_dir.path().join("userns.ready"),
             &mut supervisor,
             &stderr_path,
-            "user namespace",
+            "user namespace startup",
+            STARTUP_TIMEOUT,
         ) {
             terminate_child(&mut supervisor);
             return Err(error);
@@ -386,7 +419,11 @@ impl ProxyNetworkNamespace {
             self.state_dir.path().join("slirp.ready"),
             &mut self.supervisor,
             &self.state_dir.path().join("supervisor.stderr"),
-            "slirp4netns",
+            // Names both phases: this signal is written after slirp is up *and*
+            // every egress rule is installed, so attributing a stall to
+            // slirp alone would send the reader to the wrong place.
+            "slirp4netns startup and egress rule installation",
+            RULE_INSTALL_TIMEOUT,
         )?;
         logger.log_line(
             "Bubblewrap: slirp4netns configured the private proxy namespace and proxy-only \
@@ -453,13 +490,28 @@ impl Drop for ProxyNetworkNamespace {
 /// Return the proxy endpoint visible through slirp's host gateway.
 pub(crate) fn sandbox_proxy_address(address: &ProxyAddress) -> Result<ProxyAddress, String> {
     let host = address.host().trim_matches(['[', ']']);
+    let parsed = host.parse::<std::net::IpAddr>().ok();
+
+    // slirp's gateway reaches the host's *IPv4* loopback only. A proxy bound
+    // to `::1` listens on the IPv6 loopback exclusively, so rewriting it to
+    // the gateway would hand the sandbox an address nothing answers on --
+    // failing at connect time rather than at policy time. Reject it instead.
+    if matches!(parsed, Some(std::net::IpAddr::V6(ip)) if ip.is_loopback()) {
+        return Err(format!(
+            "Bubblewrap: proxy address '{}' uses the IPv6 loopback, which the private \
+             network namespace cannot reach; bind the proxy to 127.0.0.1 or a dual-stack \
+             wildcard address instead",
+            address.host()
+        ));
+    }
+
     // `0.0.0.0` / `::` name the host itself just as `127.0.0.1` does: a proxy
     // bound to the wildcard is reachable on the host's loopback, which the
     // sandbox's private namespace cannot see. Both need the gateway rewrite.
+    // `::` is safe to rewrite to IPv4 because a dual-stack wildcard listener
+    // accepts IPv4 connections, which `::1` does not.
     let is_host_local = host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
+        || parsed.is_some_and(|ip| ip.is_loopback() || ip.is_unspecified());
     if !is_host_local {
         return Ok(address.clone());
     }
@@ -590,10 +642,10 @@ fn probe_dependencies_uncached() -> Result<(), String> {
 
     // Proxy-only egress is programmed with these, so a host missing them must
     // fail here rather than deep inside supervisor startup.
-    for (binary, probe) in [
-        ("nsenter", "--version"),
-        ("iptables", "--version"),
-        ("ip6tables", "--version"),
+    for (binary, probe, has_backend) in [
+        ("nsenter", "--version", false),
+        ("iptables", "--version", true),
+        ("ip6tables", "--version", true),
     ] {
         let mut command = Command::new(binary);
         command.arg(probe);
@@ -610,8 +662,65 @@ fn probe_dependencies_uncached() -> Result<(), String> {
                 output.status
             ));
         }
+        // Presence is not enough: the binary can work while its backend is one
+        // this supervisor cannot drive.
+        if has_backend {
+            iptables_backend_is_usable(binary, &output.stdout, Path::new(XTABLES_LOCK_PATH))?;
+        }
     }
     Ok(())
+}
+
+/// Whether `binary`'s backend can install rules from the unprivileged supervisor.
+///
+/// The supervisor runs under `unshare --user --map-current-user`, so it keeps the
+/// caller's uid: its capabilities apply inside the new user namespace, not to
+/// root-owned files in the initial one. The legacy backend opens
+/// [`XTABLES_LOCK_PATH`] before touching any table, so on a stock host (root-owned
+/// `/run`, no lock file) it fails with `EACCES` and `set -e` kills the supervisor
+/// at the first rule. `nf_tables` takes no lock.
+///
+/// The banner alone cannot decide this: legacy *does* work where the lock is
+/// reachable (as root, or with a writable lock). So the backend picks the
+/// question, and for legacy the lock itself is tested.
+fn iptables_backend_is_usable(binary: &str, banner: &str, lock: &Path) -> Result<(), String> {
+    if banner.contains("nf_tables") {
+        return Ok(());
+    }
+    if lock_is_writable(lock) {
+        return Ok(());
+    }
+
+    // A pre-1.8 banner carries no marker at all; those builds are legacy-only.
+    Err(format!(
+        "Bubblewrap: network.proxy requires an iptables backend the sandbox supervisor can \
+         drive without privilege, but '{binary}' resolves to the legacy backend ({}) and \
+         '{}' is not writable by this user. Proxy-only egress rules are installed by an \
+         unprivileged supervisor in a user namespace, which keeps the caller's uid, so the \
+         root-owned lock is unreachable and every rule would fail. Select the nf_tables \
+         backend (for example: update-alternatives --set {binary} /usr/sbin/{binary}-nft), \
+         or make '{}' writable.",
+        banner.trim(),
+        lock.display(),
+        lock.display()
+    ))
+}
+
+/// Whether the legacy backend could take its lock as the current user.
+///
+/// The lock is created on first use, so an absent file makes the *directory* the
+/// thing that must be writable. `access` tests the real uid — the uid the
+/// supervisor itself runs under.
+fn lock_is_writable(lock: &Path) -> bool {
+    let target = if lock.exists() {
+        lock
+    } else {
+        match lock.parent() {
+            Some(parent) => parent,
+            None => return false,
+        }
+    };
+    access(target, AccessFlags::W_OK).is_ok()
 }
 
 /// Cap on how much component stderr is quoted into a diagnostic.
@@ -655,9 +764,10 @@ fn wait_for_file(
     child: &mut Child,
     stderr_path: &std::path::Path,
     component: &str,
+    timeout: Duration,
 ) -> Result<(), String> {
     let path = path.as_ref();
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     loop {
         if fs::metadata(path).is_ok_and(|metadata| metadata.len() > 0) {
             return Ok(());
@@ -675,8 +785,7 @@ fn wait_for_file(
             // is usually the only evidence of *why* startup stalled, and the
             // process is still alive so no exit status will explain it.
             return Err(format!(
-                "Bubblewrap: timed out waiting for {component} startup after {STARTUP_TIMEOUT:?} \
-                 ({})",
+                "Bubblewrap: timed out waiting for {component} after {timeout:?} ({})",
                 stderr_detail(stderr_path)
             ));
         }
@@ -690,6 +799,11 @@ fn wait_for_file(
 /// the descriptors to every concurrent `Command::spawn` -- a real window, since
 /// this crate is reachable from the SDK and FFI. Clearing it in the forked child
 /// instead gives them to the intended child and no one else.
+///
+/// The number is left as the OS assigned it, which is safe here because bwrap
+/// receives it in argv (`--info-fd N`) and parses it as an integer. A child
+/// that must *redirect* to the descriptor from a shell needs
+/// [`remap_descriptors`] instead.
 fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
     // SAFETY: `pre_exec` runs between fork and exec, where only
     // async-signal-safe work is permitted. `fcntl` is async-signal-safe and
@@ -699,6 +813,43 @@ fn inherit_descriptors(command: &mut Command, fds: Vec<RawFd>) {
         command.pre_exec(move || {
             for fd in &fds {
                 fcntl(*fd, FcntlArg::F_SETFD(FdFlag::empty())).map_err(std::io::Error::from)?;
+            }
+            Ok(())
+        });
+    }
+}
+
+/// Hand `mapping` to one specific child at fixed, known descriptor numbers.
+///
+/// Two problems are solved together. `FD_CLOEXEC` is per-process, so clearing
+/// it on the parent's copy would leak the descriptors to every concurrent
+/// `Command::spawn` -- a real window, since this crate is reachable from the
+/// SDK and FFI. And an OS-assigned descriptor number cannot be named from
+/// `/bin/sh`: dash rejects `>&$fd` and `<&$fd` for any descriptor >= 10 with
+/// `Bad fd number` at *parse* time, so interpolating a raw number breaks the
+/// supervisor as soon as the parent holds enough open files.
+///
+/// `dup2` in the forked child solves both: it clears `FD_CLOEXEC` on the new
+/// descriptor only, and it puts that descriptor on a number the script can
+/// hardcode. The originals stay CLOEXEC and close at exec.
+fn remap_descriptors<const N: usize>(command: &mut Command, mapping: [(RawFd, RawFd); N]) {
+    // SAFETY: `pre_exec` runs between fork and exec, where only
+    // async-signal-safe work is permitted. `fcntl` and `dup2` are both
+    // async-signal-safe and this closure allocates nothing -- `mapping` is a
+    // fixed-size array of plain integers captured by move, and the staging
+    // buffer is a fixed-size array too.
+    unsafe {
+        command.pre_exec(move || {
+            // Stage every source above the target range before landing any of
+            // them: a direct `dup2` could otherwise clobber a source that
+            // happens to already sit on a later target.
+            let mut staged = [-1; N];
+            for (index, (source, _)) in mapping.iter().enumerate() {
+                staged[index] = fcntl(*source, FcntlArg::F_DUPFD_CLOEXEC(FD_STAGING_BASE))
+                    .map_err(std::io::Error::from)?;
+            }
+            for (index, (_, target)) in mapping.iter().enumerate() {
+                dup2(staged[index], *target).map_err(std::io::Error::from)?;
             }
             Ok(())
         });
@@ -767,14 +918,35 @@ mod tests {
     #[test]
     fn egress_rejects_an_ipv6_proxy() {
         // Rules are IPv4-only, so an IPv6 endpoint would never be opened.
-        let address = ProxyAddress::new("[::1]".into(), 8080);
-        let translated = sandbox_proxy_address(&address).unwrap();
-
-        // ::1 is loopback, so translation already yields the IPv4 gateway.
-        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
-
         let routable = ProxyAddress::new("2001:db8::1".into(), 8080);
         assert!(ProxyEgress::from_address(&routable).is_err());
+    }
+
+    /// `::1` used to be rewritten to the IPv4 gateway, which handed the sandbox
+    /// an address the proxy never listens on: an IPv6-loopback listener does
+    /// not accept the IPv4 connection slirp's gateway produces. Rejecting at
+    /// policy time beats failing at connect time.
+    #[test]
+    fn rejects_an_ipv6_loopback_proxy_instead_of_translating_it() {
+        for host in ["[::1]", "::1"] {
+            let address = ProxyAddress::new(host.into(), 8080);
+            let error = sandbox_proxy_address(&address).unwrap_err();
+
+            assert!(
+                error.contains("IPv6 loopback"),
+                "error should name the unreachable address family: {error}"
+            );
+        }
+    }
+
+    /// The rejection must not swallow `::`: a dual-stack wildcard listener does
+    /// accept the gateway's IPv4 connection, so it still translates.
+    #[test]
+    fn ipv6_loopback_rejection_leaves_the_ipv6_wildcard_translatable() {
+        let address = ProxyAddress::new("[::]".into(), 8080);
+        let translated = sandbox_proxy_address(&address).unwrap();
+
+        assert_eq!(translated.host(), SLIRP_HOST_GATEWAY);
     }
 
     #[test]
@@ -788,9 +960,20 @@ mod tests {
         );
     }
 
-    /// Byte offset of `needle` in the supervisor script.
+    /// The supervisor script with the lock-wait flag elided.
+    ///
+    /// The flag is an operational detail, not part of the egress policy these
+    /// tests pin. Normalising it away keeps a change in lock handling from
+    /// failing every ordering assertion -- while
+    /// `every_rule_command_waits_for_the_xtables_lock` still asserts it is
+    /// present on all of them.
+    fn normalised_script() -> String {
+        SUPERVISOR_SCRIPT.replace(r#" -w "$lock_wait""#, "")
+    }
+
+    /// Byte offset of `needle` in the normalised supervisor script.
     fn script_offset(needle: &str) -> usize {
-        SUPERVISOR_SCRIPT
+        normalised_script()
             .find(needle)
             .unwrap_or_else(|| panic!("supervisor script should contain {needle:?}"))
     }
@@ -812,7 +995,7 @@ mod tests {
         // The caller releases the workload on this signal, so emitting it early
         // would let the workload run with egress wide open.
         let last_rule = script_offset(r#"ip6tables -A OUTPUT -j "$chain""#);
-        let ready = script_offset(r#"eval "printf ready >&$ready_fd""#);
+        let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
 
         assert!(
             last_rule < ready,
@@ -825,9 +1008,10 @@ mod tests {
         // Deliberate: the proxy resolves on the workload's behalf, so an
         // unscoped port 53 accept would only be an exfil path. Pinning the full
         // accept set catches any widening, not just DNS.
-        let accepts: Vec<&str> = SUPERVISOR_SCRIPT
+        let accepts: Vec<String> = normalised_script()
             .lines()
             .filter(|line| line.contains("-j ACCEPT"))
+            .map(str::to_owned)
             .collect();
 
         assert_eq!(
@@ -848,7 +1032,7 @@ mod tests {
 
         assert!(v6_drop < v6_hook, "v6 chain must drop before being hooked");
         assert!(
-            !SUPERVISOR_SCRIPT.contains(r#"ip6tables -A "$chain" -p tcp"#),
+            !normalised_script().contains(r#"ip6tables -A "$chain" -p tcp"#),
             "v6 must not carry a proxy accept"
         );
     }
@@ -866,8 +1050,9 @@ mod tests {
         // Backgrounding any of them would satisfy those tests while destroying
         // the guarantee that rules precede readiness.
         let rules_start = script_offset(r#"nsenter --net="$ns" -- iptables -N "$chain""#);
-        let ready = script_offset(r#"eval "printf ready >&$ready_fd""#);
-        let region = &SUPERVISOR_SCRIPT[rules_start..ready];
+        let ready = script_offset(r#"printf ready > "$state_dir/slirp.ready""#);
+        let script = normalised_script();
+        let region = &script[rules_start..ready];
 
         for line in region.lines().filter(|line| line.contains("nsenter")) {
             assert!(
@@ -970,6 +1155,149 @@ mod tests {
         );
     }
 
+    /// Regression for the defect this scheme exists to prevent: dash rejects a
+    /// redirection to a *variable* descriptor >= 10 at parse time, so the old
+    /// `eval "... >&$fd"` form failed based on how many files the parent
+    /// happened to hold open. Remapping must land the pipe on a fixed low
+    /// number regardless of what the OS originally assigned.
+    #[test]
+    fn remapped_descriptors_land_on_fixed_numbers_from_any_source() {
+        // Force a high source number -- the exact case the old scheme broke on.
+        let (reader, writer) = pipe2(OFlag::O_CLOEXEC).expect("pipe");
+        let high = fcntl(reader.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(20)).expect("dup high");
+        assert!(high >= 20, "test needs a two-digit source descriptor");
+
+        File::from(writer).write_all(b"4242\n").expect("write pid");
+
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            // Reads through the *literal* descriptor the script hardcodes.
+            .arg(format!(
+                "IFS= read -r v <&{SUPERVISOR_PID_FD}; printf %s \"$v\""
+            ));
+        remap_descriptors(&mut command, [(high, SUPERVISOR_PID_FD)]);
+
+        let out = command.output().expect("spawn remapped child");
+        assert!(
+            out.status.success(),
+            "remapped child failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "4242",
+            "the pipe did not arrive on the fixed descriptor"
+        );
+    }
+
+    /// A source already sitting on another mapping's target must survive the
+    /// remap. A naive sequential `dup2` clobbers it and this catches that.
+    #[test]
+    fn remapping_survives_a_source_already_on_a_target_number() {
+        let (a_reader, a_writer) = pipe2(OFlag::O_CLOEXEC).expect("pipe");
+        let (b_reader, b_writer) = pipe2(OFlag::O_CLOEXEC).expect("pipe");
+        let a = a_reader.as_raw_fd();
+        let b = b_reader.as_raw_fd();
+
+        File::from(a_writer).write_all(b"AAA\n").expect("write a");
+        File::from(b_writer).write_all(b"BBB\n").expect("write b");
+
+        // The second mapping's source is the first mapping's target, so a
+        // sequential `dup2` would overwrite `b` before it had been landed.
+        let mapping = [(a, b), (b, SUPERVISOR_PID_FD)];
+
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(format!(
+            "printf 'first=%s second=%s' \
+             \"$(cat /proc/self/fd/{b})\" \"$(cat /proc/self/fd/{SUPERVISOR_PID_FD})\""
+        ));
+        remap_descriptors(&mut command, mapping);
+
+        let out = command.output().expect("spawn remapped child");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            "first=AAA second=BBB",
+            "a source sitting on another target was clobbered during remap"
+        );
+    }
+
+    /// The supervisor runs under `/bin/sh`, which is dash on Debian/Ubuntu.
+    /// Parse it with the real shell so a construct dash rejects cannot ship.
+    #[test]
+    fn supervisor_script_parses_under_the_shell_that_runs_it() {
+        let out = Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(SUPERVISOR_SCRIPT)
+            .output()
+            .expect("spawn sh");
+
+        assert!(
+            out.status.success(),
+            "supervisor script is not valid /bin/sh: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// The script may only name descriptors the parent actually pins. Two
+    /// forms are banned: `>&$var`, which broke on dash for fd >= 10, and
+    /// `{var}>`, the varfd allocation the review proposed as a fix — dash
+    /// *parses* that as a plain word, so it fails silently rather than loudly
+    /// and `sh -n` cannot catch it.
+    #[test]
+    fn supervisor_script_never_redirects_to_a_variable_descriptor() {
+        for line in SUPERVISOR_SCRIPT.lines() {
+            let code = line.trim();
+            if code.starts_with('#') {
+                continue;
+            }
+            assert!(
+                !code.contains(">&$") && !code.contains("<&$"),
+                "variable descriptor redirection breaks dash for fd >= 10: {code}"
+            );
+            assert!(
+                !code.contains("}>") && !code.contains("}<"),
+                "varfd allocation is a bash-ism; dash parses it as a word: {code}"
+            );
+        }
+    }
+
+    /// Every rule call must wait for the shared host lock. One unguarded call
+    /// is enough to fail a concurrent launch under `set -e`.
+    #[test]
+    fn every_rule_command_waits_for_the_xtables_lock() {
+        let rules: Vec<&str> = SUPERVISOR_SCRIPT
+            .lines()
+            .filter(|line| {
+                let code = line.trim();
+                !code.starts_with('#') && code.contains("tables ")
+            })
+            .collect();
+
+        assert_eq!(
+            rules.len() as u32,
+            RULE_COMMAND_COUNT,
+            "RULE_COMMAND_COUNT is stale, so the rule-install budget is wrong"
+        );
+        for rule in rules {
+            assert!(
+                rule.contains(r#"-w "$lock_wait""#),
+                "rule may fail instantly on a contended host lock: {rule}"
+            );
+        }
+    }
+
+    /// The budget must cover the worst case it was sized for, or `-w` just
+    /// moves the failure from iptables to the parent's timeout.
+    #[test]
+    fn rule_install_budget_covers_every_command_blocking_on_the_lock() {
+        assert!(
+            RULE_INSTALL_TIMEOUT >= XTABLES_LOCK_WAIT * RULE_COMMAND_COUNT,
+            "a fully contended host would time out before -w could succeed"
+        );
+    }
+
     #[test]
     fn probe_gives_up_on_a_hung_binary_instead_of_blocking_forever() {
         let mut command = Command::new("sleep");
@@ -1020,6 +1348,88 @@ mod tests {
         assert!(!probe.status.success(), "expected a non-zero exit status");
     }
 
+    /// A path whose parent does not exist, standing in for the root-owned `/run`
+    /// an unprivileged supervisor meets. Keeps the test deterministic and
+    /// root-free while hitting the same branch.
+    fn unreachable_lock(dir: &TempDir) -> std::path::PathBuf {
+        dir.path().join("no-such-dir").join("xtables.lock")
+    }
+
+    /// Verified live: with the lock absent and `/run` unwritable, `iptables-nft
+    /// -N` still succeeds.
+    #[test]
+    fn the_nft_backend_is_accepted_even_when_the_lock_is_unreachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(
+            iptables_backend_is_usable(
+                "iptables",
+                "iptables v1.8.10 (nf_tables)\n",
+                &unreachable_lock(&dir)
+            )
+            .is_ok(),
+            "the nf_tables backend takes no lock, so an unreachable lock must not refuse it"
+        );
+    }
+
+    /// The regression this check exists for: legacy opens the lock
+    /// unconditionally, so the supervisor dies at the first rule.
+    #[test]
+    fn the_legacy_backend_is_refused_when_it_could_not_take_the_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = iptables_backend_is_usable(
+            "iptables",
+            "iptables v1.8.10 (legacy)\n",
+            &unreachable_lock(&dir),
+        )
+        .expect_err("a legacy backend with an unreachable lock cannot install rules");
+
+        assert!(
+            error.contains("iptables") && error.contains("nf_tables"),
+            "the error must name the binary and the backend to switch to: {error}"
+        );
+    }
+
+    /// Legacy is refused for being unable to take its lock, not for being
+    /// legacy: it works as root, and rejecting that would break a valid host.
+    #[test]
+    fn the_legacy_backend_is_accepted_when_the_lock_is_writable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let lock = dir.path().join("xtables.lock");
+        fs::write(&lock, b"").expect("create lock");
+
+        assert!(
+            iptables_backend_is_usable("iptables", "iptables v1.8.10 (legacy)\n", &lock).is_ok(),
+            "a legacy backend that can take its lock installs rules fine"
+        );
+    }
+
+    /// The lock is created on first use, so the check must ask about the
+    /// directory rather than report the absent file as a failure.
+    #[test]
+    fn an_absent_lock_in_a_writable_directory_is_usable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(
+            lock_is_writable(&dir.path().join("xtables.lock")),
+            "the lock is created on demand, so a writable directory is enough"
+        );
+    }
+
+    /// Pre-1.8 builds print no backend marker and are legacy-only, so an
+    /// unmarked banner must not be assumed usable.
+    #[test]
+    fn a_banner_without_a_backend_marker_is_treated_as_legacy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert!(
+            iptables_backend_is_usable("iptables", "iptables v1.6.1\n", &unreachable_lock(&dir))
+                .is_err(),
+            "a pre-1.8 build is legacy-only and must not be assumed usable"
+        );
+    }
+
     #[test]
     fn stderr_detail_keeps_the_tail_and_stays_bounded() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1052,5 +1462,290 @@ mod tests {
         let empty = dir.path().join("empty.stderr");
         fs::write(&empty, "   \n").expect("write stderr");
         assert_eq!(stderr_detail(&empty), "no stderr output");
+    }
+
+    /// Counts the rule commands and fails the one named by `MXC_TEST_FAIL_AT`.
+    /// The real `nsenter` needs a live namespace and `CAP_SYS_ADMIN`; the
+    /// script only cares whether it succeeded.
+    const FAKE_NSENTER: &str = r#"#!/bin/sh
+count=$(cat "$MXC_TEST_COUNT" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s' "$count" > "$MXC_TEST_COUNT"
+if [ "${MXC_TEST_FAIL_AT:-0}" = "$count" ]; then
+    echo "fake nsenter: forced failure on rule $count" >&2
+    exit 1
+fi
+exit 0
+"#;
+
+    /// Signals readiness on the descriptor the supervisor opened for it (9),
+    /// then idles so the supervisor's `wait` has something to wait on.
+    const FAKE_SLIRP: &str = r#"#!/bin/sh
+echo $$ > "$MXC_TEST_SLIRP_PID"
+if [ "${MXC_TEST_SLIRP_DIES:-0}" = "1" ]; then
+    echo "fake slirp4netns: exiting before readiness" >&2
+    exit 1
+fi
+printf ready >&9
+exec sleep 30
+"#;
+
+    /// The supervisor script running for real against fake tools.
+    ///
+    /// The six text-matching tests above assert what the script *says*; they
+    /// cannot assert what it *does*. This runs it under the same `sh` a host
+    /// would use, with `nsenter`/`slirp4netns` replaced by stubs that can fail
+    /// on demand, so the fail-closed ordering can be observed rather than read.
+    struct FakeSupervisor {
+        dir: TempDir,
+        child: Child,
+        pid_writer: Option<File>,
+        _exit_writer: OwnedFd,
+    }
+
+    impl FakeSupervisor {
+        fn state_dir(&self) -> std::path::PathBuf {
+            self.dir.path().join("state")
+        }
+
+        /// How many rule commands actually ran.
+        fn rule_invocations(&self) -> u32 {
+            fs::read_to_string(self.dir.path().join("rules.count"))
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0)
+        }
+
+        /// Whether the supervisor told the parent the sandbox is enforced.
+        fn signalled_ready(&self) -> bool {
+            self.state_dir().join("slirp.ready").exists()
+        }
+
+        fn stderr(&self) -> String {
+            stderr_detail(&self.dir.path().join("supervisor.stderr"))
+        }
+
+        /// Hand over a sandbox PID, as the parent does once bwrap is up.
+        fn publish_sandbox_pid(&mut self) {
+            let mut writer = self.pid_writer.take().expect("pid writer");
+            writer.write_all(b"4242\n").expect("publish pid");
+        }
+
+        /// Close the PID pipe without writing, as a parent that died would.
+        fn abandon_without_publishing_pid(&mut self) {
+            drop(self.pid_writer.take());
+        }
+
+        fn wait_for_exit(&mut self) -> ExitStatus {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if let Some(status) = self.child.try_wait().expect("try_wait") {
+                    return status;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!(
+                "supervisor did not exit; stderr: {}, rules run: {}",
+                self.stderr(),
+                self.rule_invocations()
+            );
+        }
+
+        fn wait_until_ready(&mut self) {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < deadline {
+                if self.signalled_ready() {
+                    return;
+                }
+                if let Some(status) = self.child.try_wait().expect("try_wait") {
+                    panic!(
+                        "supervisor exited ({status}) without signalling readiness; \
+                         stderr: {}, rules run: {}",
+                        self.stderr(),
+                        self.rule_invocations()
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!(
+                "supervisor never signalled readiness; stderr: {}",
+                self.stderr()
+            );
+        }
+    }
+
+    impl Drop for FakeSupervisor {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            // `set -e` bypasses the script's TERM trap, so a stub left running
+            // by an aborted supervisor has to be reaped here.
+            if let Ok(pid) = fs::read_to_string(self.dir.path().join("slirp.pid")) {
+                let pid = pid.trim();
+                if !pid.is_empty() {
+                    let _ = Command::new("kill")
+                        .args(["-9", pid])
+                        .stderr(Stdio::null())
+                        .status();
+                }
+            }
+        }
+    }
+
+    fn install_stub(path: &std::path::Path, body: &str) {
+        fs::write(path, body).expect("write stub");
+        let mut perms = fs::metadata(path).expect("stat stub").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        fs::set_permissions(path, perms).expect("chmod stub");
+    }
+
+    fn spawn_fake_supervisor(fail_at: Option<u32>, slirp_dies: bool) -> FakeSupervisor {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("bin");
+        let state = dir.path().join("state");
+        fs::create_dir_all(&bin).expect("bin dir");
+        fs::create_dir_all(&state).expect("state dir");
+        install_stub(&bin.join("nsenter"), FAKE_NSENTER);
+        install_stub(&bin.join("slirp4netns"), FAKE_SLIRP);
+
+        let stderr = File::create(dir.path().join("supervisor.stderr")).expect("stderr");
+        let (exit_reader, exit_writer) = pipe2(OFlag::O_CLOEXEC).expect("exit pipe");
+        let (pid_reader, pid_writer) = pipe2(OFlag::O_CLOEXEC).expect("pid pipe");
+
+        // The stubs shadow the real tools; the rest of PATH still supplies the
+        // coreutils the script uses (`sleep`, `cat`).
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
+            .arg(&state)
+            .arg("10.0.2.2")
+            .arg("3128")
+            .arg("mxc-test-chain")
+            .arg("1")
+            .env("PATH", path)
+            .env("MXC_TEST_COUNT", dir.path().join("rules.count"))
+            .env("MXC_TEST_SLIRP_PID", dir.path().join("slirp.pid"))
+            .env(
+                "MXC_TEST_FAIL_AT",
+                fail_at.map(|n| n.to_string()).unwrap_or_default(),
+            )
+            .env("MXC_TEST_SLIRP_DIES", if slirp_dies { "1" } else { "0" })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr));
+        remap_descriptors(
+            &mut command,
+            [
+                (pid_reader.as_raw_fd(), SUPERVISOR_PID_FD),
+                (exit_reader.as_raw_fd(), SUPERVISOR_EXIT_FD),
+            ],
+        );
+        let child = command.spawn().expect("spawn supervisor");
+        drop(exit_reader);
+        drop(pid_reader);
+
+        FakeSupervisor {
+            dir,
+            child,
+            pid_writer: Some(File::from(pid_writer)),
+            _exit_writer: exit_writer,
+        }
+    }
+
+    /// Executing the script also re-checks [`RULE_COMMAND_COUNT`] against the
+    /// number of commands that actually run, which the text-offset tests can
+    /// only approximate.
+    #[test]
+    fn the_supervisor_signals_readiness_only_after_every_rule_is_installed() {
+        let mut supervisor = spawn_fake_supervisor(None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        assert_eq!(
+            supervisor.rule_invocations(),
+            RULE_COMMAND_COUNT,
+            "readiness was signalled after a different number of rules than the \
+             startup budget is sized for; stderr: {}",
+            supervisor.stderr()
+        );
+    }
+
+    /// The fail-closed guarantee of the whole feature: a rule that does not
+    /// install must take the supervisor down *before* readiness, so the parent
+    /// never releases a sandbox whose egress is unenforced.
+    ///
+    /// Asserting it for every rule position is the point. A future edit that
+    /// moves one command into a pipeline, an `if` condition or a subshell
+    /// escapes `set -e` and would start an unenforced sandbox while every
+    /// text-matching test above stayed green.
+    #[test]
+    fn a_failed_rule_kills_the_supervisor_instead_of_signalling_readiness() {
+        for rule in 1..=RULE_COMMAND_COUNT {
+            let mut supervisor = spawn_fake_supervisor(Some(rule), false);
+            supervisor.publish_sandbox_pid();
+            let status = supervisor.wait_for_exit();
+
+            assert!(
+                !status.success(),
+                "rule {rule} failed but the supervisor exited successfully; stderr: {}",
+                supervisor.stderr()
+            );
+            assert!(
+                !supervisor.signalled_ready(),
+                "rule {rule} failed yet the sandbox was signalled ready -- it would \
+                 have run with unenforced egress"
+            );
+            assert_eq!(
+                supervisor.rule_invocations(),
+                rule,
+                "rule {rule} failed but the script carried on installing rules"
+            );
+        }
+    }
+
+    #[test]
+    fn the_supervisor_gives_up_when_slirp_dies_before_signalling_readiness() {
+        let mut supervisor = spawn_fake_supervisor(None, true);
+        supervisor.publish_sandbox_pid();
+        let status = supervisor.wait_for_exit();
+
+        assert!(!status.success(), "a dead slirp must fail the startup");
+        assert!(!supervisor.signalled_ready());
+        assert!(
+            supervisor.stderr().contains("before signalling readiness"),
+            "the failure must say slirp never came up: {}",
+            supervisor.stderr()
+        );
+        assert_eq!(
+            supervisor.rule_invocations(),
+            0,
+            "rules were installed against a namespace with no connectivity"
+        );
+    }
+
+    /// The blocking read on the PID pipe exists so a supervisor whose parent
+    /// died exits instead of spinning as an orphan holding a namespace.
+    #[test]
+    fn the_supervisor_exits_when_the_parent_never_publishes_the_sandbox_pid() {
+        let mut supervisor = spawn_fake_supervisor(None, false);
+        supervisor.abandon_without_publishing_pid();
+        let status = supervisor.wait_for_exit();
+
+        assert!(
+            !status.success(),
+            "an unpublished PID must fail the startup"
+        );
+        assert!(!supervisor.signalled_ready());
+        assert!(
+            supervisor.stderr().contains("before publishing"),
+            "the failure must name the missing PID: {}",
+            supervisor.stderr()
+        );
+        assert_eq!(supervisor.rule_invocations(), 0);
     }
 }
