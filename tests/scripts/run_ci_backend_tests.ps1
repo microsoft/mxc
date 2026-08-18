@@ -42,45 +42,25 @@ function Assert-File {
     }
 }
 
-# The suites write their logs, configs, and transcripts under $env:TEMP, which
-# is not the directory CI uploads from. Several also refuse to run with those
-# paths pointed elsewhere, so copy the artifacts across afterwards instead of
-# redirecting them. Best-effort by design: losing a log must not turn a passing
-# run red, and a failing run keeps its original result.
-function Copy-TempArtifacts {
-    if (-not $env:RUNNER_TEMP -or -not $env:TEMP) {
+# The suites, and MXC itself, write logs and scratch trees under $env:TEMP,
+# which is not the directory CI uploads from. Rather than enumerate every
+# artifact and copy it afterwards, point TEMP at the upload directory for the
+# duration of the run: parameter defaults, .NET GetTempPath(), and child
+# processes all follow it, so anything temp-rooted lands where CI collects it.
+#
+# The suites' scratch-root guards compare against $env:TEMP, so they stay
+# satisfied — this redirects what TEMP means rather than pointing a path
+# outside it.
+function Redirect-TempToRunnerTemp {
+    if (-not $env:RUNNER_TEMP) {
         return
     }
-
-    $names = @(
-        'mxc-wpc-tests',
-        'mxc-t3-workloads',
-        'mxc_concurrent_oneshot',
-        'mxc_etw_test',
-        'wxc-wsb',
-        'wxc-sandbox-rendezvous',
-        'WinProcessContainer-Tests.results.txt',
-        'WinProcessContainer-Tests.results.json',
-        'WinProcessContainer-Tests.cargo.log'
-    )
-
-    foreach ($name in $names) {
-        $source = Join-Path $env:TEMP $name
-        if (-not (Test-Path -LiteralPath $source)) {
-            continue
-        }
-        Copy-Item -Recurse -Force -LiteralPath $source `
-            -Destination (Join-Path $env:RUNNER_TEMP $name) `
-            -ErrorAction SilentlyContinue
+    if (-not (Test-Path -LiteralPath $env:RUNNER_TEMP)) {
+        New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP | Out-Null
     }
-
-    # MXC's own diagnostic dumps are timestamped per run, so match the family.
-    Get-ChildItem -Path $env:TEMP -Filter 'mxc-diagnostics-*' -ErrorAction SilentlyContinue |
-        ForEach-Object {
-            Copy-Item -Recurse -Force -LiteralPath $_.FullName `
-                -Destination (Join-Path $env:RUNNER_TEMP $_.Name) `
-                -ErrorAction SilentlyContinue
-        }
+    $env:TEMP = $env:RUNNER_TEMP
+    $env:TMP  = $env:RUNNER_TEMP
+    Write-Host "Redirected TEMP to $env:RUNNER_TEMP so test logs are collected."
 }
 
 function Invoke-TestScript {
@@ -146,44 +126,41 @@ function Invoke-ProcessContainerTests {
     }
 }
 
-try {
-    switch ($Backend) {
-        'process-t1' {
-            Invoke-ProcessContainerTests
-        }
-        'process-t3' {
-            Invoke-ProcessContainerTests
-        }
-        'isolation-session' {
-            Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
-                WxcExePath = $wxc
-            }
-        }
-        'windows-sandbox' {
-            Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
-                BinDir = $binaryDirectoryPath
-            }
-        }
-        'wslc' {
-            # The current WSLC helper hardcodes the x64 target when locating assets.
-            if ($Architecture -ne 'x64') {
-                throw 'The existing WSLC test harness is not architecture-portable yet.'
-            }
-            Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
-                WxcExecPath = $wxc
-            }
-        }
-        'microvm' {
-            Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @{
-                BinDir = $binaryDirectoryPath
-            }
-        }
-        'hyperlight' {
-            # Keep unwired backends explicit so accidental activation fails loudly.
-            throw 'The Hyperlight CI backend is not wired to an existing test entry point yet.'
+Redirect-TempToRunnerTemp
+
+switch ($Backend) {
+    'process-t1' {
+        Invoke-ProcessContainerTests
+    }
+    'process-t3' {
+        Invoke-ProcessContainerTests
+    }
+    'isolation-session' {
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
+            WxcExePath = $wxc
         }
     }
-} finally {
-    # Also runs when a suite throws, which is when these logs matter most.
-    Copy-TempArtifacts
+    'windows-sandbox' {
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
+            BinDir = $binaryDirectoryPath
+        }
+    }
+    'wslc' {
+        # The current WSLC helper hardcodes the x64 target when locating assets.
+        if ($Architecture -ne 'x64') {
+            throw 'The existing WSLC test harness is not architecture-portable yet.'
+        }
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
+            WxcExecPath = $wxc
+        }
+    }
+    'microvm' {
+        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @{
+            BinDir = $binaryDirectoryPath
+        }
+    }
+    'hyperlight' {
+        # Keep unwired backends explicit so accidental activation fails loudly.
+        throw 'The Hyperlight CI backend is not wired to an existing test entry point yet.'
+    }
 }
