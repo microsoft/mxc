@@ -4,30 +4,28 @@
 use super::network::Network;
 use super::primitives::{NonEmptyString, OptionalField};
 
-#[rustfmt::skip]
 string_enum! {
-/// The exact version marker accepted by this contract.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Version {
-    /// The published `0.6.0-alpha` contract.
-    V0_6_0Alpha => ["0.6.0-alpha"],
-}
+    /// The exact version marker accepted by this contract.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Version {
+        /// The published `0.6.0-alpha` contract.
+        V0_6_0Alpha => ["0.6.0-alpha"],
+    }
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Stable containment selections available in `0.6.0-alpha`.
-#[derive(Debug)]
-pub enum Containment {
-    /// Select the host's native process-containment backend.
-    Process => ["process"],
-    /// Select the Windows ProcessContainer backend.
-    ProcessContainer => ["processcontainer", "appcontainer"],
-    /// Select the Linux LXC backend.
-    Lxc => ["lxc"],
-    /// Select the Linux Bubblewrap backend.
-    Bubblewrap => ["bubblewrap"],
-}
+    /// Stable containment selections available in `0.6.0-alpha`.
+    #[derive(Debug)]
+    pub enum Containment {
+        /// Select the host's native process-containment backend.
+        Process => ["process"],
+        /// Select the Windows ProcessContainer backend.
+        ProcessContainer => ["processcontainer", "appcontainer"],
+        /// Select the Linux LXC backend.
+        Lxc => ["lxc"],
+        /// Select the Linux Bubblewrap backend.
+        Bubblewrap => ["bubblewrap"],
+    }
 }
 
 /// Container lifecycle settings.
@@ -83,20 +81,19 @@ pub struct Fallback {
     pub allow_dacl_mutation: OptionalField<bool>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Clipboard access granted to the contained process.
-#[derive(Debug)]
-pub enum UiClipboard {
-    /// Deny clipboard reads and writes.
-    None => ["none"],
-    /// Allow clipboard reads.
-    Read => ["read"],
-    /// Allow clipboard writes.
-    Write => ["write"],
-    /// Allow clipboard reads and writes.
-    All => ["all"],
-}
+    /// Clipboard access granted to the contained process.
+    #[derive(Debug)]
+    pub enum UiClipboard {
+        /// Deny clipboard reads and writes.
+        None => ["none"],
+        /// Allow clipboard reads.
+        Read => ["read"],
+        /// Allow clipboard writes.
+        Write => ["write"],
+        /// Allow clipboard reads and writes.
+        All => ["all"],
+    }
 }
 
 /// Cross-platform user-interface policy.
@@ -114,20 +111,19 @@ pub struct Ui {
     pub injection: OptionalField<bool>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Isolation level for ProcessContainer desktop resources.
-#[derive(Debug)]
-pub enum ProcessContainerUiIsolation {
-    /// Isolate the complete container user-interface environment.
-    Container => ["container"],
-    /// Isolate desktop resources.
-    Desktop => ["desktop"],
-    /// Isolate user-interface handles.
-    Handles => ["handles"],
-    /// Isolate user-interface atoms.
-    Atoms => ["atoms"],
-}
+    /// Isolation level for ProcessContainer desktop resources.
+    #[derive(Debug)]
+    pub enum ProcessContainerUiIsolation {
+        /// Isolate the complete container user-interface environment.
+        Container => ["container"],
+        /// Isolate desktop resources.
+        Desktop => ["desktop"],
+        /// Isolate user-interface handles.
+        Handles => ["handles"],
+        /// Isolate user-interface atoms.
+        Atoms => ["atoms"],
+    }
 }
 
 /// ProcessContainer-specific user-interface policy.

@@ -5,30 +5,28 @@ use std::num::NonZeroU16;
 
 use super::primitives::{OptionalField, True};
 
-#[rustfmt::skip]
 string_enum! {
-/// The default outbound network policy.
-#[derive(Debug)]
-pub enum DefaultNetworkPolicy {
-    /// Allow outbound network access by default.
-    Allow => ["allow"],
-    /// Block outbound network access by default.
-    Block => ["block"],
-}
+    /// The default outbound network policy.
+    #[derive(Debug)]
+    pub enum DefaultNetworkPolicy {
+        /// Allow outbound network access by default.
+        Allow => ["allow"],
+        /// Block outbound network access by default.
+        Block => ["block"],
+    }
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// The mechanism used to enforce network policy.
-#[derive(Debug)]
-pub enum NetworkEnforcementMode {
-    /// Enforce policy through containment capabilities.
-    Capabilities => ["capabilities"],
-    /// Enforce policy through host firewall rules.
-    Firewall => ["firewall"],
-    /// Enforce policy through both capabilities and firewall rules.
-    Both => ["both"],
-}
+    /// The mechanism used to enforce network policy.
+    #[derive(Debug)]
+    pub enum NetworkEnforcementMode {
+        /// Enforce policy through containment capabilities.
+        Capabilities => ["capabilities"],
+        /// Enforce policy through host firewall rules.
+        Firewall => ["firewall"],
+        /// Enforce policy through both capabilities and firewall rules.
+        Both => ["both"],
+    }
 }
 
 /// One of the proxy configurations accepted by the `0.6.0-alpha` contract.

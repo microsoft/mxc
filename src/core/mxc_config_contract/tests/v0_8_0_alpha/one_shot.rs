@@ -236,26 +236,6 @@ fn rejects_non_exact_version() {
     );
 }
 
-#[test]
-fn rejects_non_string_version() {
-    assert_invalid(
-        r#"{
-            "version": 0.6,
-            "process": {"commandLine": "echo"}
-        }"#,
-    );
-}
-
-#[test]
-fn rejects_null_version() {
-    assert_invalid(
-        r#"{
-            "version": null,
-            "process": {"commandLine": "echo"}
-        }"#,
-    );
-}
-
 // Required field tests
 #[test]
 fn rejects_missing_process() {

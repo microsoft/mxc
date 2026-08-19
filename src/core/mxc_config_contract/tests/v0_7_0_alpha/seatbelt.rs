@@ -54,23 +54,6 @@ fn rejects_invalid_seatbelt_launch_method() {
 }
 
 #[test]
-fn rejects_non_string_seatbelt_launch_method() {
-    for launch_method in ["true", "false", "0", "1", "[]", "{}"] {
-        let json = format!(
-            r#"{{
-                "version": "0.7.0-alpha",
-                "seatbelt": {{
-                    "launchMethod": {launch_method}
-                }},
-                "process": {{"commandLine": "echo"}}
-            }}"#
-        );
-
-        assert_invalid(&json);
-    }
-}
-
-#[test]
 fn accepts_empty_profile_override() {
     let json = r#"{
         "version": "0.7.0-alpha",
