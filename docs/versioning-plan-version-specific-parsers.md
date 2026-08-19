@@ -2268,9 +2268,9 @@ Suggested commit boundary: one commit per consumer.
 ##### Phase 7.1.1: The CLI consumer
 
 Grounding facts, verified against the branch: there is exactly one production
-call site (`wxc/src/main.rs:954`); everything from line 1315 onward is
+call site (`wxc/src/main.rs:973` on the Phase 7 worktree); everything from line 1366 onward is
 `mod tests`. There is one post-parse mutation to remove
-(`apply_command_override`, `main.rs:250`). `lxc` and `mxc_darwin` are
+(`apply_command_override`, `main.rs:243`, mutating `script_code` at line 256). `lxc` and `mxc_darwin` are
 unaffected — they call `load_request`, where the flag is always false, and they
 never mutate `script_code`.
 
@@ -2499,10 +2499,12 @@ break MXC would be shipping without deciding to.
 
 ### Phase 7.1.1.0 tests
 
-**File:** `src/core/wxc/src/main.rs`, inside the existing `mod tests` (begins at
-line 1315), beside the current CLI command-override tests. That module is the
+**File:** `src/core/wxc/src/main.rs`, inside the existing `mod tests`, which
+begins at line 1366 on the Phase 7 worktree branch. Add them beside the current
+CLI command-override tests, which occupy lines 1527 to 1808. That module is the
 only place where the CLI parsing helpers and the loader are both visible, and it
-already provides `parse_cli`, `encoded_policy`, and `test_logger`.
+already provides `parse_cli` (1375), `encoded_policy` (1381), and
+`test_logger` (1385).
 
 **Write them through a helper, not against the current call shape.** Today the
 behavior is split across two calls that the refactor merges into one:
@@ -2532,19 +2534,40 @@ survive the refactor unchanged, because `command_override_from_cli` and
 
 **Gaps to close before refactoring.**
 
-| # | Test | Why it is missing today |
-| --- | --- | --- |
-| 1 | One-shot, policy has a command, CLI overrides it | Exists; move onto the helper |
-| 2 | One-shot, policy has **no** command, CLI supplies it, and the override log does **not** fire | The `if !script_code.is_empty()` branch in `apply_command_override` is unasserted |
-| 3 | One-shot, no CLI command, policy command survives untouched | No test pins the no-override path end to end |
-| 4 | State-aware **exec** accepts the override and the command reaches `script_code` | Only the rejection case is covered |
-| 5 | State-aware **non-exec** is rejected, asserting the error is envelope-routed | The existing test calls `command_override_context_for_state_aware` on a hand-built request; routing is decided in `main()` and is untested |
-| 6 | One case per `CommandLineContext`, asserting the final `script_code` rather than the intermediate string | Existing tests assert the intermediate conversion, not the resolved request |
-| 7 | Negative: empty CLI command, non-object `process`, malformed JSON | Empty command is unreachable today via `has_cli_command`; it becomes reachable in 7.1.1.3 |
+The shared helper:
+
+```rust
+fn resolve_with_cli(argv: &[&str], policy: &str) -> (Result<ExecutionRequest, ParseError>, String);
+```
+
+| # | Proposed test name | What it pins | Status |
+| --- | --- | --- | --- |
+| 1 | `cli_command_overrides_policy_command_line_in_resolved_request` | Override replaces a policy command and logs the override line | Exists at 1676; move onto the helper |
+| 2 | `cli_command_fills_absent_policy_command_line_without_override_log` | Override supplies a command the policy omits, and the log does **not** fire | New. The `if !script_code.is_empty()` branch in `apply_command_override` is unasserted |
+| 3 | `policy_command_line_survives_without_cli_command` | The no-override path leaves `script_code` untouched | New. Nothing pins it end to end |
+| 4 | `state_aware_exec_cli_command_reaches_script_code` | Exec accepts an override and the command lands in the request | New. Only the rejection case is covered |
+| 5 | `state_aware_non_exec_cli_command_error_routes_to_envelope` | Non-exec rejection **and** its envelope routing | New, highest value. The existing test at 1808 calls `command_override_context_for_state_aware` on a hand-built request; routing is decided in `main()` and is untestable there |
+| 6a | `cli_command_quoting_for_windows_create_process_in_resolved_request` | Final `script_code` under `WindowsCreateProcess` | New. The test at 1668 asserts the intermediate conversion |
+| 6b | `cli_command_quoting_for_command_processor_in_resolved_request` | Final `script_code` under `WindowsCommandProcessor` | New; complements 1780 |
+| 6c | `cli_command_quoting_for_posix_shell_in_resolved_request` | Final `script_code` under `PosixShell` | New; complements 1798 |
+| 7a | `empty_cli_command_is_an_entry_point_error` | An empty converted command fails at the entry point | New. Unreachable today through `has_cli_command`; 7.1.1.3 makes it reachable |
+| 7b | `non_object_process_section_is_rejected` | A non-object `process` errors rather than panicking | New; the splice must not assume an object |
+| 7c | `malformed_policy_json_is_rejected_before_splicing` | Decode failure precedes any splice attempt | New |
+
+Tests 6a through 6c are deliberately separate from the three existing
+context tests: those assert the string `command_override_from_cli` produces,
+while these assert what reaches `script_code` after the whole pipeline. The
+existing ones survive the refactor untouched; these are what prove the splice
+preserves quoting.
 
 Test 5 is the highest value of these. Error routing is the behavior most likely
 to regress silently, because 7.1.1.3 moves that decision from `main()` into the
 loader, and `main()` cannot be called from a test.
 
-The `allow_missing_command` tests already in `config_parser.rs` characterize the
-loader half and are replaced, not preserved, by 7.1.1.6.
+The three `allow_missing_command` tests in `config_parser.rs` (lines 1604,
+1623, and 1636) characterize the loader half and are replaced, not preserved, by
+7.1.1.6.
+
+Line references in this section are against the Phase 7 worktree branch. That
+branch predates the rebased #949 tip, so the numbers shift once it is rebased,
+though the override machinery itself is identical in both.
