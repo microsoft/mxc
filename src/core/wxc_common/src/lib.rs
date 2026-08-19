@@ -26,6 +26,9 @@ pub mod script_runner;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
+// Not yet reachable from production dispatch; see Gudge.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod state_aware_wire;
 pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
