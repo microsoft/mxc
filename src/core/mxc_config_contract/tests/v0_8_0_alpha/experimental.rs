@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[path = "experimental/apple_container.rs"]
+mod apple_container;
 #[path = "experimental/root.rs"]
 mod root;
 #[path = "experimental/test_and_telemetry.rs"]

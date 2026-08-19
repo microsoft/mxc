@@ -48,6 +48,10 @@ pub enum ContainmentBackend {
     /// create namespace-isolated processes without root privileges.
     /// Selected on the wire as `"bubblewrap"`.
     Bubblewrap,
+    /// Apple Container — Linux OCI workload in a Virtualization.framework VM.
+    /// Experimental and available only on Apple silicon macOS hosts.
+    #[serde(rename = "apple_container")]
+    AppleContainer,
 }
 
 impl ContainmentBackend {
@@ -64,6 +68,7 @@ impl ContainmentBackend {
             ContainmentBackend::IsolationSession => "isolation_session",
             ContainmentBackend::Seatbelt => "seatbelt",
             ContainmentBackend::Bubblewrap => "bubblewrap",
+            ContainmentBackend::AppleContainer => "apple_container",
         }
     }
 
@@ -76,6 +81,7 @@ impl ContainmentBackend {
             ContainmentBackend::Lxc => Some("lxc"),
             ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
             ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::AppleContainer => Some("experimental.apple_container"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
@@ -130,6 +136,7 @@ impl From<crate::wire::Containment> for ContainmentBackend {
             W::Seatbelt => Self::Seatbelt,
             W::IsolationSession => Self::IsolationSession,
             W::Bubblewrap => Self::Bubblewrap,
+            W::AppleContainer => Self::AppleContainer,
         }
     }
 }
@@ -770,6 +777,18 @@ pub struct WslcConfig {
     pub port_mappings: Vec<PortMapping>,
 }
 
+/// Configuration for the experimental Apple Container backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppleContainerConfig {
+    /// OCI image reference. The image must provide `/bin/sh`.
+    pub image: String,
+    /// Requested virtual CPU count. `None` lets Apple Container choose.
+    pub cpu_count: Option<u32>,
+    /// Requested memory limit in megabytes. `None` lets Apple Container choose.
+    pub memory_mb: Option<u64>,
+}
+
 impl Default for WslcConfig {
     fn default() -> Self {
         Self {
@@ -831,6 +850,8 @@ pub struct ExperimentalConfig {
     pub windows_sandbox: Option<WindowsSandboxConfig>,
     /// WSL Container (WSLC SDK) backend (experimental).
     pub wslc: Option<WslcConfig>,
+    /// Apple Container backend (experimental, macOS).
+    pub apple_container: Option<AppleContainerConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }

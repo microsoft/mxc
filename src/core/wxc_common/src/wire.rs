@@ -158,6 +158,8 @@ pub enum Containment {
     IsolationSession,
     /// Unprivileged Linux bubblewrap sandbox.
     Bubblewrap,
+    /// Apple Container VM backend (experimental, macOS).
+    AppleContainer,
 }
 
 /// Process execution settings.
@@ -473,6 +475,8 @@ pub struct Experimental {
     pub windows_sandbox: Option<WindowsSandbox>,
     /// WSL container backend config.
     pub wslc: Option<Wslc>,
+    /// Apple Container backend config (macOS).
+    pub apple_container: Option<AppleContainer>,
     /// IsolationSession backend config (Windows).
     pub isolation_session: Option<IsolationSession>,
     /// Seatbelt backend config (pre-promotion alias).
@@ -542,6 +546,21 @@ pub struct Wslc {
     /// for the state-aware lifecycle; the flat sibling fields above remain the
     /// one-shot surface. Absent on one-shot configs and non-provision phases.
     pub provision: Option<WslcProvisionPhase>,
+}
+
+/// Apple Container backend config.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct AppleContainer {
+    /// OCI image reference. The image must provide `/bin/sh`.
+    pub image: String,
+    /// Requested virtual CPU count.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1)))]
+    pub cpu_count: Option<u32>,
+    /// Requested memory limit in megabytes.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1)))]
+    pub memory_mb: Option<u64>,
 }
 
 /// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested

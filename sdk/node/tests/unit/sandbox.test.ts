@@ -3,7 +3,13 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { buildSandboxPayload, createConfigFromPolicy, spawnSandbox, spawnSandboxFromConfig } from '../../src/sandbox.js';
+import {
+  buildSandboxPayload,
+  createAppleContainerConfig,
+  createConfigFromPolicy,
+  spawnSandbox,
+  spawnSandboxFromConfig,
+} from '../../src/sandbox.js';
 import { resolveExecutableAndArgs } from '../../src/helper.js';
 import { ContainerConfig, SandboxPolicy, SandboxingMethod } from '../../src/types.js';
 import { platformSkip } from './test-helpers.js';
@@ -787,6 +793,55 @@ describe('createConfigFromPolicy', () => {
         restore();
       }
     });
+
+    it('should build an Apple Container 0.8 config without a Seatbelt section', () => {
+      mockDarwin();
+      try {
+        const config = createAppleContainerConfig(
+          { version: '0.8.0-alpha' },
+          {
+            image: 'docker.io/library/alpine:3.23',
+            cpuCount: 2,
+            memoryMb: 1024,
+          },
+          'apple-test',
+        );
+
+        assert.strictEqual(config.containment, 'apple_container');
+        assert.strictEqual(config.containerId, 'apple-test');
+        assert.strictEqual(config.seatbelt, undefined);
+        assert.deepStrictEqual(config.experimental?.apple_container, {
+          image: 'docker.io/library/alpine:3.23',
+          cpuCount: 2,
+          memoryMb: 1024,
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should reject invalid Apple Container builder inputs', () => {
+      mockDarwin();
+      try {
+        assert.throws(
+          () => createAppleContainerConfig({ version: '0.7.0-alpha' }, { image: 'alpine' }),
+          /requires policy version/,
+        );
+        assert.throws(
+          () => createAppleContainerConfig({ version: '0.8.0-alpha' }, { image: ' ' }),
+          /image is required/,
+        );
+        assert.throws(
+          () => createAppleContainerConfig(
+            { version: '0.8.0-alpha' },
+            { image: 'alpine', cpuCount: 0 },
+          ),
+          /cpuCount/,
+        );
+      } finally {
+        restore();
+      }
+    });
   });
 
   describe('network validation', () => {
@@ -1072,6 +1127,13 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
   it('should still require experimental mode for experimental backends like wslc', () => {
     assert.throws(
       () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
+      { message: /experimental mode/ },
+    );
+  });
+
+  it('should require experimental mode for apple_container', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('apple_container'), { executablePath: fakeExe }),
       { message: /experimental mode/ },
     );
   });

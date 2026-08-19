@@ -573,6 +573,37 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
+    /// Apple Container backend, configured by [`AppleContainerSection`].
+    ///
+    /// **Experimental** — the request must have experimental features enabled.
+    /// The initial config-only implementation rejects execution until the
+    /// Apple Container management and runtime layers are added.
+    AppleContainer(AppleContainerSection),
+}
+
+/// Apple Container settings, mirroring `experimental.apple_container`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppleContainerSection {
+    /// OCI image reference. The image must provide `/bin/sh`.
+    pub image: String,
+    /// Requested virtual CPU count. `None` lets Apple Container choose.
+    pub cpu_count: Option<u32>,
+    /// Requested memory limit in megabytes. `None` lets Apple Container choose.
+    pub memory_mb: Option<u64>,
+}
+
+impl AppleContainerSection {
+    fn wire(&self) -> serde_json::Value {
+        use serde_json::json;
+        let mut config = json!({ "image": self.image });
+        if let Some(cpu_count) = self.cpu_count {
+            config["cpuCount"] = json!(cpu_count);
+        }
+        if let Some(memory_mb) = self.memory_mb {
+            config["memoryMb"] = json!(memory_mb);
+        }
+        config
+    }
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -775,8 +806,9 @@ impl SandboxRequest {
     /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
     /// executor's `--experimental` flag.
     ///
-    /// Experimental backends (today: [`Containment::Wslc`]) refuse to spawn
-    /// unless this is set, so the gate stays fail-closed.
+    /// Experimental backends (today: [`Containment::Wslc`] and
+    /// [`Containment::AppleContainer`]) refuse to spawn unless this is set, so
+    /// the gate stays fail-closed.
     pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
         self.inner.experimental_enabled = enabled;
         self
@@ -906,7 +938,10 @@ fn build_wire_config(
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
     let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
-        || matches!(containment, Containment::Wslc(_));
+        || matches!(
+            containment,
+            Containment::Wslc(_) | Containment::AppleContainer(_)
+        );
 
     if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
@@ -935,6 +970,9 @@ fn build_wire_config(
     match containment {
         Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
+        Containment::AppleContainer(apple_container) => {
+            apply_apple_container_backend(&mut config, apple_container)
+        }
     }
     Ok(config)
 }
@@ -1048,6 +1086,15 @@ fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
     config["experimental"] = json!({ "wslc": wslc.wire() });
 }
 
+fn apply_apple_container_backend(
+    config: &mut serde_json::Value,
+    apple_container: &AppleContainerSection,
+) {
+    use serde_json::json;
+    config["containment"] = json!("apple_container");
+    config["experimental"] = json!({ "apple_container": apple_container.wire() });
+}
+
 /// Promote network enforcement to `firewall` when host rules are present and
 /// no cooperative proxy is configured — the Linux counterpart of the SDK's
 /// `applyLinuxNetworkPolicy`.
@@ -1111,6 +1158,37 @@ mod tests {
             config.get("ui").is_some(),
             "wire config dropped a `ui` block the caller supplied: {config}"
         );
+    }
+
+    #[test]
+    fn apple_container_builder_maps_required_and_optional_config() {
+        let policy: super::SandboxPolicy =
+            serde_json::from_str(r#"{ "version": "0.8.0-alpha" }"#).expect("minimal policy parses");
+        let section = super::AppleContainerSection {
+            image: "docker.io/library/alpine:3.23".to_string(),
+            cpu_count: Some(2),
+            memory_mb: Some(1024),
+        };
+
+        let request = super::build_request_with_containment(
+            &policy,
+            &super::Containment::AppleContainer(section),
+            Some("apple-test"),
+        )
+        .expect("Apple Container config builds");
+
+        assert_eq!(
+            request.inner.containment,
+            wxc_common::models::ContainmentBackend::AppleContainer
+        );
+        let config = request
+            .inner
+            .experimental
+            .apple_container
+            .expect("Apple Container config should be present");
+        assert_eq!(config.image, "docker.io/library/alpine:3.23");
+        assert_eq!(config.cpu_count, Some(2));
+        assert_eq!(config.memory_mb, Some(1024));
     }
 
     #[test]

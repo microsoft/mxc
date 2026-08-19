@@ -16,6 +16,25 @@
  *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
  */
 /**
+ * Apple Container backend config.
+ */
+export interface AppleContainer {
+  /**
+   * Requested virtual CPU count.
+   */
+  cpuCount?: number | null;
+  /**
+   * OCI image reference. The image must provide `/bin/sh`.
+   */
+  image: string;
+  /**
+   * Requested memory limit in megabytes.
+   */
+  memoryMb?: number | null;
+  [k: string]: unknown;
+}
+
+/**
  * BaseProcessContainer UI isolation settings.
  */
 export interface BaseProcessUi {
@@ -68,12 +87,16 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
 /**
  * Containment backend (abstract intent or concrete backend).
  */
-export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
+export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap" | "apple_container";
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
  */
 export interface Experimental {
+  /**
+   * Apple Container backend config (macOS).
+   */
+  apple_container?: AppleContainer | null;
   /**
    * IsolationSession backend config (Windows).
    */

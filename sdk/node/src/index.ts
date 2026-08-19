@@ -38,6 +38,7 @@ export {
   ContainmentTypes,
   ContainmentBackend,
   ExperimentalBackends,
+  AppleContainerConfig,
   ContainerConfig,
   PlatformSupport,
   UiCapabilitySupport,
@@ -51,6 +52,7 @@ export {
 // Export sandbox spawning functions
 export {
   createConfigFromPolicy,
+  createAppleContainerConfig,
   spawnSandbox,
   spawnSandboxAsync,
   spawnSandboxFromConfig,

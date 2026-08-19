@@ -5,6 +5,35 @@
   "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
   "additionalProperties": false,
   "definitions": {
+    "AppleContainer": {
+      "description": "Apple Container backend config.",
+      "properties": {
+        "cpuCount": {
+          "description": "Requested virtual CPU count.",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "image": {
+          "description": "OCI image reference. The image must provide `/bin/sh`.",
+          "type": "string"
+        },
+        "memoryMb": {
+          "description": "Requested memory limit in megabytes.",
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
     "BaseProcessUi": {
       "additionalProperties": false,
       "description": "BaseProcessContainer UI isolation settings.",
@@ -184,12 +213,30 @@
             "bubblewrap"
           ],
           "type": "string"
+        },
+        {
+          "description": "Apple Container VM backend (experimental, macOS).",
+          "enum": [
+            "apple_container"
+          ],
+          "type": "string"
         }
       ]
     },
     "Experimental": {
       "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
       "properties": {
+        "apple_container": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppleContainer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Apple Container backend config (macOS)."
+        },
         "isolation_session": {
           "anyOf": [
             {

@@ -70,6 +70,16 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
+        ContainmentBackend::AppleContainer => {
+            if !request.experimental_enabled {
+                return Err(MxcError::malformed_request(
+                    "Apple Container is an experimental feature. Use --experimental flag.",
+                ));
+            }
+            Err(MxcError::unsupported_containment(
+                "Apple Container configuration is recognized, but streaming execution is not implemented",
+            ))
+        }
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
@@ -293,6 +303,26 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
+    }
+
+    #[test]
+    fn streaming_apple_container_is_gated_then_unimplemented() {
+        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        request.inner.containment = ContainmentBackend::AppleContainer;
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("Apple Container must require experimental opt-in"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+
+        request.inner.experimental_enabled = true;
+        let error = match spawn_runner(&request.inner, &mut logger) {
+            Ok(_) => panic!("Apple Container streaming must remain unimplemented"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
     }
 
     #[test]

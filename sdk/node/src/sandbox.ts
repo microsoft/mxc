@@ -6,7 +6,13 @@ import * as os from 'os';
 import { spawn, ChildProcess } from 'child_process';
 import { randomBytes } from "crypto";
 import { parse as semverParse } from 'semver';
-import { SandboxPolicy, ContainerConfig, ContainmentType, ContainmentBackend } from './types.js';
+import {
+    AppleContainerConfig,
+    SandboxPolicy,
+    ContainerConfig,
+    ContainmentType,
+    ContainmentBackend,
+} from './types.js';
 import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.js';
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
@@ -360,6 +366,42 @@ export function createConfigFromPolicy(
     }
 
     throw new Error(`Containment type '${containment}' is not yet supported.`);
+}
+
+/**
+ * Creates an experimental Apple Container config for macOS.
+ */
+export function createAppleContainerConfig(
+    policy: SandboxPolicy,
+    options: AppleContainerConfig,
+    containerName?: string,
+): ContainerConfig {
+    if (os.platform() !== 'darwin') {
+        throw new Error('The apple_container backend is only supported on macOS.');
+    }
+    if (policy.version !== SUPPORTED_VERSION) {
+        throw new Error(`Apple Container requires policy version '${SUPPORTED_VERSION}'.`);
+    }
+    if (!options.image.trim()) {
+        throw new Error('Apple Container image is required.');
+    }
+    if (options.cpuCount !== undefined &&
+        (!Number.isInteger(options.cpuCount) || options.cpuCount <= 0)) {
+        throw new Error('Apple Container cpuCount must be a positive integer.');
+    }
+    if (options.memoryMb !== undefined &&
+        (!Number.isSafeInteger(options.memoryMb) || options.memoryMb <= 0)) {
+        throw new Error('Apple Container memoryMb must be a positive integer.');
+    }
+
+    const config = createConfigFromPolicy(policy, 'process', containerName);
+    delete config.seatbelt;
+    config.containment = 'apple_container';
+    config.experimental = {
+        ...config.experimental,
+        apple_container: { ...options },
+    };
+    return config;
 }
 
 /**

@@ -53,6 +53,7 @@ import type {
   ProcessContainerConfig,
   BaseProcessUiConfig,
   WslcConfig,
+  AppleContainerConfig,
   PortMapping as PublicPortMapping,
   LxcConfig,
   SeatbeltConfig,
@@ -71,6 +72,7 @@ import type {
   ProcessContainer as WireProcessContainer,
   BaseProcessUi as WireBaseProcessUi,
   Wslc as WireWslc,
+  AppleContainer as WireAppleContainer,
   PortMapping as WirePortMapping,
   Lxc as WireLxc,
   Seatbelt as WireSeatbelt,
@@ -133,6 +135,7 @@ type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
 type _WslcVals = AssertTrue<Assignable<WslcConfig, WireWslc>>;
+type _AppleContainerVals = AssertTrue<Assignable<AppleContainerConfig, WireAppleContainer>>;
 type _PortMappingVals = AssertTrue<Assignable<PublicPortMapping, WirePortMapping>>;
 type _SeatbeltVals = AssertTrue<Assignable<SeatbeltConfig, WireSeatbelt>>;
 type _LxcVals = AssertTrue<Assignable<StripIndex<LxcConfig>, WireLxc>>;
@@ -153,6 +156,7 @@ type _LifecycleKeys = AssertTrue<Equivalent<OnlyInPublic<LifecycleConfig, WireLi
 type _UiKeys = AssertTrue<Equivalent<OnlyInPublic<UiConfig, WireUi>, never>>;
 type _BaseProcessUiKeys = AssertTrue<Equivalent<OnlyInPublic<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 type _WslcKeys = AssertTrue<Equivalent<OnlyInPublic<WslcConfig, WireWslc>, never>>;
+type _AppleContainerKeys = AssertTrue<Equivalent<OnlyInPublic<AppleContainerConfig, WireAppleContainer>, never>>;
 type _PortMappingKeys = AssertTrue<Equivalent<OnlyInPublic<PublicPortMapping, WirePortMapping>, never>>;
 type _SeatbeltKeys = AssertTrue<Equivalent<OnlyInPublic<SeatbeltConfig, WireSeatbelt>, never>>;
 
@@ -199,6 +203,7 @@ type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConf
 // one-shot public `WslcConfig` intentionally omits it (state-aware config is
 // surfaced through `state-aware-types.ts`, not the one-shot policy surface).
 type _WslcWireKeys = AssertTrue<Equivalent<OnlyInWire<WslcConfig, WireWslc>, 'provision'>>;
+type _AppleContainerWireKeys = AssertTrue<Equivalent<OnlyInWire<AppleContainerConfig, WireAppleContainer>, never>>;
 type _PortMappingWireKeys = AssertTrue<Equivalent<OnlyInWire<PublicPortMapping, WirePortMapping>, never>>;
 type _LxcWireKeys = AssertTrue<Equivalent<OnlyInWire<LxcConfig, WireLxc>, never>>;
 
@@ -229,14 +234,14 @@ export type WireConformanceAssertions = [
   _Clipboard, _Containment,
   _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
-  _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
+  _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _AppleContainerVals, _PortMappingVals,
   _SeatbeltVals, _LxcVals,
   _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
-  _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _PortMappingKeys,
+  _ProcessContainerKeys, _BaseProcessUiKeys, _WslcKeys, _AppleContainerKeys, _PortMappingKeys,
   _SeatbeltKeys, _LxcKeys,
   _RootVals, _RootKeys,
   _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
-  _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _PortMappingWireKeys,
+  _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _AppleContainerWireKeys, _PortMappingWireKeys,
   _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
 ];
 
