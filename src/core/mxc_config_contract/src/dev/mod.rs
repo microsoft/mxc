@@ -12,9 +12,17 @@
 // only string values. This macro generates a string-only deserializer while
 // supporting explicit compatibility aliases.
 macro_rules! string_enum {
+    (@schema_name $name:ident, $schema_name:literal) => {
+        $schema_name.to_string()
+    };
+    (@schema_name $name:ident) => {
+        stringify!($name).to_string()
+    };
     (
         $(#[$enum_meta:meta])*
-        $vis:vis enum $name:ident {
+        $vis:vis enum $name:ident
+        $(, schema_name = $schema_name:literal)?
+        {
             $(
                 $(#[$variant_meta:meta])*
                 $variant:ident => [
@@ -35,7 +43,7 @@ macro_rules! string_enum {
         #[cfg(feature = "schema-gen")]
         impl schemars::JsonSchema for $name {
             fn schema_name() -> String {
-                stringify!($name).to_string()
+                string_enum!(@schema_name $name $(, $schema_name)?)
             }
 
             fn json_schema(
@@ -216,6 +224,8 @@ mod network;
 mod one_shot;
 mod primitives;
 mod request;
+#[cfg(feature = "schema-gen")]
+mod schema;
 mod stable;
 /// The development `0.8.0-alpha` state-aware configuration contract.
 mod state_aware;
@@ -228,6 +238,8 @@ pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, Network
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, OptionalField, True};
 pub use request::{parse_request, Request, RequestParseError};
+#[cfg(feature = "schema-gen")]
+pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerUi,

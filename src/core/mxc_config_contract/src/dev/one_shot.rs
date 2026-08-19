@@ -12,7 +12,7 @@ use crate::dev::Version;
 string_enum! {
     /// Containment selections available in `0.8.0-alpha`.
     #[derive(Debug)]
-    pub enum Containment {
+    pub enum Containment, schema_name = "OneShotContainment" {
         // Stable-candidate values.
         /// Select the host's native process-containment backend.
         Process => ["process"],
@@ -44,6 +44,7 @@ string_enum! {
 /// A complete one-shot `0.8.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     /// Optional JSON Schema reference for editor validation.
