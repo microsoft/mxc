@@ -112,6 +112,21 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
+        // Schema 0.8+ fails closed on a network element Bubblewrap cannot
+        // honor, rather than running more permissive than requested. Pre-0.8
+        // keeps the warning, so existing configs are unaffected. Sits with the
+        // input checks so a host without bwrap is still told what is wrong.
+        //
+        // The parser rejects both of these too, but only sees JSON configs; a
+        // Rust caller can build an `ExecutionRequest` and reach the runner
+        // directly, so the checks are repeated here rather than assumed.
+        if let Some(reason) = bwrap_command::unenforced_host_rules_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
+        if let Some(reason) = bwrap_command::local_network_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
+
         // Proxy-only networking derives the sandbox-visible endpoint from the
         // configured one and then opens exactly that address in the egress
         // chain. That step can reject an endpoint outright (an IPv6 loopback
@@ -369,7 +384,7 @@ impl BubblewrapScriptRunner {
         if let Some(warning) =
             bwrap_command::local_network_diagnostic_for_mode(request, network_mode)
         {
-            let _ = writeln!(logger, "{}", warning);
+            let _ = writeln!(logger, "WARNING: {}", warning);
         }
         let mut args = bwrap_command::build_args_classified_with_mode(
             request,
@@ -887,7 +902,7 @@ fn resolve_through_symlinks(path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ProxyAddress, ProxyConfig};
+    use wxc_common::models::{NetworkEnforcementMode, ProxyAddress, ProxyConfig};
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -1214,6 +1229,158 @@ mod tests {
             !message.contains("deniedPaths"),
             "legacy proxy mode pins nothing, so it must not inherit the \
              private-namespace rejection: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_an_unhonorable_local_network_request_at_0_8() {
+        // defaultPolicy='allow' shares the host netns, so allowLocalNetwork
+        // =false cannot be honored. Runs ahead of the bwrap probe, so this
+        // holds on hosts without bwrap installed. Host lists are no longer a
+        // vehicle for this: at 0.8 they resolve to a private namespace under
+        // either enforcement mechanism.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("allowLocalNetwork=false"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_the_same_request_before_0_8() {
+        // Pre-0.8 warns at run time instead of failing, so existing callers are
+        // unaffected. Tolerant of a host without bwrap: it only rules out the
+        // local-network rejection.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message.contains("allowLocalNetwork"),
+                "0.7 must not be rejected for allowLocalNetwork: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_firewall_enforced_host_rules_at_0_8() {
+        // Firewall mode is the enforcement mechanism at 0.8, so the
+        // unenforced-host-rules gate must not fire for it.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["10.0.2.2/32".into()];
+        req.policy.allow_local_network = true;
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message
+                    .contains("require an enforcement mechanism"),
+                "firewall mode enforces the lists: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_a_firewall_mode_request_before_0_8() {
+        // GHCP consumes Bubblewrap on 0.6/0.7; the gate must not reach them.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message.contains("enforcementMode"),
+                "0.7 must not be rejected for enforcementMode: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_host_rules_no_mechanism_will_enforce_at_0_8() {
+        // The gap this closes: host lists suppress --unshare-net, but under
+        // 'capabilities' with no proxy nothing applies them, so a default-deny
+        // policy ran with fully open egress on the host's namespace.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message
+                .contains("require an enforcement mechanism"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_host_rules_when_a_proxy_enforces_them_at_0_8() {
+        // The proxy is the mechanism, so the same lists are fine with one.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.blocked_hosts = vec!["evil.example.com".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message
+                    .contains("require an enforcement mechanism"),
+                "a proxy enforces the lists: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_host_rules_without_a_mechanism_before_0_8() {
+        // GHCP consumes Bubblewrap on 0.6/0.7 with exactly this shape.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message
+                    .contains("require an enforcement mechanism"),
+                "0.7 must not be rejected: {}",
+                err.error_message
+            );
+        }
+    }
+
+    /// A malformed non-empty version cannot come from the parser, so it is a
+    /// hand-built request; the typo must not buy pre-0.8 leniency.
+    #[test]
+    fn validate_rejects_unenforced_host_rules_with_a_malformed_version() {
+        let mut req = base_request();
+        req.schema_version = "0.8".into();
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message
+                .contains("require an enforcement mechanism"),
+            "unexpected error: {}",
+            err.error_message
         );
     }
 

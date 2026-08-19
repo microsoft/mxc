@@ -338,6 +338,39 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
+/// Whether a schema version opts into the 0.8 network contract, under which a
+/// network element the backend cannot enforce is a hard error rather than a
+/// warning.
+///
+/// An absent version stays lenient: `validate_schema_version` accepts it, and
+/// programmatic callers who never set one are the pre-0.8 population. A
+/// malformed non-empty version is treated as strict instead of lenient --
+/// `validate_schema_version` would reject it outright, so the only way one
+/// reaches here is a hand-built `ExecutionRequest` that skipped the parser, and
+/// a typo like `"0.8"` must not silently buy pre-0.8 leniency.
+pub fn schema_enforces_network_strictly(version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    semver::Version::parse(version)
+        .map(|parsed| (parsed.major, parsed.minor) >= (0, 8))
+        .unwrap_or(true)
+}
+
+/// Rejection text for host lists no mechanism will enforce, on schema 0.8+.
+///
+/// Shared with the Bubblewrap runner's validate-time twin so the CLI and
+/// programmatic paths cannot drift apart in wording.
+pub const BWRAP_UNENFORCED_HOST_RULES: &str =
+    "Bubblewrap: network.allowedHosts and network.blockedHosts require an enforcement \
+     mechanism. With enforcementMode='capabilities' (the default) and no network.proxy, \
+     nothing applies them: the host lists suppress the --unshare-net full block, so the \
+     sandbox shares the host network namespace with no filtering at all. Set \
+     network.enforcementMode to 'firewall' to filter by address inside the sandbox's own \
+     network namespace, set network.proxy to enforce host filtering at the proxy layer, or \
+     drop the host lists to get the namespace-level block that defaultPolicy='block' applies \
+     on its own.";
+
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str) -> Result<(), WxcError> {
@@ -1091,7 +1124,9 @@ fn convert_wire_config(
         // The cooperative env-var proxy enforces hosts at the proxy layer,
         // which is mutually exclusive with iptables-based enforcement: they are
         // two different answers to the same question, and honoring both would
-        // mean honoring neither predictably. Rejected at every schema version.
+        // mean honoring neither predictably. Rejected at every schema version,
+        // unlike the guard below. Sequenced first so a config that sets both
+        // gets the specific conflict rather than the 0.8 gate's advice.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && matches!(
@@ -1103,6 +1138,24 @@ fn convert_wire_config(
                        network.enforcementMode='firewall' or 'both'. The cooperative \
                        env-var proxy enforces hosts at the proxy layer, and iptables-based \
                        enforcement filters by address; the two are mutually exclusive.";
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Host lists suppress `--unshare-net` (the runner expects iptables to
+        // filter instead), but under 'capabilities' with no proxy nothing does:
+        // the sandbox shares the host namespace unfiltered. A default-deny
+        // policy then yields fully open egress, so 0.8+ fails closed.
+        if containment == ContainmentBackend::Bubblewrap
+            && schema_enforces_network_strictly(&schema_version)
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Capabilities
+            )
+            && !policy.network_proxy.is_enabled()
+            && (!policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty())
+        {
+            let msg = BWRAP_UNENFORCED_HOST_RULES;
+            logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -4093,6 +4146,118 @@ mod tests {
     }
 
     #[test]
+    fn bubblewrap_firewall_enforcement_is_accepted_at_0_8() {
+        // 0.8 programs the rules into the sandbox's own network namespace, so
+        // firewall mode is a real enforcement mechanism and must parse.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["10.0.2.2/32"],
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let request = load_request(&encoded, &mut logger, true).expect("firewall mode enforces");
+        assert_eq!(
+            request.policy.allowed_hosts,
+            vec!["10.0.2.2/32".to_string()]
+        );
+    }
+
+    #[test]
+    fn bubblewrap_firewall_enforcement_is_accepted_before_0_8() {
+        // Pre-0.8 keeps its current behavior; the fail-closed gate is 0.8+ only
+        // so existing 0.6/0.7 callers are unaffected.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("0.7 firewall configs must keep parsing");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
+    }
+
+    #[test]
+    fn bubblewrap_host_rules_without_a_mechanism_are_rejected_at_0_8() {
+        // Host lists suppress --unshare-net, but 'capabilities' (the default)
+        // with no proxy applies nothing: this ran with fully open egress.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("require an enforcement mechanism"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn bubblewrap_host_rules_with_a_proxy_are_accepted_at_0_8() {
+        // The proxy is the mechanism, so the same lists are honoured. Only the
+        // built-in test proxy pairs with host lists -- an external one is
+        // rejected earlier, since MXC does not forward host policy to it.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "proxy": {"builtinTestServer": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        load_request(&encoded, &mut logger, true).expect("a proxy enforces the host lists at 0.8");
+    }
+
+    #[test]
+    fn bubblewrap_host_rules_without_a_mechanism_are_accepted_before_0_8() {
+        // GHCP consumes Bubblewrap on 0.6/0.7 with exactly this shape.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("0.7 host-list configs must keep parsing");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
+    }
+
+    #[test]
     fn proxy_remote_url_with_seatbelt_and_default_block_is_rejected() {
         // A remote (non-loopback) proxy under default-deny would degrade the
         // Seatbelt profile to allow-all outbound — reject it at validation.
@@ -5699,6 +5864,49 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.schema_version, "");
+    }
+
+    // The predicate gates whether an unenforceable network element is a hard
+    // error or a warning, so a regression in it changes security behavior
+    // silently. Pinned directly rather than only through the call sites, which
+    // planned work is expected to replace.
+    #[test]
+    fn strict_network_enforcement_starts_at_0_8() {
+        assert!(!schema_enforces_network_strictly("0.7.9"));
+        assert!(!schema_enforces_network_strictly("0.7.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0"));
+        assert!(schema_enforces_network_strictly("0.9.0"));
+    }
+
+    #[test]
+    fn strict_network_enforcement_holds_past_1_0() {
+        // A tuple compare, so a major bump must not wrap back to lenient.
+        assert!(schema_enforces_network_strictly("1.0.0"));
+        assert!(schema_enforces_network_strictly("2.3.4"));
+    }
+
+    #[test]
+    fn a_pre_release_label_does_not_lower_the_version() {
+        // semver orders 0.8.0-alpha *below* 0.8.0; comparing (major, minor)
+        // sidesteps that, which is the whole reason for the tuple.
+        assert!(
+            semver::Version::parse("0.8.0-alpha").unwrap()
+                < semver::Version::parse("0.8.0").unwrap()
+        );
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+    }
+
+    #[test]
+    fn an_absent_version_is_lenient_but_a_malformed_one_is_not() {
+        // Absent is the pre-0.8 programmatic caller: `validate_schema_version`
+        // accepts it, so it keeps its behavior. Malformed cannot come from the
+        // parser at all (it rejects these), so it is a hand-built request whose
+        // typo must not buy leniency.
+        assert!(!schema_enforces_network_strictly(""));
+        assert!(schema_enforces_network_strictly("x"));
+        assert!(schema_enforces_network_strictly("0.8"));
+        assert!(schema_enforces_network_strictly("0.7"));
     }
 
     #[test]

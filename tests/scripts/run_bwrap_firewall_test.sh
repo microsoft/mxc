@@ -189,6 +189,30 @@ if ! grep -qF "not an IP address or CIDR" <<<"$NAME_OUT"; then
 fi
 echo "PASS: hostname rule address rejected"
 
+# Host lists with no mechanism behind them: 'capabilities' does not filter and
+# there is no proxy, so the lists would suppress the namespace-level block and
+# leave the sandbox on the host namespace unfiltered. Must fail closed.
+echo "Running Bubblewrap firewall test: unenforced host rules rejected..."
+UNENF_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_hostrules_unenforced_rejected.json" 2>&1) \
+    && UNENF_RC=0 || UNENF_RC=$?
+if [ "$UNENF_RC" = 0 ]; then
+    echo "$UNENF_OUT"
+    echo "FAIL: unenforced host rules (accepted a policy nothing applies)"
+    exit 1
+fi
+if grep -q SHOULD_NOT_RUN <<<"$UNENF_OUT"; then
+    echo "$UNENF_OUT"
+    echo "FAIL: unenforced host rules (workload ran despite the rejection)"
+    exit 1
+fi
+if ! grep -qF "require an enforcement mechanism" <<<"$UNENF_OUT"; then
+    echo "$UNENF_OUT"
+    echo "FAIL: unenforced host rules (rejection did not explain the contract)"
+    exit 1
+fi
+echo "PASS: unenforced host rules rejected"
+
 # Schema <= 0.7 must be untouched. Those callers pass hostnames by construction
 # and run today against a host chain that filters nothing; the 0.8 work must
 # neither reject them nor change what they get. This asserts the compatibility

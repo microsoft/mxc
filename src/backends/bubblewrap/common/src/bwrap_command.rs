@@ -125,14 +125,7 @@ pub(crate) enum ResolvedNetworkMode {
 /// is a behavior change for callers already running on 0.6/0.7, so it is
 /// introduced on the dev line rather than retrofitted.
 fn uses_private_network_contract(request: &ExecutionRequest) -> bool {
-    let mut components = request.schema_version.split('.');
-    let major = components
-        .next()
-        .and_then(|value| value.parse::<u64>().ok());
-    let minor = components
-        .next()
-        .and_then(|value| value.parse::<u64>().ok());
-    matches!((major, minor), (Some(major), Some(minor)) if major > 0 || minor >= 8)
+    wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
 }
 
 impl ResolvedNetworkMode {
@@ -189,6 +182,57 @@ impl ResolvedNetworkMode {
     pub(crate) fn requires_host_firewall_manager(self) -> bool {
         matches!(self, Self::FirewallFiltered)
     }
+
+    /// Whether this mode actually applies the policy's host lists.
+    ///
+    /// `FirewallEnforced` filters by address in the sandbox's own namespace.
+    /// `ProxyOnly` closes egress to everything but the proxy endpoint, so the
+    /// lists are enforced at the proxy the sandbox is forced through. Every
+    /// other mode leaves the lists unapplied.
+    pub(crate) fn enforces_host_rules(self) -> bool {
+        matches!(self, Self::FirewallEnforced | Self::ProxyOnly)
+    }
+}
+
+/// Whether this schema opts into rejecting network elements Bubblewrap cannot
+/// honor. Pre-0.8 callers keep the warning, so existing configs still run.
+fn rejects_unhonorable_network(request: &ExecutionRequest) -> bool {
+    wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
+}
+
+/// Validate-time twin of the parser's schema-0.8 unenforced-host-list gate.
+///
+/// Host lists suppress the `Isolated` mode, so a mode that does not apply them
+/// leaves the sandbox on the host namespace unfiltered. The parser only sees
+/// JSON configs; a Rust caller can hand `mxc_engine` an `ExecutionRequest`
+/// directly and reach the runner without ever passing through it, so both
+/// paths must refuse it and share the message verbatim.
+pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    let has_host_rules =
+        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
+    let mode =
+        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
+
+    (has_host_rules && !mode.enforces_host_rules())
+        .then_some(wxc_common::config_parser::BWRAP_UNENFORCED_HOST_RULES)
+}
+
+/// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
+/// only for schemas that reject it rather than warn.
+///
+/// Keys off proxy *enablement* rather than a resolved address because
+/// `builtinTestServer` has no address until the proxy starts, which is after
+/// validation.
+pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    let mode =
+        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
+    local_network_diagnostic_for_mode(request, mode)
 }
 
 /// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
@@ -219,6 +263,9 @@ pub fn local_network_diagnostic(
 }
 
 /// Describe an inbound-policy mismatch using a previously resolved mode.
+///
+/// The text carries no severity prefix so it can serve both the pre-0.8
+/// warning and the 0.8+ rejection; callers add "WARNING: " when logging.
 pub(crate) fn local_network_diagnostic_for_mode(
     request: &ExecutionRequest,
     network_mode: ResolvedNetworkMode,
@@ -228,17 +275,18 @@ pub(crate) fn local_network_diagnostic_for_mode(
         network_mode.uses_private_netns(),
     ) {
         (false, false) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+            "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
              sandbox shares the host network namespace (defaultPolicy='allow'). \
              The sandboxed process can still bind, listen and accept on host-local addresses. For \
-             an unreachable sandbox use defaultPolicy='block' with no proxy, which applies \
-             --unshare-net.",
+             an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
+             which applies --unshare-net.",
         ),
         (true, true) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-             network namespace. Isolated and proxy modes apply --unshare-net, so a listener inside \
-             the sandbox is reachable only from within it, never from the host. Use \
-             defaultPolicy='allow' without a proxy to share the host network namespace.",
+            "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+             network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
+             listener inside the sandbox is reachable only from within it, never from the host. \
+             Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
+             namespace.",
         ),
         _ => None,
     }
@@ -441,15 +489,19 @@ mod tests {
             ("0.10.0", ResolvedNetworkMode::ProxyOnly),
             ("1.0.0", ResolvedNetworkMode::ProxyOnly),
             ("2.1.0", ResolvedNetworkMode::ProxyOnly),
-            // Anything unparsable fails closed onto the legacy path: the old
-            // behavior is the compatible one, so an unreadable version must
-            // never silently opt a caller into the new namespace model.
+            // An absent version stays legacy: programmatic callers who never
+            // set one are the pre-0.8 population. Anything non-empty but
+            // unparsable cannot have come from the parser (it validates the
+            // version first), so it is a hand-built request whose typo must not
+            // buy pre-0.8 leniency -- it resolves strictly, matching
+            // `schema_enforces_network_strictly`, which the rejection gates
+            // share.
             ("", ResolvedNetworkMode::LegacyProxy),
             ("0.8", ResolvedNetworkMode::ProxyOnly),
-            ("0", ResolvedNetworkMode::LegacyProxy),
-            ("0.8-beta", ResolvedNetworkMode::LegacyProxy),
-            ("v0.8.0", ResolvedNetworkMode::LegacyProxy),
-            ("not-a-version", ResolvedNetworkMode::LegacyProxy),
+            ("0", ResolvedNetworkMode::ProxyOnly),
+            ("0.8-beta", ResolvedNetworkMode::ProxyOnly),
+            ("v0.8.0", ResolvedNetworkMode::ProxyOnly),
+            ("not-a-version", ResolvedNetworkMode::ProxyOnly),
         ];
 
         for (version, expected) in cases {
@@ -480,10 +532,10 @@ mod tests {
             ("0.8.0-alpha", ResolvedNetworkMode::FirewallEnforced),
             ("0.9.0", ResolvedNetworkMode::FirewallEnforced),
             ("1.0.0", ResolvedNetworkMode::FirewallEnforced),
-            // Unparsable fails closed onto the legacy path for the same reason
-            // it does on the proxy path.
+            // Absent stays legacy; a non-empty unparsable version resolves
+            // strictly, for the same reason it does on the proxy path.
             ("", ResolvedNetworkMode::FirewallFiltered),
-            ("not-a-version", ResolvedNetworkMode::FirewallFiltered),
+            ("not-a-version", ResolvedNetworkMode::FirewallEnforced),
         ];
 
         for (version, expected) in cases {
@@ -760,6 +812,57 @@ mod tests {
         r.policy.allow_local_network = true;
         r.policy.default_network_policy = NetworkPolicy::Allow;
         assert!(local_network_diagnostic(&r, None).is_none());
+    }
+
+    // ------- allowLocalNetwork rejection (schema 0.8+) ------------------
+
+    #[test]
+    fn local_network_mismatch_is_not_rejected_before_0_8() {
+        // A 0.7 proxy config shares the host netns and leaves allowLocalNetwork
+        // at its default false. That combination must keep warning rather than
+        // start failing, or every existing 0.6/0.7 proxy caller breaks.
+        let mut r = base_request();
+        r.schema_version = "0.7.0-alpha".into();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 8080));
+        assert!(local_network_diagnostic(&r, r.policy.network_proxy.address.as_ref()).is_some());
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn local_network_mismatch_is_rejected_at_0_8() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+        // The text is reused verbatim as an error, so it must carry no severity.
+        assert!(!msg.contains("WARNING"));
+    }
+
+    #[test]
+    fn honored_local_network_is_not_rejected_at_0_8() {
+        // block + no host rules + no proxy is a private netns, which satisfies
+        // allowLocalNetwork=false; nothing to reject.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn builtin_test_server_counts_as_an_active_proxy_when_rejecting() {
+        // builtinTestServer has no address until the proxy starts, which is
+        // after validation, so the rejection keys off enablement instead.
+        // defaultPolicy='allow' would be a shared namespace on its own, so the
+        // rejection fires only if the proxy is recognized without an address.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        assert!(local_network_rejection(&r).is_none());
+
+        r.policy.network_proxy.builtin_test_server = true;
+        assert!(r.policy.network_proxy.address.is_none());
+        assert!(local_network_rejection(&r).is_some());
     }
 
     #[test]

@@ -276,13 +276,14 @@ namespace choice alone decides the outcome:
 
 | `allowLocalNetwork` | Namespace | Result |
 |---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`, including 0.8 proxy mode) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` (default) | private (`--unshare-net`; isolated, plus 0.8 proxy and firewall modes) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
 | `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 emit a `WARNING:` line to the runner log at preflight rather
-than failing silently. Windows (AppContainer's `privateNetworkClientServer`
+Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later, and emit a
+`WARNING:` line to the runner log at preflight on earlier schemas rather than
+failing silently. Windows (AppContainer's `privateNetworkClientServer`
 capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
 enforce the field at the syscall level; this divergence is Linux-specific.
 
