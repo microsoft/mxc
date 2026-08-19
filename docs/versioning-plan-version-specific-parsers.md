@@ -1869,6 +1869,57 @@ Phase 9 flips that over. The deliverable is a classification: for each parser
 mode and each representative request shape, either the two paths converge, or
 the difference is recorded as intentional tightening with a reason.
 
+**This is differential testing, not shadowing.** "Shadow dispatch" is a
+misnomer inherited from the original phase name. Shadowing normally means
+running both implementations in production against live traffic, to discover
+inputs the test corpus lacks. MXC has no live traffic to shadow: it is a CLI
+and a library whose inputs are the corpus, the fixtures, and SDK-generated
+envelopes, all of which can be enumerated in tests. A production dual-run would
+double the parse cost of every request and add a runtime failure mode in a
+security-sensitive path, in exchange for inputs that do not exist. Decision 2
+resolves this; the phase name is retained only for continuity with earlier
+sections.
+
+### How Phase 7 differs from the Phase 5 adapter tests
+
+The Phase 5D adapters already ship an equivalence helper that looks like the
+same idea:
+
+```rust
+let current: wire::MxcConfig = config_deserialize::from_str(json).unwrap();
+let contract: contract::OneShotRequest = serde_json::from_str(json).unwrap();
+assert_eq!(to_value(into_wire(contract)), to_value(current));
+```
+
+The technique is identical. What is compared is not. Four differences, and the
+last one is a defect to repair rather than a gap to fill:
+
+1. **Depth in the pipeline.** The Phase 5 helper stops at `wire::MxcConfig`.
+   Everything that gives the runtime model its meaning happens afterwards, in
+   `convert_wire_config` and the state-aware normalization: containment
+   mapping, filesystem path validation and normalization, proxy conversion,
+   backend-section validation, schema-version validation, and telemetry
+   population. Identical wire values can still diverge, or be rejected, in that
+   layer.
+2. **Both sides `unwrap`, so the disagreement set is unreachable.** The helper
+   can only assert over inputs both paths accept. Phase 7's actual deliverable
+   is the opposite set: inputs one path accepts and the other rejects, and
+   inputs both reject with different diagnostics.
+3. **Inputs are author-chosen.** Every Phase 5 input is a JSON literal written
+   alongside the adapter it exercises, so it proves the cases the author
+   thought of. Phase 7 runs the corpus, the fixtures, and all six loader entry
+   points, including base64 and file decode, `ParseError` routing, logging
+   conventions, and the spliced command override.
+4. **The state-aware comparison currently targets a shape the rolling pipeline
+   never builds.** `state_aware_tests` compares against
+   `config_deserialize::from_str::<wire::MxcConfig>(json)` — the plain,
+   unmasked deserialization. But `convert_wire_state_aware` masks `experimental`
+   out of the source, sets `cfg.experimental = None`, and clears `sandbox_id`,
+   `correlation_vector`, and the one-shot sections before normalizing. Those
+   tests therefore validate against a straw man and carry false confidence.
+   Repair them in Phase 7.2, when the seam makes the real pre-normalization
+   value available to compare against.
+
 ### Phase 7 parser surface
 
 The loader has six public entry points, all in `wxc_common::config_parser`,
@@ -1901,11 +1952,102 @@ Resolve these before implementation; each changes the shape of the work.
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | Settle before extracting the seam. The dispatcher reads `experimental.<backend>.<phase>` from `experimental_raw` and `source_text` through `deserialize_config<C>`, so after Phase 9 the closed contract becomes a second acceptance authority over the same bytes, permanently, because Phase 11 never publishes state-aware types. Either make the typed provision payloads authoritative at dispatch, or shrink the contract's experimental modelling to the envelope and declare raw authoritative. The adapters currently populate both `config.experimental` and `experimental_raw`, with no stated precedence |
-| 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. A test harness over the corpus and fixtures gives the same evidence with none of that exposure |
+| 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority; dispatch keeps reading `experimental_raw`. See "Phase 7 decision 1 resolved" below |
+| 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable |
 | 3 | How `load_request_from_value` reaches an exact contract | Prefer giving `mxc_engine::policy` a typed builder that constructs the contract request directly, rather than serializing its `Value` to text and re-parsing. A round-trip works and is the cheaper interim answer, but it reintroduces exactly the text-to-value-to-text churn this plan avoids elsewhere. Decide now; Phase 9 depends on it |
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
 | 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
+
+#### Phase 7 decision 1 resolved: split structural and semantic authority
+
+**Resolution.** The exact contract is the **structural** authority for the
+state-aware experimental subtree: recursive closure, unknown-field rejection,
+and shape. Each backend's config type remains the **semantic** authority: what
+a field means, its defaults, and its validation. Dispatch continues to read
+`experimental_raw` through `deserialize_config<C>`.
+
+This is option C of the three considered, adopted deliberately rather than by
+accident, with the drift it implies closed by a test.
+
+**Why not option B (typed payload authoritative at dispatch) now.** The stated
+goal is to surface errors as early as possible, and option C already achieves
+that. The contract root is recursively closed, so `appIdd` fails at
+`dev::parse_request`, before dispatch and before any backend runs. Option B
+adds no earliness whatsoever; its only gains are removing the redundant second
+parse and the drift risk. Since the Phase 5 stack is already long, the
+redundancy is a fair price for now.
+
+**Why option B stays cheap later.** All three state-aware provision config
+types already live in `wxc_common`, not in the backend crates:
+
+| Backend | `ProvisionConfig` | Defined in |
+| --- | --- | --- |
+| IsolationSession | `models::IsolationSessionProvisionConfig` | `wxc_common::models` |
+| WSLC | `wire::WslcProvisionPhase` | `wxc_common::wire` |
+| Windows Sandbox | `()` | — |
+
+So the contract type, the adapter, and the backend config type are all visible
+in one crate, and the crate-boundary obstacle does not exist. Option B's cost
+is confined to dispatch plumbing — `StatefulSandboxBackend::ProvisionConfig`,
+the six `deserialize_config` call sites in `state_aware_dispatch.rs`, the three
+backend impls, and `state_aware_request.rs`. It touches no contract module, no
+adapter destructuring, no published contract, and no generated artifact. Option
+C adds no coupling that B must later unpick, and Phase 11 never freezes
+state-aware types, so no deadline forces the choice.
+
+**Enforcement is not weakened by dropping the duplicate payload.** Validation
+is a property of parsing, not of adaptation:
+
+```rust
+let request = contract::parse_request(json)?;   // enforcement happens here
+adapt_request(request, json)                    // runs on an already-valid value
+```
+
+The contract types are the validator; the adapter output is the payload.
+Emitting `experimental: None` from the state-aware adapter discards a redundant
+copy of a value that has already served its purpose as a check.
+
+**Required work, both small.**
+
+1. Delete the double population. The state-aware adapter currently fills both
+   `config.experimental` and `experimental_raw` with no stated precedence.
+   Emit `experimental: None` so `experimental_raw` is unambiguously the value
+   dispatch reads, which also matches the shape the rolling parser builds and
+   is what makes the Phase 7.2 test repair possible. This removes the
+   `convert_*_experimental` conversions from the state-aware path.
+2. Add a parity test in `wxc_common`, which can see both definitions, asserting
+   that each backend's `ProvisionConfig` round-trips through its contract
+   counterpart. The asymmetry rule: the contract may be **stricter** than the
+   backend, since that is the intended tightening, but the backend must never
+   accept a shape the contract rejects without a recorded Phase 7.4
+   classification entry. This mirrors the existing
+   `check-dotnet-errorcode-parity.js` gate.
+
+**Telemetry must move to the seam.** The adapter currently maps
+`experimental.telemetry` into `wire::Experimental`. The rolling parser does not:
+it sets `cfg.experimental = None`, then reads telemetry back out of
+`experimental_raw` after `convert_wire_config` and writes it onto the domain
+request. Once the exact adapter emits `experimental: None`, the shared seam must
+own telemetry population for both paths, which it should anyway. Missing this
+makes telemetry silently disappear on the exact path. Note that the seam and the
+adapter are different layers: the adapter converts a contract type to
+`wire::MxcConfig` and is exact-path only, while the seam converts
+`StateAwareWireInput` to `ParsedStateAwareRequest` and is shared.
+
+**Known live divergence, and the trigger to revisit.** The two authorities
+already disagree: `models::IsolationSessionProvisionConfig` is
+`#[serde(default)]` over `Option<String>` and documents that "a JSON `null` is a
+second spelling of absent", while the contract's `OptionalField<String>` rejects
+explicit `null`. The backend also ignores unknown fields where the contract
+rejects them. Under this resolution the stricter authority wins by rejecting
+first, so `"appId": null` becomes a parse error; record it in the Phase 7.4
+classification.
+
+What option C does not guarantee is that the value dispatch acts on is the one
+the contract produced. That is a non-issue while the payloads are plain strings
+with no normalization — `appId`, `image`, `imageTarPath`. The moment a payload
+field gains defaulting or canonicalization, the two authorities could interpret
+the same bytes differently, and that is the trigger to move to option B.
 
 ### Phase 7 step breakdown
 
@@ -1963,6 +2105,14 @@ roots. They stay in the seam for the rolling path; for exact input they are
 unreachable, and the difference in the resulting *error message* is Phase 7.4
 classification material.
 
+Repair the Phase 5D state-aware equivalence tests in this step. They currently
+compare against the unmasked `wire::MxcConfig` deserialization, which the
+rolling state-aware pipeline never produces; once the seam exposes the real
+pre-normalization value, point them at it.
+
+Per the decision 1 resolution, the seam owns telemetry population for both
+paths, and the state-aware adapter stops emitting `config.experimental`.
+
 Suggested commit boundary: `Extract the shared state-aware normalization seam`.
 
 #### Phase 7.3: Add the private exact-contract path
@@ -2000,6 +2150,11 @@ a table with its input, both behaviors, and the reason. Expect at least:
 - explicit `null` on any optional field, which `OptionalField` rejects
 - `"phase": null`, which the rolling parser treats as one-shot and the exact
   phase probe rejects as a malformed declaration
+- `"appId": null` on an IsolationSession provision request, which
+  `models::IsolationSessionProvisionConfig` documents as a second spelling of
+  absent and the contract's `OptionalField` rejects
+- an unknown field inside an experimental backend payload, which the backend
+  config type ignores and the closed contract rejects
 - curated policy diagnostics replaced by structural Serde errors, most visibly
   the IsolationSession `filesystem` and `ui` rejections, whose current messages
   explain *why* the backend cannot honor the policy
