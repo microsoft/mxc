@@ -69,13 +69,10 @@ fn normalize_integer_formats(value: &mut Value) {
         Value::Object(map) => {
             if let Some(Value::String(format)) = map.get("format") {
                 let format = format.clone();
-                let is_unsigned = format.starts_with("uint");
-                let is_signed = format.starts_with("int");
-                if is_unsigned || is_signed {
+                if let Some((minimum, maximum)) = integer_bounds(&format) {
                     map.remove("format");
-                    if is_unsigned {
-                        map.entry("minimum").or_insert(Value::Number(0.into()));
-                    }
+                    map.entry("minimum").or_insert(Value::Number(minimum));
+                    map.entry("maximum").or_insert(Value::Number(maximum));
                 }
             }
             for child in map.values_mut() {
@@ -88,6 +85,33 @@ fn normalize_integer_formats(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn integer_bounds(format: &str) -> Option<(serde_json::Number, serde_json::Number)> {
+    let unsigned = |maximum: u64| {
+        (
+            serde_json::Number::from(0),
+            serde_json::Number::from(maximum),
+        )
+    };
+    let signed = |minimum: i64, maximum: i64| {
+        (
+            serde_json::Number::from(minimum),
+            serde_json::Number::from(maximum),
+        )
+    };
+
+    match format {
+        "uint8" => Some(unsigned(u8::MAX.into())),
+        "uint16" => Some(unsigned(u16::MAX.into())),
+        "uint32" => Some(unsigned(u32::MAX.into())),
+        "uint64" | "uint" => Some(unsigned(u64::MAX)),
+        "int8" => Some(signed(i8::MIN.into(), i8::MAX.into())),
+        "int16" => Some(signed(i16::MIN.into(), i16::MAX.into())),
+        "int32" => Some(signed(i32::MIN.into(), i32::MAX.into())),
+        "int64" | "int" => Some(signed(i64::MIN, i64::MAX)),
+        _ => None,
     }
 }
 
@@ -110,7 +134,19 @@ mod tests {
 
         assert_eq!(schema["$id"], "https://example.test/schema.json");
         assert_eq!(schema["definitions"]["Unsigned"]["minimum"], 0);
+        assert_eq!(
+            schema["definitions"]["Unsigned"]["maximum"],
+            serde_json::Value::from(u32::MAX)
+        );
         assert!(schema["definitions"]["Unsigned"].get("format").is_none());
+        assert_eq!(
+            schema["definitions"]["Signed"]["minimum"],
+            serde_json::Value::from(i64::MIN)
+        );
+        assert_eq!(
+            schema["definitions"]["Signed"]["maximum"],
+            serde_json::Value::from(i64::MAX)
+        );
         assert!(schema["definitions"]["Signed"].get("format").is_none());
         assert_eq!(schema["definitions"]["Uri"]["format"], "uri");
     }

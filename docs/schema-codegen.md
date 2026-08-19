@@ -180,8 +180,9 @@ committed file) that fails on drift. So a wire-model change ripples to all three
 surfaces — Rust ⇄ schema ⇄ TS — and a forgotten SDK update fails CI instead of
 drifting silently. The emitter handles only the JSON Schema constructs the MXC
 schema uses (enums, closed/open objects, `$ref`, `anyOf [T, null]`, arrays,
-scalars); extending the wire model with a new construct may require teaching the
-emitter about it.
+named scalars, externally tagged object unions, and mutually exclusive aliases);
+extending the wire model with a new construct may require teaching the emitter
+about it.
 
 The conformance check covers both SDK surfaces: `wire-conformance.test.ts` pins
 the one-shot public types in `sdk/node/src/types.ts`, and

@@ -303,11 +303,9 @@ export type NetworkEnforcementMode = "capabilities" | "firewall" | "both";
 /**
  * One of the proxy configurations accepted by the `0.8.0-alpha` contract.
  */
-export type NetworkProxy = { localhost: number } | { builtinTestServer: True } | { url: string };
+export type NetworkProxy = { localhost: number; builtinTestServer?: never; url?: never } | { builtinTestServer: True; localhost?: never; url?: never } | { url: string; builtinTestServer?: never; localhost?: never };
 
-export interface NonEmptyString {
-  [k: string]: unknown;
-}
+export type NonEmptyString = string;
 
 export type OneShotContainment = "process" | "processcontainer" | "appcontainer" | "lxc" | "bubblewrap" | "seatbelt" | "macos_sandbox" | "vm" | "windows_sandbox" | "microvm" | "hyperlight" | "wslc" | "isolation_session";
 
@@ -336,7 +334,7 @@ export interface OneShotExperimental {
 /**
  * A complete one-shot `0.8.0-alpha` configuration request.
  */
-export interface OneShotRequest {
+export type OneShotRequest = {
   /**
    * Optional JSON Schema reference for editor validation.
    */
@@ -405,7 +403,7 @@ export interface OneShotRequest {
    * The exact contract version marker.
    */
   version: Version;
-}
+} & ({ processContainer?: never } | { appContainer?: never }) & ({ seatbelt?: never } | { macos_sandbox?: never });
 
 /**
  * Compatibility settings accepted for one-shot Windows Sandbox requests.

@@ -92,6 +92,27 @@ fn add_property_alias(definitions: &mut Value, definition: &str, canonical: &str
     properties.insert(alias.to_string(), schema);
 }
 
+fn exclude_duplicate_alias(
+    definitions: &mut Value,
+    definition: &str,
+    canonical: &str,
+    alias: &str,
+) {
+    let definition = definitions[definition]
+        .as_object_mut()
+        .expect("object definition");
+    let constraints = definition
+        .entry("allOf")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("allOf constraints");
+    constraints.push(json!({
+        "not": {
+            "required": [canonical, alias]
+        }
+    }));
+}
+
 /// Generates the unrendered JSON Schema for the mutable `0.8.0-alpha`
 /// development contract.
 ///
@@ -121,7 +142,19 @@ pub fn development_schema() -> Value {
         "processContainer",
         "appContainer",
     );
+    exclude_duplicate_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "processContainer",
+        "appContainer",
+    );
     add_property_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "seatbelt",
+        "macos_sandbox",
+    );
+    exclude_duplicate_alias(
         &mut definitions,
         "OneShotRequest",
         "seatbelt",
@@ -230,6 +263,13 @@ mod tests {
 
         assert_eq!(properties["appContainer"], properties["processContainer"]);
         assert_eq!(properties["macos_sandbox"], properties["seatbelt"]);
+        assert_eq!(
+            schema["definitions"]["OneShotRequest"]["allOf"]
+                .as_array()
+                .expect("alias constraints")
+                .len(),
+            2
+        );
     }
 
     #[test]

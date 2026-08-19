@@ -97,6 +97,18 @@ const INVALID_FIXTURES: &[(&str, &str)] = &[
             "fixtures/one_shot/invalid/capability_permissive_learning_mode_reserved.json"
         ),
     ),
+    (
+        "duplicate ProcessContainer alias",
+        include_str!("fixtures/one_shot/invalid/duplicate_process_container_alias.json"),
+    ),
+    (
+        "duplicate Seatbelt alias",
+        include_str!("fixtures/one_shot/invalid/duplicate_seatbelt_alias.json"),
+    ),
+    (
+        "out-of-range WSLC port",
+        include_str!("fixtures/one_shot/invalid/port_out_of_range.json"),
+    ),
 ];
 
 #[test]

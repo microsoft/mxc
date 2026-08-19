@@ -91,16 +91,53 @@ function compareArtifact(committedPath, generatedPath, command) {
 
 function readFixtures(root, kind) {
   const directory = join(fixtureRoot, root, kind);
-  return readdirSync(directory)
+  const fixtures = readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
     .sort()
     .map((name) => ({
       name: `${root}/${kind}/${name}`,
       value: JSON.parse(readFileSync(join(directory, name), "utf8")),
     }));
+  if (fixtures.length === 0) {
+    fail(`fixture directory ${root}/${kind} is empty`);
+  }
+  return fixtures;
+}
+
+function collectDispatchRoots(value, references = new Set()) {
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      collectDispatchRoots(child, references);
+    }
+  } else if (value && typeof value === "object") {
+    if (typeof value.$ref === "string") {
+      const prefix = "#/definitions/";
+      if (value.$ref.startsWith(prefix)) {
+        references.add(value.$ref.slice(prefix.length));
+      }
+    }
+    for (const [key, child] of Object.entries(value)) {
+      if (key !== "definitions") {
+        collectDispatchRoots(child, references);
+      }
+    }
+  }
+  return references;
 }
 
 function validateFixtures(schema) {
+  const dispatchedRoots = collectDispatchRoots(schema);
+  const expectedRoots = new Set(Object.values(roots));
+  const missing = [...dispatchedRoots].filter((root) => !expectedRoots.has(root));
+  const stale = [...expectedRoots].filter((root) => !dispatchedRoots.has(root));
+  if (missing.length || stale.length) {
+    fail(
+      `fixture roots do not match schema dispatch; missing mappings: ` +
+        `${missing.join(", ") || "none"}; stale mappings: ` +
+        `${stale.join(", ") || "none"}`
+    );
+  }
+
   const composed = new Ajv({ allErrors: true, strict: false }).compile(schema);
 
   for (const [directory, definition] of Object.entries(roots)) {

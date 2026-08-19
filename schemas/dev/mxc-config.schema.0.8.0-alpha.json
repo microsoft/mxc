@@ -570,6 +570,7 @@
           "description": "Connect to an existing proxy on a non-zero localhost TCP port.",
           "properties": {
             "localhost": {
+              "maximum": 65535,
               "minimum": 1.0,
               "type": "integer"
             }
@@ -731,6 +732,24 @@
     },
     "OneShotRequest": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "processContainer",
+              "appContainer"
+            ]
+          }
+        },
+        {
+          "not": {
+            "required": [
+              "seatbelt",
+              "macos_sandbox"
+            ]
+          }
+        }
+      ],
       "description": "A complete one-shot `0.8.0-alpha` configuration request.",
       "properties": {
         "$schema": {
@@ -817,11 +836,13 @@
         },
         "idleTimeout": {
           "description": "Legacy idle-timeout field retained for compatibility.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
         },
         "idleTimeoutMs": {
           "description": "Idle timeout before teardown, in milliseconds.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
         }
@@ -834,6 +855,7 @@
       "properties": {
         "cpuCount": {
           "description": "Requested virtual CPU count.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
         },
@@ -851,6 +873,7 @@
         },
         "memoryMb": {
           "description": "Requested memory limit in megabytes.",
+          "maximum": 18446744073709551615,
           "minimum": 0.0,
           "type": "integer"
         },
@@ -878,6 +901,7 @@
       "properties": {
         "containerPort": {
           "description": "Non-zero TCP port inside the container.",
+          "maximum": 65535,
           "minimum": 1.0,
           "type": "integer"
         },
@@ -887,6 +911,7 @@
         },
         "windowsPort": {
           "description": "Non-zero TCP port on the Windows host.",
+          "maximum": 65535,
           "minimum": 1.0,
           "type": "integer"
         }
@@ -918,6 +943,7 @@
         },
         "timeout": {
           "description": "Optional execution timeout in milliseconds.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
         }

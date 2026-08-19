@@ -161,11 +161,26 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         return;
     }
 
+    if obj.get("type").and_then(Value::as_str) != Some("object") {
+        let (definition_type, nullable) = ts_type(def);
+        push_doc(out, obj.get("description"));
+        let nullable = if nullable { " | null" } else { "" };
+        out.push_str(&format!(
+            "export type {name} = {definition_type}{nullable};\n\n"
+        ));
+        return;
+    }
+
     emit_object(out, name, obj_as_map(def));
 }
 
 fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
     let one_of = obj.get("oneOf")?.as_array()?;
+    let all_properties = one_of
+        .iter()
+        .filter_map(|branch| branch.get("properties").and_then(Value::as_object))
+        .flat_map(|properties| properties.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
     let mut variants = Vec::with_capacity(one_of.len());
 
     for branch in one_of {
@@ -174,12 +189,16 @@ fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<Str
             return None;
         }
         let properties = branch.get("properties")?.as_object()?;
+        let branch_properties = properties
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
         let required: Vec<&str> = branch
             .get("required")
             .and_then(Value::as_array)
             .map(|array| array.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        let fields = properties
+        let mut fields = properties
             .iter()
             .map(|(name, schema)| {
                 let (field_type, nullable) = ts_type(schema);
@@ -191,9 +210,13 @@ fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<Str
                 let nullable = if nullable { " | null" } else { "" };
                 format!("{}{}: {field_type}{nullable}", field_key(name), optional)
             })
-            .collect::<Vec<_>>()
-            .join("; ");
-        variants.push(format!("{{ {fields} }}"));
+            .collect::<Vec<_>>();
+        fields.extend(
+            all_properties
+                .difference(&branch_properties)
+                .map(|name| format!("{}?: never", field_key(name))),
+        );
+        variants.push(format!("{{ {} }}", fields.join("; ")));
     }
 
     Some(variants)
@@ -233,7 +256,13 @@ fn obj_as_map(def: &Value) -> &serde_json::Map<String, Value> {
 /// Emit an `export interface Name { ... }` from an object schema.
 fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value>) {
     push_doc(out, obj.get("description"));
-    out.push_str(&format!("export interface {name} {{\n"));
+    let exclusions = exclusive_property_pairs(obj);
+    let has_exclusions = !exclusions.is_empty();
+    if !has_exclusions {
+        out.push_str(&format!("export interface {name} {{\n"));
+    } else {
+        out.push_str(&format!("export type {name} = {{\n"));
+    }
 
     let required: Vec<&str> = obj
         .get("required")
@@ -259,7 +288,31 @@ fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value
         out.push_str("  [k: string]: unknown;\n");
     }
 
-    out.push_str("}\n\n");
+    out.push('}');
+    for (first, second) in &exclusions {
+        out.push_str(&format!(
+            " & ({{ {}?: never }} | {{ {}?: never }})",
+            field_key(first),
+            field_key(second)
+        ));
+    }
+    if has_exclusions {
+        out.push(';');
+    }
+    out.push_str("\n\n");
+}
+
+fn exclusive_property_pairs(obj: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+    obj.get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|constraint| constraint.get("not")?.get("required")?.as_array())
+        .filter_map(|required| match required.as_slice() {
+            [first, second] => Some((first.as_str()?.to_string(), second.as_str()?.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// An object is "open" unless it explicitly sets `additionalProperties: false`.
@@ -494,7 +547,61 @@ mod tests {
         let ts = emit_ts(&schema);
 
         assert!(
-            ts.contains("export type Proxy = { url: string } | { builtin: true };"),
+            ts.contains(
+                "export type Proxy = { url: string; builtin?: never } | { builtin: true; url?: never };"
+            ),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_named_scalar_definition() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "NonEmptyString": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(ts.contains("export type NonEmptyString = string;"), "{ts}");
+    }
+
+    #[test]
+    fn emits_mutually_exclusive_aliases() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Request": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "canonical": { "type": "string" },
+                        "alias": { "type": "string" }
+                    },
+                    "allOf": [{
+                        "not": {
+                            "required": ["canonical", "alias"]
+                        }
+                    }]
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(
+            ts.contains(
+                "export type Request = {\n  alias?: string;\n  canonical?: string;\n} & ({ canonical?: never } | { alias?: never });"
+            ),
             "{ts}"
         );
     }
