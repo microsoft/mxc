@@ -115,6 +115,14 @@ fn types_content(target: Target) -> Result<String, String> {
 fn write_artifact(content: &str, path: Option<&Path>, label: &str) -> Result<(), String> {
     match path {
         Some(path) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    format!(
+                        "failed to create output directory {}: {error}",
+                        parent.display()
+                    )
+                })?;
+            }
             std::fs::write(path, content).map_err(|error| {
                 format!("failed to write {label} to {}: {error}", path.display())
             })?;

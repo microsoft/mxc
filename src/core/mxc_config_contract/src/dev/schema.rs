@@ -109,7 +109,7 @@ pub fn development_schema() -> Value {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "title": "MXC Configuration 0.8.0-alpha",
         "description": "Exact mutable MXC development configuration contract.",
-        "$comment": "Request roots are selected by phase and provision containment.",
+        "$comment": "GENERATED FILE - DO NOT EDIT. Regenerate with: cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.8.0-alpha --out schemas/dev/mxc-config.schema.0.8.0-alpha.json. This exact contract is not enforced by the runtime parser until Phase 9. Request roots are selected by phase and provision containment.",
         "allOf": [dispatch],
         "definitions": definitions
     })

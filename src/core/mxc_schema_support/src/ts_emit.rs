@@ -152,7 +152,51 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         return;
     }
 
+    if let Some(variants) = object_union_variants(obj) {
+        push_doc(out, obj.get("description"));
+        out.push_str(&format!(
+            "export type {name} = {};\n\n",
+            variants.join(" | ")
+        ));
+        return;
+    }
+
     emit_object(out, name, obj_as_map(def));
+}
+
+fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
+    let one_of = obj.get("oneOf")?.as_array()?;
+    let mut variants = Vec::with_capacity(one_of.len());
+
+    for branch in one_of {
+        let branch = branch.as_object()?;
+        if branch.get("type").and_then(Value::as_str) != Some("object") {
+            return None;
+        }
+        let properties = branch.get("properties")?.as_object()?;
+        let required: Vec<&str> = branch
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|array| array.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let fields = properties
+            .iter()
+            .map(|(name, schema)| {
+                let (field_type, nullable) = ts_type(schema);
+                let optional = if required.contains(&name.as_str()) {
+                    ""
+                } else {
+                    "?"
+                };
+                let nullable = if nullable { " | null" } else { "" };
+                format!("{}{}: {field_type}{nullable}", field_key(name), optional)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        variants.push(format!("{{ {fields} }}"));
+    }
+
+    Some(variants)
 }
 
 /// Collect a string-union's members from either a `oneOf` of single-value
@@ -413,6 +457,44 @@ mod tests {
         assert!(ts.contains("export type True = true;"), "{ts}");
         assert!(
             ts.contains("export type MXCConfiguration = OneShotRequest | ExecRequest;"),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_object_union() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Proxy": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "url": { "type": "string" }
+                            },
+                            "required": ["url"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "builtin": { "enum": [true], "type": "boolean" }
+                            },
+                            "required": ["builtin"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(
+            ts.contains("export type Proxy = { url: string } | { builtin: true };"),
             "{ts}"
         );
     }
