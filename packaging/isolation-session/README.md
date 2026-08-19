@@ -4,8 +4,9 @@ This directory contains the repository-owned packaging inputs used by
 `.azure-pipelines/1ES.IsoSession.Artifacts.yml`.
 
 The payload binaries are not built in this repository. The pipeline resolves a
-Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the six
-required IsolationSession binaries, and then:
+Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the seven
+required IsolationSession binaries, generates the month-specific
+`IsoSession.manifest`, and then:
 
 1. builds and signs x64 and ARM64 MSI/EXE outputs in parallel, including the
    detached Burn engine and the complete bootstrapper EXE;

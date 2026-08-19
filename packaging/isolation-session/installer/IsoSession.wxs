@@ -151,6 +151,13 @@
               KeyPath="yes" />
       </Component>
 
+      <Component Id="Comp_IsoSessionManifest">
+        <File Id="IsoSession.manifest"
+              Name="IsoSession.manifest"
+              Source="$(var.RuntimeManifestPath)"
+              KeyPath="yes" />
+      </Component>
+
       <Component Id="Comp_IsolationProxy">
         <File Id="IsolationProxy.exe"
               Source="$(var.BinDir)\IsolationProxy.exe"
@@ -449,13 +456,13 @@
     <!-- Records the actual install dir so version resolution works at a   -->
     <!-- custom (non-default) INSTALLDIR. Read by                          -->
     <!-- IsoSession::Activation::ResolveInstallDir (IsoSessionVersionPath.h)-->
-    <!-- keyed by MonthId. [INSTALLDIR] resolves to the chosen path         -->
-    <!-- with a trailing backslash; the resolver trims it.                 -->
+    <!-- keyed by the underscore runtime token. [INSTALLDIR] resolves to   -->
+    <!-- the chosen path with a trailing backslash; the resolver trims it. -->
     <!-- ================================================================ -->
     <DirectoryRef Id="INSTALLDIR">
       <Component Id="Comp_InstallDirRecord">
         <RegistryValue Root="HKLM"
-                       Key="SOFTWARE\Microsoft\IsoSession\$(var.MonthId)"
+                       Key="SOFTWARE\Microsoft\IsoSession\$(var.RuntimeToken)"
                        Name="InstallDir" Type="string" Value="[INSTALLDIR]"
                        KeyPath="yes" />
       </Component>
@@ -472,6 +479,7 @@
       <ComponentRef Id="Comp_IsoSessionProxyStub" />
       <ComponentRef Id="Comp_IsoSessionCli" />
       <ComponentRef Id="Comp_IsoSessionCliManifest" />
+      <ComponentRef Id="Comp_IsoSessionManifest" />
       <ComponentRef Id="Comp_IsolationProxy" />
       <ComponentRef Id="Comp_Service" />
       <ComponentRef Id="Comp_ComAppId" />

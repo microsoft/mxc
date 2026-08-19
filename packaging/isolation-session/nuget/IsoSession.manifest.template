@@ -2,9 +2,9 @@
 <!--
   Copyright (c) Microsoft Corporation. All rights reserved.
 
-  Side-by-side WinRT activation manifest for the NuGet-delivered
-  IsoSessionApp.dll.  Ships in the SDK NuGet next to the consumer (e.g.
-  wxc-exec.exe) alongside IsoSessionApp.dll.
+  Side-by-side WinRT activation manifest for IsoSessionApp.dll. Ships both in
+  the SDK NuGet next to the consumer (for example, wxc-exec.exe) and in the
+  monthly MSI next to the installed runtime binaries.
 
   Purpose:
     1. Reg-free SxS resolution of IsoSessionApp.dll (the file element) so the
@@ -18,7 +18,8 @@
 
   Contract mirrors MXC regfree.rs.  No activatableClass element is needed --
   both consumers call the DllGetActivationFactory export directly by full path.
-  pack.ps1 stamps the MonthId placeholder from GENERATION_INFO.toml instance.
+  pack.ps1 and installer/makeinstaller.ps1 stamp the MonthId placeholder from
+  their shared release identity.
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
   <assemblyIdentity name="IsoSession.Runtime" version="1.0.0.0" type="win32" />

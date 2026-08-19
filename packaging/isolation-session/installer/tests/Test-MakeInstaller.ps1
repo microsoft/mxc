@@ -136,6 +136,15 @@ Assert-True (
 Assert-True (
     $installerAuthoring.Contains('<ComponentRef Id="Comp_IsoSessionCore" />')
 ) 'MSI includes IsoSessionCore.dll in the Complete feature'
+Assert-True (
+    $installerAuthoring.Contains('Source="$(var.RuntimeManifestPath)"')
+) 'MSI installs the generated IsoSession.manifest'
+Assert-True (
+    $installerAuthoring.Contains('<ComponentRef Id="Comp_IsoSessionManifest" />')
+) 'MSI includes IsoSession.manifest in the Complete feature'
+Assert-True (
+    $installerAuthoring.Contains('Key="SOFTWARE\Microsoft\IsoSession\$(var.RuntimeToken)"')
+) 'MSI keys InstallDir by the underscore runtime token'
 
 $expectedComGuids = [ordered]@{
     CLSID_IsoSessionProxyStub = '{2B526D49-56AC-4D72-8692-4DB1F4EDFA7C}'
@@ -229,6 +238,19 @@ try {
     Assert-True ($x64SubDir -eq 'Microsoft\Agentic Runtime\2026.09') "x64 InstallSubDir follows the MonthId runtime contract ($x64SubDir)"
     Assert-True ($arm64SubDir -eq $x64SubDir) "arm64 InstallSubDir matches x64 ($arm64SubDir)"
 
+    $x64RuntimeToken = Get-DefineValue $x64VarsA 'RuntimeToken'
+    $arm64RuntimeToken = Get-DefineValue $arm64Vars 'RuntimeToken'
+    Assert-True ($x64RuntimeToken -eq '2026_09') "x64 RuntimeToken uses the underscore identity ($x64RuntimeToken)"
+    Assert-True ($arm64RuntimeToken -eq $x64RuntimeToken) "arm64 RuntimeToken matches x64 ($arm64RuntimeToken)"
+
+    $runtimeManifestPath = Get-DefineValue $x64VarsA 'RuntimeManifestPath'
+    Assert-True (Test-Path -LiteralPath $runtimeManifestPath -PathType Leaf) 'Generated IsoSession.manifest exists'
+    $runtimeManifest = Get-Content -LiteralPath $runtimeManifestPath -Raw
+    Assert-True (
+        $runtimeManifest.Contains(
+            '<iso:instance xmlns:iso="urn:schemas-microsoft-com:agentic-runtime.v1" name="2026.09" />')
+    ) 'Generated IsoSession.manifest carries the dotted service instance'
+
     $releaseOut = Join-Path $genOutDir 'release-check'
     $releaseResult = Invoke-MakeInstaller -scriptArgs @(
         '-Arch', 'x64',
@@ -292,6 +314,8 @@ if (-not $dotnetAvailable) {
         # is the crux of the "appropriate Util custom-action binary" requirement.
         $directoryRecord = $null
         $directoryView = $null
+        $fileRecord = $null
+        $fileView = $null
         $registryRecord = $null
         $registryView = $null
         $view = $null
@@ -328,12 +352,25 @@ if (-not $dotnetAvailable) {
             $installDirName = $directoryRecord.StringData(1)
             Assert-True ($installDirName -eq $monthId) "$arch MSI INSTALLDIR remains MonthId-only ($installDirName)"
 
+            $fileView = $db.OpenView(
+                "SELECT ``FileName`` FROM ``File`` WHERE ``File`` = 'IsoSession.manifest'")
+            $fileView.Execute()
+            $fileRecord = $fileView.Fetch()
+            $runtimeManifestName = if ($fileRecord) {
+                ($fileRecord.StringData(1) -split '\|')[-1]
+            } else {
+                $null
+            }
+            Assert-True ($runtimeManifestName -eq 'IsoSession.manifest') "$arch MSI contains IsoSession.manifest"
+
             $registryView = $db.OpenView(
                 "SELECT ``Key`` FROM ``Registry`` WHERE ``Name`` = 'InstallDir'")
             $registryView.Execute()
             $registryRecord = $registryView.Fetch()
             $installRegistryKey = $registryRecord.StringData(1)
-            Assert-True ($installRegistryKey -eq "SOFTWARE\Microsoft\IsoSession\$monthId") "$arch MSI install-path registry key remains MonthId-only ($installRegistryKey)"
+            Assert-True (
+                $installRegistryKey -eq "SOFTWARE\Microsoft\IsoSession\$monthUnderscore"
+            ) "$arch MSI install-path registry key uses the underscore runtime token ($installRegistryKey)"
         } catch {
             Write-Host "  SKIP: MSI table inspection unavailable in this environment ($($_.Exception.Message))" -ForegroundColor Yellow
         } finally {
@@ -342,6 +379,8 @@ if (-not $dotnetAvailable) {
             foreach ($comObj in @(
                 $directoryRecord,
                 $directoryView,
+                $fileRecord,
+                $fileView,
                 $registryRecord,
                 $registryView,
                 $view,
