@@ -271,6 +271,7 @@ async function defaultConsentProtocolRunner(
           .catch(fail);
       }
     });
+    childStdout.on('error', fail);
     childStderr.setEncoding('utf8');
     childStderr.on('data', (chunk: string) => {
       if (settled) {
@@ -283,6 +284,7 @@ async function defaultConsentProtocolRunner(
       }
       stderr += chunk;
     });
+    childStderr.on('error', fail);
     childStdin.on('error', (error) => {
       if (!settled) {
         fail(error);

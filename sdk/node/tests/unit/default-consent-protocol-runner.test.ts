@@ -335,6 +335,32 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     await rejection;
   });
 
+  it('fails closed when the child stdout stream errors', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.stdout.emit('error', new Error('stdout broke'));
+
+    await assert.rejects(promise, /stdout broke/);
+    assert.strictEqual(child.killed, true);
+    assert.strictEqual(child.killCount, 1);
+  });
+
+  it('fails closed when the child stderr stream errors', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.stderr.emit('error', new Error('stderr broke'));
+
+    await assert.rejects(promise, /stderr broke/);
+    assert.strictEqual(child.killed, true);
+    assert.strictEqual(child.killCount, 1);
+  });
+
   it('rejects cleanly when the child exits before responding', async () => {
     const box = installFakeChildFactory();
     const promise = requestTelemetryConsent(() => 'yes');
