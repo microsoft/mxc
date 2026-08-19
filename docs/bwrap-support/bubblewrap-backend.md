@@ -37,6 +37,10 @@ requiring root privileges or a container runtime.
   policy with no `network.proxy` and no 0.8 firewall enforcement, or a 0.6/0.7
   policy using the legacy proxy and host-rule behavior.
 
+  The inbound chain's connection-state match additionally needs the
+  `nf_conntrack` kernel module already loaded — unprivileged Bubblewrap cannot
+  load it on demand.
+
   > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
   > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
   > connectivity at all and the v6 rules exist to keep the unmatched family
@@ -319,7 +323,7 @@ namespace choice alone decides the outcome:
 
 | `allowLocalNetwork` | Namespace | Result |
 |---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`; isolated, plus 0.8 proxy and firewall modes) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` (default) | private (`--unshare-net`; isolated, plus 0.8 proxy and firewall modes) | Honored at the sandbox boundary — nothing outside can reach in, and on 0.8 the proxy and firewall modes additionally drop new inbound connections in an `MXC_INGRESS` chain (see below). `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
 | `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
@@ -340,6 +344,47 @@ is still a request for inbound denial and is rejected the same way: a bare
 Callers who want the shared namespace acknowledge the exposure with
 `allowLocalNetwork: true` (row 4), the same acknowledgment IsolationSession
 requires for this field.
+
+#### Inbound is closed by the namespace, and by a chain
+On schema `0.8.0-alpha` and later, the modes that build a private network
+namespace (proxy and firewall-enforced) also install an `MXC_INGRESS` chain
+hooked into `INPUT`, for both families:
+
+```
+-i lo -j ACCEPT
+-m state --state ESTABLISHED,RELATED -j ACCEPT
+-m state --state NEW -j DROP
+-j DROP
+```
+
+Be honest about what this buys. It is **not** new protection: nothing outside
+the sandbox can reach in already, because the runner configures no port
+forwarding into the namespace, so there is no path for an inbound packet to
+arrive on. The chain is defense in depth against a future change that adds
+one, and the mechanism the GA networking spec expects a backend to apply
+`ingress.default` through. The terminal `DROP` is deliberately independent of
+`network.defaultPolicy`, which governs egress only — an open outbound posture
+must not open inbound as a side effect.
+
+The `ESTABLISHED,RELATED` accept is not optional. A terminal `INPUT` drop
+applies to reply packets too, so without it the sandbox would lose all
+networking rather than gain an inbound restriction.
+
+That connection-state match requires `nf_conntrack` on the host. Unprivileged
+Bubblewrap cannot `modprobe`, so if the module is not already loaded the
+`iptables-restore` transaction fails, iptables rolls the whole table back, and
+the supervisor aborts before releasing the workload. The failure is loud and
+fail-closed by construction, not a silently unenforced sandbox. No separate
+probe is performed: the transaction is a stricter check than probing the
+userspace extension would be, because it exercises the match in the actual
+namespace.
+
+No RFC 4890 ICMPv6 exemptions are emitted. `slirp4netns` runs without
+`--enable-ipv6`, so the namespace has no IPv6 for them to govern; they must be
+added in the same change that enables it.
+
+Legacy schemas are unaffected. Below `0.8.0-alpha`, proxy mode resolves to the
+shared host network namespace, where no chain of any kind is installed.
 
 ### Process Settings
 
@@ -398,10 +443,13 @@ request fails if its private namespace cannot be configured.
    through slirp's `10.0.2.2` host gateway. Once slirp is up, the supervisor
    programs a default-DROP `MXC_EGRESS` chain into that namespace via
    `nsenter`, permitting only loopback and the proxy endpoint (IPv6 gets a
-   DROP-only chain). Each family's whole table — the chain, its rules in
-   order, the terminal verdict and the `OUTPUT` hook — is applied in a single
+   DROP-only chain), plus a default-DROP `MXC_INGRESS` chain on `INPUT`
+   (see [Inbound](#inbound-is-closed-by-the-namespace-and-by-a-chain)).
+   Each family's whole table — both chains, their rules in
+   order, the terminal verdicts and the `OUTPUT` / `INPUT` hooks — is applied
+   in a single
    `iptables-restore` transaction, so the cost of a policy does not grow with
-   the caller's host lists and the hook is never live over a half-built chain.
+   the caller's host lists and a hook is never live over a half-built chain.
    The workload is released only after both transactions are
    applied, so it can never run with egress open. A failure to program any
    rule aborts the supervisor rather than starting an unenforced sandbox.

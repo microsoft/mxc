@@ -359,6 +359,7 @@ impl BubblewrapScriptRunner {
                 let egress = resolved.egress();
                 match proxy_network::ProxyNetworkNamespace::start(
                     &egress.plan(),
+                    &network_rules::IngressPlan::for_request(request),
                     egress.pin(),
                     logger,
                 ) {
@@ -381,7 +382,12 @@ impl BubblewrapScriptRunner {
                         return Err(ScriptResponse::error(&error));
                     }
                 };
-                match proxy_network::ProxyNetworkNamespace::start(&plan, None, logger) {
+                match proxy_network::ProxyNetworkNamespace::start(
+                    &plan,
+                    &network_rules::IngressPlan::for_request(request),
+                    None,
+                    logger,
+                ) {
                     Ok(network) => Some(network),
                     Err(error) => {
                         proxy.stop(logger);

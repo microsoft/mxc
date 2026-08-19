@@ -327,32 +327,146 @@ impl EgressPlan {
         })
     }
 
-    /// The `iptables-restore` payload for one family.
+    /// The chain body for one family: the loopback exemption, the family's
+    /// rules in order, and the terminal verdict that closes it.
     ///
-    /// The chain body, its terminal verdict and the `OUTPUT` hook arrive in one
-    /// transaction, so the hook is never live over a partially built chain.
-    /// Ordering inside the chain is the policy: the file is written deny-first
-    /// so an explicit deny overrides a broader allow, and loopback is exempted
-    /// ahead of everything because it is the sandbox's own isolated loopback.
-    pub(crate) fn render(&self, family: RuleFamily, chain: &str) -> String {
+    /// Ordering is the policy: the chain is evaluated first-match, so loopback
+    /// is exempted ahead of everything because it is the sandbox's own isolated
+    /// loopback, and denies precede allows so an explicit deny overrides a
+    /// broader allow. A family with no rules of its own still gets its terminal
+    /// verdict, so IPv6 under an IPv4-only policy fails closed rather than
+    /// being left open.
+    fn chain_lines(&self, family: RuleFamily) -> Vec<String> {
         let terminal = match family {
             RuleFamily::V4 => self.v4_terminal,
             RuleFamily::V6 => self.v6_terminal,
         };
 
-        let mut out = format!("*filter\n:{chain} - [0:0]\n-A {chain} -o lo -j ACCEPT\n");
-        for rule in self
-            .rules
-            .iter()
-            .filter(|rule| rule.address.family == family)
-        {
-            out.push_str(&format!("-A {chain} {}\n", rule.render()));
-        }
-        out.push_str(&format!("-A {chain} -j {terminal}\n"));
-        out.push_str(&format!("-A OUTPUT -j {chain}\n"));
-        out.push_str("COMMIT\n");
-        out
+        let mut lines = vec!["-o lo -j ACCEPT".to_string()];
+        lines.extend(
+            self.rules
+                .iter()
+                .filter(|rule| rule.address.family == family)
+                .map(EgressRule::render),
+        );
+        lines.push(format!("-j {terminal}"));
+        lines
     }
+}
+
+/// The inbound posture for one sandbox.
+///
+/// Bubblewrap's sandbox already has no inbound path -- it runs in a private
+/// network namespace and slirp is launched without port forwarding -- so this
+/// chain is defense in depth plus the shape the 0.8 contract's D6 specifies,
+/// rather than new protection. It becomes load-bearing the moment any inbound
+/// path is configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IngressPlan {
+    /// Verdict for a connection the sandbox did not initiate.
+    new_inbound: RuleVerdict,
+}
+
+impl IngressPlan {
+    /// The posture the request asks for.
+    ///
+    /// Only the deny posture is reachable on the private-namespace path today:
+    /// `allowLocalNetwork: true` is refused before this point at schema 0.8+
+    /// (see `bwrap_command::local_network_diagnostic_for_mode`) because
+    /// honoring it needs slirp port forwarding and a port contract that the
+    /// legacy schema cannot express. The mapping is written out in full anyway
+    /// so the policy lives in one readable place and lifting that rejection is
+    /// a change at the rejection, not here.
+    pub(crate) fn for_request(request: &ExecutionRequest) -> Self {
+        Self {
+            new_inbound: if request.policy.allow_local_network {
+                RuleVerdict::Accept
+            } else {
+                RuleVerdict::Drop
+            },
+        }
+    }
+
+    /// The chain body for one family.
+    ///
+    /// The `ESTABLISHED,RELATED` accept is not optional: the terminal `DROP`
+    /// applies to *every* inbound packet, and a reply to sandbox-initiated
+    /// egress arrives inbound. Without it this chain would break all
+    /// networking rather than restrict it.
+    ///
+    /// The terminal verdict is `DROP` regardless of `defaultPolicy`, which
+    /// governs egress only -- an open outbound posture must not open inbound.
+    ///
+    /// Both families get the same body. IPv6 needs an RFC 4890 ICMPv6 carve-out
+    /// (NDP and MLD, which a terminal `DROP` would otherwise break) before it
+    /// can carry traffic, as `lxc_common::network_ingress` has; it is omitted
+    /// here because slirp is launched without `--enable-ipv6`, so the sandbox
+    /// namespace has no IPv6 connectivity for those rules to protect. Enabling
+    /// IPv6 means adding them in the same change.
+    fn chain_lines(&self, _family: RuleFamily) -> Vec<String> {
+        vec![
+            // The sandbox's own loopback, which never leaves the sandbox.
+            "-i lo -j ACCEPT".to_string(),
+            "-m state --state ESTABLISHED,RELATED -j ACCEPT".to_string(),
+            format!("-m state --state NEW -j {}", self.new_inbound.target()),
+            "-j DROP".to_string(),
+        ]
+    }
+}
+
+/// One chain in a rendered table: its name, the built-in hook that jumps to it,
+/// and its body.
+struct ChainSection {
+    chain: &'static str,
+    hook: &'static str,
+    lines: Vec<String>,
+}
+
+/// The `iptables-restore` payload installing both directions for one family.
+///
+/// Everything travels in a single transaction: chain creation, both bodies and
+/// both hooks. That keeps the cost of a policy independent of the caller's host
+/// lists, and means a hook is never live over a partially built chain. If any
+/// line is unsupported by the host kernel -- the `state` match without
+/// `nf_conntrack`, say -- the whole transaction is rejected and nothing is
+/// applied, which is what makes an unsupported host fail closed at launch
+/// rather than run unenforced.
+pub(crate) fn render_filter_payload(
+    egress: &EgressPlan,
+    ingress: &IngressPlan,
+    family: RuleFamily,
+    egress_chain: &'static str,
+    ingress_chain: &'static str,
+) -> String {
+    let sections = [
+        ChainSection {
+            chain: egress_chain,
+            hook: "OUTPUT",
+            lines: egress.chain_lines(family),
+        },
+        ChainSection {
+            chain: ingress_chain,
+            hook: "INPUT",
+            lines: ingress.chain_lines(family),
+        },
+    ];
+
+    let mut out = String::from("*filter\n");
+    for section in &sections {
+        out.push_str(&format!(":{} - [0:0]\n", section.chain));
+    }
+    for section in &sections {
+        for line in &section.lines {
+            out.push_str(&format!("-A {} {line}\n", section.chain));
+        }
+    }
+    // Hooks last, so the built-in chains are only redirected once every custom
+    // chain in this transaction is complete.
+    for section in &sections {
+        out.push_str(&format!("-A {} -j {}\n", section.hook, section.chain));
+    }
+    out.push_str("COMMIT\n");
+    out
 }
 
 #[cfg(test)]
@@ -554,22 +668,41 @@ mod tests {
         }
     }
 
-    /// The chain's fixed opening: creation plus the loopback exemption.
-    fn head() -> String {
-        "*filter\n:C - [0:0]\n-A C -o lo -j ACCEPT\n".into()
+    const EGRESS: &str = "EG";
+    const INGRESS: &str = "IN";
+
+    fn payload(plan: &EgressPlan, family: RuleFamily) -> String {
+        render_filter_payload(plan, &denied_ingress(), family, EGRESS, INGRESS)
     }
 
-    /// The chain's fixed close: the terminal verdict and the `OUTPUT` hook.
-    fn tail(terminal: &str) -> String {
-        format!("-A C -j {terminal}\n-A OUTPUT -j C\nCOMMIT\n")
+    fn denied_ingress() -> IngressPlan {
+        IngressPlan::for_request(&ExecutionRequest::default())
     }
 
-    fn v4(plan: &EgressPlan) -> String {
-        plan.render(RuleFamily::V4, "C")
+    /// The rules appended to `chain`, in order, stripped of the `-A <chain>`
+    /// prefix so the assertion reads as policy rather than syntax.
+    fn chain_body(payload: &str, chain: &str) -> Vec<String> {
+        let prefix = format!("-A {chain} ");
+        payload
+            .lines()
+            .filter_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+            .collect()
     }
 
-    fn v6(plan: &EgressPlan) -> String {
-        plan.render(RuleFamily::V6, "C")
+    fn v4(plan: &EgressPlan) -> Vec<String> {
+        chain_body(&payload(plan, RuleFamily::V4), EGRESS)
+    }
+
+    fn v6(plan: &EgressPlan) -> Vec<String> {
+        chain_body(&payload(plan, RuleFamily::V6), EGRESS)
+    }
+
+    /// The egress chain's fixed frame, with `rules` in between.
+    fn egress(rules: &[&str], terminal: &str) -> Vec<String> {
+        let mut expected = vec!["-o lo -j ACCEPT".to_string()];
+        expected.extend(rules.iter().map(|rule| rule.to_string()));
+        expected.push(format!("-j {terminal}"));
+        expected
     }
 
     #[test]
@@ -577,11 +710,8 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["10.0.0.0/8"], &[]))
             .expect("a CIDR allowlist is enforceable");
 
-        assert_eq!(
-            v4(&plan),
-            format!("{}-A C -d 10.0.0.0/8 -j ACCEPT\n{}", head(), tail("DROP"))
-        );
-        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
+        assert_eq!(v4(&plan), egress(&["-d 10.0.0.0/8 -j ACCEPT"], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
     #[test]
@@ -589,11 +719,8 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &["192.0.2.0/24"]))
             .expect("a CIDR denylist is enforceable");
 
-        assert_eq!(
-            v4(&plan),
-            format!("{}-A C -d 192.0.2.0/24 -j DROP\n{}", head(), tail("ACCEPT"))
-        );
-        assert_eq!(v6(&plan), format!("{}{}", head(), tail("ACCEPT")));
+        assert_eq!(v4(&plan), egress(&["-d 192.0.2.0/24 -j DROP"], "ACCEPT"));
+        assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
     }
 
     /// The reported failure: a mapped `blockedHosts` entry under
@@ -631,11 +758,7 @@ mod tests {
 
         assert_eq!(
             v4(&plan),
-            format!(
-                "{}-A C -d 192.0.2.1 -j DROP\n-A C -d 0.0.0.0/0 -j ACCEPT\n{}",
-                head(),
-                tail("DROP")
-            )
+            egress(&["-d 192.0.2.1 -j DROP", "-d 0.0.0.0/0 -j ACCEPT"], "DROP")
         );
     }
 
@@ -644,15 +767,8 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["2001:db8::/32"], &[]))
             .expect("a v6 CIDR is enforceable");
 
-        assert_eq!(
-            v6(&plan),
-            format!(
-                "{}-A C -d 2001:db8::/32 -j ACCEPT\n{}",
-                head(),
-                tail("DROP")
-            )
-        );
-        assert_eq!(v4(&plan), format!("{}{}", head(), tail("DROP")));
+        assert_eq!(v6(&plan), egress(&["-d 2001:db8::/32 -j ACCEPT"], "DROP"));
+        assert_eq!(v4(&plan), egress(&[], "DROP"));
     }
 
     #[test]
@@ -672,27 +788,26 @@ mod tests {
 
         assert_eq!(
             v4(&plan),
-            format!(
-                "{}-A C -p tcp -d 10.0.2.2 --dport 3128 -j ACCEPT\n{}",
-                head(),
-                tail("DROP")
-            )
+            egress(&["-p tcp -d 10.0.2.2 --dport 3128 -j ACCEPT"], "DROP")
         );
-        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
-    /// The hook is the last line of the transaction, so it is only ever
-    /// committed together with the chain it jumps to.
+    /// Both hooks are the last lines of the transaction, so a built-in chain is
+    /// only ever redirected to a chain that is already complete.
     #[test]
-    fn the_output_hook_is_committed_with_the_chain_it_jumps_to() {
-        for payload in [
-            v4(&EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128)),
-            v6(&EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128)),
-        ] {
-            let lines: Vec<&str> = payload.lines().collect();
-            assert_eq!(lines.first(), Some(&"*filter"));
-            assert_eq!(lines[lines.len() - 2], "-A OUTPUT -j C");
-            assert_eq!(lines.last(), Some(&"COMMIT"));
+    fn the_hooks_are_committed_with_the_chains_they_jump_to() {
+        let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
+        for family in [RuleFamily::V4, RuleFamily::V6] {
+            let rendered = payload(&plan, family);
+            let lines: Vec<&str> = rendered.lines().collect();
+
+            assert_eq!(lines[0], "*filter");
+            assert_eq!(lines[1], format!(":{EGRESS} - [0:0]"));
+            assert_eq!(lines[2], format!(":{INGRESS} - [0:0]"));
+            assert_eq!(lines[lines.len() - 3], format!("-A OUTPUT -j {EGRESS}"));
+            assert_eq!(lines[lines.len() - 2], format!("-A INPUT -j {INGRESS}"));
+            assert_eq!(lines[lines.len() - 1], "COMMIT");
         }
     }
 
@@ -703,7 +818,97 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &[], &[]))
             .expect("a bare block policy is enforceable");
 
-        assert_eq!(v4(&plan), format!("{}{}", head(), tail("DROP")));
-        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
+        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    // ── Ingress ──────────────────────────────────────────────────────────────
+
+    fn ingress_body(family: RuleFamily) -> Vec<String> {
+        chain_body(
+            &payload(
+                &EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128),
+                family,
+            ),
+            INGRESS,
+        )
+    }
+
+    /// The whole inbound chain, asserted as an ordered sequence because in a
+    /// first-match chain a correct set of rules in the wrong order is a
+    /// different policy.
+    #[test]
+    fn the_ingress_chain_denies_new_inbound_and_keeps_replies_flowing() {
+        for family in [RuleFamily::V4, RuleFamily::V6] {
+            assert_eq!(
+                ingress_body(family),
+                vec![
+                    "-i lo -j ACCEPT".to_string(),
+                    "-m state --state ESTABLISHED,RELATED -j ACCEPT".to_string(),
+                    "-m state --state NEW -j DROP".to_string(),
+                    "-j DROP".to_string(),
+                ],
+                "{family:?}"
+            );
+        }
+    }
+
+    /// The regression this chain could most easily cause. A terminal `DROP`
+    /// applies to replies too, so without the connection-state accept ahead of
+    /// it the sandbox would lose all networking rather than gain an inbound
+    /// restriction -- and it has to come *before* the drops to be reached.
+    #[test]
+    fn replies_are_accepted_before_anything_is_dropped() {
+        let body = ingress_body(RuleFamily::V4);
+        let established = body
+            .iter()
+            .position(|rule| rule.contains("ESTABLISHED,RELATED"))
+            .expect("replies must be accepted, or egress stops working");
+        let first_drop = body
+            .iter()
+            .position(|rule| rule.contains("-j DROP"))
+            .expect("the chain must drop something");
+
+        assert!(established < first_drop, "{body:?}");
+    }
+
+    /// `defaultPolicy` governs egress. An open outbound posture must not open
+    /// inbound as a side effect.
+    #[test]
+    fn an_allow_egress_posture_does_not_open_inbound() {
+        let plan = EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &[]))
+            .expect("a bare allow policy is enforceable");
+        let rendered =
+            render_filter_payload(&plan, &denied_ingress(), RuleFamily::V4, EGRESS, INGRESS);
+
+        assert_eq!(chain_body(&rendered, EGRESS).last().unwrap(), "-j ACCEPT");
+        assert_eq!(chain_body(&rendered, INGRESS).last().unwrap(), "-j DROP");
+    }
+
+    /// The mapping the rejection at `bwrap_command` currently guards. Asserted
+    /// so lifting that rejection cannot silently produce the wrong posture.
+    #[test]
+    fn allowing_local_network_accepts_new_inbound_instead() {
+        let mut request = ExecutionRequest::default();
+        request.policy.allow_local_network = true;
+        let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
+        let rendered = render_filter_payload(
+            &plan,
+            &IngressPlan::for_request(&request),
+            RuleFamily::V4,
+            EGRESS,
+            INGRESS,
+        );
+        let body = chain_body(&rendered, INGRESS);
+
+        assert!(
+            body.contains(&"-m state --state NEW -j ACCEPT".to_string()),
+            "{body:?}"
+        );
+        assert_eq!(
+            body.last().unwrap(),
+            "-j DROP",
+            "the terminal verdict closes the chain regardless: {body:?}"
+        );
     }
 }

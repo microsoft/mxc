@@ -23,7 +23,9 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
 
 use crate::bwrap_command::COMMAND_TAIL;
-use crate::network_rules::{EgressPlan, RuleFamily, RESTORE_INVOCATIONS};
+use crate::network_rules::{
+    render_filter_payload, EgressPlan, IngressPlan, RuleFamily, RESTORE_INVOCATIONS,
+};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -63,6 +65,8 @@ const SLIRP_NETWORK: &str = "10.0.2.0/24";
 const SANDBOX_HOSTS_PATH: &str = "/etc/hosts";
 /// Egress chain installed inside the sandbox's own network namespace.
 const EGRESS_CHAIN: &str = "MXC_EGRESS";
+/// Chain carrying the inbound posture, hooked into `INPUT`.
+const INGRESS_CHAIN: &str = "MXC_INGRESS";
 /// Descriptor numbers the supervisor script hardcodes. They must stay single
 /// digit and below [`FD_STAGING_BASE`]: dash cannot name a descriptor >= 10 in
 /// a redirection, which is the whole reason the parent pins them.
@@ -121,15 +125,15 @@ while [ ! -s "$state_dir/slirp.internal" ]; do
 done
 
 ns="/proc/$child_pid/ns/net"
-# Per-destination filtering, programmed here because it needs CAP_NET_ADMIN in
-# the owning user namespace, which this supervisor holds (`--keep-caps`) and
-# the caller does not.
+# Network filtering in both directions, programmed here because it needs
+# CAP_NET_ADMIN in the owning user namespace, which this supervisor holds
+# (`--keep-caps`) and the caller does not.
 #
-# Each family's whole table -- chain, loopback exemption, the caller's rules in
-# order, the terminal verdict and the OUTPUT hook -- arrives in one
-# `iptables-restore` transaction, so the hook is never live over a partially
-# built chain and the rules cannot be observed half-installed. The payloads are
-# rendered in Rust from parsed addresses, so nothing here echoes caller text.
+# Each family's whole table -- both chains, their bodies and both built-in
+# hooks -- arrives in one `iptables-restore` transaction, so a hook is never
+# live over a partially built chain and the rules cannot be observed
+# half-installed. The payloads are rendered in Rust from parsed addresses, so
+# nothing here echoes caller text.
 #
 # -w matters only on the legacy backend, the one that takes a lock: nsenter
 # enters the network namespace but not the mount namespace, so concurrent
@@ -137,8 +141,15 @@ ns="/proc/$child_pid/ns/net"
 # race into a dead supervisor. nf_tables takes no lock and ignores the wait.
 # A backend that cannot take the lock at all is refused by probe_dependencies.
 # -n keeps the restore additive, so it never clears a table it did not write.
-nsenter --net="$ns" -- iptables-restore -w "$lock_wait" -n "$state_dir/egress.v4.rules"
-nsenter --net="$ns" -- ip6tables-restore -w "$lock_wait" -n "$state_dir/egress.v6.rules"
+#
+# A rejected transaction applies nothing, so a host that cannot support a rule
+# fails closed here rather than starting an unenforced sandbox. The most likely
+# cause is worth naming, because iptables reports it only as "Invalid argument".
+conntrack_hint="mxc: could not install the sandbox network policy. If the error above says \
+'Invalid argument', this host is missing the nf_conntrack kernel module that the inbound \
+connection-state match requires, and an unprivileged sandbox cannot load it."
+nsenter --net="$ns" -- iptables-restore -w "$lock_wait" -n "$state_dir/egress.v4.rules" || { echo "$conntrack_hint" >&2; exit 1; }
+nsenter --net="$ns" -- ip6tables-restore -w "$lock_wait" -n "$state_dir/egress.v6.rules" || { echo "$conntrack_hint" >&2; exit 1; }
 
 # Signalled by path, not through a descriptor: this is a plain file the parent
 # polls, so it needs no shell redirection and cannot hit dash's fd limit.
@@ -575,15 +586,17 @@ pub(crate) struct ProxyNetworkNamespace {
 impl ProxyNetworkNamespace {
     /// Create the capability-retaining namespace supervisor.
     ///
-    /// `plan` is the complete filtering posture the sandbox runs under once the
+    /// `plan` is the outbound filtering posture the sandbox runs under once the
     /// supervisor signals readiness; anything it does not accept is dropped.
-    /// `pin` is the hosts-file entry the sandbox needs to agree with the plan,
-    /// which only a hostname proxy endpoint produces.
+    /// `ingress` is the matching inbound posture. `pin` is the hosts-file entry
+    /// the sandbox needs to agree with the plan, which only a hostname proxy
+    /// endpoint produces.
     ///
     /// Callers reach this only after `BwrapRunner::validate` has already run
     /// [`probe_dependencies`], so the probe is not repeated here.
     pub(crate) fn start(
         plan: &EgressPlan,
+        ingress: &IngressPlan,
         pin: Option<&ProxyHostPin>,
         logger: &mut Logger,
     ) -> Result<Self, String> {
@@ -600,8 +613,9 @@ impl ProxyNetworkNamespace {
             ("egress.v6.rules", RuleFamily::V6),
         ] {
             let path = state_dir.path().join(name);
-            std::fs::write(&path, plan.render(family, EGRESS_CHAIN)).map_err(|error| {
-                format!("Bubblewrap: failed to write egress rules to {path:?}: {error}")
+            let payload = render_filter_payload(plan, ingress, family, EGRESS_CHAIN, INGRESS_CHAIN);
+            std::fs::write(&path, payload).map_err(|error| {
+                format!("Bubblewrap: failed to write network rules to {path:?}: {error}")
             })?;
         }
         let stderr_path = state_dir.path().join("supervisor.stderr");
@@ -2615,6 +2629,8 @@ mod tests {
     /// Chain name the fake supervisor installs into. Distinct from
     /// [`EGRESS_CHAIN`] so a test can never pass by matching production text.
     const TEST_CHAIN: &str = "mxc-test-chain";
+    /// Inbound counterpart to [`TEST_CHAIN`].
+    const TEST_INGRESS_CHAIN: &str = "mxc-test-ingress";
 
     /// Counts the restore commands and fails the one named by
     /// `MXC_TEST_FAIL_AT`. The real `nsenter` needs a live namespace and
@@ -2829,12 +2845,24 @@ exec sleep 30
         fs::create_dir_all(&state).expect("state dir");
         fs::write(
             state.join("egress.v4.rules"),
-            plan.render(RuleFamily::V4, TEST_CHAIN),
+            render_filter_payload(
+                plan,
+                &IngressPlan::for_request(&wxc_common::models::ExecutionRequest::default()),
+                RuleFamily::V4,
+                TEST_CHAIN,
+                TEST_INGRESS_CHAIN,
+            ),
         )
         .expect("v4 rules file");
         fs::write(
             state.join("egress.v6.rules"),
-            plan.render(RuleFamily::V6, TEST_CHAIN),
+            render_filter_payload(
+                plan,
+                &IngressPlan::for_request(&wxc_common::models::ExecutionRequest::default()),
+                RuleFamily::V6,
+                TEST_CHAIN,
+                TEST_INGRESS_CHAIN,
+            ),
         )
         .expect("v6 rules file");
         install_stub(&bin.join("nsenter"), FAKE_NSENTER);
@@ -2888,8 +2916,8 @@ exec sleep 30
         }
     }
 
-    /// The chain and its `OUTPUT` hook must reach iptables in one transaction,
-    /// so the hook is never live over a partially built chain.
+    /// Both chains and both hooks must reach iptables in one transaction per
+    /// family, so a hook is never live over a partially built chain.
     #[test]
     fn each_family_is_restored_from_its_own_payload_in_one_transaction() {
         let mut supervisor = spawn_fake_supervisor(None, false);
@@ -2912,12 +2940,50 @@ exec sleep 30
                 .collect();
             assert_eq!(lines.first().map(String::as_str), Some("*filter"), "{tool}");
             assert_eq!(
-                lines[lines.len() - 2],
+                lines[lines.len() - 3],
                 format!("-A OUTPUT -j {TEST_CHAIN}"),
-                "the {tool} hook must be committed with its chain"
+                "the {tool} egress hook must be committed with its chain"
+            );
+            assert_eq!(
+                lines[lines.len() - 2],
+                format!("-A INPUT -j {TEST_INGRESS_CHAIN}"),
+                "the {tool} ingress hook must be committed with its chain"
             );
             assert_eq!(lines.last().map(String::as_str), Some("COMMIT"), "{tool}");
         }
+    }
+
+    /// The inbound chain has to survive the trip through the supervisor, not
+    /// just the renderer: it is only real once iptables receives it.
+    #[test]
+    fn the_supervisor_installs_the_inbound_chain_alongside_the_outbound_one() {
+        let mut supervisor = spawn_fake_supervisor(None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        for tool in ["iptables", "ip6tables"] {
+            let lines: Vec<String> = supervisor
+                .payload_lines()
+                .into_iter()
+                .filter_map(|line| line.strip_prefix(&format!("{tool} ")).map(str::to_owned))
+                .collect();
+            assert!(
+                lines.contains(&format!(":{TEST_INGRESS_CHAIN} - [0:0]")),
+                "{tool} must declare the inbound chain: {lines:?}"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("ESTABLISHED,RELATED -j ACCEPT")),
+                "{tool} must keep replies flowing: {lines:?}"
+            );
+        }
+
+        assert_eq!(
+            supervisor.rule_log().len(),
+            RESTORE_INVOCATIONS as usize,
+            "the inbound chain must not cost an extra transaction"
+        );
     }
 
     /// Executing the script also re-checks that the whole policy travels in
