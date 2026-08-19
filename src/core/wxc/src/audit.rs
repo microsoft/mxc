@@ -61,10 +61,10 @@ pub fn finalize(
         .as_mut()
         .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
     let source_denials = PathBuf::from(&capture.output_path);
-    let source_data_loop =
-        learning_mode_core::data_loop_sibling_path(&source_denials).map_err(|error| {
+    let source_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&source_denials)
+        .map_err(|error| {
             format!(
-                "failed to derive Data Loop path from {}: {error}",
+                "failed to derive verbose logging path from {}: {error}",
                 source_denials.display()
             )
         })?;
@@ -85,10 +85,10 @@ pub fn finalize(
             source_etl.display()
         ));
     }
-    if !source_data_loop.is_file() {
+    if !source_verbose_logging.is_file() {
         return Err(format!(
-            "captureDenials Data Loop output file is missing: {}",
-            source_data_loop.display()
+            "captureDenials verbose logging output file is missing: {}",
+            source_verbose_logging.display()
         ));
     }
 
@@ -106,31 +106,31 @@ pub fn finalize(
             )
         })?;
     validate_metadata(capture, &document)?;
-    let _: learning_mode_core::DataLoopDocument =
-        serde_json::from_slice(&std::fs::read(&source_data_loop).map_err(|error| {
+    let _: learning_mode_core::VerboseLoggingDocument =
+        serde_json::from_slice(&std::fs::read(&source_verbose_logging).map_err(|error| {
             format!(
-                "failed to read captureDenials Data Loop output {}: {error}",
-                source_data_loop.display()
+                "failed to read captureDenials verbose logging output {}: {error}",
+                source_verbose_logging.display()
             )
         })?)
         .map_err(|error| {
             format!(
-                "captureDenials Data Loop output {} is not valid JSON: {error}",
-                source_data_loop.display()
+                "captureDenials verbose logging output {} is not valid JSON: {error}",
+                source_verbose_logging.display()
             )
         })?;
 
     let final_denials = context.log_dir.join("denials.json");
-    let final_data_loop = learning_mode_core::data_loop_sibling_path(&final_denials)
-        .map_err(|error| format!("failed to derive audit Data Loop output path: {error}"))?;
+    let final_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&final_denials)
+        .map_err(|error| format!("failed to derive audit verbose logging output path: {error}"))?;
     let final_etl = context.log_dir.join("trace.etl");
     relocate_artifacts(
         capture,
         &ArtifactRelocation {
             source_denials: &source_denials,
             final_denials: &final_denials,
-            source_data_loop: &source_data_loop,
-            final_data_loop: &final_data_loop,
+            source_verbose_logging: &source_verbose_logging,
+            final_verbose_logging: &final_verbose_logging,
             source_etl: &source_etl,
             final_etl: &final_etl,
         },
@@ -186,8 +186,8 @@ fn validate_metadata(
 struct ArtifactRelocation<'a> {
     source_denials: &'a Path,
     final_denials: &'a Path,
-    source_data_loop: &'a Path,
-    final_data_loop: &'a Path,
+    source_verbose_logging: &'a Path,
+    final_verbose_logging: &'a Path,
     source_etl: &'a Path,
     final_etl: &'a Path,
 }
@@ -203,9 +203,9 @@ fn relocate_artifacts(
     relocate_pair(
         "audit output relocation",
         paths.source_denials,
-        paths.source_data_loop,
+        paths.source_verbose_logging,
         paths.final_denials,
-        paths.final_data_loop,
+        paths.final_verbose_logging,
     )
     .map_err(|error| format!("failed to relocate audit output pair: {error}"))?;
     capture.output_path = paths.final_denials.to_string_lossy().into_owned();
@@ -279,7 +279,9 @@ fn remove_empty_managed_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{DataLoopDocument, DataLoopSummary, DenialSummary, DenialsDocument};
+    use learning_mode_core::{
+        DenialSummary, DenialsDocument, VerboseLoggingDocument, VerboseLoggingSummary,
+    };
     use wxc_common::models::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
@@ -326,13 +328,15 @@ mod tests {
         finalize(&mut response, &context, directory.path(), false).unwrap();
 
         assert!(!source_denials.exists());
-        assert!(!learning_mode_core::data_loop_sibling_path(&source_denials)
-            .unwrap()
-            .exists());
+        assert!(
+            !learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(!source_etl.exists());
         assert!(!retained_dir.exists());
         assert_eq!(std::fs::read(log_dir.join("trace.etl")).unwrap(), b"etl");
-        assert!(log_dir.join("denials.data-loop.json").is_file());
+        assert!(log_dir.join("denials.verbose.json").is_file());
         let capture = response
             .output_metadata
             .as_ref()
@@ -385,7 +389,7 @@ mod tests {
             Some(log_dir.join("trace.etl").as_path())
         );
         assert!(log_dir.join("denials.json").is_file());
-        assert!(log_dir.join("denials.data-loop.json").is_file());
+        assert!(log_dir.join("denials.verbose.json").is_file());
         assert!(log_dir.join("trace.etl").is_file());
     }
 
@@ -435,25 +439,28 @@ mod tests {
 
         assert!(error.contains("canonical denials JSON"));
         assert!(source_denials.exists());
-        assert!(learning_mode_core::data_loop_sibling_path(&source_denials)
-            .unwrap()
-            .exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(source_etl.exists());
     }
 
     #[test]
-    fn finalize_rejects_malformed_data_loop_without_moving_artifacts() {
+    fn finalize_rejects_malformed_verbose_logging_without_moving_artifacts() {
         let directory = tempfile::tempdir().unwrap();
         let log_dir = directory.path().join("audit");
         std::fs::create_dir_all(&log_dir).unwrap();
         let source_denials = log_dir.join("denials.unique.json");
-        let source_data_loop = learning_mode_core::data_loop_sibling_path(&source_denials).unwrap();
+        let source_verbose_logging =
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
         let source_etl = log_dir.join("denials.unique.etl");
         let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
         std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut response = response_with_capture(&source_denials, &source_etl, 0);
-        std::fs::write(&source_data_loop, b"{").unwrap();
+        std::fs::write(&source_verbose_logging, b"{").unwrap();
         let context = AuditContext {
             log_dir: log_dir.clone(),
             config_path: None,
@@ -461,13 +468,13 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("Data Loop output"));
+        assert!(error.contains("verbose logging output"));
         assert!(error.contains("not valid JSON"));
         assert!(source_denials.is_file());
-        assert!(source_data_loop.is_file());
+        assert!(source_verbose_logging.is_file());
         assert!(source_etl.is_file());
         assert!(!log_dir.join("denials.json").exists());
-        assert!(!log_dir.join("denials.data-loop.json").exists());
+        assert!(!log_dir.join("denials.verbose.json").exists());
         assert!(!log_dir.join("trace.etl").exists());
     }
 
@@ -492,9 +499,11 @@ mod tests {
 
         assert!(error.contains("canonical output file already exists"));
         assert!(source_denials.exists());
-        assert!(learning_mode_core::data_loop_sibling_path(&source_denials)
-            .unwrap()
-            .exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(source_etl.exists());
         assert!(!log_dir.join("trace.etl").exists());
     }
@@ -515,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_rejects_missing_data_loop_output() {
+    fn finalize_rejects_missing_verbose_logging_output() {
         let directory = tempfile::tempdir().unwrap();
         let log_dir = directory.path().join("audit");
         std::fs::create_dir_all(&log_dir).unwrap();
@@ -525,8 +534,10 @@ mod tests {
         std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut response = response_with_capture(&source_denials, &source_etl, 0);
-        std::fs::remove_file(learning_mode_core::data_loop_sibling_path(&source_denials).unwrap())
-            .unwrap();
+        std::fs::remove_file(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap(),
+        )
+        .unwrap();
         let context = AuditContext {
             log_dir,
             config_path: None,
@@ -534,7 +545,7 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("Data Loop output file is missing"));
+        assert!(error.contains("verbose logging output file is missing"));
         assert!(source_denials.exists());
         assert!(source_etl.exists());
     }
@@ -545,13 +556,13 @@ mod tests {
         let log_dir = directory.path().join("audit");
         std::fs::create_dir_all(&log_dir).unwrap();
         let source_denials = log_dir.join("denials.unique.json");
-        let source_data_loop = log_dir.join("denials.unique.data-loop.json");
+        let source_verbose_logging = log_dir.join("denials.unique.verbose.json");
         let source_etl = log_dir.join("denials.unique.etl");
         let final_denials = log_dir.join("denials.json");
-        let final_data_loop = log_dir.join("denials.data-loop.json");
+        let final_verbose_logging = log_dir.join("denials.verbose.json");
         let final_etl = log_dir.join("trace.etl");
         std::fs::write(&source_denials, b"denials").unwrap();
-        std::fs::write(&source_data_loop, b"data-loop").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut capture = CaptureDenialsOutput {
             kind: CaptureDenialsOutput::KIND.to_string(),
@@ -568,8 +579,8 @@ mod tests {
             &ArtifactRelocation {
                 source_denials: &source_denials,
                 final_denials: &final_denials,
-                source_data_loop: &source_data_loop,
-                final_data_loop: &final_data_loop,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &final_verbose_logging,
                 source_etl: &source_etl,
                 final_etl: &final_etl,
             },
@@ -590,8 +601,8 @@ mod tests {
         assert!(final_denials.is_file());
         assert!(!source_denials.exists());
         assert_eq!(Path::new(&capture.output_path), final_denials);
-        assert!(final_data_loop.is_file());
-        assert!(!source_data_loop.exists());
+        assert!(final_verbose_logging.is_file());
+        assert!(!source_verbose_logging.exists());
         // ETL untouched; metadata still truthfully points at the source.
         assert!(source_etl.is_file());
         assert!(!final_etl.exists());
@@ -605,12 +616,12 @@ mod tests {
     fn relocate_rolls_back_json_pair_before_publishing_metadata() {
         let directory = tempfile::tempdir().unwrap();
         let source_denials = directory.path().join("denials.unique.json");
-        let source_data_loop = directory.path().join("denials.unique.data-loop.json");
+        let source_verbose_logging = directory.path().join("denials.unique.verbose.json");
         let source_etl = directory.path().join("denials.unique.etl");
         let shared_destination = directory.path().join("denials.json");
         let final_etl = directory.path().join("trace.etl");
         std::fs::write(&source_denials, b"denials").unwrap();
-        std::fs::write(&source_data_loop, b"data-loop").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut capture = CaptureDenialsOutput {
             kind: CaptureDenialsOutput::KIND.to_string(),
@@ -626,8 +637,8 @@ mod tests {
             &ArtifactRelocation {
                 source_denials: &source_denials,
                 final_denials: &shared_destination,
-                source_data_loop: &source_data_loop,
-                final_data_loop: &shared_destination,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &shared_destination,
                 source_etl: &source_etl,
                 final_etl: &final_etl,
             },
@@ -639,7 +650,7 @@ mod tests {
         assert!(error.contains("failed to promote canonical"));
         assert_eq!(Path::new(&capture.output_path), source_denials);
         assert!(source_denials.is_file());
-        assert!(source_data_loop.is_file());
+        assert!(source_verbose_logging.is_file());
         assert!(!shared_destination.exists());
         assert!(source_etl.is_file());
         assert!(!final_etl.exists());
@@ -650,9 +661,14 @@ mod tests {
         etl_path: &Path,
         exit_code: i32,
     ) -> ScriptResponse {
-        let data_loop_path = learning_mode_core::data_loop_sibling_path(denials_path).unwrap();
-        let data_loop = DataLoopDocument::new(&DataLoopSummary::default());
-        std::fs::write(data_loop_path, serde_json::to_vec(&data_loop).unwrap()).unwrap();
+        let verbose_logging_path =
+            learning_mode_core::verbose_logging_sibling_path(denials_path).unwrap();
+        let verbose_logging = VerboseLoggingDocument::new(&VerboseLoggingSummary::default());
+        std::fs::write(
+            verbose_logging_path,
+            serde_json::to_vec(&verbose_logging).unwrap(),
+        )
+        .unwrap();
         ScriptResponse {
             exit_code,
             output_metadata: Some(Box::new(SandboxOutputMetadata {

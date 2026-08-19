@@ -7,7 +7,7 @@
 //! decoding its own sealed ETL) and the guarded-WPR legacy-tier fallback
 //! (`appcontainer_runner`, consuming an already-decoded [`AnalysisResult`]
 //! handed back by the elevated PLM guardian) must emit byte-for-byte the same
-//! [`DenialsDocument`] JSON shape, username-redacted Data Loop sibling,
+//! [`DenialsDocument`] JSON shape, username-redacted verbose logging sibling,
 //! [`CaptureDenialsOutput`] summary, and resolved output-path convention.
 //! Centralizing that here is what guarantees the two paths can't drift.
 //!
@@ -19,9 +19,9 @@
 use std::path::{Path, PathBuf};
 
 use learning_mode_core::{
-    data_loop_sibling_path, write_data_loop_document, write_document, write_paired_output_files,
-    AnalysisResult, DataLoopDocument, DenialSummary, DenialsDocument, DenialsOutputPointer,
-    ExistingOutputPolicy,
+    verbose_logging_sibling_path, write_document, write_paired_output_files,
+    write_verbose_logging_document, AnalysisResult, DenialSummary, DenialsDocument,
+    DenialsOutputPointer, ExistingOutputPolicy, VerboseLoggingDocument,
 };
 use wxc_common::models::CaptureDenialsOutput;
 
@@ -51,7 +51,7 @@ pub struct DenialsOutputPaths {
 }
 
 /// Writes a bounded [`AnalysisResult`] as the canonical denials document and
-/// deterministic Data Loop sibling, then returns caller-facing metadata for
+/// deterministic verbose logging sibling, then returns caller-facing metadata for
 /// the canonical document.
 ///
 /// Never overwrites an existing file: a run whose output path collides with a
@@ -61,22 +61,22 @@ pub fn write_denials_document(
     exit_code: i32,
     output_path: &Path,
 ) -> std::io::Result<CaptureDenialsOutput> {
-    let data_loop_path = data_loop_output_path(output_path)?;
+    let verbose_logging_path = verbose_logging_output_path(output_path)?;
     let summary = DenialSummary::new(
         exit_code,
         analysis.denials.len(),
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials, summary);
-    let data_loop_document = DataLoopDocument::new(&analysis.data_loop);
+    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
 
     write_paired_output_files(
         "captureDenials",
         output_path,
-        &data_loop_path,
+        &verbose_logging_path,
         ExistingOutputPolicy::CreateNew,
         |writer| write_document(writer, &document),
-        |writer| write_data_loop_document(writer, &data_loop_document),
+        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
     )?;
 
     let pointer = DenialsOutputPointer::new(output_path.to_string_lossy(), &document.summary);
@@ -90,9 +90,9 @@ pub fn write_denials_document(
     })
 }
 
-/// Derives the deterministic Data Loop sibling path for a denials output.
-pub fn data_loop_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
-    data_loop_sibling_path(output_path)
+/// Derives the deterministic verbose logging sibling path for a denials output.
+pub fn verbose_logging_output_path(output_path: &Path) -> std::io::Result<PathBuf> {
+    verbose_logging_sibling_path(output_path)
         .map_err(|error| std::io::Error::other(format!("captureDenials {error}")))
 }
 
@@ -282,8 +282,8 @@ pub fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
 mod tests {
     use super::*;
     use learning_mode_core::{
-        AccessType, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature, DeniedResource,
-        ResourceType,
+        AccessType, DeniedResource, ResourceType, VerboseLoggingExclusionReason,
+        VerboseLoggingProvider, VerboseLoggingSignature,
     };
     use std::io::Write;
 
@@ -309,11 +309,11 @@ mod tests {
         let document: DenialsDocument =
             serde_json::from_slice(&std::fs::read(&output_path).unwrap()).unwrap();
         assert_eq!(document.denials.len(), 1);
-        let data_loop: DataLoopDocument = serde_json::from_slice(
-            &std::fs::read(data_loop_output_path(&output_path).unwrap()).unwrap(),
+        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
+            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
         )
         .unwrap();
-        assert_eq!(data_loop.version, DataLoopDocument::VERSION);
+        assert_eq!(verbose_logging.version, VerboseLoggingDocument::VERSION);
     }
 
     #[test]
@@ -327,19 +327,19 @@ mod tests {
 
         assert_eq!(metadata.total_denials, 0);
         assert!(output_path.exists());
-        assert!(data_loop_output_path(&output_path).unwrap().exists());
+        assert!(verbose_logging_output_path(&output_path).unwrap().exists());
     }
 
     #[test]
-    fn write_denials_document_writes_data_loop_aggregates() {
+    fn write_denials_document_writes_verbose_logging_aggregates() {
         let directory = tempfile::tempdir().expect("temp directory");
         let output_path = directory.path().join("denials.json");
         let mut analysis = AnalysisResult::complete(Vec::new());
-        analysis.data_loop.record(DataLoopSignature {
-            provider: DataLoopProvider::KernelGeneral,
+        analysis.verbose_logging.record(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: DataLoopExclusionReason::CanonicalDenial,
+            reason: VerboseLoggingExclusionReason::CanonicalDenial,
             pid: 42,
             access_type: Some(learning_mode_core::AccessType::Read),
             resource_type: Some(learning_mode_core::ResourceType::File),
@@ -348,63 +348,65 @@ mod tests {
 
         write_denials_document(analysis, 0, &output_path).expect("write should succeed");
 
-        let data_loop: DataLoopDocument = serde_json::from_slice(
-            &std::fs::read(data_loop_output_path(&output_path).unwrap()).unwrap(),
+        let verbose_logging: VerboseLoggingDocument = serde_json::from_slice(
+            &std::fs::read(verbose_logging_output_path(&output_path).unwrap()).unwrap(),
         )
         .unwrap();
-        assert_eq!(data_loop.signatures.len(), 1);
-        assert_eq!(data_loop.signatures[0].count, 1);
-        assert_eq!(data_loop.signatures[0].signature.pid, 42);
+        assert_eq!(verbose_logging.signatures.len(), 1);
+        assert_eq!(verbose_logging.signatures[0].count, 1);
+        assert_eq!(verbose_logging.signatures[0].signature.pid, 42);
     }
 
     #[test]
-    fn data_loop_path_is_a_deterministic_json_sibling() {
+    fn verbose_logging_path_is_a_deterministic_json_sibling() {
         assert_eq!(
-            data_loop_output_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
-            PathBuf::from(r"C:\out\denials.123.data-loop.json")
+            verbose_logging_output_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
+            PathBuf::from(r"C:\out\denials.123.verbose.json")
         );
         assert_eq!(
-            data_loop_output_path(Path::new("denials")).unwrap(),
-            PathBuf::from("denials.data-loop.json")
+            verbose_logging_output_path(Path::new("denials")).unwrap(),
+            PathBuf::from("denials.verbose.json")
         );
     }
 
     #[test]
-    fn data_loop_collision_leaves_canonical_output_absent() {
+    fn verbose_logging_collision_leaves_canonical_output_absent() {
         let directory = tempfile::tempdir().expect("temp directory");
         let output_path = directory.path().join("denials.json");
-        let data_loop_path = data_loop_output_path(&output_path).unwrap();
-        std::fs::write(&data_loop_path, b"existing").expect("seed Data Loop output");
+        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
+        std::fs::write(&verbose_logging_path, b"existing").expect("seed verbose logging output");
 
         write_denials_document(AnalysisResult::complete(Vec::new()), 0, &output_path)
             .expect_err("collision should fail");
 
         assert!(!output_path.exists());
-        assert_eq!(std::fs::read(data_loop_path).unwrap(), b"existing");
+        assert_eq!(std::fs::read(verbose_logging_path).unwrap(), b"existing");
     }
 
     #[test]
     fn second_staged_write_failure_leaves_no_final_output() {
         let directory = tempfile::tempdir().expect("temp directory");
         let output_path = directory.path().join("denials.json");
-        let data_loop_path = data_loop_output_path(&output_path).unwrap();
+        let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();
 
         let error = write_paired_output_files(
             "captureDenials",
             &output_path,
-            &data_loop_path,
+            &verbose_logging_path,
             ExistingOutputPolicy::CreateNew,
             |writer| writer.write_all(b"denials"),
             |writer| {
                 writer.write_all(b"partial")?;
-                Err(std::io::Error::other("simulated Data Loop failure"))
+                Err(std::io::Error::other("simulated verbose logging failure"))
             },
         )
         .expect_err("paired write should fail");
 
-        assert!(error.to_string().contains("simulated Data Loop failure"));
+        assert!(error
+            .to_string()
+            .contains("simulated verbose logging failure"));
         assert!(!output_path.exists());
-        assert!(!data_loop_path.exists());
+        assert!(!verbose_logging_path.exists());
     }
 
     #[test]

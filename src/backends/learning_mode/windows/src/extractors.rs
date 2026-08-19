@@ -22,7 +22,7 @@
 //! resource types we surface. This list grows as more denial sources are
 //! decoded; event IDs outside this vocabulary are excluded rather than
 //! extracted, and (for the known providers below) that exclusion is
-//! aggregated into [`learning_mode_core::DataLoopSummary`] rather than
+//! aggregated into [`learning_mode_core::VerboseLoggingSummary`] rather than
 //! silently dropped. The IDs handled today:
 //!
 //! - **14 / 4907 — access check** — the primary denial event
@@ -47,7 +47,9 @@
 //!   capability SID via [`crate::capability_names`] (well-known SID → friendly
 //!   name; custom hashed capabilities fall back to the SID string).
 
-use learning_mode_core::{AccessType, DataLoopExclusionReason, DataLoopProvider, ResourceType};
+use learning_mode_core::{
+    AccessType, ResourceType, VerboseLoggingExclusionReason, VerboseLoggingProvider,
+};
 use sha2::{Digest, Sha256};
 use windows::core::GUID;
 
@@ -107,19 +109,19 @@ pub struct RawDenial {
     pub filetime: u64,
     /// Originating ETW event ID (kept for diagnostics).
     pub event_id: u16,
-    /// Symbolic category of the originating provider, for Data Loop
+    /// Symbolic category of the originating provider, for verbose logging
     /// aggregation. Never a raw provider GUID.
-    pub provider: DataLoopProvider,
-    /// Bounded sensitive-value-redacted properties retained for Data Loop signatures.
-    pub data_loop_properties: Vec<(String, String)>,
+    pub provider: VerboseLoggingProvider,
+    /// Bounded sensitive-value-redacted properties retained for verbose logging signatures.
+    pub verbose_logging_properties: Vec<(String, String)>,
 }
 
 /// Routes a decoded event to the matching extractor by its event ID.
 ///
-/// Returns `Err` with a closed [`DataLoopExclusionReason`] for events that
+/// Returns `Err` with a closed [`VerboseLoggingExclusionReason`] for events that
 /// are not learning-mode denials, that carry an object type we don't
 /// surface, or that otherwise fail extraction. Callers aggregate the
-/// returned reason into [`learning_mode_core::DataLoopSummary`] rather than
+/// returned reason into [`learning_mode_core::VerboseLoggingSummary`] rather than
 /// discarding it, except when a fallback extractor (e.g.
 /// [`crate::capability_dacl`]) recovers an equivalent denial from the same
 /// event.
@@ -127,14 +129,14 @@ pub fn extract_denial(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Result<RawDenial, DataLoopExclusionReason> {
+) -> Result<RawDenial, VerboseLoggingExclusionReason> {
     // Callers on the real trace path gate on `is_learning_mode_event` before
     // decoding via TDH at all, so this branch only matters for direct/test
     // callers that skip that gate.
-    let provider =
-        provider_category(parts.provider).ok_or(DataLoopExclusionReason::UnsupportedEventSchema)?;
+    let provider = provider_category(parts.provider)
+        .ok_or(VerboseLoggingExclusionReason::UnsupportedEventSchema)?;
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        return Err(DataLoopExclusionReason::UnsupportedEventSchema);
+        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
     }
 
     match parts.event_id {
@@ -148,13 +150,13 @@ pub fn extract_denial(
             build_denial_from_learning_mode(parts, pid, filetime, provider)
         }
         CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime, provider),
-        _ => Err(DataLoopExclusionReason::UnsupportedEventSchema),
+        _ => Err(VerboseLoggingExclusionReason::UnsupportedEventSchema),
     }
 }
 
 /// Returns typed denial classifications that can be determined independently
 /// of whether the event contains every property required for canonical output.
-pub(crate) fn data_loop_classification(
+pub(crate) fn verbose_logging_classification(
     parts: &DecodedEventParts,
 ) -> (Option<AccessType>, Option<ResourceType>) {
     match parts.event_id {
@@ -244,29 +246,29 @@ pub(crate) fn effective_capability_event_pid(process_id: Option<&str>) -> Option
     process_id.and_then(parse_u32)
 }
 
-/// Maps a raw ETW provider GUID to its symbolic Data Loop category.
+/// Maps a raw ETW provider GUID to its symbolic verbose logging category.
 ///
 /// Returns `None` for providers outside the Learning Mode vocabulary; those
 /// events are ignored entirely (not aggregated), since they are unrelated
 /// host traffic rather than an excluded Learning Mode outcome.
-pub(crate) fn provider_category(provider: GUID) -> Option<DataLoopProvider> {
+pub(crate) fn provider_category(provider: GUID) -> Option<VerboseLoggingProvider> {
     if provider == KERNEL_GENERAL_PROVIDER {
-        Some(DataLoopProvider::KernelGeneral)
+        Some(VerboseLoggingProvider::KernelGeneral)
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
-        Some(DataLoopProvider::PrivacyAuditingPermissiveLearningMode)
+        Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
     } else {
         None
     }
 }
 
-/// Renders a symbolic Data Loop provider category back to its raw ETW
+/// Renders a symbolic verbose logging provider category back to its raw ETW
 /// provider GUID, in canonical braced string form, for retention in a Data
 /// Loop signature. Provider GUIDs are stable component identifiers, not
 /// personal data, so unlike account/user values they are never redacted.
-pub(crate) fn provider_guid_string(provider: DataLoopProvider) -> String {
+pub(crate) fn provider_guid_string(provider: VerboseLoggingProvider) -> String {
     match provider {
-        DataLoopProvider::KernelGeneral => format_guid(KERNEL_GENERAL_PROVIDER),
-        DataLoopProvider::PrivacyAuditingPermissiveLearningMode => {
+        VerboseLoggingProvider::KernelGeneral => format_guid(KERNEL_GENERAL_PROVIDER),
+        VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             format_guid(PRIVACY_LEARNING_MODE_PROVIDER)
         }
     }
@@ -289,9 +291,9 @@ fn format_guid(guid: GUID) -> String {
     )
 }
 
-// ---- Data Loop signature sanitization -------------------------------------
+// ---- verbose logging signature sanitization -------------------------------------
 //
-// A Data Loop signature retains identifiers useful for triage (SIDs,
+// A verbose logging signature retains identifiers useful for triage (SIDs,
 // capability names, PIDs, provider/object GUIDs) but must never leak a
 // human account/user name, a file path, an exact timestamp, or a free-form
 // decoder error message. These bounds apply uniformly to every decoded
@@ -304,7 +306,7 @@ fn format_guid(guid: GUID) -> String {
 pub(crate) const REDACTED_USER: &str = "<redacted-user>";
 /// Fixed replacement for a complete file path.
 pub(crate) const REDACTED_PATH: &str = "<REDACTED>";
-/// Maximum number of `(name, value)` properties retained in one Data Loop
+/// Maximum number of `(name, value)` properties retained in one verbose logging
 /// signature. Bounds pathological/huge TDH property lists; sanitization
 /// (never raw decoding) determines which survive, via deterministic
 /// (sorted-by-name) truncation.
@@ -360,7 +362,7 @@ impl<'a> NormalizedPropertyName<'a> {
 }
 
 /// Returns whether `name` looks like it carries a timestamp, so it is
-/// dropped from a Data Loop signature entirely (never redacted or
+/// dropped from a verbose logging signature entirely (never redacted or
 /// truncated) — exact timestamps must not prevent otherwise-identical
 /// events from deduplicating.
 fn is_timestamp_like_property(name: &str) -> bool {
@@ -490,7 +492,7 @@ fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
 ///
 /// Overlong values retain prefix and suffix context plus a digest of the full
 /// sanitized value. The digest prevents distinct values with a long shared
-/// prefix from collapsing into one Data Loop signature.
+/// prefix from collapsing into one verbose logging signature.
 ///
 /// Callers must sanitize (redact) *before* calling this so neither the retained
 /// context nor the digest is derived from sensitive identity content.
@@ -619,24 +621,24 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 ///
 /// # Errors
 ///
-/// Returns the closed [`DataLoopExclusionReason`] describing why no denial
-/// could be built: a missing `ObjectType` ([`DataLoopExclusionReason::MissingObjectType`]),
+/// Returns the closed [`VerboseLoggingExclusionReason`] describing why no denial
+/// could be built: a missing `ObjectType` ([`VerboseLoggingExclusionReason::MissingObjectType`]),
 /// an object type this model can't represent
-/// ([`DataLoopExclusionReason::UnsupportedObjectType`]), a missing/empty
+/// ([`VerboseLoggingExclusionReason::UnsupportedObjectType`]), a missing/empty
 /// object name (registry/file:
-/// [`DataLoopExclusionReason::MissingObjectName`]; capability: an
+/// [`VerboseLoggingExclusionReason::MissingObjectName`]; capability: an
 /// unidentified brokered check,
-/// [`DataLoopExclusionReason::UnresolvedCapability`] — [`crate::capability_dacl`]
+/// [`VerboseLoggingExclusionReason::UnresolvedCapability`] — [`crate::capability_dacl`]
 /// may still recover it from the event's DACL payload), or a self-access
-/// check that isn't actionable ([`DataLoopExclusionReason::NotActionable`]).
+/// check that isn't actionable ([`VerboseLoggingExclusionReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-    provider: DataLoopProvider,
-) -> Result<RawDenial, DataLoopExclusionReason> {
-    let object_type =
-        find_prop(&parts.props, "ObjectType").ok_or(DataLoopExclusionReason::MissingObjectType)?;
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+    let object_type = find_prop(&parts.props, "ObjectType")
+        .ok_or(VerboseLoggingExclusionReason::MissingObjectType)?;
     let object_type_str = object_type.trim_matches('"');
 
     let resource_type = match object_type_str {
@@ -645,7 +647,7 @@ pub fn build_denial_from_access_check(
         "Section" | "SymbolicLink" | "Timer" => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
-        _ => return Err(DataLoopExclusionReason::UnsupportedObjectType),
+        _ => return Err(VerboseLoggingExclusionReason::UnsupportedObjectType),
     };
 
     let object_name = find_prop(&parts.props, "ObjectName")
@@ -655,9 +657,9 @@ pub fn build_denial_from_access_check(
         // An unidentified brokered-capability check: the identifier may
         // still be recoverable from the event's DACL payload.
         (ResourceType::Capability, None) => {
-            return Err(DataLoopExclusionReason::UnresolvedCapability)
+            return Err(VerboseLoggingExclusionReason::UnresolvedCapability)
         }
-        (_, None) => return Err(DataLoopExclusionReason::MissingObjectName),
+        (_, None) => return Err(VerboseLoggingExclusionReason::MissingObjectName),
         (_, Some(name)) => name,
     };
 
@@ -666,7 +668,7 @@ pub fn build_denial_from_access_check(
             .or_else(|| find_prop(&parts.props, "ApplicationPath"))
             .map(|value| value.trim_matches('"'));
         if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
-            return Err(DataLoopExclusionReason::NotActionable);
+            return Err(VerboseLoggingExclusionReason::NotActionable);
         }
     }
 
@@ -694,7 +696,7 @@ pub fn build_denial_from_access_check(
         filetime,
         event_id: parts.event_id,
         provider,
-        data_loop_properties: sanitize_properties(&parts.props),
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -754,27 +756,27 @@ fn strip_dos_namespace_prefix(path: &str) -> &str {
 ///
 /// # Errors
 ///
-/// Returns [`DataLoopExclusionReason::MissingObjectType`] when `Category` is
-/// absent or unparseable, [`DataLoopExclusionReason::MissingObjectName`]
+/// Returns [`VerboseLoggingExclusionReason::MissingObjectType`] when `Category` is
+/// absent or unparseable, [`VerboseLoggingExclusionReason::MissingObjectName`]
 /// when the required `Detail` is absent or unparseable, and
-/// [`DataLoopExclusionReason::NotActionable`] when the category/detail pair
+/// [`VerboseLoggingExclusionReason::NotActionable`] when the category/detail pair
 /// describes no violation (`Category == 0`).
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-    provider: DataLoopProvider,
-) -> Result<RawDenial, DataLoopExclusionReason> {
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingExclusionReason> {
     let category = find_prop(&parts.props, "Category")
         .and_then(|value| parse_u32(value))
-        .ok_or(DataLoopExclusionReason::MissingObjectType)?;
+        .ok_or(VerboseLoggingExclusionReason::MissingObjectType)?;
     let detail = match find_prop(&parts.props, "Detail") {
-        Some(value) => parse_u32(value).ok_or(DataLoopExclusionReason::MissingObjectName)?,
+        Some(value) => parse_u32(value).ok_or(VerboseLoggingExclusionReason::MissingObjectName)?,
         None if category == crate::ui::CONVERT_TO_GUI => 0,
-        None => return Err(DataLoopExclusionReason::MissingObjectName),
+        None => return Err(VerboseLoggingExclusionReason::MissingObjectName),
     };
-    let object_name =
-        crate::ui::resource_name(category, detail).ok_or(DataLoopExclusionReason::NotActionable)?;
+    let object_name = crate::ui::resource_name(category, detail)
+        .ok_or(VerboseLoggingExclusionReason::NotActionable)?;
 
     Ok(RawDenial {
         pid,
@@ -784,7 +786,7 @@ pub fn build_denial_from_learning_mode(
         filetime,
         event_id: parts.event_id,
         provider,
-        data_loop_properties: sanitize_properties(&parts.props),
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -800,20 +802,20 @@ pub fn build_denial_from_learning_mode(
 ///
 /// # Errors
 ///
-/// Returns [`DataLoopExclusionReason::NotActionable`] when `Denied` is
-/// absent or not `true`, and [`DataLoopExclusionReason::UnresolvedCapability`]
+/// Returns [`VerboseLoggingExclusionReason::NotActionable`] when `Denied` is
+/// absent or not `true`, and [`VerboseLoggingExclusionReason::UnresolvedCapability`]
 /// when no usable capability identifier could be decoded.
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-    provider: DataLoopProvider,
-) -> Result<RawDenial, DataLoopExclusionReason> {
+    provider: VerboseLoggingProvider,
+) -> Result<RawDenial, VerboseLoggingExclusionReason> {
     // A partially decoded event must not become a policy recommendation.
     let denied = find_prop(&parts.props, "Denied")
         .is_some_and(|value| value.trim_matches('"').eq_ignore_ascii_case("true"));
     if !denied {
-        return Err(DataLoopExclusionReason::NotActionable);
+        return Err(VerboseLoggingExclusionReason::NotActionable);
     }
 
     let pid = find_prop(&parts.props, "ProcessId")
@@ -839,7 +841,7 @@ pub fn build_denial_from_capability(
                 && name != "<invalid SID>"
                 && name != "<malformed-sid>"
         })
-        .ok_or(DataLoopExclusionReason::UnresolvedCapability)?;
+        .ok_or(VerboseLoggingExclusionReason::UnresolvedCapability)?;
 
     Ok(RawDenial {
         pid,
@@ -849,7 +851,7 @@ pub fn build_denial_from_capability(
         filetime,
         event_id: parts.event_id,
         provider,
-        data_loop_properties: sanitize_properties(&parts.props),
+        verbose_logging_properties: sanitize_properties(&parts.props),
     })
 }
 
@@ -1097,7 +1099,7 @@ mod tests {
             );
             assert_eq!(
                 extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-                DataLoopExclusionReason::NotActionable
+                VerboseLoggingExclusionReason::NotActionable
             );
         }
     }
@@ -1226,7 +1228,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::UnresolvedCapability
+            VerboseLoggingExclusionReason::UnresolvedCapability
         );
     }
 
@@ -1243,7 +1245,7 @@ mod tests {
             );
             assert_eq!(
                 extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
-                DataLoopExclusionReason::MissingObjectName
+                VerboseLoggingExclusionReason::MissingObjectName
             );
         }
     }
@@ -1298,7 +1300,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::UnsupportedObjectType
+            VerboseLoggingExclusionReason::UnsupportedObjectType
         );
     }
 
@@ -1307,7 +1309,7 @@ mod tests {
         let p = parts(14, &[("ObjectName", "\"x\"")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::MissingObjectType
+            VerboseLoggingExclusionReason::MissingObjectType
         );
     }
 
@@ -1390,13 +1392,13 @@ mod tests {
         let invalid_category = parts(27, &[("Category", "not-a-number"), ("Detail", "4")]);
         assert_eq!(
             extract_denial(&invalid_category, 9999, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::MissingObjectType
+            VerboseLoggingExclusionReason::MissingObjectType
         );
 
         let invalid_detail = parts(27, &[("Category", "2"), ("Detail", "not-a-number")]);
         assert_eq!(
             extract_denial(&invalid_detail, 9999, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::MissingObjectName
+            VerboseLoggingExclusionReason::MissingObjectName
         );
     }
 
@@ -1405,7 +1407,7 @@ mod tests {
         let p = parts(27, &[("Category", "0"), ("Detail", "0")]);
         assert_eq!(
             extract_denial(&p, 9999, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::NotActionable
+            VerboseLoggingExclusionReason::NotActionable
         );
     }
 
@@ -1430,7 +1432,7 @@ mod tests {
         // pid comes from the payload ProcessId (0x1acc), not the header.
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "internetClient");
-        assert_eq!(ev.provider, DataLoopProvider::KernelGeneral);
+        assert_eq!(ev.provider, VerboseLoggingProvider::KernelGeneral);
     }
 
     #[test]
@@ -1454,7 +1456,7 @@ mod tests {
         assert_eq!(denial.object_name, "Handles");
         assert_eq!(denial.pid, 0x1594);
         assert_eq!(
-            data_loop_classification(&p),
+            verbose_logging_classification(&p),
             (Some(AccessType::Unknown), Some(ResourceType::Ui))
         );
     }
@@ -1499,7 +1501,7 @@ mod tests {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "false")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::NotActionable
+            VerboseLoggingExclusionReason::NotActionable
         );
     }
 
@@ -1508,7 +1510,7 @@ mod tests {
         let p = parts(28, &[("PackageSid", "S-1-15-3-1")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::NotActionable
+            VerboseLoggingExclusionReason::NotActionable
         );
     }
 
@@ -1517,7 +1519,7 @@ mod tests {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "true")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::UnresolvedCapability
+            VerboseLoggingExclusionReason::UnresolvedCapability
         );
     }
 
@@ -1530,7 +1532,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::UnsupportedEventSchema
+            VerboseLoggingExclusionReason::UnsupportedEventSchema
         );
         assert!(
             provider_category(GUID::from_u128(0x12345678_1234_1234_1234_1234567890ab)).is_none()
@@ -1560,7 +1562,7 @@ mod tests {
         let p = parts(9999, &[("Foo", "\"bar\"")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            DataLoopExclusionReason::UnsupportedEventSchema
+            VerboseLoggingExclusionReason::UnsupportedEventSchema
         );
     }
 
@@ -1568,27 +1570,27 @@ mod tests {
     fn known_provider_category_is_symbolic_and_pii_free() {
         assert_eq!(
             provider_category(KERNEL_GENERAL_PROVIDER),
-            Some(DataLoopProvider::KernelGeneral)
+            Some(VerboseLoggingProvider::KernelGeneral)
         );
         assert_eq!(
             provider_category(PRIVACY_LEARNING_MODE_PROVIDER),
-            Some(DataLoopProvider::PrivacyAuditingPermissiveLearningMode)
+            Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
         );
         assert_eq!(provider_category(GUID::from_u128(0)), None);
     }
 
     #[test]
     fn provider_guid_string_is_stable_and_round_trips_by_category() {
-        let kernel_guid = provider_guid_string(DataLoopProvider::KernelGeneral);
+        let kernel_guid = provider_guid_string(VerboseLoggingProvider::KernelGeneral);
         let privacy_guid =
-            provider_guid_string(DataLoopProvider::PrivacyAuditingPermissiveLearningMode);
+            provider_guid_string(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode);
         assert_ne!(kernel_guid, privacy_guid);
         assert_eq!(kernel_guid, format_guid(KERNEL_GENERAL_PROVIDER));
         assert_eq!(privacy_guid, format_guid(PRIVACY_LEARNING_MODE_PROVIDER));
         assert!(kernel_guid.starts_with('{') && kernel_guid.ends_with('}'));
     }
 
-    // ---- Data Loop signature sanitization ----------------------------------
+    // ---- verbose logging signature sanitization ----------------------------------
 
     #[test]
     fn file_path_detection_preserves_non_file_identifiers() {

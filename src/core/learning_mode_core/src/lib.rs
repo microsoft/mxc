@@ -13,12 +13,12 @@
 //!    [`DenialAnalyzer`]; this crate owns the trait and the model.
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
 //!    written to the canonical JSON output that host applications read to
-//!    regenerate policy. A deterministic Data Loop sibling contains bounded,
+//!    regenerate policy. A deterministic verbose logging sibling contains bounded,
 //!    sensitive-value-redacted signatures for excluded decoder outcomes.
 //!
 //! This crate is the cross-platform hinge between stages 2 and 3: it
 //! defines the public [`DeniedResource`] model, the [`DenialSummary`]
-//! terminator, the [`DenialsDocument`] and [`DataLoopDocument`] output shapes,
+//! terminator, the [`DenialsDocument`] and [`VerboseLoggingDocument`] output shapes,
 //! and the [`DenialAnalyzer`] decode trait. It carries no OS-specific code so
 //! the wire format never encodes a platform assumption.
 //!
@@ -33,18 +33,13 @@
 #![deny(missing_docs)]
 
 pub mod analyze;
-pub mod data_loop;
 pub mod emit;
 pub mod model;
 pub mod paired_output;
 pub mod summary;
+pub mod verbose_logging;
 
 pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
-pub use data_loop::{
-    data_loop_sibling_path, write_data_loop_document, DataLoopAggregate, DataLoopDocument,
-    DataLoopDocumentSummary, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
-    DataLoopSummary, MAX_DATA_LOOP_GROUPS, MAX_DATA_LOOP_SIGNATURE_BYTES,
-};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use paired_output::{
@@ -52,3 +47,9 @@ pub use paired_output::{
     ExistingOutputPolicy,
 };
 pub use summary::DenialSummary;
+pub use verbose_logging::{
+    verbose_logging_sibling_path, write_verbose_logging_document, VerboseLoggingAggregate,
+    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingExclusionReason,
+    VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
+    MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
+};

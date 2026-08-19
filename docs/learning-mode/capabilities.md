@@ -105,8 +105,8 @@ stays enforced:
    hosts use native capture without PLM or UAC, while legacy or incompatible
    tiers use the session-scoped guarded-WPR fallback and elevate only its
    fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
-   relocates the canonical output, its Data Loop sibling, and the trace to
-   `denials.json`, `denials.data-loop.json`, and `trace.etl`, and generates the
+   relocates the canonical output, its verbose logging sibling, and the trace to
+   `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
    source snapshot and `Adjusted_*.json` from canonical denials without decoding
    ETL again. Truncated analysis skips the adjusted config.
 
@@ -224,12 +224,12 @@ sandbox policy:
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
 
-### Data Loop event signatures
+### Verbose logging event signatures
 
 Every successful decode also writes a deterministic sibling file:
-`denials.<run-id>.json` produces `denials.<run-id>.data-loop.json`. This Data
-Loop artifact is a bounded, sensitive-value-redacted superset containing canonical
-denial occurrences plus outcomes omitted from canonical denials:
+`denials.<run-id>.json` produces `denials.<run-id>.verbose.json`. This verbose
+logging artifact is a bounded, sensitive-value-redacted superset containing
+canonical denial occurrences plus outcomes omitted from canonical denials:
 
 ```json
 {
@@ -309,9 +309,9 @@ decoding, and `unsupportedPropertyEncoding` means the decoder cannot consume
 that property shape. When TDH exposes it, the schema-declared name is retained
 as the bounded `EventName` signature property. Free-form decoder errors are
 never serialized. Failure to obtain the event schema remains a fatal analysis
-error rather than being represented as a Data Loop signature.
+error rather than being represented as a verbose logging signature.
 
-Data Loop retains at most 4,096 distinct signatures, 24 sorted properties per
+Verbose logging retains at most 4,096 distinct signatures, 24 sorted properties per
 signature, 256 characters per property value, and 16 MiB of compact serialized
 signature data. Canonical-denial signatures take priority over diagnostic
 signatures at these bounds. Additional keys are collapsed into
@@ -319,15 +319,15 @@ signatures at these bounds. Additional keys are collapsed into
 canonical occurrences that could not be represented even after diagnostic
 groups were evicted, and `aggregateGroupsTruncated` is set.
 Before returning analysis, the decoder also fits the complete canonical plus
-Data Loop result within the guarded 64 MiB transport limit by moving additional
-Data Loop groups into overflow; canonical denials are never discarded.
+verbose logging result within the guarded 64 MiB transport limit by moving additional
+verbose logging groups into overflow; canonical denials are never discarded.
 `processedEventsTruncated` indicates that the 1,000,000-event bound prevented
 complete accounting. Counts are candidate-level when extraction identifies
 individual denial candidates and one event-level outcome when decoding cannot
 determine candidate cardinality.
 
-The canonical and Data Loop files fail together: MXC stages both and reports
-capture failure unless both final artifacts are committed. The Data Loop path
+The canonical and verbose logging files fail together: MXC stages both and reports
+capture failure unless both final artifacts are committed. The verbose logging path
 is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
 metadata; callers derive it from the canonical path using the naming rule
 above.

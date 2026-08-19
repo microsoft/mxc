@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Transactional staging for the canonical and Data Loop output pair.
+//! Transactional staging for the canonical and verbose logging output pair.
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
@@ -102,7 +102,7 @@ pub enum ExistingOutputPolicy {
     Replace,
 }
 
-/// Stages, flushes, and promotes a canonical output and its Data Loop sibling.
+/// Stages, flushes, and promotes a canonical output and its verbose logging sibling.
 ///
 /// Both documents are serialized before either final path is changed. Replace
 /// mode retains the previous files until both new files are promoted, allowing
@@ -110,35 +110,39 @@ pub enum ExistingOutputPolicy {
 pub fn write_paired_output_files(
     operation: &str,
     canonical_path: &Path,
-    data_loop_path: &Path,
+    verbose_logging_path: &Path,
     policy: ExistingOutputPolicy,
     write_canonical: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
-    write_data_loop: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+    write_verbose_logging: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let _pair_lock = OutputPairLock::acquire(operation, canonical_path)?;
     match policy {
         ExistingOutputPolicy::CreateNew => {
             ensure_output_absent(operation, canonical_path, "canonical")?;
-            ensure_output_absent(operation, data_loop_path, "Data Loop")?;
+            ensure_output_absent(operation, verbose_logging_path, "verbose logging")?;
         }
         ExistingOutputPolicy::Replace => {
             ensure_output_replaceable(operation, canonical_path, "canonical")?;
-            ensure_output_replaceable(operation, data_loop_path, "Data Loop")?;
+            ensure_output_replaceable(operation, verbose_logging_path, "verbose logging")?;
         }
     }
 
     let canonical_temp =
         stage_output_file(operation, canonical_path, "canonical", write_canonical)?;
-    let data_loop_temp =
-        stage_output_file(operation, data_loop_path, "Data Loop", write_data_loop)?;
+    let verbose_logging_temp = stage_output_file(
+        operation,
+        verbose_logging_path,
+        "verbose logging",
+        write_verbose_logging,
+    )?;
 
     let canonical_backup = if policy == ExistingOutputPolicy::Replace {
         backup_existing_output(operation, canonical_path, "canonical")?
     } else {
         None
     };
-    let data_loop_backup = if policy == ExistingOutputPolicy::Replace {
-        match backup_existing_output(operation, data_loop_path, "Data Loop") {
+    let verbose_logging_backup = if policy == ExistingOutputPolicy::Replace {
+        match backup_existing_output(operation, verbose_logging_path, "verbose logging") {
             Ok(backup) => backup,
             Err(error) => {
                 return Err(combine_error_with_rollback(
@@ -151,23 +155,27 @@ pub fn write_paired_output_files(
         None
     };
 
-    let data_loop_promoted =
-        match promote_output_file(operation, data_loop_temp, data_loop_path, "Data Loop") {
-            Ok(promoted) => promoted,
-            Err(error) => {
-                return Err(combine_error_with_rollback(
-                    error,
-                    restore_output_pair(
-                        canonical_path,
-                        canonical_backup.as_deref(),
-                        None,
-                        data_loop_path,
-                        data_loop_backup.as_deref(),
-                        None,
-                    ),
-                ))
-            }
-        };
+    let verbose_logging_promoted = match promote_output_file(
+        operation,
+        verbose_logging_temp,
+        verbose_logging_path,
+        "verbose logging",
+    ) {
+        Ok(promoted) => promoted,
+        Err(error) => {
+            return Err(combine_error_with_rollback(
+                error,
+                restore_output_pair(
+                    canonical_path,
+                    canonical_backup.as_deref(),
+                    None,
+                    verbose_logging_path,
+                    verbose_logging_backup.as_deref(),
+                    None,
+                ),
+            ))
+        }
+    };
     let canonical_promoted =
         match promote_output_file(operation, canonical_temp, canonical_path, "canonical") {
             Ok(promoted) => promoted,
@@ -178,19 +186,22 @@ pub fn write_paired_output_files(
                         canonical_path,
                         canonical_backup.as_deref(),
                         None,
-                        data_loop_path,
-                        data_loop_backup.as_deref(),
-                        Some(data_loop_promoted),
+                        verbose_logging_path,
+                        verbose_logging_backup.as_deref(),
+                        Some(verbose_logging_promoted),
                     ),
                 ))
             }
         };
 
-    drop((canonical_promoted, data_loop_promoted));
-    remove_backups(canonical_backup.as_deref(), data_loop_backup.as_deref())
+    drop((canonical_promoted, verbose_logging_promoted));
+    remove_backups(
+        canonical_backup.as_deref(),
+        verbose_logging_backup.as_deref(),
+    )
 }
 
-/// Copies an existing canonical/Data Loop pair to new no-clobber destinations,
+/// Copies an existing canonical/verbose logging pair to new no-clobber destinations,
 /// then removes only source files whose identity and contents still match the
 /// files that were copied.
 ///
@@ -206,17 +217,17 @@ pub fn write_paired_output_files(
 pub fn relocate_paired_output_files(
     operation: &str,
     canonical_source_path: &Path,
-    data_loop_source_path: &Path,
+    verbose_logging_source_path: &Path,
     canonical_destination_path: &Path,
-    data_loop_destination_path: &Path,
+    verbose_logging_destination_path: &Path,
 ) -> std::io::Result<()> {
     if canonical_source_path == canonical_destination_path
-        && data_loop_source_path == data_loop_destination_path
+        && verbose_logging_source_path == verbose_logging_destination_path
     {
         return Ok(());
     }
     if canonical_source_path == canonical_destination_path
-        || data_loop_source_path == data_loop_destination_path
+        || verbose_logging_source_path == verbose_logging_destination_path
     {
         return Err(std::io::Error::other(format!(
             "{operation} cannot relocate only one member of an output pair"
@@ -225,32 +236,35 @@ pub fn relocate_paired_output_files(
 
     let mut canonical_source = std::fs::File::open(canonical_source_path)?;
     let canonical_identity = PromotedOutput::from_file(canonical_source.try_clone()?)?;
-    let mut data_loop_source = std::fs::File::open(data_loop_source_path)?;
-    let data_loop_identity = PromotedOutput::from_file(data_loop_source.try_clone()?)?;
+    let mut verbose_logging_source = std::fs::File::open(verbose_logging_source_path)?;
+    let verbose_logging_identity = PromotedOutput::from_file(verbose_logging_source.try_clone()?)?;
 
     write_paired_output_files(
         operation,
         canonical_destination_path,
-        data_loop_destination_path,
+        verbose_logging_destination_path,
         ExistingOutputPolicy::CreateNew,
         |writer| {
             canonical_source.rewind()?;
             std::io::copy(&mut canonical_source, writer).map(|_| ())
         },
         |writer| {
-            data_loop_source.rewind()?;
-            std::io::copy(&mut data_loop_source, writer).map(|_| ())
+            verbose_logging_source.rewind()?;
+            std::io::copy(&mut verbose_logging_source, writer).map(|_| ())
         },
     )?;
 
-    drop((canonical_source, data_loop_source));
-    let data_loop_cleanup =
-        remove_promoted_output_if_owned(data_loop_source_path, data_loop_identity, None)
-            .and_then(cleanup_result);
+    drop((canonical_source, verbose_logging_source));
+    let verbose_logging_cleanup = remove_promoted_output_if_owned(
+        verbose_logging_source_path,
+        verbose_logging_identity,
+        None,
+    )
+    .and_then(cleanup_result);
     let canonical_cleanup =
         remove_promoted_output_if_owned(canonical_source_path, canonical_identity, None)
             .and_then(cleanup_result);
-    match (data_loop_cleanup, canonical_cleanup) {
+    match (verbose_logging_cleanup, canonical_cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(first), Err(second)) => Err(std::io::Error::other(format!(
@@ -432,13 +446,17 @@ fn restore_output_pair(
     canonical_path: &Path,
     canonical_backup: Option<&Path>,
     canonical_promoted: Option<PromotedOutput>,
-    data_loop_path: &Path,
-    data_loop_backup: Option<&Path>,
-    data_loop_promoted: Option<PromotedOutput>,
+    verbose_logging_path: &Path,
+    verbose_logging_backup: Option<&Path>,
+    verbose_logging_promoted: Option<PromotedOutput>,
 ) -> std::io::Result<()> {
-    let data_loop_result = restore_output(data_loop_path, data_loop_backup, data_loop_promoted);
+    let verbose_logging_result = restore_output(
+        verbose_logging_path,
+        verbose_logging_backup,
+        verbose_logging_promoted,
+    );
     let canonical_result = restore_output(canonical_path, canonical_backup, canonical_promoted);
-    match (data_loop_result, canonical_result) {
+    match (verbose_logging_result, canonical_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(first), Err(second)) => Err(std::io::Error::other(format!(
@@ -586,7 +604,7 @@ fn persist_existing_file_noclobber(source_path: &Path, final_path: &Path) -> std
 
 fn remove_backups(
     canonical_backup: Option<&Path>,
-    data_loop_backup: Option<&Path>,
+    verbose_logging_backup: Option<&Path>,
 ) -> std::io::Result<()> {
     let canonical_result = canonical_backup.map_or(Ok(()), |path| {
         remove_if_present(path).map_err(|error| {
@@ -596,19 +614,19 @@ fn remove_backups(
             ))
         })
     });
-    let data_loop_result = data_loop_backup.map_or(Ok(()), |path| {
+    let verbose_logging_result = verbose_logging_backup.map_or(Ok(()), |path| {
         remove_if_present(path).map_err(|error| {
             std::io::Error::other(format!(
-                "failed to remove Data Loop backup {}: {error}",
+                "failed to remove verbose logging backup {}: {error}",
                 path.display()
             ))
         })
     });
-    match (canonical_result, data_loop_result) {
+    match (canonical_result, verbose_logging_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(first), Err(second)) => Err(std::io::Error::other(format!(
-            "{first}; additionally failed to remove Data Loop backup: {second}"
+            "{first}; additionally failed to remove verbose logging backup: {second}"
         ))),
     }
 }
@@ -641,23 +659,23 @@ mod tests {
     fn replace_rejects_non_file_output_before_promoting_sibling() {
         let directory = tempfile::tempdir().unwrap();
         let canonical_path = directory.path().join("denials.json");
-        let data_loop_path = directory.path().join("denials.data-loop.json");
+        let verbose_logging_path = directory.path().join("denials.verbose.json");
         std::fs::create_dir(&canonical_path).unwrap();
 
         let error = write_paired_output_files(
             "test",
             &canonical_path,
-            &data_loop_path,
+            &verbose_logging_path,
             ExistingOutputPolicy::Replace,
             |writer| writer.write_all(b"canonical"),
-            |writer| writer.write_all(b"data-loop"),
+            |writer| writer.write_all(b"verbose"),
         )
         .unwrap_err();
 
         assert!(error
             .to_string()
             .contains("cannot replace non-file canonical"));
-        assert!(!data_loop_path.exists());
+        assert!(!verbose_logging_path.exists());
     }
 
     #[test]
@@ -672,7 +690,7 @@ mod tests {
             &shared_path,
             ExistingOutputPolicy::Replace,
             |writer| writer.write_all(b"canonical"),
-            |writer| writer.write_all(b"data-loop"),
+            |writer| writer.write_all(b"verbose"),
         )
         .unwrap_err();
 
@@ -684,15 +702,15 @@ mod tests {
     fn relocation_rolls_back_failed_second_promotion_and_keeps_sources() {
         let directory = tempfile::tempdir().unwrap();
         let canonical_source = directory.path().join("source-denials.json");
-        let data_loop_source = directory.path().join("source-denials.data-loop.json");
+        let verbose_logging_source = directory.path().join("source-denials.verbose.json");
         let shared_destination = directory.path().join("denials.json");
         std::fs::write(&canonical_source, b"canonical").unwrap();
-        std::fs::write(&data_loop_source, b"data-loop").unwrap();
+        std::fs::write(&verbose_logging_source, b"verbose").unwrap();
 
         let error = relocate_paired_output_files(
             "test relocation",
             &canonical_source,
-            &data_loop_source,
+            &verbose_logging_source,
             &shared_destination,
             &shared_destination,
         )
@@ -701,7 +719,7 @@ mod tests {
         assert!(error.to_string().contains("failed to promote canonical"));
         assert!(!shared_destination.exists());
         assert_eq!(std::fs::read(canonical_source).unwrap(), b"canonical");
-        assert_eq!(std::fs::read(data_loop_source).unwrap(), b"data-loop");
+        assert_eq!(std::fs::read(verbose_logging_source).unwrap(), b"verbose");
     }
 
     #[test]

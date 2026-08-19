@@ -8,9 +8,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use learning_mode_core::{
-    data_loop_sibling_path, write_data_loop_document, write_document, write_paired_output_files,
-    AccessType, AnalysisResult, DataLoopDocument, DenialAnalyzer, DenialSummary, DenialsDocument,
-    DeniedResource, ExistingOutputPolicy, ResourceType,
+    verbose_logging_sibling_path, write_document, write_paired_output_files,
+    write_verbose_logging_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary,
+    DenialsDocument, DeniedResource, ExistingOutputPolicy, ResourceType, VerboseLoggingDocument,
 };
 use learning_mode_windows::EtlDenialAnalyzer;
 
@@ -24,7 +24,7 @@ pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
         .with_context(|| format!("failed to analyze {}", trace_file.display()))
 }
 
-/// Write canonical denials JSON and its Data Loop sibling, then return the
+/// Write canonical denials JSON and its verbose logging sibling, then return the
 /// canonical document.
 pub fn write_denials(
     output_path: &Path,
@@ -41,16 +41,16 @@ pub fn write_denials(
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials.clone(), summary);
-    let data_loop_document = DataLoopDocument::new(&analysis.data_loop);
-    let data_loop_path = data_loop_sibling_path(output_path)
+    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
+    let verbose_logging_path = verbose_logging_sibling_path(output_path)
         .with_context(|| format!("failed to derive sibling for {}", output_path.display()))?;
     write_paired_output_files(
         "plm stop",
         output_path,
-        &data_loop_path,
+        &verbose_logging_path,
         ExistingOutputPolicy::Replace,
         |writer| write_document(writer, &document),
-        |writer| write_data_loop_document(writer, &data_loop_document),
+        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
     )?;
     Ok(document)
 }
@@ -294,31 +294,31 @@ mod tests {
         let analysis = AnalysisResult {
             denials: vec![denial(r"C:\read.txt", ResourceType::File, AccessType::Read)],
             denied_resources_truncated: true,
-            data_loop: Default::default(),
+            verbose_logging: Default::default(),
         };
 
         write_denials(&path, &analysis, 7).unwrap();
         let document: DenialsDocument =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        let data_loop_path = learning_mode_core::data_loop_sibling_path(&path).unwrap();
-        let data_loop_document: learning_mode_core::DataLoopDocument =
-            serde_json::from_slice(&std::fs::read(data_loop_path).unwrap()).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
+        let verbose_logging_document: learning_mode_core::VerboseLoggingDocument =
+            serde_json::from_slice(&std::fs::read(verbose_logging_path).unwrap()).unwrap();
         assert_eq!(document.denials, analysis.denials);
         assert_eq!(document.summary.exit_code, 7);
         assert!(document.summary.denied_resources_truncated);
-        assert_eq!(data_loop_document.summary.total_occurrences, 0);
+        assert_eq!(verbose_logging_document.summary.total_occurrences, 0);
     }
 
     #[test]
-    fn canonical_promotion_failure_removes_data_loop_sibling() {
+    fn canonical_promotion_failure_removes_verbose_logging_sibling() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("denials.json");
         std::fs::create_dir(&path).unwrap();
-        let data_loop_path = learning_mode_core::data_loop_sibling_path(&path).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
         let analysis = AnalysisResult {
             denials: Vec::new(),
             denied_resources_truncated: false,
-            data_loop: Default::default(),
+            verbose_logging: Default::default(),
         };
 
         let error = write_denials(&path, &analysis, 0).unwrap_err();
@@ -326,6 +326,6 @@ mod tests {
         assert!(error
             .to_string()
             .contains("cannot replace non-file canonical"));
-        assert!(!data_loop_path.exists());
+        assert!(!verbose_logging_path.exists());
     }
 }

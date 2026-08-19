@@ -89,10 +89,10 @@ fn prepare_config_output_paths(
     trace_path: &Path,
     denials_path: &Path,
 ) -> Result<Option<ConfigOutputPaths>> {
-    let data_loop_path = learning_mode_core::data_loop_sibling_path(denials_path)
-        .context("failed to derive Data Loop output path")?;
+    let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(denials_path)
+        .context("failed to derive verbose logging output path")?;
     if same_config_target(trace_path, denials_path)
-        || same_config_target(trace_path, &data_loop_path)
+        || same_config_target(trace_path, &verbose_logging_path)
     {
         anyhow::bail!(
             "trace output {} would be overwritten by a denials output derived from {}",
@@ -118,7 +118,7 @@ fn prepare_config_output_paths(
     ] {
         if same_config_target(path, trace_path)
             || same_config_target(path, denials_path)
-            || same_config_target(path, &data_loop_path)
+            || same_config_target(path, &verbose_logging_path)
         {
             anyhow::bail!(
                 "{label} path {} collides with a capture output",
@@ -667,8 +667,8 @@ mod tests {
     }
 
     #[test]
-    fn trace_input_cannot_collide_with_data_loop_output() {
-        let trace = Path::new(r"C:\captures\denials.data-loop.json");
+    fn trace_input_cannot_collide_with_verbose_logging_output() {
+        let trace = Path::new(r"C:\captures\denials.verbose.json");
         let error = prepare_config_output_paths(
             None,
             Path::new(r"C:\captures"),
@@ -680,8 +680,8 @@ mod tests {
     }
 
     #[test]
-    fn config_snapshot_cannot_collide_with_data_loop_output() {
-        let source = Path::new(r"C:\source\denials.data-loop.json");
+    fn config_snapshot_cannot_collide_with_verbose_logging_output() {
+        let source = Path::new(r"C:\source\denials.verbose.json");
         let error = prepare_config_output_paths(
             Some(source),
             Path::new(r"C:\captures"),

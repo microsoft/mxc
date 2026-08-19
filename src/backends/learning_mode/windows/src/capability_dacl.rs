@@ -269,7 +269,7 @@ pub(crate) fn extract_denials(
             filetime,
             event_id: parts.event_id,
             provider,
-            data_loop_properties: crate::extractors::sanitize_properties(&parts.props),
+            verbose_logging_properties: crate::extractors::sanitize_properties(&parts.props),
         })
         .collect()
 }

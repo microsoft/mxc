@@ -10,17 +10,17 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of distinct aggregate groups retained in one analysis.
-pub const MAX_DATA_LOOP_GROUPS: usize = 4_096;
+pub const MAX_VERBOSE_LOGGING_GROUPS: usize = 4_096;
 /// Maximum compact-JSON bytes retained across distinct serialized signatures.
 ///
 /// This leaves substantial headroom under the guarded WPR analysis protocol's
 /// 64 MiB frame limit for canonical denials and envelope overhead.
-pub const MAX_DATA_LOOP_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stable category for a known Learning Mode ETW provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum DataLoopProvider {
+pub enum VerboseLoggingProvider {
     /// Microsoft-Windows-Kernel-General.
     KernelGeneral,
     /// Microsoft-Windows-Privacy-Auditing-PermissiveLearningMode.
@@ -30,7 +30,7 @@ pub enum DataLoopProvider {
 /// Closed reason why a decoder outcome was omitted from canonical denials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum DataLoopExclusionReason {
+pub enum VerboseLoggingExclusionReason {
     /// The event produced a valid canonical denial candidate.
     CanonicalDenial,
     /// The provider is known, but the event ID is not a supported denial schema.
@@ -55,7 +55,7 @@ pub enum DataLoopExclusionReason {
     NotActionable,
 }
 
-impl DataLoopExclusionReason {
+impl VerboseLoggingExclusionReason {
     /// Returns whether this outcome represents a valid denial candidate.
     #[must_use]
     pub fn is_canonical_denial(self) -> bool {
@@ -63,18 +63,18 @@ impl DataLoopExclusionReason {
     }
 }
 
-/// One sanitized event signature used as a Data Loop deduplication key.
+/// One sanitized event signature used as a verbose logging deduplication key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DataLoopSignature {
+pub struct VerboseLoggingSignature {
     /// Symbolic provider category.
-    pub provider: DataLoopProvider,
+    pub provider: VerboseLoggingProvider,
     /// Stable ETW provider GUID.
     pub provider_guid: String,
     /// Provider-scoped ETW schema identifier.
     pub event_id: u16,
     /// Closed exclusion category.
-    pub reason: DataLoopExclusionReason,
+    pub reason: VerboseLoggingExclusionReason,
     /// Process identifier from the event header.
     pub pid: u32,
     /// Classified access type when the event produced a denial candidate.
@@ -87,12 +87,12 @@ pub struct DataLoopSignature {
     pub properties: Vec<(String, String)>,
 }
 
-/// One deduplicated Data Loop signature and its occurrence count.
+/// One deduplicated verbose logging signature and its occurrence count.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DataLoopAggregate {
+pub struct VerboseLoggingAggregate {
     /// Sanitized signature shared by all counted occurrences.
-    pub signature: DataLoopSignature,
+    pub signature: VerboseLoggingSignature,
     /// Number of matching exclusion outcomes.
     pub count: u64,
 }
@@ -100,9 +100,9 @@ pub struct DataLoopAggregate {
 /// Bounded aggregate state produced by one decoder pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DataLoopSummary {
-    /// Sorted sanitized signatures retained within [`MAX_DATA_LOOP_GROUPS`].
-    pub signatures: Vec<DataLoopAggregate>,
+pub struct VerboseLoggingSummary {
+    /// Sorted sanitized signatures retained within [`MAX_VERBOSE_LOGGING_GROUPS`].
+    pub signatures: Vec<VerboseLoggingAggregate>,
     /// Total recorded event outcomes, including groups collapsed into overflow.
     pub total_occurrences: u64,
     /// Outcomes whose new aggregate key could not be retained at the group bound.
@@ -117,9 +117,9 @@ pub struct DataLoopSummary {
     pub canonical_denial_limit_reached: bool,
 }
 
-impl DataLoopSummary {
+impl VerboseLoggingSummary {
     /// Records one event outcome while preserving deterministic group order.
-    pub fn record(&mut self, signature: DataLoopSignature) {
+    pub fn record(&mut self, signature: VerboseLoggingSignature) {
         self.total_occurrences = self.total_occurrences.saturating_add(1);
         match self
             .signatures
@@ -128,10 +128,10 @@ impl DataLoopSummary {
             Ok(index) => {
                 self.signatures[index].count = self.signatures[index].count.saturating_add(1);
             }
-            Err(index) if self.signatures.len() < MAX_DATA_LOOP_GROUPS => {
+            Err(index) if self.signatures.len() < MAX_VERBOSE_LOGGING_GROUPS => {
                 self.signatures.insert(
                     index,
-                    DataLoopAggregate {
+                    VerboseLoggingAggregate {
                         signature,
                         count: 1,
                     },
@@ -146,7 +146,7 @@ impl DataLoopSummary {
                         .unwrap_err();
                     self.signatures.insert(
                         index,
-                        DataLoopAggregate {
+                        VerboseLoggingAggregate {
                             signature,
                             count: 1,
                         },
@@ -162,7 +162,7 @@ impl DataLoopSummary {
     /// Records an outcome while bounding compact serialized signature bytes.
     pub fn record_with_byte_budget(
         &mut self,
-        signature: DataLoopSignature,
+        signature: VerboseLoggingSignature,
         retained_bytes: &mut usize,
         max_bytes: usize,
     ) {
@@ -176,7 +176,7 @@ impl DataLoopSummary {
         }
 
         let serialized_len = Self::serialized_signature_len(&signature);
-        while self.signatures.len() >= MAX_DATA_LOOP_GROUPS
+        while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
             if !signature.reason.is_canonical_denial()
@@ -193,7 +193,7 @@ impl DataLoopSummary {
             .unwrap_err();
         self.signatures.insert(
             index,
-            DataLoopAggregate {
+            VerboseLoggingAggregate {
                 signature,
                 count: 1,
             },
@@ -214,7 +214,7 @@ impl DataLoopSummary {
     }
 
     /// Moves a retained aggregate into overflow accounting.
-    pub(crate) fn move_to_overflow(&mut self, aggregate: DataLoopAggregate) {
+    pub(crate) fn move_to_overflow(&mut self, aggregate: VerboseLoggingAggregate) {
         self.overflow_occurrences = self.overflow_occurrences.saturating_add(aggregate.count);
         if aggregate.signature.reason.is_canonical_denial() {
             self.canonical_overflow_occurrences = self
@@ -263,8 +263,8 @@ impl DataLoopSummary {
             && !self.canonical_denial_limit_reached
     }
 
-    fn serialized_signature_len(signature: &DataLoopSignature) -> usize {
-        serde_json::to_vec(&DataLoopAggregate {
+    fn serialized_signature_len(signature: &VerboseLoggingSignature) -> usize {
+        serde_json::to_vec(&VerboseLoggingAggregate {
             signature: signature.clone(),
             count: 1,
         })
@@ -272,22 +272,22 @@ impl DataLoopSummary {
     }
 }
 
-/// Versioned on-disk Data Loop document.
+/// Versioned on-disk verbose logging document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DataLoopDocument {
-    /// Data Loop schema version.
+pub struct VerboseLoggingDocument {
+    /// Verbose logging schema version.
     pub version: u32,
     /// Sorted deduplicated sanitized signatures.
-    pub signatures: Vec<DataLoopAggregate>,
+    pub signatures: Vec<VerboseLoggingAggregate>,
     /// Aggregate summary and bounds state.
-    pub summary: DataLoopDocumentSummary,
+    pub summary: VerboseLoggingDocumentSummary,
 }
 
-/// Bounds and count summary for a [`DataLoopDocument`].
+/// Bounds and count summary for a [`VerboseLoggingDocument`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DataLoopDocumentSummary {
+pub struct VerboseLoggingDocumentSummary {
     /// Total recorded event outcomes, including overflow.
     pub total_occurrences: u64,
     /// Outcomes collapsed because the group bound was reached.
@@ -302,17 +302,17 @@ pub struct DataLoopDocumentSummary {
     pub canonical_denial_limit_reached: bool,
 }
 
-impl DataLoopDocument {
-    /// Current Data Loop document schema version.
+impl VerboseLoggingDocument {
+    /// Current verbose logging document schema version.
     pub const VERSION: u32 = 1;
 
     /// Builds an on-disk document from decoder aggregate state.
     #[must_use]
-    pub fn new(summary: &DataLoopSummary) -> Self {
+    pub fn new(summary: &VerboseLoggingSummary) -> Self {
         Self {
             version: Self::VERSION,
             signatures: summary.signatures.clone(),
-            summary: DataLoopDocumentSummary {
+            summary: VerboseLoggingDocumentSummary {
                 total_occurrences: summary.total_occurrences,
                 overflow_occurrences: summary.overflow_occurrences,
                 canonical_overflow_occurrences: summary.canonical_overflow_occurrences,
@@ -324,12 +324,12 @@ impl DataLoopDocument {
     }
 }
 
-/// Derives the deterministic Data Loop sibling for a canonical denials path.
+/// Derives the deterministic verbose logging sibling for a canonical denials path.
 ///
 /// # Errors
 ///
 /// Returns an error when `output_path` has no usable file name.
-pub fn data_loop_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
+pub fn verbose_logging_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
     let file_name = output_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -343,21 +343,21 @@ pub fn data_loop_sibling_path(output_path: &Path) -> io::Result<PathBuf> {
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or(file_name);
-    let sibling = format!("{stem}.data-loop.json");
+    let sibling = format!("{stem}.verbose.json");
     Ok(match output_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join(sibling),
         _ => PathBuf::from(sibling),
     })
 }
 
-/// Writes a pretty-printed Data Loop JSON document and trailing newline.
+/// Writes a pretty-printed verbose logging JSON document and trailing newline.
 ///
 /// # Errors
 ///
 /// Returns serialization or underlying writer failures.
-pub fn write_data_loop_document<W: Write>(
+pub fn write_verbose_logging_document<W: Write>(
     writer: &mut W,
-    document: &DataLoopDocument,
+    document: &VerboseLoggingDocument,
 ) -> io::Result<()> {
     serde_json::to_writer_pretty(&mut *writer, document).map_err(io::Error::other)?;
     writer.write_all(b"\n")?;
@@ -370,12 +370,12 @@ mod tests {
 
     #[test]
     fn aggregates_and_sorts_sanitized_signatures() {
-        let mut summary = DataLoopSummary::default();
-        let signature = DataLoopSignature {
-            provider: DataLoopProvider::KernelGeneral,
+        let mut summary = VerboseLoggingSummary::default();
+        let signature = VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: DataLoopExclusionReason::MissingObjectName,
+            reason: VerboseLoggingExclusionReason::MissingObjectName,
             pid: 42,
             access_type: None,
             resource_type: None,
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(summary.signatures[0].count, 2);
 
         let mut bytes = Vec::new();
-        write_data_loop_document(&mut bytes, &DataLoopDocument::new(&summary)).unwrap();
+        write_verbose_logging_document(&mut bytes, &VerboseLoggingDocument::new(&summary)).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(text.contains("S-1-15-3-1"));
         assert!(text.contains("<REDACTED>"));
@@ -404,55 +404,55 @@ mod tests {
 
     #[test]
     fn group_bound_collapses_new_keys_into_overflow() {
-        let mut summary = DataLoopSummary::default();
-        for event_id in 0..MAX_DATA_LOOP_GROUPS as u16 {
-            summary.record(DataLoopSignature {
-                provider: DataLoopProvider::KernelGeneral,
+        let mut summary = VerboseLoggingSummary::default();
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
+            summary.record(VerboseLoggingSignature {
+                provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: DataLoopExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
                 properties: Vec::new(),
             });
         }
-        summary.record(DataLoopSignature {
-            provider: DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+        summary.record(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
             provider_guid: "privacy".to_string(),
             event_id: u16::MAX,
-            reason: DataLoopExclusionReason::UnsupportedEventSchema,
+            reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
             pid: 1,
             access_type: None,
             resource_type: None,
             properties: Vec::new(),
         });
 
-        assert_eq!(summary.signatures.len(), MAX_DATA_LOOP_GROUPS);
+        assert_eq!(summary.signatures.len(), MAX_VERBOSE_LOGGING_GROUPS);
         assert_eq!(summary.overflow_occurrences, 1);
         assert!(summary.aggregate_groups_truncated);
     }
 
     #[test]
     fn canonical_signature_evicts_noncanonical_signature_at_group_bound() {
-        let mut summary = DataLoopSummary::default();
-        for event_id in 0..MAX_DATA_LOOP_GROUPS as u16 {
-            summary.record(DataLoopSignature {
-                provider: DataLoopProvider::KernelGeneral,
+        let mut summary = VerboseLoggingSummary::default();
+        for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
+            summary.record(VerboseLoggingSignature {
+                provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: DataLoopExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
                 properties: Vec::new(),
             });
         }
-        summary.record(DataLoopSignature {
-            provider: DataLoopProvider::KernelGeneral,
+        summary.record(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "kernel".to_string(),
             event_id: u16::MAX,
-            reason: DataLoopExclusionReason::CanonicalDenial,
+            reason: VerboseLoggingExclusionReason::CanonicalDenial,
             pid: 1,
             access_type: Some(crate::AccessType::Read),
             resource_type: Some(crate::ResourceType::File),
@@ -462,42 +462,42 @@ mod tests {
         assert!(summary
             .signatures
             .iter()
-            .any(|group| group.signature.reason == DataLoopExclusionReason::CanonicalDenial));
+            .any(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial));
         assert_eq!(summary.overflow_occurrences, 1);
         assert_eq!(summary.canonical_overflow_occurrences, 0);
     }
 
     #[test]
     fn byte_budget_leaves_guarded_analysis_protocol_headroom() {
-        let mut summary = DataLoopSummary::default();
+        let mut summary = VerboseLoggingSummary::default();
         let mut retained_bytes = 0;
         let properties = (0..24)
             .map(|index| (format!("Property{index:02}"), "x".repeat(256)))
             .collect::<Vec<_>>();
-        for pid in 0..MAX_DATA_LOOP_GROUPS as u32 {
+        for pid in 0..MAX_VERBOSE_LOGGING_GROUPS as u32 {
             summary.record_with_byte_budget(
-                DataLoopSignature {
-                    provider: DataLoopProvider::KernelGeneral,
+                VerboseLoggingSignature {
+                    provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
                     event_id: 14,
-                    reason: DataLoopExclusionReason::CanonicalDenial,
+                    reason: VerboseLoggingExclusionReason::CanonicalDenial,
                     pid,
                     access_type: Some(crate::AccessType::Read),
                     resource_type: Some(crate::ResourceType::File),
                     properties: properties.clone(),
                 },
                 &mut retained_bytes,
-                MAX_DATA_LOOP_SIGNATURE_BYTES,
+                MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
             );
         }
 
         assert!(summary.aggregate_groups_truncated);
         assert!(summary.overflow_occurrences > 0);
-        assert!(retained_bytes <= MAX_DATA_LOOP_SIGNATURE_BYTES);
+        assert!(retained_bytes <= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES);
         let payload = serde_json::to_vec(&crate::AnalysisResult {
             denials: Vec::new(),
             denied_resources_truncated: false,
-            data_loop: summary,
+            verbose_logging: summary,
         })
         .unwrap();
         assert!(payload.len() < 64 * 1024 * 1024);
@@ -505,25 +505,25 @@ mod tests {
 
     #[test]
     fn document_round_trips() {
-        let mut summary = DataLoopSummary::default();
+        let mut summary = VerboseLoggingSummary::default();
         summary.mark_canonical_denial_limit_reached();
         summary.mark_processed_events_truncated();
-        let document = DataLoopDocument::new(&summary);
+        let document = VerboseLoggingDocument::new(&summary);
         let mut bytes = Vec::new();
-        write_data_loop_document(&mut bytes, &document).unwrap();
-        let parsed: DataLoopDocument = serde_json::from_slice(&bytes).unwrap();
+        write_verbose_logging_document(&mut bytes, &document).unwrap();
+        let parsed: VerboseLoggingDocument = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, document);
     }
 
     #[test]
     fn sibling_path_replaces_the_canonical_extension() {
         assert_eq!(
-            data_loop_sibling_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
-            PathBuf::from(r"C:\out\denials.123.data-loop.json")
+            verbose_logging_sibling_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
+            PathBuf::from(r"C:\out\denials.123.verbose.json")
         );
         assert_eq!(
-            data_loop_sibling_path(Path::new("denials")).unwrap(),
-            PathBuf::from("denials.data-loop.json")
+            verbose_logging_sibling_path(Path::new("denials")).unwrap(),
+            PathBuf::from("denials.verbose.json")
         );
     }
 }

@@ -29,9 +29,9 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 
 use learning_mode_core::{
-    AnalysisResult, AnalyzeError, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
-    DataLoopSummary, DenialAnalyzer, DeniedResource, ProcessLifetime,
-    MAX_DATA_LOOP_SIGNATURE_BYTES,
+    AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
+    VerboseLoggingExclusionReason, VerboseLoggingProvider, VerboseLoggingSignature,
+    VerboseLoggingSummary, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use windows::core::PWSTR;
 use windows::Win32::System::Diagnostics::Etw::{
@@ -142,8 +142,8 @@ struct Accumulator<'visitor> {
     decode_error: Option<String>,
     panic_payload: Option<Box<dyn std::any::Any + Send>>,
     schema_cache: tdh_decode::EventSchemaCache,
-    data_loop: DataLoopSummary,
-    data_loop_signature_bytes: usize,
+    verbose_logging: VerboseLoggingSummary,
+    verbose_logging_signature_bytes: usize,
 }
 
 impl<'visitor> Accumulator<'visitor> {
@@ -165,8 +165,8 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
-            data_loop: DataLoopSummary::default(),
-            data_loop_signature_bytes: 0,
+            verbose_logging: VerboseLoggingSummary::default(),
+            verbose_logging_signature_bytes: 0,
         }
     }
 
@@ -195,8 +195,8 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
-            data_loop: DataLoopSummary::default(),
-            data_loop_signature_bytes: 0,
+            verbose_logging: VerboseLoggingSummary::default(),
+            verbose_logging_signature_bytes: 0,
         }
     }
 
@@ -218,8 +218,8 @@ impl<'visitor> Accumulator<'visitor> {
             decode_error: None,
             panic_payload: None,
             schema_cache: tdh_decode::EventSchemaCache::default(),
-            data_loop: DataLoopSummary::default(),
-            data_loop_signature_bytes: 0,
+            verbose_logging: VerboseLoggingSummary::default(),
+            verbose_logging_signature_bytes: 0,
         }
     }
 
@@ -234,7 +234,7 @@ impl<'visitor> Accumulator<'visitor> {
                     self.record_raw_denial_outcome(
                         &raw,
                         &candidate,
-                        DataLoopExclusionReason::UnusableResourcePath,
+                        VerboseLoggingExclusionReason::UnusableResourcePath,
                     );
                     return;
                 }
@@ -246,7 +246,7 @@ impl<'visitor> Accumulator<'visitor> {
                     self.record_raw_denial_outcome(
                         &raw,
                         &candidate,
-                        DataLoopExclusionReason::UnusableResourcePath,
+                        VerboseLoggingExclusionReason::UnusableResourcePath,
                     );
                     return;
                 }
@@ -254,7 +254,11 @@ impl<'visitor> Accumulator<'visitor> {
         } else {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
-        self.record_raw_denial_outcome(&raw, &resource, DataLoopExclusionReason::CanonicalDenial);
+        self.record_raw_denial_outcome(
+            &raw,
+            &resource,
+            VerboseLoggingExclusionReason::CanonicalDenial,
+        );
         let dedup_resource = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
                 resource.to_ascii_lowercase()
@@ -269,11 +273,11 @@ impl<'visitor> Accumulator<'visitor> {
         }
         // The canonical unique-denial bound is reached: keep reading (up to
         // the processed-event bound) so every remaining outcome is still
-        // aggregated into the Data Loop summary, rather than stopping the
+        // aggregated into the verbose logging summary, rather than stopping the
         // trace early.
         if self.denials.len() >= MAX_UNIQUE_DENIALS {
             self.truncated = true;
-            self.data_loop.mark_canonical_denial_limit_reached();
+            self.verbose_logging.mark_canonical_denial_limit_reached();
             return;
         }
         self.seen.insert((dedup_resource, raw.access_type));
@@ -294,10 +298,10 @@ impl<'visitor> Accumulator<'visitor> {
         &mut self,
         raw: &RawDenial,
         resource: &str,
-        reason: DataLoopExclusionReason,
+        reason: VerboseLoggingExclusionReason,
     ) {
         let mut properties = raw
-            .data_loop_properties
+            .verbose_logging_properties
             .iter()
             .cloned()
             .collect::<std::collections::BTreeMap<_, _>>();
@@ -340,15 +344,15 @@ impl<'visitor> Accumulator<'visitor> {
         );
     }
 
-    /// Records one excluded outcome as a deduplicated Data Loop signature:
+    /// Records one excluded outcome as a deduplicated verbose logging signature:
     /// symbolic provider, provider GUID, event ID, reason, PID, and the
     /// already-sanitized/bounded property list all identify the group;
     /// repeats of the same signature only increment its `count`.
     fn record_exclusion(
         &mut self,
-        provider: DataLoopProvider,
+        provider: VerboseLoggingProvider,
         event_id: u16,
-        reason: DataLoopExclusionReason,
+        reason: VerboseLoggingExclusionReason,
         pid: u32,
         properties: Vec<(String, String)>,
     ) {
@@ -357,9 +361,9 @@ impl<'visitor> Accumulator<'visitor> {
 
     fn record_outcome(
         &mut self,
-        provider: DataLoopProvider,
+        provider: VerboseLoggingProvider,
         event_id: u16,
-        reason: DataLoopExclusionReason,
+        reason: VerboseLoggingExclusionReason,
         pid: u32,
         classification: (
             Option<learning_mode_core::AccessType>,
@@ -368,7 +372,7 @@ impl<'visitor> Accumulator<'visitor> {
         properties: Vec<(String, String)>,
     ) {
         let (access_type, resource_type) = classification;
-        let signature = DataLoopSignature {
+        let signature = VerboseLoggingSignature {
             provider,
             provider_guid: crate::extractors::provider_guid_string(provider),
             event_id,
@@ -378,10 +382,10 @@ impl<'visitor> Accumulator<'visitor> {
             resource_type,
             properties,
         };
-        self.data_loop.record_with_byte_budget(
+        self.verbose_logging.record_with_byte_budget(
             signature,
-            &mut self.data_loop_signature_bytes,
-            MAX_DATA_LOOP_SIGNATURE_BYTES,
+            &mut self.verbose_logging_signature_bytes,
+            MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
         );
     }
 
@@ -395,7 +399,7 @@ impl<'visitor> Accumulator<'visitor> {
         if self.processed_event_count >= MAX_PROCESSED_EVENTS {
             self.processing_limit_reached = true;
             self.truncated = true;
-            self.data_loop.mark_processed_events_truncated();
+            self.verbose_logging.mark_processed_events_truncated();
             self.stop_requested = true;
             return false;
         }
@@ -423,7 +427,7 @@ impl<'visitor> Accumulator<'visitor> {
     /// state is unreliable beyond this single event. Per-event decode
     /// failures are fatal only for the raw diagnostic visitor (which needs
     /// every event to succeed); in [`CollectionMode::Analyze`] they are
-    /// aggregated into the Data Loop summary for a known provider instead of
+    /// aggregated into the verbose logging summary for a known provider instead of
     /// silently dropped.
     fn record_event_decode_error(
         &mut self,
@@ -443,13 +447,13 @@ impl<'visitor> Accumulator<'visitor> {
         if let Some(category) = crate::extractors::provider_category(provider) {
             let reason = match error.event_kind() {
                 Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
-                    DataLoopExclusionReason::EventPayloadMalformed
+                    VerboseLoggingExclusionReason::EventPayloadMalformed
                 }
                 Some(tdh_decode::EventDecodeKind::DecoderLimitReached) => {
-                    DataLoopExclusionReason::DecoderLimitReached
+                    VerboseLoggingExclusionReason::DecoderLimitReached
                 }
                 Some(tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding) => {
-                    DataLoopExclusionReason::UnsupportedPropertyEncoding
+                    VerboseLoggingExclusionReason::UnsupportedPropertyEncoding
                 }
                 None => return,
             };
@@ -482,9 +486,9 @@ impl<'visitor> Accumulator<'visitor> {
         let mut result = AnalysisResult {
             denials: self.denials,
             denied_resources_truncated: self.truncated,
-            data_loop: self.data_loop,
+            verbose_logging: self.verbose_logging,
         };
-        match result.fit_data_loop_within_serialized_bytes(
+        match result.fit_verbose_logging_within_serialized_bytes(
             crate::guarded_wpr_protocol::MAX_ANALYSIS_BYTES as usize,
         ) {
             Ok(true) => Ok(result),
@@ -550,7 +554,7 @@ impl DenialAnalyzer for EtlDenialAnalyzer {
 /// Runs the pure decode composition over already-collected events, using the
 /// same event-classification path ([`handle_decoded_event`]) as the real ETW
 /// callback: provider/vocabulary gating, extraction, capability-DACL
-/// fallback, and Data Loop aggregation. Split out from
+/// fallback, and verbose logging aggregation. Split out from
 /// [`EtlDenialAnalyzer::analyze`] so it can be tested with hand-built events
 /// that mirror real traces, without a live ETW/TDH read (which needs the
 /// provider manifests registered on the machine).
@@ -828,7 +832,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
             acc.record_exclusion(
                 category,
                 event_id,
-                DataLoopExclusionReason::UnsupportedEventSchema,
+                VerboseLoggingExclusionReason::UnsupportedEventSchema,
                 header.ProcessId,
                 Vec::new(),
             );
@@ -983,7 +987,7 @@ fn handle_decoded_event(
             acc.record_exclusion(
                 category,
                 parts.event_id,
-                DataLoopExclusionReason::UnsupportedEventSchema,
+                VerboseLoggingExclusionReason::UnsupportedEventSchema,
                 header_pid,
                 crate::extractors::sanitize_properties(&parts.props),
             );
@@ -995,9 +999,9 @@ fn handle_decoded_event(
             acc.record_outcome(
                 category,
                 parts.event_id,
-                DataLoopExclusionReason::EventPayloadMalformed,
+                VerboseLoggingExclusionReason::EventPayloadMalformed,
                 header_pid,
-                crate::extractors::data_loop_classification(parts),
+                crate::extractors::verbose_logging_classification(parts),
                 crate::extractors::sanitize_properties(&parts.props),
             );
         }
@@ -1021,7 +1025,7 @@ fn handle_decoded_event(
     match primary {
         Ok(raw) => acc.add_raw_denial(raw),
         Err(reason) => {
-            let recovered_by_dacl = reason == DataLoopExclusionReason::UnresolvedCapability
+            let recovered_by_dacl = reason == VerboseLoggingExclusionReason::UnresolvedCapability
                 && !capability_candidates.is_empty();
             if !recovered_by_dacl {
                 acc.record_outcome(
@@ -1029,7 +1033,7 @@ fn handle_decoded_event(
                     parts.event_id,
                     reason,
                     pid,
-                    crate::extractors::data_loop_classification(parts),
+                    crate::extractors::verbose_logging_classification(parts),
                     crate::extractors::sanitize_properties(&parts.props),
                 );
             }
@@ -1184,12 +1188,12 @@ mod tests {
 
         assert_eq!(
             find_signature(
-                &analysis.data_loop,
+                &analysis.verbose_logging,
                 crate::extractors::CAPABILITY_DENIAL_EVENT_ID
             )
             .signature
             .reason,
-            DataLoopExclusionReason::EventPayloadMalformed
+            VerboseLoggingExclusionReason::EventPayloadMalformed
         );
     }
 
@@ -1342,8 +1346,9 @@ mod tests {
             access_type: access,
             filetime: 1,
             event_id: 4907,
-            provider: learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
-            data_loop_properties: Vec::new(),
+            provider:
+                learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+            verbose_logging_properties: Vec::new(),
         }
     }
 
@@ -1401,10 +1406,12 @@ mod tests {
         assert_eq!(analysis.denials.len(), 1);
         assert_eq!(analysis.denials[0].resource, r"\\server\share\file.txt");
         let excluded = analysis
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
-            .filter(|group| group.signature.reason == DataLoopExclusionReason::UnusableResourcePath)
+            .filter(|group| {
+                group.signature.reason == VerboseLoggingExclusionReason::UnusableResourcePath
+            })
             .collect::<Vec<_>>();
         assert_eq!(excluded.len(), 1);
         assert!(excluded.iter().all(|group| {
@@ -1443,10 +1450,10 @@ mod tests {
     #[test]
     fn unique_denial_bound_marks_truncated_without_stopping() {
         fn exclusion_count(
-            summary: &learning_mode_core::DataLoopSummary,
-            provider: learning_mode_core::DataLoopProvider,
+            summary: &learning_mode_core::VerboseLoggingSummary,
+            provider: learning_mode_core::VerboseLoggingProvider,
             event_id: u16,
-            reason: DataLoopExclusionReason,
+            reason: VerboseLoggingExclusionReason,
         ) -> u64 {
             summary
                 .signatures
@@ -1485,13 +1492,13 @@ mod tests {
             "hitting the unique-denial cap must not halt the trace early"
         );
         assert!(accumulator.truncated);
-        assert!(accumulator.data_loop.canonical_denial_limit_reached);
+        assert!(accumulator.verbose_logging.canonical_denial_limit_reached);
         assert_eq!(
             exclusion_count(
-                &accumulator.data_loop,
-                learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+                &accumulator.verbose_logging,
+                learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                DataLoopExclusionReason::CanonicalDenial
+                VerboseLoggingExclusionReason::CanonicalDenial
             ),
             1
         );
@@ -1509,10 +1516,10 @@ mod tests {
         assert!(!accumulator.stop_requested);
         assert_eq!(
             exclusion_count(
-                &accumulator.data_loop,
-                learning_mode_core::DataLoopProvider::PrivacyAuditingPermissiveLearningMode,
+                &accumulator.verbose_logging,
+                learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                DataLoopExclusionReason::CanonicalDenial
+                VerboseLoggingExclusionReason::CanonicalDenial
             ),
             3
         );
@@ -1765,7 +1772,7 @@ mod tests {
         // by raw payload: one unresolved access-check event (14) plus two
         // unresolved capability denials (28). The two event-28 signatures stay
         // distinct because their retained ProcessId properties differ.
-        let groups = &out.data_loop.signatures;
+        let groups = &out.verbose_logging.signatures;
         assert_eq!(groups.len(), 3);
         let event_14_group = groups
             .iter()
@@ -1773,11 +1780,11 @@ mod tests {
             .expect("event 14 exclusion group present");
         assert_eq!(
             event_14_group.signature.provider,
-            DataLoopProvider::KernelGeneral
+            VerboseLoggingProvider::KernelGeneral
         );
         assert_eq!(
             event_14_group.signature.reason,
-            DataLoopExclusionReason::UnresolvedCapability
+            VerboseLoggingExclusionReason::UnresolvedCapability
         );
         assert_eq!(event_14_group.count, 1);
         let event_28_groups = groups
@@ -1786,8 +1793,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(event_28_groups.len(), 2);
         assert!(event_28_groups.iter().all(|group| {
-            group.signature.provider == DataLoopProvider::KernelGeneral
-                && group.signature.reason == DataLoopExclusionReason::UnresolvedCapability
+            group.signature.provider == VerboseLoggingProvider::KernelGeneral
+                && group.signature.reason == VerboseLoggingExclusionReason::UnresolvedCapability
                 && group.count == 1
         }));
     }
@@ -1848,17 +1855,19 @@ mod tests {
 
         assert_eq!(analysis.denials.len(), 1);
         assert_eq!(analysis.denials[0].resource, r"C:\owned.txt");
-        assert_eq!(analysis.data_loop.signatures.len(), 2);
+        assert_eq!(analysis.verbose_logging.signatures.len(), 2);
         assert!(analysis
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
             .all(|group| group.signature.pid == 42));
         let unsupported = analysis
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == DataLoopExclusionReason::UnsupportedEventSchema)
+            .find(|group| {
+                group.signature.reason == VerboseLoggingExclusionReason::UnsupportedEventSchema
+            })
             .expect("owned unknown event retained");
         assert_eq!(property(&unsupported.signature, "Marker"), "owned");
     }
@@ -1887,10 +1896,10 @@ mod tests {
         assert_eq!(analysis.denials[0].pid, 42);
         assert_eq!(analysis.denials[0].resource, "internetClient");
         let group = analysis
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == DataLoopExclusionReason::CanonicalDenial)
+            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial)
             .expect("canonical capability event retained");
         assert_eq!(group.signature.pid, 42);
         assert_eq!(group.signature.access_type, Some(AccessType::Unknown));
@@ -1916,7 +1925,7 @@ mod tests {
         let analysis = resources_from_events_for_process_lifetimes(&events, Some(&[]));
 
         assert!(analysis.denials.is_empty());
-        assert!(analysis.data_loop.is_empty());
+        assert!(analysis.verbose_logging.is_empty());
     }
 
     /// Non-actionable object types and not-denied capability records are
@@ -1934,7 +1943,7 @@ mod tests {
         assert!(out.denials.is_empty());
 
         let reason_for = |event_id: u16| {
-            out.data_loop
+            out.verbose_logging
                 .signatures
                 .iter()
                 .find(|group| group.signature.event_id == event_id)
@@ -1942,12 +1951,15 @@ mod tests {
         };
         assert_eq!(
             reason_for(14),
-            Some(DataLoopExclusionReason::UnsupportedObjectType)
+            Some(VerboseLoggingExclusionReason::UnsupportedObjectType)
         );
-        assert_eq!(reason_for(28), Some(DataLoopExclusionReason::NotActionable));
+        assert_eq!(
+            reason_for(28),
+            Some(VerboseLoggingExclusionReason::NotActionable)
+        );
         assert_eq!(
             reason_for(9999),
-            Some(DataLoopExclusionReason::UnsupportedEventSchema)
+            Some(VerboseLoggingExclusionReason::UnsupportedEventSchema)
         );
     }
 
@@ -1968,10 +1980,13 @@ mod tests {
         let out = resources_from_events(&events);
 
         assert!(out.denials.is_empty());
-        assert_eq!(out.data_loop.signatures.len(), 1);
-        let group = &out.data_loop.signatures[0];
+        assert_eq!(out.verbose_logging.signatures.len(), 1);
+        let group = &out.verbose_logging.signatures[0];
         assert_eq!(group.count, 1);
-        assert_eq!(group.signature.provider, DataLoopProvider::KernelGeneral);
+        assert_eq!(
+            group.signature.provider,
+            VerboseLoggingProvider::KernelGeneral
+        );
         assert_eq!(
             group.signature.provider_guid,
             "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}"
@@ -1979,7 +1994,7 @@ mod tests {
         assert_eq!(group.signature.event_id, 14);
         assert_eq!(
             group.signature.reason,
-            DataLoopExclusionReason::UnusableResourcePath
+            VerboseLoggingExclusionReason::UnusableResourcePath
         );
         assert_eq!(group.signature.pid, 1996);
         assert_eq!(group.signature.access_type, Some(AccessType::Read));
@@ -2019,17 +2034,17 @@ mod tests {
         let out = resources_from_events(&events);
 
         assert!(out.denials.is_empty());
-        assert_eq!(out.data_loop.signatures.len(), cases.len());
+        assert_eq!(out.verbose_logging.signatures.len(), cases.len());
         for (object_type, object_name) in cases {
             let group = out
-                .data_loop
+                .verbose_logging
                 .signatures
                 .iter()
                 .find(|group| property(&group.signature, "ObjectType") == object_type)
-                .unwrap_or_else(|| panic!("missing Data Loop signature for {object_type}"));
+                .unwrap_or_else(|| panic!("missing verbose logging signature for {object_type}"));
             assert_eq!(
                 group.signature.reason,
-                DataLoopExclusionReason::UnsupportedObjectType
+                VerboseLoggingExclusionReason::UnsupportedObjectType
             );
             assert_eq!(property(&group.signature, "ObjectName"), object_name);
             assert_eq!(group.count, 1);
@@ -2073,9 +2088,9 @@ mod tests {
                 && denial.access_type == AccessType::Write
                 && names.contains(&denial.resource)
         }));
-        assert_eq!(out.data_loop.signatures.len(), names.len());
-        assert!(out.data_loop.signatures.iter().all(|group| {
-            group.signature.reason == DataLoopExclusionReason::CanonicalDenial
+        assert_eq!(out.verbose_logging.signatures.len(), names.len());
+        assert!(out.verbose_logging.signatures.iter().all(|group| {
+            group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial
                 && group.count == 1
                 && property(&group.signature, "ObjectName").contains("<sha256=")
         }));
@@ -2128,11 +2143,9 @@ mod tests {
                 && denial.resource_type == ResourceType::Ui
                 && denial.access_type == AccessType::Unknown
         }));
-        assert!(out
-            .data_loop
-            .signatures
-            .iter()
-            .all(|group| { group.signature.reason == DataLoopExclusionReason::CanonicalDenial }));
+        assert!(out.verbose_logging.signatures.iter().all(|group| {
+            group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial
+        }));
     }
 
     #[test]
@@ -2162,27 +2175,26 @@ mod tests {
         // Each event ID is valid for the *other* known provider, so both are
         // classified `UnsupportedEventSchema` for their own provider rather
         // than silently ignored or misrouted.
-        assert_eq!(out.data_loop.signatures.len(), 2);
-        assert!(
-            out.data_loop
-                .signatures
-                .iter()
-                .all(|group| group.signature.reason
-                    == DataLoopExclusionReason::UnsupportedEventSchema)
-        );
+        assert_eq!(out.verbose_logging.signatures.len(), 2);
         assert!(out
-            .data_loop
+            .verbose_logging
+            .signatures
+            .iter()
+            .all(|group| group.signature.reason
+                == VerboseLoggingExclusionReason::UnsupportedEventSchema));
+        assert!(out
+            .verbose_logging
             .signatures
             .iter()
             .any(|group| group.signature.provider
-                == DataLoopProvider::PrivacyAuditingPermissiveLearningMode
+                == VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode
                 && group.signature.event_id == 28));
         assert!(out
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
             .any(
-                |group| group.signature.provider == DataLoopProvider::KernelGeneral
+                |group| group.signature.provider == VerboseLoggingProvider::KernelGeneral
                     && group.signature.event_id == 4907
             ));
     }
@@ -2190,7 +2202,7 @@ mod tests {
     #[test]
     fn unrelated_provider_is_ignored_without_accounting() {
         // A provider outside the known Learning Mode vocabulary must not
-        // contribute any Data Loop accounting at all, even though its event
+        // contribute any verbose logging accounting at all, even though its event
         // ID happens to collide with a known access-check ID.
         let events = vec![event_with_provider(
             windows::core::GUID::from_u128(0xdead_beef),
@@ -2207,13 +2219,13 @@ mod tests {
         let out = resources_from_events(&events);
         assert!(out.denials.is_empty());
         assert!(
-            out.data_loop.is_empty(),
+            out.verbose_logging.is_empty(),
             "unrelated providers are ignored, not aggregated"
         );
     }
 
     #[test]
-    fn canonical_candidates_and_duplicates_share_one_data_loop_signature() {
+    fn canonical_candidates_and_duplicates_share_one_verbose_logging_signature() {
         let make_event = |sequence_no: u64| {
             kernel_event(
                 14,
@@ -2237,14 +2249,14 @@ mod tests {
         );
 
         let canonical_group = out
-            .data_loop
+            .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == DataLoopExclusionReason::CanonicalDenial)
+            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial)
             .expect("canonical outcome recorded");
         assert_eq!(
             canonical_group.signature.provider,
-            DataLoopProvider::KernelGeneral
+            VerboseLoggingProvider::KernelGeneral
         );
         assert_eq!(canonical_group.signature.event_id, 14);
         assert_eq!(
@@ -2291,14 +2303,14 @@ mod tests {
 
         assert_eq!(out.denials.len(), MAX_UNIQUE_DENIALS);
         assert!(out.denied_resources_truncated);
-        assert!(out.data_loop.canonical_denial_limit_reached);
-        assert!(!out.data_loop.processed_events_truncated);
+        assert!(out.verbose_logging.canonical_denial_limit_reached);
+        assert!(!out.verbose_logging.processed_events_truncated);
 
         // If the trace had stopped as soon as the cap was reached, only the
-        // The Data Loop accounts for every denial candidate, including those
+        // The verbose logging accounts for every denial candidate, including those
         // observed after the canonical unique-denial cap.
         assert_eq!(
-            out.data_loop.total_occurrences,
+            out.verbose_logging.total_occurrences,
             (MAX_UNIQUE_DENIALS + overflow_candidates) as u64
         );
     }
@@ -2306,7 +2318,7 @@ mod tests {
     #[test]
     fn capability_denial_recovered_from_dacl_records_no_exclusion() {
         // Same shape as `allow_shape_recovers_capability_from_dacl`, but
-        // asserting the Data Loop side: a successfully DACL-recovered
+        // asserting the verbose logging side: a successfully DACL-recovered
         // capability candidate must not also surface an `UnresolvedCapability`
         // exclusion for the same event.
         let dacl = "hex:000000000000000001000000010200000000000F0300000001000000";
@@ -2326,27 +2338,33 @@ mod tests {
         let out = resources_from_events(&events);
         assert_eq!(out.denials.len(), 1);
         assert_eq!(out.denials[0].resource, "internetClient");
-        assert_eq!(out.data_loop.signatures.len(), 1);
-        let signature = &out.data_loop.signatures[0].signature;
-        assert_eq!(signature.reason, DataLoopExclusionReason::CanonicalDenial);
+        assert_eq!(out.verbose_logging.signatures.len(), 1);
+        let signature = &out.verbose_logging.signatures[0].signature;
+        assert_eq!(
+            signature.reason,
+            VerboseLoggingExclusionReason::CanonicalDenial
+        );
         assert_eq!(signature.access_type, Some(AccessType::Unknown));
         assert_eq!(signature.resource_type, Some(ResourceType::Capability));
     }
 
-    // ---- Data Loop signature retention (identifiers + redaction + dedup) --
+    // ---- verbose logging signature retention (identifiers + redaction + dedup) --
 
     fn find_signature(
-        summary: &learning_mode_core::DataLoopSummary,
+        summary: &learning_mode_core::VerboseLoggingSummary,
         event_id: u16,
-    ) -> &learning_mode_core::DataLoopAggregate {
+    ) -> &learning_mode_core::VerboseLoggingAggregate {
         summary
             .signatures
             .iter()
             .find(|group| group.signature.event_id == event_id)
-            .unwrap_or_else(|| panic!("expected a Data Loop signature for event {event_id}"))
+            .unwrap_or_else(|| panic!("expected a verbose logging signature for event {event_id}"))
     }
 
-    fn property<'a>(signature: &'a learning_mode_core::DataLoopSignature, name: &str) -> &'a str {
+    fn property<'a>(
+        signature: &'a learning_mode_core::VerboseLoggingSignature,
+        name: &str,
+    ) -> &'a str {
         signature
             .properties
             .iter()
@@ -2357,7 +2375,7 @@ mod tests {
     }
 
     #[test]
-    fn data_loop_byte_budget_preserves_guarded_protocol_headroom() {
+    fn verbose_logging_byte_budget_preserves_guarded_protocol_headroom() {
         let mut accumulator = Accumulator::analyze();
         let properties = (0..crate::extractors::MAX_SIGNATURE_PROPERTIES)
             .map(|index| {
@@ -2367,19 +2385,19 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        for pid in 0..learning_mode_core::MAX_DATA_LOOP_GROUPS as u32 {
+        for pid in 0..learning_mode_core::MAX_VERBOSE_LOGGING_GROUPS as u32 {
             accumulator.record_exclusion(
-                DataLoopProvider::KernelGeneral,
+                VerboseLoggingProvider::KernelGeneral,
                 14,
-                DataLoopExclusionReason::CanonicalDenial,
+                VerboseLoggingExclusionReason::CanonicalDenial,
                 pid,
                 properties.clone(),
             );
         }
 
-        assert!(accumulator.data_loop.aggregate_groups_truncated);
-        assert!(accumulator.data_loop.overflow_occurrences > 0);
-        assert!(accumulator.data_loop_signature_bytes <= MAX_DATA_LOOP_SIGNATURE_BYTES);
+        assert!(accumulator.verbose_logging.aggregate_groups_truncated);
+        assert!(accumulator.verbose_logging.overflow_occurrences > 0);
+        assert!(accumulator.verbose_logging_signature_bytes <= MAX_VERBOSE_LOGGING_SIGNATURE_BYTES);
     }
 
     #[test]
@@ -2393,10 +2411,10 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        let group = find_signature(&out.data_loop, 9999);
+        let group = find_signature(&out.verbose_logging, 9999);
         assert_eq!(
             group.signature.reason,
-            DataLoopExclusionReason::UnsupportedEventSchema
+            VerboseLoggingExclusionReason::UnsupportedEventSchema
         );
         assert_eq!(
             property(&group.signature, "ObjectName"),
@@ -2420,15 +2438,18 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        let group = find_signature(&out.data_loop, 28);
+        let group = find_signature(&out.verbose_logging, 28);
         assert_eq!(
             group.signature.reason,
-            DataLoopExclusionReason::UnresolvedCapability
+            VerboseLoggingExclusionReason::UnresolvedCapability
         );
-        assert_eq!(group.signature.provider, DataLoopProvider::KernelGeneral);
+        assert_eq!(
+            group.signature.provider,
+            VerboseLoggingProvider::KernelGeneral
+        );
         assert_eq!(
             group.signature.provider_guid,
-            crate::extractors::provider_guid_string(DataLoopProvider::KernelGeneral)
+            crate::extractors::provider_guid_string(VerboseLoggingProvider::KernelGeneral)
         );
         assert_eq!(group.signature.pid, 42, "process identifier retained");
         assert_eq!(
@@ -2451,11 +2472,11 @@ mod tests {
         let out = resources_from_events(&events);
 
         assert_eq!(
-            out.data_loop.signatures.len(),
+            out.verbose_logging.signatures.len(),
             1,
             "differing only by timestamp must dedupe to a single signature"
         );
-        assert_eq!(find_signature(&out.data_loop, 9999).count, 2);
+        assert_eq!(find_signature(&out.verbose_logging, 9999).count, 2);
     }
 
     #[test]
@@ -2472,7 +2493,7 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        let group = find_signature(&out.data_loop, 9999);
+        let group = find_signature(&out.verbose_logging, 9999);
         assert!(
             group
                 .signature
@@ -2521,22 +2542,22 @@ mod tests {
             .into_analysis()
             .expect("per-event decode failures are non-fatal in Analyze mode");
 
-        let malformed = find_signature(&out.data_loop, 14);
+        let malformed = find_signature(&out.verbose_logging, 14);
         assert_eq!(
             malformed.signature.reason,
-            DataLoopExclusionReason::EventPayloadMalformed
+            VerboseLoggingExclusionReason::EventPayloadMalformed
         );
         assert_eq!(malformed.signature.pid, 9);
         assert_eq!(property(&malformed.signature, "EventName"), "AccessCheck");
         assert_eq!(
-            find_signature(&out.data_loop, 27).signature.reason,
-            DataLoopExclusionReason::DecoderLimitReached
+            find_signature(&out.verbose_logging, 27).signature.reason,
+            VerboseLoggingExclusionReason::DecoderLimitReached
         );
         assert_eq!(
-            find_signature(&out.data_loop, 28).signature.reason,
-            DataLoopExclusionReason::UnsupportedPropertyEncoding
+            find_signature(&out.verbose_logging, 28).signature.reason,
+            VerboseLoggingExclusionReason::UnsupportedPropertyEncoding
         );
-        assert!(out.data_loop.signatures.iter().all(|aggregate| {
+        assert!(out.verbose_logging.signatures.iter().all(|aggregate| {
             aggregate
                 .signature
                 .properties

@@ -16,8 +16,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::data_loop::{DataLoopAggregate, DataLoopSummary};
 use crate::model::DeniedResource;
+use crate::verbose_logging::{VerboseLoggingAggregate, VerboseLoggingSummary};
 
 /// Result of decoding a capture source into bounded, de-duplicated denials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct AnalysisResult {
     pub denied_resources_truncated: bool,
     /// Username-redacted signatures for outcomes omitted from canonical denials.
     #[serde(default)]
-    pub data_loop: DataLoopSummary,
+    pub verbose_logging: VerboseLoggingSummary,
 }
 
 /// Inclusive process-lifetime window used to scope a host-wide capture.
@@ -65,15 +65,15 @@ impl AnalysisResult {
         Self {
             denials,
             denied_resources_truncated: false,
-            data_loop: DataLoopSummary::default(),
+            verbose_logging: VerboseLoggingSummary::default(),
         }
     }
 
-    /// Trims Data Loop signatures so the complete compact JSON result fits.
+    /// Trims verbose logging signatures so the complete compact JSON result fits.
     ///
-    /// Returns `false` when the canonical denials and empty Data Loop envelope
+    /// Returns `false` when the canonical denials and empty verbose logging envelope
     /// alone exceed `max_bytes`; canonical denials are never discarded.
-    pub fn fit_data_loop_within_serialized_bytes(
+    pub fn fit_verbose_logging_within_serialized_bytes(
         &mut self,
         max_bytes: usize,
     ) -> Result<bool, serde_json::Error> {
@@ -81,12 +81,13 @@ impl AnalysisResult {
             return Ok(true);
         }
 
-        let base_len = serialized_analysis_len(self, &[], self.data_loop.signatures.as_slice())?;
+        let base_len =
+            serialized_analysis_len(self, &[], self.verbose_logging.signatures.as_slice())?;
         if base_len > max_bytes {
             return Ok(false);
         }
 
-        let original = std::mem::take(&mut self.data_loop.signatures);
+        let original = std::mem::take(&mut self.verbose_logging.signatures);
         let mut retained_bytes = 0usize;
         const ENVELOPE_HEADROOM: usize = 4 * 1024;
         let signature_budget = max_bytes
@@ -98,13 +99,13 @@ impl AnalysisResult {
             let aggregate_len = serde_json::to_vec(&aggregate)?.len().saturating_add(1);
             if retained_bytes.saturating_add(aggregate_len) <= signature_budget {
                 retained_bytes += aggregate_len;
-                self.data_loop.signatures.push(aggregate);
+                self.verbose_logging.signatures.push(aggregate);
             } else {
-                self.data_loop.move_to_overflow(aggregate);
+                self.verbose_logging.move_to_overflow(aggregate);
             }
         }
 
-        let mut retained = std::mem::take(&mut self.data_loop.signatures);
+        let mut retained = std::mem::take(&mut self.verbose_logging.signatures);
         let serialized_len = |retained_count: usize| {
             serialized_analysis_len(
                 self,
@@ -123,11 +124,11 @@ impl AnalysisResult {
             }
         }
         let removed = retained.split_off(low);
-        self.data_loop.signatures = retained;
+        self.verbose_logging.signatures = retained;
         for aggregate in removed {
-            self.data_loop.move_to_overflow(aggregate);
+            self.verbose_logging.move_to_overflow(aggregate);
         }
-        self.data_loop
+        self.verbose_logging
             .signatures
             .sort_by(|left, right| left.signature.cmp(&right.signature));
         Ok(serde_json::to_vec(self)?.len() <= max_bytes)
@@ -136,21 +137,21 @@ impl AnalysisResult {
 
 fn serialized_analysis_len(
     analysis: &AnalysisResult,
-    retained: &[DataLoopAggregate],
-    removed: &[DataLoopAggregate],
+    retained: &[VerboseLoggingAggregate],
+    removed: &[VerboseLoggingAggregate],
 ) -> Result<usize, serde_json::Error> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct AnalysisView<'a> {
         denials: &'a [DeniedResource],
         denied_resources_truncated: bool,
-        data_loop: DataLoopView<'a>,
+        verbose_logging: VerboseLoggingView<'a>,
     }
 
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
-    struct DataLoopView<'a> {
-        signatures: &'a [DataLoopAggregate],
+    struct VerboseLoggingView<'a> {
+        signatures: &'a [VerboseLoggingAggregate],
         total_occurrences: u64,
         overflow_occurrences: u64,
         canonical_overflow_occurrences: u64,
@@ -171,21 +172,21 @@ fn serialized_analysis_len(
     let view = AnalysisView {
         denials: &analysis.denials,
         denied_resources_truncated: analysis.denied_resources_truncated,
-        data_loop: DataLoopView {
+        verbose_logging: VerboseLoggingView {
             signatures: retained,
-            total_occurrences: analysis.data_loop.total_occurrences,
+            total_occurrences: analysis.verbose_logging.total_occurrences,
             overflow_occurrences: analysis
-                .data_loop
+                .verbose_logging
                 .overflow_occurrences
                 .saturating_add(removed_occurrences),
             canonical_overflow_occurrences: analysis
-                .data_loop
+                .verbose_logging
                 .canonical_overflow_occurrences
                 .saturating_add(removed_canonical_occurrences),
-            aggregate_groups_truncated: analysis.data_loop.aggregate_groups_truncated
+            aggregate_groups_truncated: analysis.verbose_logging.aggregate_groups_truncated
                 || !removed.is_empty(),
-            processed_events_truncated: analysis.data_loop.processed_events_truncated,
-            canonical_denial_limit_reached: analysis.data_loop.canonical_denial_limit_reached,
+            processed_events_truncated: analysis.verbose_logging.processed_events_truncated,
+            canonical_denial_limit_reached: analysis.verbose_logging.canonical_denial_limit_reached,
         },
     };
     serde_json::to_vec(&view).map(|bytes| bytes.len())
@@ -233,10 +234,11 @@ pub trait DenialAnalyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data_loop::{
-        DataLoopAggregate, DataLoopExclusionReason, DataLoopProvider, DataLoopSignature,
-    };
     use crate::model::{AccessType, ResourceType};
+    use crate::verbose_logging::{
+        VerboseLoggingAggregate, VerboseLoggingExclusionReason, VerboseLoggingProvider,
+        VerboseLoggingSignature,
+    };
 
     /// A trivial analyzer returning a fixed set, proving the trait is
     /// object-safe and usable behind a `dyn` reference.
@@ -261,14 +263,14 @@ mod tests {
         let got = analyzer.analyze(Path::new("ignored.etl")).unwrap();
         assert_eq!(got.denials, denials);
         assert!(!got.denied_resources_truncated);
-        assert!(got.data_loop.is_empty());
+        assert!(got.verbose_logging.is_empty());
     }
 
     #[test]
-    fn legacy_guarded_payload_defaults_data_loop_summary() {
+    fn legacy_guarded_payload_defaults_verbose_logging_summary() {
         let payload = br#"{"denials":[],"deniedResourcesTruncated":false}"#;
         let result: AnalysisResult = serde_json::from_slice(payload).unwrap();
-        assert!(result.data_loop.is_empty());
+        assert!(result.verbose_logging.is_empty());
     }
 
     #[test]
@@ -299,13 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn serialized_size_limit_moves_data_loop_groups_to_overflow() {
-        let signature = |pid| DataLoopAggregate {
-            signature: DataLoopSignature {
-                provider: DataLoopProvider::KernelGeneral,
+    fn serialized_size_limit_moves_verbose_logging_groups_to_overflow() {
+        let signature = |pid| VerboseLoggingAggregate {
+            signature: VerboseLoggingSignature {
+                provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "provider".to_string(),
                 event_id: 14,
-                reason: DataLoopExclusionReason::CanonicalDenial,
+                reason: VerboseLoggingExclusionReason::CanonicalDenial,
                 pid,
                 access_type: Some(AccessType::Read),
                 resource_type: Some(ResourceType::File),
@@ -322,7 +324,7 @@ mod tests {
                 filetime: 2,
             }],
             denied_resources_truncated: false,
-            data_loop: DataLoopSummary {
+            verbose_logging: VerboseLoggingSummary {
                 signatures: vec![signature(1), signature(2)],
                 total_occurrences: 6,
                 ..Default::default()
@@ -331,12 +333,12 @@ mod tests {
         let original_len = serde_json::to_vec(&result).unwrap().len();
 
         assert!(result
-            .fit_data_loop_within_serialized_bytes(original_len - 1)
+            .fit_verbose_logging_within_serialized_bytes(original_len - 1)
             .unwrap());
         assert!(serde_json::to_vec(&result).unwrap().len() < original_len);
-        assert!(result.data_loop.aggregate_groups_truncated);
-        assert_eq!(result.data_loop.total_occurrences, 6);
-        assert!(result.data_loop.overflow_occurrences > 0);
+        assert!(result.verbose_logging.aggregate_groups_truncated);
+        assert_eq!(result.verbose_logging.total_occurrences, 6);
+        assert!(result.verbose_logging.overflow_occurrences > 0);
     }
 
     #[test]
@@ -350,13 +352,13 @@ mod tests {
                 filetime: 2,
             }],
             denied_resources_truncated: false,
-            data_loop: DataLoopSummary {
-                signatures: vec![DataLoopAggregate {
-                    signature: DataLoopSignature {
-                        provider: DataLoopProvider::KernelGeneral,
+            verbose_logging: VerboseLoggingSummary {
+                signatures: vec![VerboseLoggingAggregate {
+                    signature: VerboseLoggingSignature {
+                        provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
-                        reason: DataLoopExclusionReason::CanonicalDenial,
+                        reason: VerboseLoggingExclusionReason::CanonicalDenial,
                         pid: 1,
                         access_type: Some(AccessType::Read),
                         resource_type: Some(ResourceType::File),
@@ -370,23 +372,27 @@ mod tests {
         };
         let original = result.clone();
 
-        assert!(!result.fit_data_loop_within_serialized_bytes(1).unwrap());
+        assert!(!result
+            .fit_verbose_logging_within_serialized_bytes(1)
+            .unwrap());
         assert_eq!(result, original);
         assert!(result
-            .fit_data_loop_within_serialized_bytes(serde_json::to_vec(&original).unwrap().len())
+            .fit_verbose_logging_within_serialized_bytes(
+                serde_json::to_vec(&original).unwrap().len()
+            )
             .unwrap());
         assert_eq!(result, original);
     }
 
     #[test]
     fn serialized_size_limit_handles_maximum_signature_count() {
-        let signatures = (0..crate::data_loop::MAX_DATA_LOOP_GROUPS)
-            .map(|pid| DataLoopAggregate {
-                signature: DataLoopSignature {
-                    provider: DataLoopProvider::KernelGeneral,
+        let signatures = (0..crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS)
+            .map(|pid| VerboseLoggingAggregate {
+                signature: VerboseLoggingSignature {
+                    provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "provider".to_string(),
                     event_id: 14,
-                    reason: DataLoopExclusionReason::MissingObjectName,
+                    reason: VerboseLoggingExclusionReason::MissingObjectName,
                     pid: u32::try_from(pid).unwrap(),
                     access_type: Some(AccessType::Read),
                     resource_type: Some(ResourceType::File),
@@ -398,21 +404,22 @@ mod tests {
         let mut result = AnalysisResult {
             denials: Vec::new(),
             denied_resources_truncated: false,
-            data_loop: DataLoopSummary {
+            verbose_logging: VerboseLoggingSummary {
                 signatures,
-                total_occurrences: crate::data_loop::MAX_DATA_LOOP_GROUPS as u64,
+                total_occurrences: crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS as u64,
                 ..Default::default()
             },
         };
 
         assert!(result
-            .fit_data_loop_within_serialized_bytes(64 * 1024)
+            .fit_verbose_logging_within_serialized_bytes(64 * 1024)
             .unwrap());
         assert!(serde_json::to_vec(&result).unwrap().len() <= 64 * 1024);
-        assert!(!result.data_loop.signatures.is_empty());
+        assert!(!result.verbose_logging.signatures.is_empty());
         assert_eq!(
-            result.data_loop.signatures.len() as u64 + result.data_loop.overflow_occurrences,
-            crate::data_loop::MAX_DATA_LOOP_GROUPS as u64
+            result.verbose_logging.signatures.len() as u64
+                + result.verbose_logging.overflow_occurrences,
+            crate::verbose_logging::MAX_VERBOSE_LOGGING_GROUPS as u64
         );
     }
 }
