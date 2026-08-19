@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 
 use wxc_common::filesystem_resolve::FsIntent;
-use wxc_common::models::{ExecutionRequest, NetworkPolicy, ProxyAddress};
+use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress};
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
@@ -104,6 +104,43 @@ fn uses_private_netns(request: &ExecutionRequest, proxy_active: bool) -> bool {
 /// honor. Pre-0.8 callers keep the warning, so existing configs still run.
 fn rejects_unhonorable_network(request: &ExecutionRequest) -> bool {
     wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
+}
+
+/// Validate-time twin of the parser's schema-0.8 firewall gate.
+///
+/// The parser only sees JSON configs; a Rust caller can hand `mxc_engine` an
+/// `ExecutionRequest` directly and reach the runner without ever passing
+/// through it. Both paths must refuse a mode whose chain is built and never
+/// attached, so this shares the parser's message verbatim.
+pub fn firewall_mode_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    matches!(
+        request.policy.network_enforcement_mode,
+        NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+    )
+    .then_some(wxc_common::config_parser::BWRAP_FIREWALL_UNSUPPORTED)
+}
+
+/// Validate-time twin of the parser's schema-0.8 unenforced-host-list gate.
+///
+/// Host lists suppress `--unshare-net` but nothing applies them under
+/// 'capabilities' with no proxy, so the sandbox shares the host namespace
+/// unfiltered. Same reachability argument as [`firewall_mode_rejection`]: a
+/// Rust caller reaches the runner without passing through the parser.
+pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    let unenforced = matches!(
+        request.policy.network_enforcement_mode,
+        NetworkEnforcementMode::Capabilities
+    ) && !request.policy.network_proxy.is_enabled();
+    let has_host_rules =
+        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
+
+    (unenforced && has_host_rules).then_some(wxc_common::config_parser::BWRAP_UNENFORCED_HOST_RULES)
 }
 
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but

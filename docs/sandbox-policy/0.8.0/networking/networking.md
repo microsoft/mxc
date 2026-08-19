@@ -70,7 +70,7 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
 - **When allowed:** Only when explicitly allowed by IP/CIDR + port + protocol rules in `egress.allow`. In model 2 there is no direct egress path, so these connections are not possible regardless of any allow rules.
 - **Use case:** e.g. SSH to a specific dev server, a direct TCP connection to a database, UDP to a specific endpoint, ICMP for diagnostics.
 - **Caveat (coarse filtering):** Rules match IP/CIDR + port + protocol, not the application protocol. A port number does not identify a service (DNS need not use 53; a database may listen on any port), so allowing or denying a port is a blunt control rather than service-level filtering.
-- **Enforcement:** WFP filters (Windows process containers), network namespace + iptables (WSLc/LXC/Bubblewrap). Model 1 for macOS is not supported for GA. Seatbelt cannot filter arbitrary destinations and macOS packet filtering is not fine-grained enough for per-sandbox scenarios out of the box.
+- **Enforcement:** WFP filters (Windows process containers), network namespace + iptables (WSLc/LXC/Bubblewrap). Model 1 for macOS is not supported for GA. Seatbelt cannot filter arbitrary destinations and macOS packet filtering is not fine-grained enough for per-sandbox scenarios out of the box. Model 1 is **not yet enforced on Bubblewrap** — see "LXC and Bubblewrap: GA enforcement" below; a config requesting it on schema 0.8+ is rejected rather than silently unenforced.
 
 **Example:**
 
@@ -386,6 +386,18 @@ egress allow-list.
 LXC and Bubblewrap use iptables/nftables on the container network path. Their INPUT policy applies `ingress.default`
 and the host-to-container half of `ingress.hostLoopback`; routing and output policy enforce its container-to-host half.
 Model 2 permits only the proxy endpoint.
+
+> **Implementation status (Bubblewrap).** The above is the GA target, not
+> current behavior. Unprivileged Bubblewrap has no host-side veth, so an
+> iptables chain cannot be hooked into `FORWARD`; the chain is built and never
+> attached. Rather than report success having enforced nothing, MXC **rejects**
+> `network.enforcementMode` of `firewall` or `both` on schema 0.8+ (schema
+> 0.6/0.7 keeps the previous warn-and-continue behavior). Model 2 — the proxy
+> endpoint — is the enforced path today. Delivering the chain described above
+> requires moving filtered mode into the sandbox's own network namespace and
+> filtering on `OUTPUT` instead of `FORWARD`; `ingress.hostLoopback` is
+> likewise parsed but not yet enforced. LXC is unaffected: it has a veth and
+> runs privileged, and enforces as described.
 
 ### macOS (Seatbelt): GA enforcement
 

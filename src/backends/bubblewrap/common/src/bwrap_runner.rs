@@ -112,6 +112,16 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // honor, rather than running more permissive than requested. Pre-0.8
         // keeps the warning, so existing configs are unaffected. Sits with the
         // input checks so a host without bwrap is still told what is wrong.
+        //
+        // The parser rejects both of these too, but only sees JSON configs; a
+        // Rust caller can build an `ExecutionRequest` and reach the runner
+        // directly, so the checks are repeated here rather than assumed.
+        if let Some(reason) = bwrap_command::firewall_mode_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
+        if let Some(reason) = bwrap_command::unenforced_host_rules_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
         if let Some(reason) = bwrap_command::local_network_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
@@ -750,10 +760,15 @@ mod tests {
     fn validate_rejects_an_unhonorable_local_network_request_at_0_8() {
         // Host rules keep the sandbox on the shared netns, so allowLocalNetwork
         // =false cannot be honored. Runs ahead of the bwrap probe, so this holds
-        // on hosts without bwrap installed.
+        // on hosts without bwrap installed. The proxy is what makes the host
+        // rules legal at 0.8 -- without a mechanism they are refused earlier.
         let mut req = base_request();
         req.schema_version = "0.8.0-alpha".into();
         req.policy.blocked_hosts = vec!["evil.example.com".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
 
         let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
         assert!(
@@ -779,6 +794,136 @@ mod tests {
                 err.error_message
             );
         }
+    }
+
+    #[test]
+    fn validate_rejects_a_firewall_mode_request_at_0_8() {
+        // The parser rejects this too, but a Rust caller can build the request
+        // directly and never pass through it. Without this check the chain is
+        // built, never attached, and the run reports success having enforced
+        // nothing -- the exact fail-open this gate exists to close.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("enforcementMode='firewall'"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_rejects_both_mode_request_at_0_8() {
+        // 'both' is the same unattached chain as 'firewall'.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Both;
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("enforcementMode='firewall'"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_a_firewall_mode_request_before_0_8() {
+        // GHCP consumes Bubblewrap on 0.6/0.7; the gate must not reach them.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message.contains("enforcementMode"),
+                "0.7 must not be rejected for enforcementMode: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_rejects_host_rules_no_mechanism_will_enforce_at_0_8() {
+        // The gap this closes: host lists suppress --unshare-net, but under
+        // 'capabilities' with no proxy nothing applies them, so a default-deny
+        // policy ran with fully open egress on the host's namespace.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message
+                .contains("require an enforcement mechanism"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_host_rules_when_a_proxy_enforces_them_at_0_8() {
+        // The proxy is the mechanism, so the same lists are fine with one.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.blocked_hosts = vec!["evil.example.com".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message
+                    .contains("require an enforcement mechanism"),
+                "a proxy enforces the lists: {}",
+                err.error_message
+            );
+        }
+    }
+
+    #[test]
+    fn validate_accepts_host_rules_without_a_mechanism_before_0_8() {
+        // GHCP consumes Bubblewrap on 0.6/0.7 with exactly this shape.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message
+                    .contains("require an enforcement mechanism"),
+                "0.7 must not be rejected: {}",
+                err.error_message
+            );
+        }
+    }
+
+    /// A malformed non-empty version cannot come from the parser, so it is a
+    /// hand-built request; the typo must not buy pre-0.8 leniency.
+    #[test]
+    fn validate_rejects_a_firewall_mode_request_with_a_malformed_version() {
+        let mut req = base_request();
+        req.schema_version = "0.8".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("enforcementMode='firewall'"),
+            "unexpected error: {}",
+            err.error_message
+        );
     }
 
     #[test]
