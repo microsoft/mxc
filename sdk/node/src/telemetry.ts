@@ -137,6 +137,7 @@ async function defaultConsentProtocolRunner(
     let stdoutBytes = 0;
     let stderrBytes = 0;
     let protocolLines = 0;
+    let childExitCode: number | null | undefined;
     const presenterAbort = new AbortController();
     let rejectPresenterWait: ((error: Error) => void) | undefined;
 
@@ -204,6 +205,12 @@ async function defaultConsentProtocolRunner(
       }
       if (!response.prompt || !response.challenge) {
         fail(new Error('telemetry consent presentation omitted its prompt or challenge'));
+        return;
+      }
+      if (childExitCode !== undefined) {
+        fail(new Error(
+          `telemetry consent process exited before presentation completed (${childExitCode ?? 'no exit code'})`,
+        ));
         return;
       }
 
@@ -282,10 +289,11 @@ async function defaultConsentProtocolRunner(
     });
     child.on('error', fail);
     child.on('close', (code) => {
+      childExitCode = code;
       if (rejectPresenterWait !== undefined) {
         presenterAbort.abort();
         rejectPresenterWait(
-          new Error(`telemetry consent process exited while awaiting presentation (${code ?? 'no exit code'})`),
+          new Error(`telemetry consent process exited before presentation completed (${code ?? 'no exit code'})`),
         );
         rejectPresenterWait = undefined;
       }

@@ -223,13 +223,31 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     const child = box.current;
 
     child.writeStdout(`${presentationLine()}${grantedLine()}`);
+    await waitFor(() => child.stdinEnded);
     child.emitClose(0);
 
     const outcome = await promise;
     assert.strictEqual(outcome.result, 'granted');
-    await waitFor(() => child.stdinEnded);
     const echo = JSON.parse(child.stdinChunks.join('').trim());
     assert.strictEqual(echo.decision, 'yes');
+  });
+
+  it('does not start a queued presenter after the child closes', async () => {
+    const box = installFakeChildFactory();
+    let presenterCalls = 0;
+    const promise = requestTelemetryConsent(() => {
+      presenterCalls += 1;
+      return new Promise<'yes'>(() => {});
+    });
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(presentationLine());
+    child.emitClose(0);
+
+    await assert.rejects(promise, /exited before presentation completed \(0\)/);
+    assert.strictEqual(presenterCalls, 0);
+    assert.deepStrictEqual(child.stdinChunks, []);
   });
 
   it('fails closed when the presenter throws and never writes a fallback decision', async () => {
@@ -396,7 +414,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     await waitFor(() => observedSignal !== undefined);
     child.emitClose(2);
 
-    await assert.rejects(promise, /exited while awaiting presentation/);
+    await assert.rejects(promise, /exited before presentation completed/);
     assert.strictEqual(observedSignal?.aborted, true);
   });
 
@@ -414,7 +432,7 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     await waitFor(() => observedSignal !== undefined);
     child.emitClose(0);
 
-    await assert.rejects(promise, /exited while awaiting presentation \(0\)/);
+    await assert.rejects(promise, /exited before presentation completed \(0\)/);
     assert.strictEqual(observedSignal?.aborted, true);
   });
 
