@@ -1,6 +1,6 @@
 # Process Container Networking Configuration, GA
 
-The planned schema 0.8.0 ProcessContainer networking uses the shared `network.egress` and `network.ingress` policy plus
+Schema 0.8.0 ProcessContainer networking uses the shared `network.egress` and `network.ingress` policy plus
 the `runtimeConfig.networkProxy` and `processContainer.network.allowedProxyPeer` configuration.
 
 Implementation companion to the parent
@@ -238,7 +238,7 @@ See the parent doc on the last 4.
 ## 2. Schema 0.8 selection and downlevel behavior
 
 Both WFP filter writes and per-container WinHTTP proxy configuration require a
-privileged context. The planned schema 0.8 behavior selects the strongest
+privileged context. Schema 0.8 selects the strongest
 usable process-creation contract through runtime probing.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
