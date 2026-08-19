@@ -4,7 +4,7 @@ Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
 #838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
 and under review as a stacked series: Phase 5A in PR #909, Phase 5B in PR #910,
 Phase 5C in PR #929, and Phase 5D in PR #941. Phases 6-11 remain to be
-implemented.
+implemented; Phase 6 has a detailed design below.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -778,6 +778,8 @@ This phase generates development artifacts only; it does not publish or freeze
 those changes update the Rust contract, JSON Schema, and TypeScript oracle
 together.
 
+The detailed design is in the Phase 6 detailed design section below.
+
 ### Phase 7: Add shadow exact-contract dispatch
 
 Add a private exact-contract path in `config_parser` while retaining the current
@@ -1373,3 +1375,384 @@ stable, meaningful fragments where necessary.
 - No existing parser or SDK behavior has changed.
 - No schema, generated SDK type, config file, or documentation migration has
   started.
+
+## Phase 6 detailed design
+
+Phase 6 is the next phase to implement. It depends on the complete Phase 5
+stack (PRs #909, #910, #929, and #941) and should be branched from Phase 5D
+or from `main` once that stack merges.
+
+### Phase 6 objective
+
+Make the mutable `0.8.0-alpha` contract's generated artifacts derive from
+`mxc_config_contract::dev` rather than from the rolling `wxc_common::wire`
+model, and gate them, so that every later change to the development contract
+updates the Rust contract, the JSON Schema, and the TypeScript wire oracle in
+one reviewable change.
+
+Phase 6 **adds** a second generator alongside the existing one. It does not
+publish or freeze `0.8.0-alpha`, does not retire the rolling artifacts, does
+not repoint the corpus gate, and does not modify the parser or any runtime
+behavior.
+
+### Phase 6 relationship to adjacent phases
+
+Phase 6 is independent of Phase 7 and the two may proceed in parallel. It must
+land before Phase 10 and should land before Phase 8.
+
+**The entry-point command splice fixes the generated shape.** Because the CLI
+command override is resolved before the parser runs, every contract keeps
+`process` and a non-empty `process.commandLine` required. Phase 6 therefore
+generates exactly one shape per root. It must not emit a relaxed twin, an
+`allow_missing_command` variant, or an optional-command policy root. The
+practical consequence is that a policy document supplied to the CLI override
+entry point is not itself contract-valid; only the effective spliced document
+is. Record that in the codegen documentation so a future reader does not
+"fix" the schema by relaxing the requirement.
+
+This also repairs a limitation of the rolling schema that only the multi-root
+composition can express. The rolling single-root schema has no root `required`
+array at all, because one root had to cover one-shot and every state-aware
+phase simultaneously. Of the 230 documents in the `tests/configs` plus
+`tests/examples` corpus, 21 carry no `process` block, and all 21 are
+state-aware. Splitting the schema by root restores `required: ["process"]`
+exactly where the contract requires it and omits it exactly where the contract
+does not.
+
+**The adapter marker rule gets a second enforcement surface.** Phase 3's rule
+that an adapter must bind marker fields by qualified type pattern rather than
+`_` protects the adapters. The schema implementations in Phase 6.2 must be
+emitted by the `string_enum!` and `string_marker!` macros themselves, so that
+widening one of those types changes the deserializer and the generated const
+together. Adapters then fail to compile and the artifact drift gate fails,
+rather than either failing alone.
+
+**Phase 10's network rework becomes reviewable.** The IsolationSession
+unrestricted-network acknowledgment is encoded structurally as the exact
+values `network.defaultPolicy: "allow"` and `network.allowLocalNetwork: true`
+on the provision root. Once Phase 6 lands, that acknowledgment appears in a
+generated schema and a generated TypeScript oracle as two constants attached
+to a backend that cannot enforce either of them. Whichever way Phase 10
+resolves the acknowledgment, it then produces a reviewable artifact diff and
+cannot land as a Rust-only change. The same applies to `ExecRequest.network`
+and `WslcProvisionRequest.network`.
+
+**Phase 11 reuses the version dispatch.** The generator's `--version`
+selection is exact and registry-driven from the outset, with published
+versions reserved. Publication adds a `published/v0_8_0_alpha` arm rather
+than reworking the command line. The enum schema emission must derive its
+value set from the macro's own value table, never from a list written into
+the generator, so that Phase 11's `STABLE_CANDIDATE_CONTAINMENTS` narrowing
+yields the narrower published schema automatically.
+
+### Phase 6 decisions required
+
+Resolve these before implementation; each changes committed paths or output.
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| 1 | Path of the contract-generated schema, given that the rolling `schemas/dev/mxc-config.schema.0.8.0-dev.json` already exists | `schemas/dev/mxc-config.schema.0.8.0-alpha.json`, keyed by the exact registry version and visibly distinct from the rolling `-dev` artifact that Phase 9 deletes |
+| 2 | Path of the versioned TypeScript oracle | `sdk/node/src/generated/v0_8_0_alpha/wire.ts`; confirm it is neither re-exported nor listed in the package `files` array, otherwise place it under `sdk/node/tests/` |
+| 3 | How eight concrete roots become one schema document | A single root with `oneOf` over the eight roots and a shared `definitions` block |
+| 4 | Whether the schema advertises the compatibility aliases `appContainer` and `macos_sandbox` | Yes; the rolling schema omits them and `docs/schema-codegen.md` records that as a known reduction |
+| 5 | Fate of the current `-- <path>` and `-- --ts <path>` argument forms | Replace them and update all call sites in the same commit; do not retain a hidden legacy form |
+
+### Phase 6 step breakdown
+
+#### Phase 6.0: Prepare the implementation branch
+
+Base the branch on Phase 5D, or on `main` once the Phase 5 stack has merged.
+Confirm `cargo test -p mxc_config_contract` is green before adding anything,
+so a later failure is unambiguously attributable to this phase.
+
+No source files are changed in this step.
+
+#### Phase 6.1: Add optional Schemars support to the contract crate
+
+Hoist `schemars` into `src/Cargo.toml` `[workspace.dependencies]`. It is
+currently declared inline in `wxc_common`, against the repository convention,
+and a second consumer makes the inline declaration a drift risk.
+
+Add to the contract crate:
+
+```toml
+[features]
+schema-gen = ["dep:schemars"]
+
+[dependencies]
+schemars = { workspace = true, optional = true }
+```
+
+Annotate every derive-`Deserialize` type under `dev/` with
+
+```rust
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+```
+
+covering `stable.rs`, `network.rs`, `experimental.rs`, `one_shot.rs`, and
+`state_aware/`. Leave `published/` untouched; published schema generation is
+Phase 11 work.
+
+Resolve one behavioral unknown before proceeding: confirm that Schemars treats
+a `#[serde(default)]` field of type `OptionalField<T>` as **not required** and
+does not wrap it in a nullable form. If it does not, add an explicit
+`schemars(default)` attribute or a required-field override. Everything else in
+this phase depends on that answer, so settle it first.
+
+Done when the crate builds cleanly with and without the feature, and the
+default build carries no Schemars dependency.
+
+Suggested commit boundary: `Add optional schema generation to the config
+contract crate`.
+
+#### Phase 6.2: Implement contract primitive schemas
+
+Derived output is insufficient for five families of contract type. Each needs
+a feature-gated hand-written implementation.
+
+| Type | Emitted schema | Why the derive is insufficient |
+| --- | --- | --- |
+| `dev::primitives::True` | `{"type": "boolean", "enum": [true]}` | The hand-written `Deserialize` accepts only `true`; a derive would emit a plain boolean. This restores `const: true` for `network.proxy.builtinTestServer`, which the rolling schema widened |
+| `dev::primitives::NonEmptyString` | `{"type": "string", "minLength": 1}` | A newtype with a validating `Deserialize` |
+| `dev::primitives::OptionalField<T>` | transparent forward to `T`, not referenceable | Must not emit the `anyOf: [T, null]` wrapper the rolling schema uses; this contract rejects explicit `null` |
+| `string_enum!` enums | `{"type": "string", "enum": [...]}` with per-variant descriptions | The macro generates a string-only deserializer with aliases; a derive would emit Rust variant names and drop every alias |
+| `string_marker!` markers | a single-value string `enum` | Zero-sized types with no derive-visible shape; these are what make each state-aware root self-discriminating |
+
+Emit the last two from inside the macros under `#[cfg(feature =
+"schema-gen")]`. A variant or marker value must not be addable without
+appearing in the generated artifact.
+
+Suggested commit boundary: `Add contract primitive schema implementations`.
+
+#### Phase 6.3: Compose the multi-root development schema
+
+Add a feature-gated `dev::schema` module exposing one entry point that returns
+an unrendered `serde_json::Value`.
+
+Composition:
+
+1. Create one Schemars generator for the whole run.
+2. Request a subschema for each of the eight roots — `OneShotRequest`,
+   `WindowsSandboxProvisionRequest`, `IsolationSessionProvisionRequest`,
+   `WslcProvisionRequest`, `StartRequest`, `ExecRequest`, `StopRequest`, and
+   `DeprovisionRequest` — so each yields a reference into one shared,
+   deduplicated `definitions` block.
+3. Take the definitions, then assemble the root by hand: a `oneOf` over the
+   eight references, plus `title`, `description`, and a `$comment` naming the
+   discriminators.
+
+`oneOf` rather than `anyOf` is exactly right, and the contract earns it. Every
+root pins `version` to a constant, each state-aware root pins `phase` to a
+distinct constant, each provision root pins `containment` to a distinct
+constant, and every root is closed. At most one branch can ever match.
+
+Known hazard: Schemars derives definition names from Rust type names and
+silently overwrites a collision. Phase 6.7 adds an explicit collision test.
+
+Suggested commit boundary: `Generate the 0.8.0-alpha development contract
+schema`.
+
+#### Phase 6.4: Share rendering and the TypeScript emitter
+
+Integer-format normalization, root key ordering, and `$id` injection are
+private to `wxc_common::wire`, and the TypeScript emitter is
+`wxc_common::ts_emit`. The contract crate must not depend on `wxc_common`, so
+this shared machinery has to move.
+
+Let the generator own rendering. The contract crate exposes only an unrendered
+value; `mxc_schema_gen` gains a dependency on the contract crate alongside its
+existing `wxc_common` dependency and performs normalization, `$id` injection,
+root ordering, and TypeScript emission for both models. Two acceptable
+placements:
+
+- move the shared code into `mxc_schema_gen` and reduce the `wxc_common`
+  `schema-gen` surface to an unrendered value, which removes
+  `generate_config_schema_json` and `generate_sdk_types_ts` from that crate's
+  public API; or
+- add a dependency-light emitter crate depending only on `serde_json`,
+  consumed by both, which keeps the `wxc_common` public API intact.
+
+Take `$id` from the registry rather than the hardcoded constant currently in
+`wire.rs`.
+
+The binding constraint either way: the legacy artifacts must remain
+byte-for-byte identical, so `check-schema-codegen.js` and
+`check-sdk-types-codegen.js` pass with no regeneration. Move the code
+unchanged and resist tidying it; those two gates are the regression test for
+this step, so run them immediately before and after.
+
+Suggested commit boundary: `Share schema rendering between the wire model and
+the contract crate`.
+
+#### Phase 6.5: Rework the generator command line
+
+Replace the positional and `--ts` argument handling with subcommands. `clap`
+is already a workspace dependency.
+
+```text
+mxc_schema_gen schema   --version <exact> [--out <path>]
+mxc_schema_gen types    --version <exact> [--out <path>]
+mxc_schema_gen schema   --legacy-wire     [--out <path>]
+mxc_schema_gen types    --legacy-wire     [--out <path>]
+mxc_schema_gen versions [--json]
+```
+
+Requirements:
+
+- `--version` accepts only exact registered spellings. A published version
+  returns a specific "published contract generation is not implemented until
+  Phase 11" error rather than panicking or silently falling back.
+- `--legacy-wire` targets the rolling model and is removed in Phase 9.
+- Omitting `--out` writes to standard output, preserving current behavior.
+- `versions --json` emits the registry — version, status, and default artifact
+  paths — so the CI gate never hardcodes a version list. This is the seed of
+  the generated registry metadata Phase 11 needs.
+- Preserve the existing convention that status goes to standard output and
+  errors to standard error; the gates depend on it.
+
+Suggested commit boundary: `Add versioned subcommands to the schema generator`.
+
+#### Phase 6.6: Commit the generated development artifacts
+
+Commit the schema and the TypeScript oracle at the paths chosen in decisions 1
+and 2, each carrying a banner that names the exact regeneration command and
+states that the TypeScript file is a drift oracle rather than public API.
+
+Expect the TypeScript emitter to need extension. It currently handles enums,
+closed and open objects, references, the `anyOf [T, null]` nullable wrapper,
+arrays, and scalars. The new schema adds a root-level `oneOf` over object
+references, which should emit as a discriminated union type alias, and
+single-value string constants. Extend the emitter for exactly those two
+constructs and keep its output deterministic.
+
+Suggested commit boundary: `Add generated 0.8.0-alpha contract artifacts`.
+
+#### Phase 6.7: Add the drift gate and schema tests
+
+Add `scripts/versioning/check-contract-codegen.js`, mirroring the two existing
+codegen gates:
+
+1. Read the artifact list from `mxc_schema_gen versions --json`; do not
+   hardcode versions in the gate.
+2. For each development contract, regenerate the schema and the TypeScript
+   oracle into a temporary directory, compare modulo line endings, and print
+   the exact regeneration command on failure.
+3. Using the `ajv` dependency already present in `scripts/versioning`, assert
+   that every `tests/v0_8_0_alpha/fixtures/valid/*.json` fixture validates
+   against the generated schema and every `fixtures/invalid/*.json` fixture
+   fails. These fixtures already exist, and this is the strongest available
+   accept-side and reject-side evidence that the schema matches the contract.
+
+Add the gate to the `Versioning Checks` workflow beside the existing codegen
+steps.
+
+Two deliberate non-changes: `validate-configs.js` stays pointed at the rolling
+dev schema, because the corpus is still declared at `0.6.0-alpha` and carries
+experimental fields until Phase 8; and `schemas/schema-version.json` with
+`check-schema-versions.js` remain untouched, because `devSchemaFile` still
+names the rolling artifact and Phase 11 replaces that mechanism outright.
+
+Suggested commit boundary: `Gate the generated contract artifacts against
+drift`.
+
+#### Phase 6.8: Defer public SDK conformance
+
+Do not add public-SDK conformance tests against the versioned oracle. The SDK
+still emits rolling and `0.6.0-alpha` shapes, so binding it to the exact
+contract is Phase 8 work. Phase 6 requires only that the generated file type
+checks in the SDK build and that the drift gate covers it. Record the
+deferral in the codegen documentation.
+
+#### Phase 6.9: Update documentation
+
+- `docs/schema-codegen.md` — add a versioned contract codegen section covering
+  the two coexisting generators and when the rolling one retires, the
+  multi-root composition, the primitive schema table, the deliberate
+  differences from the rolling schema, and the entry-point splice consequence
+  that a CLI-override policy document is not itself contract-valid.
+- `docs/versioning.md` and `docs/authoring-a-new-feature.md` — update the
+  regeneration commands and add the contract crate to the authoring checklist.
+- `.github/copilot-instructions.md` — update the schema system section and the
+  experimental feature checklist, as the repository's pull request template
+  requires whenever codegen commands change.
+- This plan — record the Phase 6 status and the resolutions of decisions 1
+  through 5.
+
+#### Phase 6.10: Run the phase quality gate
+
+```text
+cargo fmt --all -- --check
+cargo clippy -p mxc_config_contract --all-targets --features schema-gen -- -D warnings
+cargo clippy -p mxc_schema_gen --all-targets -- -D warnings
+cargo test -p mxc_config_contract --features schema-gen
+node scripts/versioning/check-schema-codegen.js
+node scripts/versioning/check-sdk-types-codegen.js
+node scripts/versioning/check-contract-codegen.js
+node scripts/versioning/check-schema-versions.js
+node scripts/versioning/validate-configs.js
+cd sdk/node && npm run build && npm test
+```
+
+Also confirm that `cargo tree -p mxc_config_contract --features schema-gen`
+contains no MXC runtime, engine, or backend crate.
+
+### Deliberate differences from the rolling schema
+
+Record each of these in `docs/schema-codegen.md`. They are improvements, not
+drift, and a reviewer comparing the two artifacts will otherwise read them as
+regressions.
+
+| Difference | Reason |
+| --- | --- |
+| Eight roots under `oneOf` instead of one permissive root | The contract has eight concrete roots; a single root cannot express per-phase required fields |
+| `required: ["process"]` on the one-shot and exec roots | The rolling schema has no root `required` array at all; the splice design fixes `process` as required |
+| No `anyOf: [T, null]` wrappers | The contract rejects explicit `null`; the rolling wrapper misdescribes it |
+| `const: true` on `network.proxy.builtinTestServer` | Restores a constraint the rolling schema widened to `boolean` |
+| Compatibility aliases documented | The rolling schema omits `appContainer` and `macos_sandbox` |
+| The experimental subtree is closed | The rolling schema leaves it open by design; the exact contract closes it recursively |
+
+### Phase 6 tests
+
+Feature-gated Rust tests in the contract crate should cover:
+
+1. All eight roots appear in the root `oneOf`.
+2. No duplicate definition names, since a collision is silently overwritten.
+3. Every root pins `version` to the `0.8.0-alpha` constant.
+4. The one-shot root has no `phase` property; each state-aware root pins
+   `phase` to a single-value constant; each provision root pins `containment`
+   to a single-value constant.
+5. `NonEmptyString` emits `minLength: 1` and `True` emits a `true` constant.
+6. The one-shot and exec roots require `process`, and `process.commandLine`
+   carries `minLength: 1`, so no future relaxation reaches the artifact
+   unnoticed.
+7. `OptionalField` fields are absent from `required` and carry no null branch.
+8. Every `string_enum!` value set contains its canonical spelling and every
+   alias.
+9. Recursive closure: every object definition reachable from any root,
+   including every experimental object, sets `additionalProperties: false`.
+   Assert this by walking the document, not by spot-checking; recursive
+   closure is the contract's headline property.
+10. Generation is deterministic across two runs.
+
+### Phase 6 exit criteria
+
+- The contract crate builds with and without `schema-gen`, the default build
+  carries no Schemars dependency, and the crate's dependency boundary is
+  unchanged.
+- The generator produces deterministic `0.8.0-alpha` artifacts from the
+  contract crate, and reproduces the rolling artifacts byte-for-byte.
+- Both committed `0.8.0-alpha` artifacts are gated and cannot drift.
+- Every existing valid `0.8.0-alpha` fixture validates against the generated
+  schema and every invalid fixture fails.
+- The parser, the corpus gate, `schemas/schema-version.json`, the published
+  contracts, and all runtime behavior are unchanged.
+
+### Phase 6 risks
+
+| Risk | Mitigation |
+| --- | --- |
+| Schemars marks `OptionalField<T>` fields required, or wraps them nullable | Settle it first in Phase 6.1; fall back to an explicit default attribute or a required-field override |
+| Moving the shared rendering perturbs the legacy artifacts | Move the code unchanged and run both existing codegen gates before and after Phase 6.4 |
+| Definition name collisions across `dev` submodules silently overwrite | Explicit collision test; rename through a Schemars attribute where needed |
+| The TypeScript emitter cannot express the root `oneOf` | Emit a discriminated union type alias; the drift gate and the SDK build cover it |
+| The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the Phase 6.5 commit |
