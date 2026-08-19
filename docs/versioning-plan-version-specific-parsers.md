@@ -2,7 +2,7 @@
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
 #838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
-and under review as a stacked series: Phase 5A in PR #909, Phase 5B in PR #910,
+and under review as GitHub stack #948: Phase 5A in PR #909, Phase 5B in PR #910,
 Phase 5C in PR #929, and Phase 5D in PR #941. Phases 6-11 remain to be
 implemented; Phase 6 has a detailed design below.
 
