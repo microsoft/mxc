@@ -572,15 +572,20 @@ fn resources_from_events_for_process_lifetimes(
         Some(lifetimes) => Accumulator::analyze_for_process_lifetimes(lifetimes),
         None => Accumulator::analyze(),
     };
-    for event in events {
-        if !accumulator.begin_event() {
-            break;
-        }
-        handle_decoded_event(&event.parts, event.pid, event.filetime, &mut accumulator);
-    }
+    accumulate_collected_events(events, &mut accumulator);
     accumulator
         .into_analysis()
         .expect("pure denial accumulation cannot decode-fail")
+}
+
+#[cfg(test)]
+fn accumulate_collected_events(events: &[CollectedEvent], accumulator: &mut Accumulator<'_>) {
+    for event in events {
+        handle_decoded_event(&event.parts, event.pid, event.filetime, accumulator);
+        if accumulator.stop_requested {
+            break;
+        }
+    }
 }
 
 /// Streams every decoded event in the ETL to `visitor` for schema discovery
@@ -1542,23 +1547,45 @@ mod tests {
 
     #[test]
     fn out_of_scope_events_are_excluded_before_consuming_the_budget() {
-        // Lifetime scoping gates the shared processing budget: an event whose
-        // PID/time falls outside the attested sandbox lifetimes is not in
-        // scope, so `process_event_record` skips it before ever calling
-        // `begin_event`. This asserts the scope predicate that drives that
-        // early return; legacy (no-lifetime) analysis treats everything as in
-        // scope.
-        let scoped = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
+        let lifetimes = [ProcessLifetime {
             pid: 7,
             start_filetime: 100,
             end_filetime: 200,
-        }]);
-        assert!(scoped.event_in_scope(7, 150));
-        assert!(!scoped.event_in_scope(7, 250), "outside the time range");
-        assert!(!scoped.event_in_scope(9, 150), "unrelated PID");
+        }];
+        let events = [
+            kernel_event(
+                14,
+                9,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\unrelated.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                14,
+                7,
+                150,
+                &[
+                    ("ObjectType", "\"File\""),
+                    ("ObjectName", "\"C:\\owned.txt\""),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+        ];
+        let mut accumulator = Accumulator {
+            processed_event_count: MAX_PROCESSED_EVENTS - 1,
+            ..Accumulator::analyze_for_process_lifetimes(&lifetimes)
+        };
 
-        let legacy = Accumulator::analyze();
-        assert!(legacy.event_in_scope(9, 150), "no lifetime filter");
+        accumulate_collected_events(&events, &mut accumulator);
+
+        assert_eq!(accumulator.processed_event_count, MAX_PROCESSED_EVENTS);
+        assert!(!accumulator.processing_limit_reached);
+        assert!(!accumulator.stop_requested);
+        assert_eq!(accumulator.denials.len(), 1);
+        assert_eq!(accumulator.denials[0].resource, r"C:\owned.txt");
     }
 
     #[test]
