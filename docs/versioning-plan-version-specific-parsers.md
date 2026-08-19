@@ -1451,11 +1451,12 @@ Resolve these before implementation; each changes committed paths or output.
 
 | # | Decision | Recommendation |
 | --- | --- | --- |
-| 1 | Path of the contract-generated schema, given that the rolling `schemas/dev/mxc-config.schema.0.8.0-dev.json` already exists | `schemas/dev/mxc-config.schema.0.8.0-alpha.json`, keyed by the exact registry version and visibly distinct from the rolling `-dev` artifact that Phase 9 deletes |
+| 1 | Path of the contract-generated schema, given that the rolling `schemas/dev/mxc-config.schema.0.8.0-dev.json` already exists | `schemas/dev/mxc-config.schema.0.8.0-alpha.json`, keyed by the exact registry version and visibly distinct from the rolling `-dev` artifact that Phase 9 deletes. Both gates tolerate the second file — `check-schema-versions.js` only tests existence of the `devSchemaFile` path and `validate-configs.js` resolves that same path; neither enumerates `schemas/dev/`. Nothing stops an author pointing `$schema` at the new file and being validated against a contract the parser does not enforce until Phase 9, so say so in the artifact banner |
 | 2 | Path of the versioned TypeScript oracle | `sdk/node/src/generated/v0_8_0_alpha/wire.ts`; confirm it is neither re-exported nor listed in the package `files` array, otherwise place it under `sdk/node/tests/` |
 | 3 | How eight concrete roots become one schema document | A single root with `oneOf` over the eight roots and a shared `definitions` block |
 | 4 | Whether the schema advertises the compatibility aliases `appContainer` and `macos_sandbox` | Yes; the rolling schema omits them and `docs/schema-codegen.md` records that as a known reduction |
 | 5 | Fate of the current `-- <path>` and `-- --ts <path>` argument forms | Replace them and update all call sites in the same commit; do not retain a hidden legacy form |
+| 6 | Whether to accept the authoring-diagnostics cost of a bare `oneOf`, or discriminate with `if`/`then` | Decide deliberately; do not leave it implicit. `oneOf` is correct — every branch pins `version`, each state-aware root pins a distinct `phase`, each provision root pins a distinct `containment`, and every root is closed, so at most one branch can match. But the schema also serves editor validation through `$schema`, and a failing document under an eight-branch `oneOf` produces errors from all eight branches where the rolling single root produced one. Either discriminate on `phase` (and `containment`) with `if`/`then` so only the matching branch is evaluated, at the cost of a more verbose document, or keep `oneOf` and record the regression in `docs/schema-codegen.md` beside the other deliberate differences |
 
 ### Phase 6 step breakdown
 
@@ -1493,11 +1494,22 @@ covering `stable.rs`, `network.rs`, `experimental.rs`, `one_shot.rs`, and
 `state_aware/`. Leave `published/` untouched; published schema generation is
 Phase 11 work.
 
-Resolve one behavioral unknown before proceeding: confirm that Schemars treats
-a `#[serde(default)]` field of type `OptionalField<T>` as **not required** and
-does not wrap it in a nullable form. If it does not, add an explicit
-`schemars(default)` attribute or a required-field override. Everything else in
-this phase depends on that answer, so settle it first.
+The behavioral unknown here has been settled empirically against Schemars 0.8,
+by replicating `OptionalField<T>` in a scratch crate: a `#[serde(default)]`
+field of a transparent custom wrapper is **omitted from `required`** and
+**carries no null branch**. No `schemars(default)` attribute and no
+required-field override are needed. The emitted document is draft-07 with a
+`definitions` block, matching decision 3 and ajv 8's default dialect.
+
+Two conditions make that result hold; treat them as requirements rather than
+rediscovering them:
+
+- `OptionalField<T>` must keep its `impl Default`. The Schemars derive
+  evaluates the field default and fails to compile without it, with
+  `no associated function or constant named 'default' found`.
+- The hand-written `JsonSchema` impl must set `is_referenceable() -> false`.
+  Otherwise the wrapper becomes its own named definition and the avoidance of
+  the `anyOf: [T, null]` wrapper is lost.
 
 Done when the crate builds cleanly with and without the feature, and the
 default build carries no Schemars dependency.
@@ -1546,8 +1558,19 @@ root pins `version` to a constant, each state-aware root pins `phase` to a
 distinct constant, each provision root pins `containment` to a distinct
 constant, and every root is closed. At most one branch can ever match.
 
-Known hazard: Schemars derives definition names from Rust type names and
-silently overwrites a collision. Phase 6.7 adds an explicit collision test.
+Known hazard, and it is already live rather than hypothetical: Schemars derives
+definition names from the bare Rust type name and silently overwrites a
+collision. The current `dev` contract has 57 public types with two colliding
+names:
+
+| Name | Locations | Impact |
+| --- | --- | --- |
+| `Containment` | `one_shot.rs` and `state_aware/provision/containment.rs` | Damaging — two different enums with different value sets |
+| `Request` | `one_shot.rs` and the selector enum in `request.rs` | Harmless today; the selector never derives `JsonSchema` |
+
+Rename through `#[schemars(rename = "...")]` in this step, before the
+composition is written. Phase 6.7's collision test then guards a known-good
+state instead of discovering the defect afterwards.
 
 Suggested commit boundary: `Generate the 0.8.0-alpha development contract
 schema`.
@@ -1572,6 +1595,11 @@ placements:
 - add a dependency-light emitter crate depending only on `serde_json`,
   consumed by both, which keeps the `wxc_common` public API intact.
 
+Prefer the second. The first deletes two public functions from `wxc_common` in
+the same commit that must keep two generated artifacts byte-for-byte identical,
+which is a wider blast radius than this step needs. Narrowing the `wxc_common`
+`schema-gen` surface is a reasonable follow-up once the artifacts are gated.
+
 Take `$id` from the registry rather than the hardcoded constant currently in
 `wire.rs`.
 
@@ -1586,8 +1614,10 @@ the contract crate`.
 
 #### Phase 6.5: Rework the generator command line
 
-Replace the positional and `--ts` argument handling with subcommands. `clap`
-is already a workspace dependency.
+Replace the positional and `--ts` argument handling with subcommands. `clap` is
+already declared in `[workspace.dependencies]`, but `mxc_schema_gen`'s own
+manifest currently lists exactly one dependency (`wxc_common`), so this step
+adds both `clap` and the contract crate to that manifest.
 
 ```text
 mxc_schema_gen schema   --version <exact> [--out <path>]
@@ -1638,10 +1668,39 @@ codegen gates:
    oracle into a temporary directory, compare modulo line endings, and print
    the exact regeneration command on failure.
 3. Using the `ajv` dependency already present in `scripts/versioning`, assert
-   that every `tests/v0_8_0_alpha/fixtures/valid/*.json` fixture validates
-   against the generated schema and every `fixtures/invalid/*.json` fixture
-   fails. These fixtures already exist, and this is the strongest available
-   accept-side and reject-side evidence that the schema matches the contract.
+   accept-side and reject-side behavior against the **reorganized per-root**
+   fixture corpus described below.
+
+**The existing fixtures cannot be used as they stand.** Everything under
+`tests/v0_8_0_alpha/fixtures/` is one-shot-scoped: `fixtures.rs` feeds all of
+it to `OneShotRequest`, so "invalid" means *invalid as a one-shot request*, not
+invalid against the contract. Applied to the composed eight-root schema, the
+naive assertion fails immediately. `fixtures/invalid/state_aware.json` is
+
+```json
+{ "version": "0.8.0-alpha", "phase": "exec",
+  "sandboxId": "example:12345678",
+  "process": { "commandLine": "echo state-aware" } }
+```
+
+which is a well-formed exec request and validates cleanly against the exec
+branch. The risk is not the red build; it is the obvious "fix" of weakening the
+schema until the fixture fails again.
+
+The accept side is equally misleading. All twelve valid fixtures are one-shot,
+so fixture validation covers **one of the eight roots**; the seven state-aware
+roots have no fixture coverage at all, because their contract tests are inline
+JSON in `state_aware/*.rs`.
+
+Therefore reorganize the corpus into per-root directories
+(`fixtures/<root>/{valid,invalid}/`) and assert per root: a valid fixture for
+root R validates against R's branch, and an invalid one fails it. Cross-root
+documents then state what they actually mean — `state_aware.json` is invalid as
+one-shot and valid as exec. Promote representative inline state-aware JSON into
+fixtures so the seven remaining roots gain coverage.
+
+This reorganization is Phase 5 test debt that Phase 6 inherits. Budget it as
+part of this step rather than discovering it while writing the gate.
 
 Add the gate to the `Versioning Checks` workflow beside the existing codegen
 steps.
@@ -1731,8 +1790,19 @@ Feature-gated Rust tests in the contract crate should cover:
 9. Recursive closure: every object definition reachable from any root,
    including every experimental object, sets `additionalProperties: false`.
    Assert this by walking the document, not by spot-checking; recursive
-   closure is the contract's headline property.
-10. Generation is deterministic across two runs.
+   closure is the contract's headline property. The walker must follow `$ref`
+   into `definitions` rather than stopping at the eight roots, or the
+   experimental subtree — the property this is meant to prove — goes
+   unchecked.
+10. Generation is deterministic across two runs. This holds by construction
+    because Schemars 0.8 uses `BTreeMap` unless the `preserve_order` feature
+    is enabled; record that reason so nobody enables the feature later without
+    realizing it breaks the drift gate.
+11. Definition names are unique, guarding the `Containment` and `Request`
+    collisions renamed in Phase 6.3.
+12. Authoring diagnostics are comprehensible: assert the validator output for
+    one representative malformed document, so the cost recorded in decision 6
+    is measured rather than assumed.
 
 ### Phase 6 exit criteria
 
@@ -1751,8 +1821,10 @@ Feature-gated Rust tests in the contract crate should cover:
 
 | Risk | Mitigation |
 | --- | --- |
-| Schemars marks `OptionalField<T>` fields required, or wraps them nullable | Settle it first in Phase 6.1; fall back to an explicit default attribute or a required-field override |
+| ~~Schemars marks `OptionalField<T>` fields required, or wraps them nullable~~ | Settled empirically against Schemars 0.8: fields are omitted from `required` and carry no null branch, provided `OptionalField` keeps its `Default` impl and its `JsonSchema` impl sets `is_referenceable() -> false`. See Phase 6.1 |
 | Moving the shared rendering perturbs the legacy artifacts | Move the code unchanged and run both existing codegen gates before and after Phase 6.4 |
-| Definition name collisions across `dev` submodules silently overwrite | Explicit collision test; rename through a Schemars attribute where needed |
+| Definition name collisions across `dev` submodules silently overwrite | Two collisions already exist (`Containment`, `Request`); rename them in Phase 6.3 and guard with the Phase 6.7 uniqueness test |
+| The one-shot-scoped fixture corpus makes the schema gate assert the wrong thing | Reorganize fixtures per root in Phase 6.7 before wiring the gate; see the worked `state_aware.json` case |
+| Eight-branch `oneOf` degrades editor diagnostics | Resolve decision 6 explicitly, and measure it with the Phase 6 authoring-diagnostics test |
 | The TypeScript emitter cannot express the root `oneOf` | Emit a discriminated union type alias; the drift gate and the SDK build cover it |
 | The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the Phase 6.5 commit |
