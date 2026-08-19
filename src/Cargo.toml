@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "backends/apple_container/common",
     "backends/appcontainer/common",
     "backends/bubblewrap/common",
     "backends/hyperlight/common",
@@ -63,6 +64,7 @@ license = "MIT"
 
 [workspace.dependencies]
 anyhow = "1"
+apple_container_common = { path = "backends/apple_container/common" }
 appcontainer_common = { path = "backends/appcontainer/common" }
 base64 = "0.22"
 bwrap_common = { path = "backends/bubblewrap/common" }
