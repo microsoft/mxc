@@ -982,6 +982,13 @@ one-shot adapter into `v0_8`, and the `dev` adapter continues to evolve against
 `0.9`. Phase 5B's split of the adapter tests into `stable_candidate.rs` (copied
 at publication) and `experimental.rs` (retained by dev) exists for this fork.
 
+The same fork applies to the `mxc_engine::policy` contract builder introduced by
+the Phase 7 decision 3 resolution. Each supported version has its own builder
+mapping `SandboxPolicy` onto that version's root, so publication freezes a
+`v0_8` builder beside the frozen `v0_8` adapter while `dev`'s builder advances.
+Publication is therefore a three-way fork — contract module, adapter, builder —
+and all three must be copied together.
+
 Keep the stable-candidate set machine-readable inside the contract crate rather
 than in a comment or an external metadata file. Declare it beside the enum, for
 example:
@@ -2105,8 +2112,8 @@ no `wslc` field, so a WSLC section under a `0.6.0-alpha` policy cannot be
 written at all. The declared version stops being an assertion about the
 document and becomes the thing that selects the type.
 
-**Recurring cost.** One builder per supported version — three today, plus one
-at each publication, frozen alongside the frozen adapter that Phase 11 already
+**Recurring cost, accepted.** One builder per supported version — three today,
+plus one at each publication, frozen alongside the frozen adapter that Phase 11
 forks. Phase 10 makes this unavoidable in any design: `0.8.0-alpha` gains
 `network.egress` and `network.ingress` while `0.6` and `0.7` keep the legacy
 shape, so construction must branch on version regardless. The only question is
