@@ -2440,12 +2440,7 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
-        NetworkPolicySupport {
-            egress_rules: true,
-            host_loopback: true,
-            runtime_proxy: true,
-            proxy_peer: true,
-        }
+        NetworkPolicySupport::ALL
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {

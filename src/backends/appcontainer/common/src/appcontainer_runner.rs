@@ -1541,11 +1541,9 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
-        NetworkPolicySupport {
-            host_loopback: true,
-            runtime_proxy: true,
-            ..NetworkPolicySupport::NONE
-        }
+        NetworkPolicySupport::NONE
+            .with_host_loopback()
+            .with_runtime_proxy()
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
