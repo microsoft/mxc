@@ -56,20 +56,19 @@ pub struct Fallback {
     pub allow_dacl_mutation: OptionalField<bool>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Clipboard access granted to the contained process.
-#[derive(Debug)]
-pub enum UiClipboard {
-    /// Deny clipboard reads and writes.
-    None => ["none"],
-    /// Allow clipboard reads.
-    Read => ["read"],
-    /// Allow clipboard writes.
-    Write => ["write"],
-    /// Allow clipboard reads and writes.
-    All => ["all"],
-}
+    /// Clipboard access granted to the contained process.
+    #[derive(Debug)]
+    pub enum UiClipboard {
+        /// Deny clipboard reads and writes.
+        None => ["none"],
+        /// Allow clipboard reads.
+        Read => ["read"],
+        /// Allow clipboard writes.
+        Write => ["write"],
+        /// Allow clipboard reads and writes.
+        All => ["all"],
+    }
 }
 
 /// Cross-platform user-interface policy.
@@ -87,20 +86,19 @@ pub struct Ui {
     pub injection: OptionalField<bool>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Isolation level for ProcessContainer desktop resources.
-#[derive(Debug)]
-pub enum ProcessContainerUiIsolation {
-    /// Isolate the complete container user-interface environment.
-    Container => ["container"],
-    /// Isolate desktop resources.
-    Desktop => ["desktop"],
-    /// Isolate user-interface handles.
-    Handles => ["handles"],
-    /// Isolate user-interface atoms.
-    Atoms => ["atoms"],
-}
+    /// Isolation level for ProcessContainer desktop resources.
+    #[derive(Debug)]
+    pub enum ProcessContainerUiIsolation {
+        /// Isolate the complete container user-interface environment.
+        Container => ["container"],
+        /// Isolate desktop resources.
+        Desktop => ["desktop"],
+        /// Isolate user-interface handles.
+        Handles => ["handles"],
+        /// Isolate user-interface atoms.
+        Atoms => ["atoms"],
+    }
 }
 
 /// ProcessContainer-specific user-interface policy.
@@ -121,16 +119,15 @@ pub struct ProcessContainerUi {
     pub ime: OptionalField<bool>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Mode for capture denials
-#[derive(Debug)]
-pub enum CaptureDenialsMode {
-    /// Access stays **denied** and the denial is recorded. Deny-by-default containment is preserved; this is the safe default.
-    Block => ["block"],
-    /// Access is **allowed** and recorded (audit mode). This relaxes deny-by-default for the run, so it is a security-sensitive choice and the runner emits a security warning.
-    Allow => ["allow"],
-}
+    /// Mode for capture denials
+    #[derive(Debug)]
+    pub enum CaptureDenialsMode {
+        /// Access stays **denied** and the denial is recorded. Deny-by-default containment is preserved; this is the safe default.
+        Block => ["block"],
+        /// Access is **allowed** and recorded (audit mode). This relaxes deny-by-default for the run, so it is a security-sensitive choice and the runner emits a security warning.
+        Allow => ["allow"],
+    }
 }
 
 /// Windows denial-capture settings.
@@ -181,16 +178,15 @@ pub struct Lxc {
     pub release: String,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Launch method for macOS Seatbelt config.
-#[derive(Debug)]
-pub enum LaunchMethod {
-    /// Launch the contained process directly through `exec`.
-    Exec => ["exec"],
-    /// Launch the contained application through macOS LaunchServices.
-    Open => ["open"],
-}
+    /// Launch method for macOS Seatbelt config.
+    #[derive(Debug)]
+    pub enum LaunchMethod {
+        /// Launch the contained process directly through `exec`.
+        Exec => ["exec"],
+        /// Launch the contained application through macOS LaunchServices.
+        Open => ["open"],
+    }
 }
 
 /// macOS Seatbelt backend settings.

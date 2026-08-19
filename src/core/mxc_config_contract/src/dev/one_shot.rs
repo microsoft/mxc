@@ -9,37 +9,36 @@ use super::stable::{
 };
 use crate::dev::Version;
 
-#[rustfmt::skip]
 string_enum! {
-/// Containment selections available in `0.8.0-alpha`.
-#[derive(Debug)]
-pub enum Containment {
-    // Stable-candidate values.
-    /// Select the host's native process-containment backend.
-    Process => ["process"],
-    /// Select the Windows ProcessContainer backend.
-    ProcessContainer => ["processcontainer", "appcontainer"],
-    /// Select the Linux LXC backend.
-    Lxc => ["lxc"],
-    /// Select the Linux Bubblewrap backend.
-    Bubblewrap => ["bubblewrap"],
-    /// Select the macOS Seatbelt backend.
-    Seatbelt => ["seatbelt", "macos_sandbox"],
+    /// Containment selections available in `0.8.0-alpha`.
+    #[derive(Debug)]
+    pub enum Containment {
+        // Stable-candidate values.
+        /// Select the host's native process-containment backend.
+        Process => ["process"],
+        /// Select the Windows ProcessContainer backend.
+        ProcessContainer => ["processcontainer", "appcontainer"],
+        /// Select the Linux LXC backend.
+        Lxc => ["lxc"],
+        /// Select the Linux Bubblewrap backend.
+        Bubblewrap => ["bubblewrap"],
+        /// Select the macOS Seatbelt backend.
+        Seatbelt => ["seatbelt", "macos_sandbox"],
 
-    // Development-only values.
-    /// Select the host's VM-class containment backend.
-    Vm => ["vm"],
-    /// Select the Windows Sandbox backend.
-    WindowsSandbox => ["windows_sandbox"],
-    /// Select the NanVix micro-VM backend.
-    Microvm => ["microvm"],
-    /// Select the Hyperlight micro-VM backend.
-    Hyperlight => ["hyperlight"],
-    /// Select the WSL container backend.
-    Wslc => ["wslc"],
-    /// Select the Windows IsolationSession backend.
-    IsolationSession => ["isolation_session"],
-}
+        // Development-only values.
+        /// Select the host's VM-class containment backend.
+        Vm => ["vm"],
+        /// Select the Windows Sandbox backend.
+        WindowsSandbox => ["windows_sandbox"],
+        /// Select the NanVix micro-VM backend.
+        Microvm => ["microvm"],
+        /// Select the Hyperlight micro-VM backend.
+        Hyperlight => ["hyperlight"],
+        /// Select the WSL container backend.
+        Wslc => ["wslc"],
+        /// Select the Windows IsolationSession backend.
+        IsolationSession => ["isolation_session"],
+    }
 }
 
 /// A complete one-shot `0.8.0-alpha` configuration request.

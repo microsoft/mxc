@@ -10,9 +10,7 @@
 // Serde's default fieldless-enum deserializer also accepts externally
 // tagged object forms such as {"process": null}. Published contracts accept
 // only string values. This macro generates a string-only deserializer while
-// supporting explicit compatibility aliases. Note that this macro should be
-// preceded by `#[rustfmt::skip]` because it uses a syntax pattern that is not
-// supported by rustfmt.
+// supporting explicit compatibility aliases.
 macro_rules! string_enum {
     (
         $(#[$enum_meta:meta])*
@@ -90,6 +88,43 @@ macro_rules! string_enum {
                 }
 
                 deserializer.deserialize_str(StringEnumVisitor)
+            }
+        }
+
+        #[cfg(test)]
+        #[allow(non_snake_case)]
+        #[test]
+        fn $name() {
+            $(
+                for wire_value in [
+                    $canonical,
+                    $($alias,)*
+                ] {
+                    let json = serde_json::to_string(wire_value).unwrap();
+                    let parsed: $name = serde_json::from_str(&json).unwrap();
+
+                    assert!(
+                        matches!(parsed, $name::$variant),
+                        "{wire_value:?} did not map to {}::{}",
+                        stringify!($name),
+                        stringify!($variant),
+                    );
+
+                    let externally_tagged = format!("{{{json}:null}}");
+                    assert!(
+                        serde_json::from_str::<$name>(&externally_tagged).is_err(),
+                        "{} accepted externally tagged value {externally_tagged}",
+                        stringify!($name),
+                    );
+                }
+            )+
+
+            for json in ["null", "true", "0", "[]", "{}"] {
+                assert!(
+                    serde_json::from_str::<$name>(json).is_err(),
+                    "{} accepted non-string value {json}",
+                    stringify!($name),
+                );
             }
         }
     };

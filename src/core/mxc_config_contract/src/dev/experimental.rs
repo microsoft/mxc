@@ -37,14 +37,13 @@ pub struct OneShotWindowsSandbox {
     pub daemon_pipe_name: OptionalField<String>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Transport protocol for a WSLC port mapping.
-#[derive(Debug)]
-pub enum TransportProtocol {
-    /// TCP transport.
-    Tcp => ["tcp"],
-}
+    /// Transport protocol for a WSLC port mapping.
+    #[derive(Debug)]
+    pub enum TransportProtocol {
+        /// TCP transport.
+        Tcp => ["tcp"],
+    }
 }
 
 /// A host-to-container WSLC port mapping.
