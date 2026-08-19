@@ -1,9 +1,10 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5A and
-Phase 5B are under review as GitHub stack #911 in PRs #909 and #910. Phase 5C
-is in progress; Phase 5D remains to be implemented.
+#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
+and under review as a stacked series: Phase 5A in PR #909, Phase 5B in PR #910,
+Phase 5C in PR #929, and Phase 5D in PR #941. Phases 6-11 remain to be
+implemented.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -230,13 +231,85 @@ schema requirement for `process.commandLine`. The existing CLI policy mode that
 supplies the command separately remains supported, but it is an entry-point
 concern rather than a relaxation of the published contract.
 
-Before exact dispatch is enabled, the loader must provide an entry-point-aware,
-typed path for `LoadOptions::allow_missing_command` that combines the CLI
-command with the versioned policy before normal semantic validation. A
-dedicated versioned policy root is acceptable; falling back to the rolling
-version-insensitive parser is not. Phase 7 shadow dispatch must cover this path,
-and Phase 9 cannot enable exact dispatch until its behavior matches the current
-CLI override flow.
+The CLI command override is therefore resolved **before** the parser runs, by
+splicing the CLI command into the request source and then parsing one complete,
+contract-conforming document. `LoadOptions::allow_missing_command`, the
+`command_required` relaxation in `convert_wire_config`, and the post-parse
+`apply_command_override` mutation of `ExecutionRequest::script_code` are all
+removed by this rework. No versioned policy root, no relaxed twin of an exact
+contract, and no fallback to the rolling version-insensitive parser is
+introduced: every contract keeps `process` and a non-empty
+`process.commandLine` required, which is also the shape Phase 6 generates and
+Phase 11 publishes.
+
+The rework must resolve one ordering obstacle. Converting CLI `argv` into a
+command-line string is backend-specific
+(`cmdline_from_argv_for_context(&cli.command, CommandLineContext::for_backend(..))`),
+and today the context comes from the already-parsed request: `request.containment`
+for one-shot, and `resolve_backend(&parsed)` — that is, the `sandboxId` prefix —
+for state-aware exec. Injection therefore runs as a probe-driven pre-parse step
+that reuses the exact-dispatch probes:
+
+```text
+raw JSON source
+    |
+    v
+probe version, phase, and (provision) containment      [exact dispatch probes]
+    |
+    v
+probe the command-line context                          [entry point only]
+      one-shot        -> declared/default containment
+      state-aware exec-> sandboxId prefix
+    |
+    v
+convert argv -> command line, splice into process.commandLine
+    |
+    v
+exact registry lookup and normal typed parse of the effective document
+```
+
+Required behavior:
+
+- A CLI command is spliced only when one is supplied; the ordinary path parses
+  the caller's bytes untouched.
+- The splice **overwrites** `process.commandLine` and creates the `process`
+  object when it is absent. Both cases exist today: `allow_missing_command`
+  tolerates an empty `commandLine` and a wholly missing `process` block, and
+  `apply_command_override` then replaces whatever was there. A fill-if-absent
+  splice would newly reject a config carrying `"commandLine": ""` together with
+  a CLI command.
+- The existing precedence and diagnostics are preserved: an override that
+  replaces a policy-supplied `process.commandLine` still logs the override, so
+  the injection step must observe whether the field was already present.
+- A CLI override remains valid only where it is valid today: one-shot requests
+  and state-aware `exec`. Any other phase still fails with the current
+  "CLI command override is only supported for state-aware exec requests" error.
+- An empty or unconvertible CLI command is an entry-point error, not a parse
+  error. This is a new failure site: today `has_cli_command` makes an empty
+  converted command unreachable, so the rework needs an explicit error and a
+  test rather than relying on the validator's empty-command check.
+- The containment probe's raw-string-to-backend mapping lives outside the
+  immutable contract modules, beside the adapters.
+- The probe reproduces a mapping the parser also performs — including the
+  absent-containment host default and the abstract `vm` intent — so the two can
+  drift, and a drift would quote the command for one backend while another
+  executes it. After the typed parse, assert that the context used for the
+  splice matches the resolved containment and fail loudly on a mismatch. This
+  assertion is part of the Phase 9 acceptance criteria.
+
+Known trade-off: when a command is spliced, serde's source positions and the
+state-aware `source_text` used for positional experimental diagnostics describe
+the effective document rather than the caller's original bytes. This applies
+only to the override path. This transform is an entry-point concern applied
+exactly once to one field; it is not the general JSON `Value` migration engine
+excluded by the non-goals. A `serde_json::Value` round-trip is the default
+implementation. If positional fidelity on the override path proves to matter, a
+textual splice that inserts the member into the existing `process` object keeps
+every offset before the insertion point exact and bounds the drift to the text
+after it.
+
+Phase 7 shadow dispatch must cover this path, and Phase 9 cannot enable exact
+dispatch until its behavior matches the current CLI override flow.
 
 ## Work plan
 
@@ -319,6 +392,36 @@ runtime model evolves.
 The adapter must explicitly destructure every source field and explicitly fill
 every internal field. Do not use a catch-all `..`.
 
+This rule applies to every adapter, published and development, and extends to
+wildcard *field* bindings: an adapter must not bind a contract field to `_`.
+Bind a marker field by its exact type pattern and match an enum field
+exhaustively:
+
+```rust
+let contract::IsolationSessionNetwork {
+    default_policy: contract::IsolationSessionNetworkDefaultPolicy,
+    allow_local_network: contract::True,
+} = value;
+```
+
+The reason is that a discarded field is usually paired with a hardcoded
+destination value — a phase, a containment, or the IsolationSession
+unrestricted-network acknowledgment. With `_`, widening the contract type
+(`string_marker!` unit struct becomes an enum, `True` becomes a bool) still
+compiles and the adapter silently keeps stamping the old value. The exact type
+pattern turns that into a compile error at precisely the sites whose output the
+change invalidates. The guarantee covers the contract type's *shape*, not the
+set of spellings it accepts.
+
+Write the marker pattern **qualified** (`contract::StartPhase`, not
+`StartPhase`). A qualified path in pattern position can only resolve to a unit
+struct, unit variant, or constant, so widening the type is `error[E0532]` at the
+adapter line. An unqualified identifier that no longer resolves to a unit struct
+is instead treated as a fresh binding, which downgrades the failure to
+`unused_variables` and `non_snake_case` warnings — caught by the repository's
+`cargo clippy -- -D warnings` gate, but no longer a compile error, and
+suppressible with a leading underscore.
+
 Add wire-equivalence tests proving that representative `0.6` requests adapt to
 the same `wire::MxcConfig` produced by the current deserializer.
 
@@ -356,12 +459,14 @@ version and reject unknown fields more consistently than those advisory files.
 
 Status:
 
-- **Phase 5A** — one-shot development contract, under review in PR #909
-- **Phase 5B** — one-shot development adapter, stacked on 5A in PR #910
+- **Phase 5A** — one-shot development contract, complete and under review in
+  PR #909
+- **Phase 5B** — one-shot development adapter, complete and under review in
+  PR #910, stacked on 5A
 - **Phase 5C** — phase discriminator and state-aware development contracts,
-  complete and under review in PR #929
+  complete and under review in PR #929, stacked on 5B
 - **Phase 5D** — state-aware adapter and wire-equivalence tests, complete and
-  under review in PR #941
+  under review in PR #941, stacked on 5C
 
 Separate the mutable development contract into:
 
@@ -436,7 +541,7 @@ requests.
 
 #### Phase 5A: Closed one-shot development contract
 
-Implemented in PR #909.
+Complete and under review in PR #909.
 
 The exact one-shot root:
 
@@ -471,7 +576,7 @@ runtime-incompatible combinations belong in focused inline tests.
 
 #### Phase 5B: One-shot development adapter
 
-Implemented in PR #910.
+Complete and under review in PR #910.
 
 The adapter exhaustively converts `dev::OneShotRequest` into the current
 `wire::MxcConfig`. It explicitly destructures every source field and fills
@@ -500,9 +605,11 @@ not share test fixtures or conversion helpers.
 
 #### Phase 5C: State-aware development contracts
 
-The source-text phase probe and the closed `start`, `stop`, and `deprovision`
-roots are implemented. The `exec` root and its structural tests are in
-progress. Provision contracts and typed root selection remain.
+Complete and under review in PR #929.
+
+The source-text phase probe, the closed `start`, `exec`, `stop`, and
+`deprovision` roots, the backend-specific provision roots, and typed root
+selection are implemented.
 
 The phase probe runs after the exact version probe. An absent phase selects
 `dev::one_shot::Request`; a present valid phase selects the matching
@@ -621,7 +728,7 @@ fields.
 
 #### Phase 5D: State-aware development adapter and wire equivalence
 
-Implemented in PR #941.
+Complete and under review in PR #941.
 
 The mutable state-aware adapter exhaustively maps every phase root into the
 current `wire::MxcConfig` shape:
@@ -776,6 +883,40 @@ The `0.8.0-alpha` development contract adds:
 - `processContainer.network.allowedPeers`
 - the GA runtime location for network proxy configuration
 
+State-aware `0.8.0-alpha` requests carry the legacy Network shape in three
+places, all introduced by Phase 5C/5D, and all of them change in this phase:
+
+- the IsolationSession provision **unrestricted-network acknowledgment**, today
+  encoded structurally as the exact markers `network.defaultPolicy: "allow"`
+  plus `network.allowLocalNetwork: true` on
+  `IsolationSessionProvisionRequest`. The GA equivalent must be defined
+  deliberately — an acknowledgment that no longer has `defaultPolicy` or
+  `allowLocalNetwork` to point at is not a mechanical rename — and the backend's
+  `validate_provision_network_policy` must be updated with it.
+- `ExecRequest.network`, the per-exec cooperative proxy path used by WSLC.
+- `WslcProvisionRequest.network`, the provision-time WSLC network policy.
+
+Decide explicitly, rather than mechanically porting, whether the IsolationSession
+acknowledgment should remain expressed as network *policy values* at all. It is
+an assertion about the caller's understanding, encoded as two fields MXC cannot
+enforce; that is exactly why it needs a bespoke translation whenever the network
+vocabulary changes. A dedicated field (for example `network.acknowledgeUnrestricted`
+or a backend-level acknowledgment inside the ISO provision payload) would be
+invariant across this change, would read honestly in the generated schema, and
+would decouple the acknowledgment from `network_specified`. The cost is a corpus
+and SDK migration plus documentation updates in `docs/isolation-session/`, since
+the current spelling has shipped.
+
+The state-aware development adapters (`config_contract_adapters::dev`) move with
+them, including the hardcoded acknowledgment mapping in
+`convert_isolation_session_network`.
+
+The backends' presence-based gates must keep working. `network_specified` and
+`ui_specified` exist because a default-deny policy is value-indistinguishable
+from an absent one; the GA shape needs an equivalent notion of "the caller
+supplied a network policy" or those backends lose the distinction that makes
+their `policy_validation` errors correct.
+
 The phase must be end-to-end and leave the tree green. It includes the
 development contract, adapters from the legacy `0.6`/`0.7` network shapes,
 canonical runtime models, semantic validation, backend enforcement, Rust and
@@ -808,6 +949,47 @@ mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-dev
 Publication copies only the development stable-candidate request;
 experimental and state-aware types never enter a published contract. Generate
 the lifecycle registry and version constants from the publication metadata.
+
+Publication is not a byte-for-byte copy of every stable-candidate type. The
+development one-shot `Containment` enum deliberately carries both
+stable-candidate values (`process`, `processcontainer` + its `appcontainer`
+alias, `lxc`, `bubblewrap`, `seatbelt` + its `macos_sandbox` alias) and
+development-only values (`vm`, `windows_sandbox`, `microvm`, `hyperlight`,
+`wslc`, `isolation_session`). Publishing `0.8.0-alpha` therefore emits a
+`published/v0_8_0_alpha` module whose containment enum contains only the
+stable-candidate values, and a frozen `config_contract_adapters::v0_8` adapter
+mapping that narrower enum. The mutable `dev` contract keeps the full enum and
+advances to the next development version.
+
+The published adapter is **forked**, not updated: freezing copies the current dev
+one-shot adapter into `v0_8`, and the `dev` adapter continues to evolve against
+`0.9`. Phase 5B's split of the adapter tests into `stable_candidate.rs` (copied
+at publication) and `experimental.rs` (retained by dev) exists for this fork.
+
+Keep the stable-candidate set machine-readable inside the contract crate rather
+than in a comment or an external metadata file. Declare it beside the enum, for
+example:
+
+```rust
+pub const STABLE_CANDIDATE_CONTAINMENTS: &[Containment] = &[ /* ... */ ];
+```
+
+with a test asserting every enum arm appears in exactly one of the
+stable-candidate and development-only lists. This keeps a single flat enum — and
+therefore good deserialization diagnostics — while making the narrowing
+declarative. Do not split the enum into a stable type wrapped by a
+development-only extension type: that degrades parse errors to "data did not
+match any variant" for every misspelled containment.
+
+Narrowing at publication has a recurring cost that must be planned for, not
+discovered: at every publication, each config using a development-only
+containment must be re-versioned to the new development version. A document
+declaring `0.8.0-alpha` with `containment: "windows_sandbox"` becomes a hard
+error the moment `0.8.0-alpha` is published. Phase 8's migration is therefore
+not a one-off; a smaller version of it recurs at each publication. This is also
+the strongest practical argument for the recorded design discussion on including
+selected experimental fields in published contracts, and the two should be
+decided together.
 
 Add CI checks that published Rust modules, stable generated schemas, registry
 identities, and recorded digests cannot be modified or deleted. Reuse
