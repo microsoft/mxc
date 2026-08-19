@@ -71,7 +71,7 @@ export async function provisionSandbox<C extends StateAwareContainmentBackend>(
     sandboxId: string;
     metadata?: ProvisionMetadataFor<C>;
     correlationVector?: string;
-  }>(envelope, options);
+  }>(envelope, options, containment);
   return {
     sandboxId: result.sandboxId as SandboxId<C>,
     metadata: result.metadata,
@@ -96,7 +96,7 @@ export async function startSandbox<C extends StateAwareContainmentBackend>(
     correlationVector: options.correlationVector,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StartResult<C>>(envelope, options);
+  return nonExecCall<StartResult<C>>(envelope, options, backendKey);
 }
 
 /**
@@ -119,7 +119,11 @@ export function execInSandbox<C extends StateAwareContainmentBackend>(
     correlationVector: options.correlationVector,
     config: config as unknown as Record<string, unknown>,
   });
-  const { executablePath, args } = resolveBinaryAndCommonArgs(JSON.stringify(envelope), options);
+  const { executablePath, args } = resolveBinaryAndCommonArgs(
+    JSON.stringify(envelope),
+    options,
+    backendKey,
+  );
   diagLog(`state-aware: spawning exec via PTY`);
   const ptyProcess = pty.spawn(executablePath, args, {
     name: 'xterm-color',
@@ -160,7 +164,7 @@ export async function execInSandboxAsync<C extends StateAwareContainmentBackend>
     correlationVector: options.correlationVector,
     config: config as unknown as Record<string, unknown>,
   });
-  const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options);
+  const { stdout, stderr, exitCode } = await spawnAndCollect(envelope, options, backendKey);
 
   if (exitCode !== 0) {
     const errorEnvelope = tryParseErrorEnvelope(stdout);
@@ -189,7 +193,7 @@ export async function stopSandbox<C extends StateAwareContainmentBackend>(
     correlationVector: options.correlationVector,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<StopResult<C>>(envelope, options);
+  return nonExecCall<StopResult<C>>(envelope, options, backendKey);
 }
 
 /**
@@ -209,5 +213,5 @@ export async function deprovisionSandbox<C extends StateAwareContainmentBackend>
     correlationVector: options.correlationVector,
     config: config as Record<string, unknown> | undefined,
   });
-  return nonExecCall<DeprovisionResult<C>>(envelope, options);
+  return nonExecCall<DeprovisionResult<C>>(envelope, options, backendKey);
 }

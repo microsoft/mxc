@@ -9,9 +9,11 @@ import {
   getPlatformSupport,
   _resetPlatformSupportCache,
   _setProbeRunner,
+  _setWindowsBuildQuery,
   _parseBwrapVersion,
   _probeBubblewrap,
   _setBwrapVersionRunner,
+  _setBwrapSandboxRunner,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -333,10 +335,14 @@ describe('findWxcExecutable failure modes', () => {
 describe('isolation_session availability gate', () => {
   beforeEach(() => {
     _resetPlatformSupportCache();
+    // Pin the host build above the `processcontainer` floor so these assertions
+    // exercise the probe alone, not whatever build the CI runner happens to be.
+    _setWindowsBuildQuery(() => ({ major: 26100 }));
   });
 
   afterEach(() => {
     _setProbeRunner(null);
+    _setWindowsBuildQuery(null);
     _resetPlatformSupportCache();
   });
 
@@ -378,13 +384,79 @@ describe('isolation_session availability gate', () => {
     assert.ok(!support.availableMethods.includes('isolation_session'));
   });
 
-  it('always reports processcontainer as the default on Windows (no build gate)', { skip: !isWindows }, () => {
-    // The runtime gate lives in the native binary; the SDK reports Windows
-    // support regardless of isolation-session availability.
-    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
+});
+
+// The 26100 (Windows 11 24H2) product floor. Reporting a below-floor host as
+// supported only moves the failure to spawn time, where the reason is far less
+// actionable. Mirrors `windows_platform_support` in
+// `src/core/mxc_engine/src/platform.rs`.
+describe('processcontainer build gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setWindowsBuildQuery(null);
+    _setProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('reports unsupported below build 26100', { skip: !isWindows }, () => {
+    // 19045 = Windows 10 22H2, 22000 = Windows 11 21H2, 22631 = 23H2.
+    for (const major of [19045, 22000, 22631, 26099]) {
+      _resetPlatformSupportCache();
+      _setWindowsBuildQuery(() => ({ major }));
+      const support = getPlatformSupport();
+      assert.ok(!support.isSupported, `build ${major} should be unsupported`);
+      assert.ok(
+        !support.availableMethods.includes('processcontainer'),
+        `build ${major} must not offer processcontainer`,
+      );
+      assert.match(support.reason ?? '', new RegExp(`${major}`));
+    }
+  });
+
+  it('reports supported at or above build 26100', { skip: !isWindows }, () => {
+    for (const major of [26100, 26200, 26600]) {
+      _resetPlatformSupportCache();
+      _setWindowsBuildQuery(() => ({ major }));
+      const support = getPlatformSupport();
+      assert.ok(support.isSupported, `build ${major} should be supported`);
+      assert.ok(support.availableMethods.includes('processcontainer'));
+    }
+  });
+
+  it('reports supported when the build cannot be read', { skip: !isWindows }, () => {
+    // A registry read failure must not disable sandboxing on a host that is in
+    // fact supported.
+    _setWindowsBuildQuery(() => null);
     const support = getPlatformSupport();
     assert.ok(support.isSupported);
-    assert.strictEqual(support.availableMethods[0], 'processcontainer');
+    assert.ok(support.availableMethods.includes('processcontainer'));
+  });
+
+  it(
+    'reports processcontainer on a supported build regardless of the probe',
+    { skip: !isWindows },
+    () => {
+      // Isolation-session availability is orthogonal to the build gate.
+      _setWindowsBuildQuery(() => ({ major: 26100 }));
+      _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: false } }));
+      const support = getPlatformSupport();
+      assert.ok(support.isSupported);
+      assert.ok(support.availableMethods.includes('processcontainer'));
+    },
+  );
+
+  // A below-floor host can still run the experimental backends, and the reason
+  // must say so rather than reading as a flat "unsupported host".
+  it('lists probe-reported backends as alternatives below the floor', { skip: !isWindows }, () => {
+    _setWindowsBuildQuery(() => ({ major: 22631 }));
+    _setProbeRunner(() => JSON.stringify({ probes: { isolationSessionAvailable: true } }));
+    const support = getPlatformSupport();
+    assert.ok(!support.isSupported);
+    assert.ok(support.availableMethods.includes('isolation_session'));
+    assert.match(support.reason ?? '', /experimental backends available: .*isolation_session/);
   });
 });
 
@@ -452,8 +524,16 @@ describe('bwrap version parsing', () => {
 // runner. Without these the SDK gate could drift from the Rust gate in
 // `src/backends/bubblewrap/common/src/bwrap_version.rs` unnoticed.
 describe('bwrap minimum-version gate', () => {
+  beforeEach(() => {
+    // A new enough `bwrap` still has to prove it can build a sandbox, which no
+    // host running these tests necessarily can. Stub that half so these cases
+    // exercise the version comparison alone.
+    _setBwrapSandboxRunner(() => ({ ok: true, detail: '' }));
+  });
+
   afterEach(() => {
     _setBwrapVersionRunner(null);
+    _setBwrapSandboxRunner(null);
     _resetPlatformSupportCache();
   });
 
@@ -554,6 +634,21 @@ describe('bwrap minimum-version gate', () => {
     const probe = _probeBubblewrap();
     assert.strictEqual(probe.available, false);
     assert.match(probe.reason, /failed without an exit status/);
+  });
+
+  it('rejects a new enough bwrap that cannot create a sandbox', () => {
+    // The case `bwrap --version` cannot see: unprivileged user namespaces
+    // disabled, or AppArmor denying bwrap. Without this the host passes
+    // detection and then fails at every spawn.
+    withVersion('bubblewrap 0.11.2\n');
+    _setBwrapSandboxRunner(() => ({
+      ok: false,
+      detail: 'bwrap: No permissions to creating new namespace',
+    }));
+    const probe = _probeBubblewrap();
+    assert.strictEqual(probe.available, false);
+    assert.match(probe.reason, /cannot create a sandbox/);
+    assert.match(probe.reason, /No permissions to creating new namespace/);
   });
 
   it('omits bubblewrap from getPlatformSupport below the floor', { skip: os.platform() !== 'linux' }, () => {

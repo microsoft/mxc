@@ -20,9 +20,11 @@ For the enforcement mechanisms themselves see the
 
 > **Product floor:** the [README](../../README.md#platforms) and
 > [SDK README](../../sdk/node/README.md) state that `processcontainer`'s **minimum
-> supported build is 26100 (24H2)**. The Rust code build-gates individual
-> capabilities down to 23H2 (build 22631); the **23H2** column below therefore
-> describes *what the code can enforce if run there* — it is below the
+> supported build is 26100 (24H2)**. This floor is enforced at detection time:
+> both `platform_support()` (Rust) and `getPlatformSupport()` (TypeScript SDK)
+> report a host below build 26100 as unsupported. The Rust code build-gates
+> individual capabilities down to 23H2 (build 22631); the **23H2** column below
+> therefore describes *what the code can enforce if run there* — it is below the
 > officially supported floor and is not a support commitment.
 
 ## Enforcement tiers

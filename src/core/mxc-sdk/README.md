@@ -62,6 +62,9 @@ questions:
   MXC is supported on this host and the backends **this SDK can actually
   launch** (the subset in [Supported backends](#supported-backends)). Use it to
   decide whether `run` / `spawn_sandbox` will work before building a request.
+  Each platform probes the dependency that actually fails at spawn time:
+  `/usr/bin/sandbox-exec` on macOS, a real namespace-creating `bwrap` run on
+  Linux, and the host OS build against the 26100 (24H2) floor on Windows.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
   containment backend the *host* can run, including ones only the executor
   binaries (`wxc-exec` etc.) can currently drive — Windows Sandbox,

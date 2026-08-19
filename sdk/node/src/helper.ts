@@ -147,9 +147,17 @@ export function applyLinuxNetworkPolicy(config: ContainerConfig): void {
 export function resolveBinaryAndCommonArgs(
   envelopeJson: string,
   options: SandboxSpawnOptions,
+  containment?: string,
 ): { executablePath: string; args: string[] } {
   const platformSupport = getPlatformSupport();
-  if (!platformSupport.isSupported && !options.skipPlatformCheck) {
+  // `isSupported` tracks the default, non-experimental backend, so it must not
+  // veto an experimental backend the caller asked for by name: those have their
+  // own host requirements (Windows Sandbox, for instance, has a lower build
+  // floor than `processcontainer`). Mirrors the bypass in
+  // `resolveExecutableAndArgs`, which would otherwise be undone here.
+  const isExperimental =
+    !!containment && (ExperimentalBackends as readonly string[]).includes(containment);
+  if (!platformSupport.isSupported && !isExperimental && !options.skipPlatformCheck) {
     throw new Error(`MXC is not supported on this platform: ${platformSupport.reason}`);
   }
 
@@ -284,7 +292,11 @@ export function resolveExecutableAndArgs(
     );
   }
 
-  const resolved = resolveBinaryAndCommonArgs(JSON.stringify(config), options);
+  const resolved = resolveBinaryAndCommonArgs(
+    JSON.stringify(config),
+    options,
+    effectiveContainment,
+  );
   if (usesBuiltinTestServer) {
     resolved.args.push('--allow-testing-features');
   }
