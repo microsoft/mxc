@@ -220,6 +220,10 @@ struct ConsentRecord {
     /// this field just read back as `0` rather than failing to parse.
     #[serde(rename = "updatedAtEpoch", default)]
     updated_at_epoch: u64,
+    /// Monotonic record identity used to reject a stale presenter decision
+    /// even when a concurrent writer preserves the effective consent state.
+    #[serde(default)]
+    revision: u64,
 }
 
 /// Returns the current, persisted telemetry consent state.
@@ -239,7 +243,7 @@ pub fn get_status() -> ConsentStatus {
 
 #[cfg(test)]
 pub(crate) fn set_consent(granted: bool, source: &str) -> Result<(), String> {
-    platform::write(granted, source)
+    platform::with_store_lock(|| platform::write(granted, source))
 }
 
 /// Request telemetry consent through a host-owned presenter.
@@ -253,17 +257,19 @@ pub fn request_consent<F>(
 where
     F: FnOnce(&ConsentPrompt) -> Result<ConsentDecision, String>,
 {
-    let (prompt, policy, status) = match consent_preflight(locale) {
+    let (prompt, policy, status, revision) = match consent_preflight(locale) {
         ConsentPreflight::Complete(outcome) => return Ok(outcome),
+        ConsentPreflight::Failed(error) => return Err(ConsentActionError::Persist(error)),
         ConsentPreflight::Present {
             prompt,
             policy,
             status,
-        } => (prompt, policy, status),
+            revision,
+        } => (prompt, policy, status, revision),
     };
 
     let decision = presenter(prompt).map_err(ConsentActionError::Presenter)?;
-    persist_presented_decision(decision, prompt, policy, status)
+    persist_presented_decision(decision, prompt, policy, status, revision)
 }
 
 /// Asynchronous counterpart to [`request_consent`].
@@ -282,16 +288,18 @@ where
     let locale = locale.map(str::to_owned);
     match BlockingTask::spawn(move || consent_preflight(locale.as_deref())).await {
         ConsentPreflight::Complete(outcome) => Ok(outcome),
+        ConsentPreflight::Failed(error) => Err(ConsentActionError::Persist(error)),
         ConsentPreflight::Present {
             prompt,
             policy,
             status,
+            revision,
         } => {
             let decision = presenter(prompt)
                 .await
                 .map_err(ConsentActionError::Presenter)?;
             BlockingTask::spawn(move || {
-                persist_presented_decision(decision, prompt, policy, status)
+                persist_presented_decision(decision, prompt, policy, status, revision)
             })
             .await
         }
@@ -377,16 +385,25 @@ impl<T> std::future::Future for BlockingTask<T> {
 
 enum ConsentPreflight {
     Complete(ConsentActionOutcome),
+    Failed(String),
     Present {
         prompt: &'static ConsentPrompt,
         policy: super::policy::PolicyState,
         status: ConsentStatus,
+        revision: Option<u64>,
     },
 }
 
 fn consent_preflight(locale: Option<&str>) -> ConsentPreflight {
     let policy = super::policy::get_policy();
-    let status = get_status();
+    let (status, revision) = match platform::with_store_lock(|| {
+        let status = platform::read_status_unlocked();
+        let revision = platform::read_revision_unlocked()?;
+        Ok((status, revision))
+    }) {
+        Ok(snapshot) => snapshot,
+        Err(error) => return ConsentPreflight::Failed(error),
+    };
 
     if status.effective_state == ConsentState::NotApplicable {
         return ConsentPreflight::Complete(ConsentActionOutcome {
@@ -415,6 +432,7 @@ fn consent_preflight(locale: Option<&str>) -> ConsentPreflight {
         prompt,
         policy,
         status,
+        revision,
     }
 }
 
@@ -423,10 +441,12 @@ fn persist_presented_decision(
     prompt: &ConsentPrompt,
     policy: super::policy::PolicyState,
     status: ConsentStatus,
+    revision: Option<u64>,
 ) -> Result<ConsentActionOutcome, ConsentActionError> {
     platform::with_store_lock(|| {
         let current_policy = super::policy::get_policy();
         let current_status = platform::read_status_unlocked();
+        let current_revision = platform::read_revision_unlocked()?;
         if current_status.effective_state == ConsentState::NotApplicable {
             return Ok(ConsentActionOutcome {
                 result: ConsentActionResult::NotApplicable,
@@ -454,7 +474,8 @@ fn persist_presented_decision(
             && current_status.effective_state == ConsentState::Granted
             && status.effective_state != ConsentState::Granted;
         if current_policy != policy
-            || (current_status.effective_state != status.effective_state
+            || ((current_status.effective_state != status.effective_state
+                || current_revision != revision)
                 && !is_concurrent_grant_being_withdrawn)
         {
             return Err(
@@ -558,6 +579,10 @@ mod platform {
     const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(1);
     #[cfg(not(test))]
     const STORE_LOCK_RETRY_DELAY: Duration = Duration::from_millis(20);
+    #[cfg(test)]
+    const STORE_LOCK_RETRY_ATTEMPTS: u32 = 1_000;
+    #[cfg(not(test))]
+    const STORE_LOCK_RETRY_ATTEMPTS: u32 = IO_RETRY_ATTEMPTS;
 
     /// `ERROR_SHARING_VIOLATION` — another handle holds the file with a
     /// conflicting share mode (AV scanner, indexer, racing sibling process).
@@ -721,7 +746,7 @@ mod platform {
             match options.open(&lock_path) {
                 Ok(file) => break file,
                 Err(error)
-                    if attempts + 1 < IO_RETRY_ATTEMPTS
+                    if attempts + 1 < STORE_LOCK_RETRY_ATTEMPTS
                         && (error.kind() == std::io::ErrorKind::AlreadyExists
                             || is_transient_io_error(&error)) =>
                 {
@@ -873,6 +898,13 @@ mod platform {
         read_status_unlocked_inner(withdrawal_marker_state, recover_stale_withdrawal_marker)
     }
 
+    pub(super) fn read_revision_unlocked() -> Result<Option<u64>, String> {
+        let Some(path) = consent_file_path() else {
+            return Ok(None);
+        };
+        Ok(read_record(&path)?.map(|record| record.revision))
+    }
+
     fn read_status_unlocked_inner(
         marker_check: impl FnOnce(&Path) -> std::io::Result<WithdrawalMarkerState>,
         recover_stale: impl FnOnce(&Path, &Path) -> Result<(), String>,
@@ -992,6 +1024,19 @@ mod platform {
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
+    fn read_record(path: &Path) -> Result<Option<ConsentRecord>, String> {
+        let data = match with_io_retry(|| read_bounded(path)) {
+            Ok(data) => data,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(format!(
+                    "failed to read telemetry consent record revision: {error}"
+                ))
+            }
+        };
+        Ok(serde_json::from_str(&data).ok())
+    }
+
     fn recover_stale_withdrawal_marker(_path: &Path, marker: &Path) -> Result<(), String> {
         match withdrawal_marker_state(marker)
             .map_err(|e| format!("failed to inspect stale withdrawal marker: {e}"))?
@@ -1067,6 +1112,10 @@ mod platform {
             .parent()
             .ok_or_else(|| "invalid telemetry consent path".to_string())?;
         fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+        let revision = read_record(&path)?
+            .map_or(0, |record| record.revision)
+            .checked_add(1)
+            .ok_or_else(|| "telemetry consent record revision is exhausted".to_string())?;
 
         let record = ConsentRecord {
             schema_version: CONSENT_SCHEMA_VERSION,
@@ -1076,6 +1125,7 @@ mod platform {
             prompt_resource_version,
             prompt_locale: prompt_locale.to_string(),
             updated_at_epoch: now_epoch_seconds(),
+            revision,
         };
         let json = serde_json::to_string_pretty(&record)
             .map_err(|e| format!("failed to serialize telemetry consent record: {e}"))?;
@@ -1149,6 +1199,10 @@ mod platform {
 
     pub(super) fn read_status_unlocked() -> ConsentStatus {
         read_status()
+    }
+
+    pub(super) fn read_revision_unlocked() -> Result<Option<u64>, String> {
+        Ok(None)
     }
 
     pub(super) fn write(_granted: bool, _source: &str) -> Result<(), String> {
@@ -1620,6 +1674,33 @@ mod tests {
                 )
             );
             assert_eq!(get_consent(), ConsentState::Denied);
+        }
+
+        #[test]
+        fn same_state_change_while_presenter_is_open_rejects_stale_decision() {
+            let tmp = tempfile::tempdir().unwrap();
+            let env = crate::telemetry::test_support::TelemetryTestEnv::new(tmp.path());
+            env.set_policy_value(3);
+            set_consent(false, "initial-denial").unwrap();
+
+            let error = request_consent(Some("en-US"), |_| {
+                set_consent(false, "concurrent-withdrawal").unwrap();
+                Ok(ConsentDecision::Yes)
+            })
+            .expect_err("stale presenter decision must not overwrite a newer denial");
+
+            assert_eq!(
+                error,
+                ConsentActionError::Persist(
+                    "consent state changed while the presenter was open; no decision was written"
+                        .to_string()
+                )
+            );
+            assert_eq!(get_consent(), ConsentState::Denied);
+            let record =
+                std::fs::read_to_string(tmp.path().join("mxc").join("telemetry-consent.json"))
+                    .unwrap();
+            assert!(record.contains(r#""source": "concurrent-withdrawal""#));
         }
 
         #[test]
