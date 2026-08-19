@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::{borrow::Cow, fs};
-
+use crate::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
 use crate::config_deserialize;
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
@@ -16,8 +15,10 @@ use crate::models::{
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
+use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
+use std::{borrow::Cow, fs};
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -204,6 +205,78 @@ pub fn load_mxc_request_from_json(
         log_error(logger, &error.message(), error.output());
     }
     result
+}
+
+/// Resolves a CLI command override by splicing it into the request source,
+/// returning the effective document to parse.
+///
+/// Returns the input **unchanged** whenever the override cannot be applied for
+/// a reason the parser will itself report. Those inputs then keep today's error
+/// text and output routing rather than inheriting a probe's stricter, and
+/// differently routed, diagnostic.
+///
+/// Probing the phase first is load-bearing: it selects which [`ParseError`]
+/// variant a later failure uses, and that selects the stdout envelope versus
+/// the stderr diagnostic.
+///
+/// `argv` is expected to be non-empty; an empty one is rejected rather than
+/// producing an empty command line.
+#[cfg_attr(not(test), allow(dead_code))]
+fn apply_cli_command(
+    json: &str,
+    argv: &[String],
+    logger: &mut Logger,
+) -> Result<String, ParseError> {
+    // An unreadable phase declaration is the parser's to report.
+    let Ok(phase) = probe_phase(json) else {
+        return Ok(json.to_string());
+    };
+
+    let context = match phase {
+        None => match crate::probe::probe_one_shot_backend(json) {
+            Some(backend) => CommandLineContext::for_backend(&backend),
+            // Likewise an unreadable containment: the typed parse rejects it.
+            None => return Ok(json.to_string()),
+        },
+        Some(ContractPhase::Exec) => {
+            // Not a passthrough: `resolve_backend` raises this same error after
+            // parsing today, so surfacing it here preserves current behavior.
+            // Swallowing it would silently drop the caller's override.
+            let backend =
+                crate::probe::probe_state_aware_backend(json).map_err(ParseError::StateAware)?;
+            CommandLineContext::for_backend(&backend)
+        }
+        Some(_) => {
+            return Err(ParseError::StateAware(MxcError::malformed_request(
+                "CLI command override is only supported for state-aware exec requests",
+            )))
+        }
+    };
+
+    let command = cmdline_from_argv_for_context(argv, context).map_err(|e| {
+        ParseError::Decode(WxcError::ConfigParse(format!(
+            "invalid CLI command override: {e}"
+        )))
+    })?;
+
+    if command.is_empty() {
+        return Err(ParseError::Decode(WxcError::ConfigParse(
+            "CLI command override must not be empty".to_string(),
+        )));
+    }
+
+    // A document the splice cannot transform is one the parser rejects anyway.
+    let Some(spliced) = crate::splice::splice_command(json, &command) else {
+        return Ok(json.to_string());
+    };
+
+    if spliced.replaced_existing {
+        logger.log_line(&format!(
+            "Overriding policy process.commandLine with CLI command: {command}"
+        ));
+    }
+
+    Ok(spliced.json)
 }
 
 /// Shared parse core over an already-decoded JSON string.
@@ -1804,6 +1877,127 @@ mod tests {
             allow_missing_command: false,
         };
         assert!(load_mxc_with_opts(json, opts).is_err());
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn apply_cli_command_splices_into_a_one_shot_request() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = apply_cli_command(
+            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["process"]["commandLine"], "app.exe --flag");
+        assert!(logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
+    fn apply_cli_command_does_not_log_when_the_policy_had_no_command() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = apply_cli_command(
+            r#"{"process":{"cwd":"/usr/tmp"}}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["process"]["commandLine"], "app.exe --flag");
+        assert!(!logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
+    fn apply_cli_command_splices_into_a_state_aware_exec_request() {
+        // The `sandboxId` prefix selects the quoting context, so the argument
+        // carries `&`: cmd.exe quotes it because `&` separates commands, a
+        // POSIX shell single-quotes it, and the direct Windows path leaves it
+        // bare. An argument needing no quoting would render identically under
+        // all three and prove nothing about the prefix.
+        for (sandbox_id, expected) in [
+            // iso -> IsolationSession -> WindowsCommandProcessor
+            ("iso:abcd1234", "app.exe \"a&b\""),
+            // wslc -> Wslc -> PosixShell
+            ("wslc:abcd1234", "app.exe 'a&b'"),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let json = format!(r#"{{"phase":"exec","sandboxId":"{sandbox_id}"}}"#);
+            let out = apply_cli_command(&json, &argv(&["app.exe", "a&b"]), &mut logger).unwrap();
+
+            let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                doc["process"]["commandLine"], expected,
+                "wrong quoting context for {sandbox_id}"
+            );
+            assert!(!logger
+                .get_buffer()
+                .contains("Overriding policy process.commandLine"));
+        }
+    }
+
+    #[test]
+    fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
+        let err = apply_cli_command(
+            r#"{"phase":"start","sandboxId":"iso:abcd1234"}"#,
+            &argv(&["echo", "hi"]),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::StateAware(_)));
+    }
+
+    #[test]
+    fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = apply_cli_command(
+            r#"{"phase":"exec","sandboxId":"zzz:abcd"}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::StateAware(_)));
+    }
+
+    #[test]
+    fn apply_cli_command_returns_the_source_unchanged_when_it_cannot_classify() {
+        // Each passthrough path: unreadable phase ({"phase":null}), unreadable
+        // containment ({"containment":"nope"}), unspliceable document
+        // ({"process":42}). Assert the output is byte-identical to the input.
+
+        for json in [
+            r#"{"phase":null,"sandboxId":"iso:abcd1234"}"#,
+            r#"{"containment":"nope"}"#,
+            r#"{"process":42}"#,
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let out = apply_cli_command(json, &argv(&["app.exe", "--flag"]), &mut logger).unwrap();
+            assert_eq!(out, json);
+            assert!(!logger
+                .get_buffer()
+                .contains("Overriding policy process.commandLine"));
+        }
+    }
+
+    #[test]
+    fn apply_cli_command_rejects_an_empty_argv() {
+        let err = apply_cli_command(
+            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            &[],
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::Decode(_)));
     }
 
     #[test]
