@@ -872,6 +872,13 @@ fallback to the latest version.
 After parity tests pass, remove the direct version-insensitive wire
 deserialization path.
 
+Remove the `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
+adapter modules, on `state_aware_wire`, and on the Phase 7.3 exact path. This
+is the first phase in which the router calls the exact path, so it is the first
+phase in which any of that code is reachable in a production build. Removing
+them earlier would produce dead-code warnings, since an uncalled exact path
+leaves everything it calls dead too.
+
 Exact dispatch must be authoritative before the development Network contract
 changes. This sequencing is what protects `0.6.0-alpha` and `0.7.0-alpha`
 callers from the breaking-change failure mode that caused PR #676 to be
@@ -1953,7 +1960,7 @@ Resolve these before implementation; each changes the shape of the work.
 | # | Decision | Recommendation |
 | --- | --- | --- |
 | 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority; dispatch keeps reading `experimental_raw`. See "Phase 7 decision 1 resolved" below |
-| 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable |
+| 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable. Test-only does not mean the phase has no production diff: see "Phase 7 production surface" below |
 | 3 | How `load_request_from_value` reaches an exact contract | Prefer giving `mxc_engine::policy` a typed builder that constructs the contract request directly, rather than serializing its `Value` to text and re-parsing. A round-trip works and is the cheaper interim answer, but it reintroduces exactly the text-to-value-to-text churn this plan avoids elsewhere. Decide now; Phase 9 depends on it |
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
 | 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
@@ -2049,6 +2056,22 @@ with no normalization — `appId`, `image`, `imageTarPath`. The moment a payload
 field gains defaulting or canonicalization, the two authorities could interpret
 the same bytes differently, and that is the trigger to move to option B.
 
+### Phase 7 production surface
+
+Decision 2 keeps the comparison in tests, but the phase still carries a
+production diff. Three changes land in non-test code:
+
+| Change | Kind | Step |
+| --- | --- | --- |
+| Command splice replaces `allow_missing_command` | Behavior-visible, entry point only | 7.1 |
+| `normalize_state_aware` extracted from `convert_wire_state_aware` | Behavior-preserving refactor | 7.2 |
+| Exact-contract path added, dead in production | Compiled but uncalled | 7.3 |
+
+Nothing else moves: no call site of the rolling parser changes, `wxc_common`
+grows no public API, and no runtime behavior differs. The seam in particular
+must be real production code rather than a test-only copy — a copy would
+validate a fork of the logic rather than the logic the rolling parser runs.
+
 ### Phase 7 step breakdown
 
 #### Phase 7.0: Prepare the implementation branch
@@ -2127,12 +2150,30 @@ model:
 Nothing calls this path in production. It exists for the harness in Phase 7.4
 and becomes authoritative in Phase 9.
 
-Remove the `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
-adapter modules and on `state_aware_wire` as they become genuinely reachable.
+Write it as ordinary private production code carrying
+`#[cfg_attr(not(test), allow(dead_code))]`, the idiom the adapter modules and
+`state_aware_wire` already use. That attribute means dead in a production build
+and genuinely reachable under `cargo test`, so the path is compiled, formatted,
+and clippy-checked alongside everything else, and Phase 9's cutover is a routing
+change rather than a code move. Do not place the path inside `#[cfg(test)]`:
+that would force Phase 9 to move code into production at the moment it becomes
+authoritative, so the validated code would not be literally the shipped code.
+
+Keep the existing `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
+adapter modules and on `state_aware_wire`. They are still required: an uncalled
+exact path leaves everything it calls dead in production too. Phase 9 removes
+all of them together when the router first calls the exact path.
 
 Suggested commit boundary: `Add the shadow exact-contract parser path`.
 
 #### Phase 7.4: Build the equivalence harness and classify differences
+
+Put the harness in an inline `#[cfg(test)]` module in `config_parser.rs`, the
+crate's dominant convention and the only placement that keeps the exact path
+private. An integration test under `src/core/wxc_common/tests/` can only reach
+`pub` items, and making an unfinished parser part of `wxc_common`'s public API
+to test it is not worth the corpus convenience; read the corpus from
+`CARGO_MANIFEST_DIR` instead.
 
 For each input, parse with both paths, adapt both to the runtime model, and
 assert semantic equivalence by the mechanism chosen in decision 5.
