@@ -23,6 +23,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
 
 use crate::bwrap_command::COMMAND_TAIL;
+use crate::network_rules::EgressPlan;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -35,22 +36,25 @@ const XTABLES_LOCK_WAIT: Duration = Duration::from_secs(5);
 /// Lock file the legacy `iptables` backend opens before touching any table.
 /// `nf_tables` does not use it. See [`iptables_backend_is_usable`].
 const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
-/// Number of `iptables`/`ip6tables` calls the supervisor makes. Only used to
-/// size the rule-installation budget, so it is asserted against the script.
-const RULE_COMMAND_COUNT: u32 = 9;
-/// Work the rule phase does beyond waiting on the lock: slirp coming up, plus
-/// one `nsenter` launch per rule. Headroom only — the supervisor raises a single
-/// signal for both phases, so they cannot be budgeted separately.
-const RULE_INSTALL_OVERHEAD: Duration =
-    Duration::from_secs(STARTUP_TIMEOUT.as_secs() + RULE_COMMAND_COUNT as u64);
-/// Budget for bringing slirp up and installing every egress rule.
+/// Budget for the rule-installation phase, which begins once slirp is up.
 ///
-/// Covers the fully contended lock case plus [`RULE_INSTALL_OVERHEAD`], so a host
-/// that legitimately consumes most of its `-w` allowance is not cut off just
-/// short of finishing.
-const RULE_INSTALL_TIMEOUT: Duration = Duration::from_secs(
-    XTABLES_LOCK_WAIT.as_secs() * RULE_COMMAND_COUNT as u64 + RULE_INSTALL_OVERHEAD.as_secs(),
-);
+/// Sized so that lock contention -- the expected reason a rule stalls -- cannot
+/// exhaust the budget before `-w` has had a chance to succeed. A single
+/// [`STARTUP_TIMEOUT`] cannot cover this: it would reject a viable sandbox the
+/// moment one call waited on a busy host.
+///
+/// Computed from the plan rather than fixed, so a large rule list gets a
+/// proportionate budget instead of being timed out for being large. On top of
+/// the lock sum it carries [`STARTUP_TIMEOUT`] plus one second per command,
+/// because the same deadline also spans slirp readiness and one `nsenter`
+/// launch per rule. Headroom only -- the supervisor raises a single signal for
+/// both phases, so they cannot be budgeted separately.
+fn rule_install_timeout(plan: &EgressPlan) -> Duration {
+    let commands = plan.command_count() as u64;
+    Duration::from_secs(
+        XTABLES_LOCK_WAIT.as_secs() * commands + STARTUP_TIMEOUT.as_secs() + commands,
+    )
+}
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
@@ -84,10 +88,10 @@ const FD_STAGING_BASE: RawFd = 10;
 const SUPERVISOR_SCRIPT: &str = r#"
 set -eu
 state_dir="$1"
-proxy_ip="$2"
-proxy_port="$3"
-chain="$4"
-lock_wait="$5"
+chain="$2"
+lock_wait="$3"
+v4_terminal="$4"
+v6_terminal="$5"
 # Inherited descriptors are remapped to fixed numbers by the parent (see
 # `remap_descriptors`): 3 is the parent's PID pipe, 4 is slirp's exit pipe.
 # They are hardcoded rather than passed in argv because /bin/sh is dash on
@@ -126,10 +130,16 @@ while [ ! -s "$state_dir/slirp.internal" ]; do
 done
 
 ns="/proc/$child_pid/ns/net"
-# Deny-all-except-proxy. Loopback is exempt: it is the sandbox's own isolated
-# loopback, so it never leaves the sandbox. Port 53 is deliberately not opened
-# -- the proxy resolves on the workload's behalf, so an accept would only be a
-# DNS-tunnel exfil path out of a proxy-only posture.
+# Per-destination filtering, programmed here because it needs CAP_NET_ADMIN in
+# the owning user namespace, which this supervisor holds (`--keep-caps`) and
+# the caller does not.
+#
+# Both families open with their chain and the loopback exemption, then take the
+# caller's rules in order, then close on the terminal verdict and the OUTPUT
+# hook. Loopback is exempt because it is the sandbox's own isolated loopback,
+# so it never leaves the sandbox. Ordering is the policy: the chain matches
+# first-wins, and the rules file is written deny-first so an explicit deny
+# overrides a broader allow.
 #
 # -w matters only on the legacy backend, the one that takes a lock: nsenter
 # enters the network namespace but not the mount namespace, so concurrent
@@ -138,14 +148,32 @@ ns="/proc/$child_pid/ns/net"
 # A backend that cannot take the lock at all is refused by probe_dependencies.
 nsenter --net="$ns" -- iptables -w "$lock_wait" -N "$chain"
 nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -o lo -j ACCEPT
-nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT
-nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -j DROP
-nsenter --net="$ns" -- iptables -w "$lock_wait" -A OUTPUT -j "$chain"
-# The proxy rule is IPv4 only, so v6 carries its closing DROP alone: IPv6
-# egress fails closed rather than being left open.
 nsenter --net="$ns" -- ip6tables -w "$lock_wait" -N "$chain"
 nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A "$chain" -o lo -j ACCEPT
-nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A "$chain" -j DROP
+# Five fixed fields per record, every one produced by re-rendering a parsed
+# address rather than echoing caller text, so nothing here can carry shell
+# metacharacters. `-` stands in for an absent protocol/port.
+while IFS=' ' read -r family verdict address proto port; do
+    [ -n "$family" ] || continue
+    case "$family" in
+        4) tool=iptables ;;
+        6) tool=ip6tables ;;
+        *) echo "mxc: unrecognized rule family '$family'" >&2; exit 1 ;;
+    esac
+    if [ "$proto" = "-" ]; then
+        nsenter --net="$ns" -- "$tool" -w "$lock_wait" \
+            -A "$chain" -d "$address" -j "$verdict"
+    else
+        nsenter --net="$ns" -- "$tool" -w "$lock_wait" \
+            -A "$chain" -p "$proto" -d "$address" --dport "$port" -j "$verdict"
+    fi
+done < "$state_dir/egress.rules"
+# The terminal verdict closes each family. A family with no rules of its own
+# still gets it, so IPv6 under an IPv4-only rule set fails closed rather than
+# being left open.
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A "$chain" -j "$v4_terminal"
+nsenter --net="$ns" -- iptables -w "$lock_wait" -A OUTPUT -j "$chain"
+nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A "$chain" -j "$v6_terminal"
 nsenter --net="$ns" -- ip6tables -w "$lock_wait" -A OUTPUT -j "$chain"
 
 # Signalled by path, not through a descriptor: this is a plain file the parent
@@ -172,6 +200,11 @@ impl ProxyEgress {
     /// The hosts-file pin the sandbox needs, if the endpoint is a hostname.
     pub(crate) fn pin(&self) -> Option<&ProxyHostPin> {
         self.pin.as_ref()
+    }
+
+    /// The filtering posture that opens this endpoint and nothing else.
+    pub(crate) fn plan(&self) -> EgressPlan {
+        EgressPlan::for_proxy(self.ip, self.port)
     }
 }
 
@@ -573,23 +606,37 @@ pub(crate) struct ProxyNetworkNamespace {
     userns: Option<File>,
     /// Hosts file mounted over `/etc/hosts`, when the endpoint is a hostname.
     hosts: Option<PathBuf>,
+    /// Budget for the readiness signal, sized from the plan's rule count.
+    rule_install_timeout: Duration,
 }
 
 impl ProxyNetworkNamespace {
     /// Create the capability-retaining namespace supervisor.
     ///
-    /// `egress` is the only destination the sandbox can reach once the
-    /// supervisor signals readiness; everything else is dropped.
+    /// `plan` is the complete filtering posture the sandbox runs under once the
+    /// supervisor signals readiness; anything it does not accept is dropped.
+    /// `pin` is the hosts-file entry the sandbox needs to agree with the plan,
+    /// which only a hostname proxy endpoint produces.
     ///
     /// Callers reach this only after `BwrapRunner::validate` has already run
     /// [`probe_dependencies`], so the probe is not repeated here.
-    pub(crate) fn start(egress: &ProxyEgress, logger: &mut Logger) -> Result<Self, String> {
+    pub(crate) fn start(
+        plan: &EgressPlan,
+        pin: Option<&ProxyHostPin>,
+        logger: &mut Logger,
+    ) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
             .tempdir()
             .map_err(|error| {
                 format!("Bubblewrap: failed to create proxy-network state: {error}")
             })?;
+        // Written before the supervisor is spawned: the script reads it during
+        // startup, so a missing or partial file must not be possible.
+        let rules_path = state_dir.path().join("egress.rules");
+        std::fs::write(&rules_path, plan.render()).map_err(|error| {
+            format!("Bubblewrap: failed to write egress rules to {rules_path:?}: {error}")
+        })?;
         let stderr_path = state_dir.path().join("supervisor.stderr");
         let stderr = File::create(&stderr_path).map_err(|error| {
             format!("Bubblewrap: failed to create proxy-network diagnostics: {error}")
@@ -612,10 +659,10 @@ impl ProxyNetworkNamespace {
                 "mxc-bwrap-proxy-supervisor",
             ])
             .arg(state_dir.path())
-            .arg(egress.ip.to_string())
-            .arg(egress.port.to_string())
             .arg(EGRESS_CHAIN)
             .arg(XTABLES_LOCK_WAIT.as_secs().to_string())
+            .arg(plan.v4_terminal().target())
+            .arg(plan.v6_terminal().target())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr));
@@ -659,7 +706,7 @@ impl ProxyNetworkNamespace {
         };
         logger.log_line("Bubblewrap: created rootless proxy network namespace supervisor");
 
-        let hosts = match egress.pin() {
+        let hosts = match pin {
             Some(pin) => {
                 let path = state_dir.path().join("hosts");
                 if let Err(error) = write_pinned_hosts(&path, pin) {
@@ -683,6 +730,7 @@ impl ProxyNetworkNamespace {
             pid_writer: Some(pid_writer),
             userns: Some(userns),
             hosts,
+            rule_install_timeout: rule_install_timeout(plan),
         })
     }
 
@@ -767,11 +815,11 @@ impl ProxyNetworkNamespace {
             // every egress rule is installed, so attributing a stall to
             // slirp alone would send the reader to the wrong place.
             "slirp4netns startup and egress rule installation",
-            RULE_INSTALL_TIMEOUT,
+            self.rule_install_timeout,
         )?;
         logger.log_line(
-            "Bubblewrap: slirp4netns configured the private proxy namespace and proxy-only \
-             egress rules are in force",
+            "Bubblewrap: slirp4netns configured the private network namespace and the egress \
+             rules are in force",
         );
         Ok(())
     }
@@ -1974,15 +2022,20 @@ mod tests {
     }
 
     #[test]
-    fn script_accepts_the_proxy_before_dropping() {
-        // iptables is first-match: a DROP appended ahead of the proxy ACCEPT
-        // would black-hole the proxy itself.
-        let accept = script_offset(r#"-p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT"#);
+    fn script_accepts_loopback_before_applying_any_rule() {
+        // iptables is first-match, so the ordering *is* the policy: loopback is
+        // exempted first, the caller's rules are applied in the order the plan
+        // holds them, and only then does the terminal verdict close the chain.
+        // A terminal appended ahead of the loop would black-hole every rule.
         let loopback = script_offset(r#"iptables -A "$chain" -o lo -j ACCEPT"#);
-        let drop = script_offset(r#"iptables -A "$chain" -j DROP"#);
+        let loop_start = script_offset("while IFS=' ' read -r family verdict");
+        let terminal = script_offset(r#"-A "$chain" -j "$v4_terminal""#);
 
-        assert!(loopback < accept, "loopback accept must come first");
-        assert!(accept < drop, "proxy accept must precede the closing drop");
+        assert!(loopback < loop_start, "loopback accept must come first");
+        assert!(
+            loop_start < terminal,
+            "the caller's rules must precede the terminal verdict"
+        );
     }
 
     #[test]
@@ -1999,10 +2052,11 @@ mod tests {
     }
 
     #[test]
-    fn script_does_not_open_dns() {
-        // Deliberate: the proxy resolves on the workload's behalf, so an
-        // unscoped port 53 accept would only be an exfil path. Pinning the full
-        // accept set catches any widening, not just DNS.
+    fn the_script_hardcodes_no_accept_but_loopback() {
+        // Every other accept must come from the plan, which is what makes the
+        // posture auditable in one place. A hardcoded exemption here -- a port
+        // 53 accept being the obvious temptation -- would be invisible to the
+        // rule model and to every policy test written against it.
         let accepts: Vec<String> = normalised_script()
             .lines()
             .filter(|line| line.contains("-j ACCEPT"))
@@ -2013,22 +2067,35 @@ mod tests {
             accepts,
             vec![
                 r#"nsenter --net="$ns" -- iptables -A "$chain" -o lo -j ACCEPT"#,
-                r#"nsenter --net="$ns" -- iptables -A "$chain" -p tcp -d "$proxy_ip" --dport "$proxy_port" -j ACCEPT"#,
                 r#"nsenter --net="$ns" -- ip6tables -A "$chain" -o lo -j ACCEPT"#,
             ],
-            "only loopback and the proxy endpoint may be accepted"
+            "only the sandbox's own loopback may be accepted outside the plan"
         );
     }
 
     #[test]
-    fn script_fails_ipv6_closed() {
-        let v6_drop = script_offset(r#"ip6tables -A "$chain" -j DROP"#);
+    fn the_script_hardcodes_no_destination_of_its_own() {
+        // Destinations reach iptables only through the rules file, whose every
+        // address was re-rendered from a parsed one. A `-d` written into the
+        // script would bypass that and could carry anything.
+        for line in normalised_script().lines() {
+            assert!(
+                !line.contains(" -d ") || line.contains(r#"-d "$address""#),
+                "the script names a destination that did not come from the rules file: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn script_closes_ipv6_on_its_own_terminal() {
+        // v6 gets its own terminal verdict rather than sharing v4's chain, so
+        // a v4-only rule set still closes v6 instead of leaving it open.
+        let v6_terminal = script_offset(r#"ip6tables -A "$chain" -j "$v6_terminal""#);
         let v6_hook = script_offset(r#"ip6tables -A OUTPUT -j "$chain""#);
 
-        assert!(v6_drop < v6_hook, "v6 chain must drop before being hooked");
         assert!(
-            !normalised_script().contains(r#"ip6tables -A "$chain" -p tcp"#),
-            "v6 must not carry a proxy accept"
+            v6_terminal < v6_hook,
+            "the v6 chain must be closed before being hooked"
         );
     }
 
@@ -2265,20 +2332,38 @@ mod tests {
     /// is enough to fail a concurrent launch under `set -e`.
     #[test]
     fn every_rule_command_waits_for_the_xtables_lock() {
-        let rules: Vec<&str> = SUPERVISOR_SCRIPT
+        let code: Vec<&str> = SUPERVISOR_SCRIPT
             .lines()
-            .filter(|line| {
-                let code = line.trim();
-                !code.starts_with('#') && code.contains("tables ")
-            })
+            .map(str::trim)
+            .filter(|line| !line.starts_with('#'))
             .collect();
 
+        // The fixed scaffolding: per family a chain creation, the loopback
+        // exemption, the terminal verdict and the OUTPUT hook. Matched on the
+        // invocation, so the loop's `tool=iptables` assignments do not count.
+        let fixed: Vec<&&str> = code
+            .iter()
+            .filter(|line| line.contains("-- iptables ") || line.contains("-- ip6tables "))
+            .collect();
         assert_eq!(
-            rules.len() as u32,
-            RULE_COMMAND_COUNT,
-            "RULE_COMMAND_COUNT is stale, so the rule-install budget is wrong"
+            fixed.len() as u32,
+            crate::network_rules::BASE_RULE_COMMANDS,
+            "BASE_RULE_COMMANDS is stale, so the rule-install budget is wrong"
         );
-        for rule in rules {
+
+        // The per-rule calls, which reach iptables or ip6tables through the
+        // family the record selects.
+        let dispatched: Vec<&&str> = code
+            .iter()
+            .filter(|line| line.contains(r#"-- "$tool""#))
+            .collect();
+        assert_eq!(
+            dispatched.len(),
+            2,
+            "the rule loop should have exactly a ported and an unported branch"
+        );
+
+        for rule in fixed.into_iter().chain(dispatched) {
             assert!(
                 rule.contains(r#"-w "$lock_wait""#),
                 "rule may fail instantly on a contended host lock: {rule}"
@@ -2290,19 +2375,47 @@ mod tests {
     /// slirp startup and one process launch per rule.
     #[test]
     fn rule_install_budget_covers_every_command_blocking_on_the_lock() {
-        let contended = XTABLES_LOCK_WAIT * RULE_COMMAND_COUNT;
+        for plan in [
+            EgressPlan::for_proxy(Ipv4Addr::new(10, 1, 2, 3), 3128),
+            plan_with_rule_count(0),
+            plan_with_rule_count(25),
+        ] {
+            let contended = XTABLES_LOCK_WAIT * plan.command_count();
+            let budget = rule_install_timeout(&plan);
+            assert!(
+                budget > contended,
+                "a fully contended host would time out before -w could succeed"
+            );
+            assert!(
+                budget - contended >= STARTUP_TIMEOUT,
+                "the budget leaves no room for slirp startup on top of lock contention"
+            );
+            assert!(
+                budget - contended - STARTUP_TIMEOUT
+                    >= Duration::from_secs(plan.command_count() as u64),
+                "the budget leaves no room to spawn one nsenter per rule"
+            );
+        }
+    }
+
+    /// A plan whose rule count is what the test cares about. Sized through the
+    /// public constructor so the count matches what the supervisor installs.
+    fn plan_with_rule_count(count: usize) -> EgressPlan {
+        let mut request = wxc_common::models::ExecutionRequest {
+            schema_version: "0.8.0-alpha".into(),
+            ..Default::default()
+        };
+        request.policy.allowed_hosts = (0..count).map(|n| format!("10.0.0.{n}")).collect();
+        EgressPlan::for_policy(&request).expect("literal addresses must build a plan")
+    }
+
+    /// The budget grows with the rule list, so a large policy is not timed out
+    /// for being large.
+    #[test]
+    fn rule_install_budget_grows_with_the_rule_list() {
         assert!(
-            RULE_INSTALL_TIMEOUT > contended,
-            "a fully contended host would time out before -w could succeed"
-        );
-        assert!(
-            RULE_INSTALL_TIMEOUT - contended >= STARTUP_TIMEOUT,
-            "the budget leaves no room for slirp startup on top of lock contention"
-        );
-        assert!(
-            RULE_INSTALL_TIMEOUT - contended - STARTUP_TIMEOUT
-                >= Duration::from_secs(RULE_COMMAND_COUNT as u64),
-            "the budget leaves no room to spawn one nsenter per rule"
+            rule_install_timeout(&plan_with_rule_count(50))
+                > rule_install_timeout(&plan_with_rule_count(1))
         );
     }
 
@@ -2479,6 +2592,7 @@ mod tests {
 count=$(cat "$MXC_TEST_COUNT" 2>/dev/null || echo 0)
 count=$((count + 1))
 printf '%s' "$count" > "$MXC_TEST_COUNT"
+printf '%s\n' "$*" >> "$MXC_TEST_ARGS"
 if [ "${MXC_TEST_FAIL_AT:-0}" = "$count" ]; then
     echo "fake nsenter: forced failure on rule $count" >&2
     exit 1
@@ -2527,6 +2641,31 @@ exec sleep 30
         /// Whether the supervisor told the parent the sandbox is enforced.
         fn signalled_ready(&self) -> bool {
             self.state_dir().join("slirp.ready").exists()
+        }
+
+        /// The argument vector of each `nsenter` call, in the order made.
+        ///
+        /// The count alone cannot distinguish a correct chain from one whose
+        /// rules carry the wrong address, verdict or order, so the arguments
+        /// that actually reached iptables are what the policy tests assert on.
+        fn rule_log(&self) -> Vec<String> {
+            fs::read_to_string(self.dir.path().join("rules.args"))
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+
+        /// The `-A <chain>` rules, stripped to the part that expresses policy.
+        fn chain_rules(&self) -> Vec<String> {
+            self.rule_log()
+                .into_iter()
+                .filter_map(|line| {
+                    let (tool, rest) = line.split_once(" -w 1 -A mxc-test-chain ")?;
+                    let tool = tool.rsplit(' ').next()?;
+                    Some(format!("{tool} {rest}"))
+                })
+                .collect()
         }
 
         fn stderr(&self) -> String {
@@ -2608,11 +2747,24 @@ exec sleep 30
     }
 
     fn spawn_fake_supervisor(fail_at: Option<u32>, slirp_dies: bool) -> FakeSupervisor {
+        spawn_fake_supervisor_with_plan(
+            &EgressPlan::for_proxy(SLIRP_HOST_GATEWAY_IP, 3128),
+            fail_at,
+            slirp_dies,
+        )
+    }
+
+    fn spawn_fake_supervisor_with_plan(
+        plan: &EgressPlan,
+        fail_at: Option<u32>,
+        slirp_dies: bool,
+    ) -> FakeSupervisor {
         let dir = tempfile::tempdir().expect("tempdir");
         let bin = dir.path().join("bin");
         let state = dir.path().join("state");
         fs::create_dir_all(&bin).expect("bin dir");
         fs::create_dir_all(&state).expect("state dir");
+        fs::write(state.join("egress.rules"), plan.render()).expect("rules file");
         install_stub(&bin.join("nsenter"), FAKE_NSENTER);
         install_stub(&bin.join("slirp4netns"), FAKE_SLIRP);
 
@@ -2631,12 +2783,13 @@ exec sleep 30
         command
             .args(["-c", SUPERVISOR_SCRIPT, "mxc-test-supervisor"])
             .arg(&state)
-            .arg("10.0.2.2")
-            .arg("3128")
             .arg("mxc-test-chain")
             .arg("1")
+            .arg(plan.v4_terminal().target())
+            .arg(plan.v6_terminal().target())
             .env("PATH", path)
             .env("MXC_TEST_COUNT", dir.path().join("rules.count"))
+            .env("MXC_TEST_ARGS", dir.path().join("rules.args"))
             .env("MXC_TEST_SLIRP_PID", dir.path().join("slirp.pid"))
             .env(
                 "MXC_TEST_FAIL_AT",
@@ -2665,22 +2818,43 @@ exec sleep 30
         }
     }
 
-    /// Executing the script also re-checks [`RULE_COMMAND_COUNT`] against the
+    /// Executing the script also re-checks the command count against the
     /// number of commands that actually run, which the text-offset tests can
     /// only approximate.
     #[test]
     fn the_supervisor_signals_readiness_only_after_every_rule_is_installed() {
+        let plan = EgressPlan::for_proxy(SLIRP_HOST_GATEWAY_IP, 3128);
         let mut supervisor = spawn_fake_supervisor(None, false);
         supervisor.publish_sandbox_pid();
         supervisor.wait_until_ready();
 
         assert_eq!(
             supervisor.rule_invocations(),
-            RULE_COMMAND_COUNT,
+            plan.command_count(),
             "readiness was signalled after a different number of rules than the \
              startup budget is sized for; stderr: {}",
             supervisor.stderr()
         );
+    }
+
+    /// A multi-rule policy must install every one of its rules before the
+    /// sandbox is released, not just the fixed scaffolding.
+    #[test]
+    fn a_policy_plan_installs_one_command_per_rule() {
+        for rule_count in [0, 1, 5] {
+            let plan = plan_with_rule_count(rule_count);
+            let mut supervisor = spawn_fake_supervisor_with_plan(&plan, None, false);
+            supervisor.publish_sandbox_pid();
+            supervisor.wait_until_ready();
+
+            assert_eq!(
+                supervisor.rule_invocations(),
+                crate::network_rules::BASE_RULE_COMMANDS + rule_count as u32,
+                "a {rule_count}-rule policy installed the wrong number of commands; \
+                 stderr: {}",
+                supervisor.stderr()
+            );
+        }
     }
 
     /// The fail-closed guarantee of the whole feature: a rule that does not
@@ -2693,8 +2867,11 @@ exec sleep 30
     /// text-matching test above stayed green.
     #[test]
     fn a_failed_rule_kills_the_supervisor_instead_of_signalling_readiness() {
-        for rule in 1..=RULE_COMMAND_COUNT {
-            let mut supervisor = spawn_fake_supervisor(Some(rule), false);
+        // Every position, including the per-rule ones inside the loop: a body
+        // that escapes `set -e` would start an unenforced sandbox.
+        let plan = plan_with_rule_count(3);
+        for rule in 1..=plan.command_count() {
+            let mut supervisor = spawn_fake_supervisor_with_plan(&plan, Some(rule), false);
             supervisor.publish_sandbox_pid();
             let status = supervisor.wait_for_exit();
 
@@ -2714,6 +2891,120 @@ exec sleep 30
                 "rule {rule} failed but the script carried on installing rules"
             );
         }
+    }
+
+    /// The chain the workload actually runs under, for a policy the reviewer
+    /// can read off the config. Ordering is asserted as a whole sequence
+    /// because in a first-match chain a correct set of rules in the wrong order
+    /// is a different policy.
+    #[test]
+    fn a_block_policy_accepts_only_its_allowlist_and_closes_both_families() {
+        let mut request = wxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        request.policy.allowed_hosts = vec!["203.0.113.7".into(), "2001:db8::/32".into()];
+        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+
+        let mut supervisor = spawn_fake_supervisor_with_plan(&plan, None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        assert_eq!(
+            supervisor.chain_rules(),
+            vec![
+                "iptables -o lo -j ACCEPT".to_string(),
+                "ip6tables -o lo -j ACCEPT".to_string(),
+                "iptables -d 203.0.113.7 -j ACCEPT".to_string(),
+                "ip6tables -d 2001:db8::/32 -j ACCEPT".to_string(),
+                "iptables -j DROP".to_string(),
+                "ip6tables -j DROP".to_string(),
+            ],
+            "stderr: {}",
+            supervisor.stderr()
+        );
+    }
+
+    /// D4: an explicit deny beats a broader allow. In an ordered chain that is
+    /// purely a question of which rule is appended first, so it is asserted
+    /// against what reached iptables rather than against the plan alone.
+    #[test]
+    fn an_allow_policy_denies_its_blocklist_before_the_open_terminal() {
+        let mut request = wxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
+        request.policy.blocked_hosts = vec!["198.51.100.0/24".into()];
+        request.policy.allowed_hosts = vec!["198.51.100.9".into()];
+        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+
+        let mut supervisor = spawn_fake_supervisor_with_plan(&plan, None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        let rules = supervisor.chain_rules();
+        let deny = rules
+            .iter()
+            .position(|rule| rule == "iptables -d 198.51.100.0/24 -j DROP")
+            .expect("the deny must be installed");
+        let allow = rules
+            .iter()
+            .position(|rule| rule == "iptables -d 198.51.100.9 -j ACCEPT")
+            .expect("the allow must be installed");
+        let terminal = rules
+            .iter()
+            .position(|rule| rule == "iptables -j ACCEPT")
+            .expect("an allow policy must end in ACCEPT");
+
+        assert!(
+            deny < allow,
+            "the narrower deny must be evaluated first, or it never matches: {rules:?}"
+        );
+        assert!(
+            allow < terminal,
+            "the open terminal must come last: {rules:?}"
+        );
+    }
+
+    /// The proxy posture must be byte-for-byte what it was before the rule list
+    /// generalised it: this path is already reviewed and already shipping.
+    #[test]
+    fn the_proxy_posture_is_unchanged_by_the_rule_list() {
+        let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 1, 2, 3), 3128);
+        let mut supervisor = spawn_fake_supervisor_with_plan(&plan, None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        assert_eq!(
+            supervisor.chain_rules(),
+            vec![
+                "iptables -o lo -j ACCEPT".to_string(),
+                "ip6tables -o lo -j ACCEPT".to_string(),
+                "iptables -p tcp -d 10.1.2.3 --dport 3128 -j ACCEPT".to_string(),
+                "iptables -j DROP".to_string(),
+                "ip6tables -j DROP".to_string(),
+            ],
+            "stderr: {}",
+            supervisor.stderr()
+        );
+    }
+
+    /// An IPv4-only rule set must still close IPv6, or the sandbox keeps a
+    /// silent v6 exit that no rule in the config mentions.
+    #[test]
+    fn a_v4_only_policy_still_closes_ipv6() {
+        let mut request = wxc_common::models::ExecutionRequest::default();
+        request.policy.default_network_policy = wxc_common::models::NetworkPolicy::Block;
+        request.policy.allowed_hosts = vec!["203.0.113.7".into()];
+        let plan = EgressPlan::for_policy(&request).expect("literals must build a plan");
+
+        let mut supervisor = spawn_fake_supervisor_with_plan(&plan, None, false);
+        supervisor.publish_sandbox_pid();
+        supervisor.wait_until_ready();
+
+        assert!(
+            supervisor
+                .chain_rules()
+                .contains(&"ip6tables -j DROP".to_string()),
+            "IPv6 was left open by a v4-only policy: {:?}",
+            supervisor.chain_rules()
+        );
     }
 
     #[test]

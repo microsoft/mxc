@@ -1088,9 +1088,10 @@ fn convert_wire_config(
             }
         }
 
-        // Bubblewrap is unprivileged by design; iptables-based enforcement
-        // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
-        // privilege story. Reject the combination explicitly.
+        // The cooperative env-var proxy enforces hosts at the proxy layer,
+        // which is mutually exclusive with iptables-based enforcement: they are
+        // two different answers to the same question, and honoring both would
+        // mean honoring neither predictably. Rejected at every schema version.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && matches!(
@@ -1100,8 +1101,8 @@ fn convert_wire_config(
         {
             let msg = "Bubblewrap: network.proxy cannot be combined with \
                        network.enforcementMode='firewall' or 'both'. The cooperative \
-                       env-var proxy enforces hosts at the proxy layer; iptables-based \
-                       enforcement requires privilege and is mutually exclusive.";
+                       env-var proxy enforces hosts at the proxy layer, and iptables-based \
+                       enforcement filters by address; the two are mutually exclusive.";
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 

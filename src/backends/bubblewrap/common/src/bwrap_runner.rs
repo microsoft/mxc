@@ -46,7 +46,7 @@ use wxc_common::validator::{validate_common, validate_network_policy_support};
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
-    bwrap_version, proxy_network,
+    bwrap_version, network_rules, proxy_network,
 };
 
 /// Bubblewrap sandbox runner. Uses only shared `ContainerPolicy` fields —
@@ -145,13 +145,29 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
+        // Firewall enforcement builds its chain from the policy's host lists,
+        // and every rule address must be an IP literal or CIDR: the sandbox
+        // resolves DNS itself, so a name can be mapped to an address the chain
+        // never authorized and is therefore unenforceable. Rejecting here
+        // rather than in the parser covers both callers -- `validate` runs
+        // ahead of every `spawn`, while a programmatic `mxc_engine` caller
+        // never passes through the parser at all.
+        let firewall_enforced =
+            ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
+                == ResolvedNetworkMode::FirewallEnforced;
+        if firewall_enforced {
+            if let Err(error) = network_rules::EgressPlan::for_policy(request) {
+                return Err(ScriptResponse::error(&error));
+            }
+        }
+
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
         if let Err(err) = bwrap_version::probe_bwrap() {
             return Err(ScriptResponse::error(&err.to_string()));
         }
-        if proxy_only {
+        if proxy_only || firewall_enforced {
             if let Err(error) = proxy_network::probe_dependencies() {
                 return Err(ScriptResponse::error(&error));
             }
@@ -311,7 +327,32 @@ impl BubblewrapScriptRunner {
             // The workload dials the sandbox-visible address, so that is what
             // the egress rule must open.
             Some(resolved) => {
-                match proxy_network::ProxyNetworkNamespace::start(resolved.egress(), logger) {
+                let egress = resolved.egress();
+                match proxy_network::ProxyNetworkNamespace::start(
+                    &egress.plan(),
+                    egress.pin(),
+                    logger,
+                ) {
+                    Ok(network) => Some(network),
+                    Err(error) => {
+                        proxy.stop(logger);
+                        return Err(ScriptResponse::error(&error));
+                    }
+                }
+            }
+            // Firewall enforcement without a proxy: the same private namespace,
+            // programmed from the policy's host lists instead of a single
+            // endpoint. There is no hostname to pin because rule addresses are
+            // literals and CIDRs only.
+            None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
+                let plan = match network_rules::EgressPlan::for_policy(request) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        proxy.stop(logger);
+                        return Err(ScriptResponse::error(&error));
+                    }
+                };
+                match proxy_network::ProxyNetworkNamespace::start(&plan, None, logger) {
                     Ok(network) => Some(network),
                     Err(error) => {
                         proxy.stop(logger);
@@ -1075,6 +1116,78 @@ mod tests {
             !message.contains("deniedPaths"),
             "an endpoint that needs no pin must not inherit the rejection: {message}"
         );
+    }
+
+    /// A rule address the backend cannot enforce must be refused, not silently
+    /// approximated. `validate` is the enforcement point rather than the parser
+    /// because it runs ahead of every spawn, including the programmatic
+    /// `mxc_engine` path that never sees the parser.
+    #[test]
+    fn validate_rejects_a_hostname_rule_address_at_0_8() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["api.github.com".into()];
+
+        let runner = BubblewrapScriptRunner::new();
+        let message = runner
+            .validate(&req)
+            .err()
+            .map(|err| err.error_message)
+            .expect("a hostname rule address must be rejected");
+
+        assert!(
+            message.contains("api.github.com") && message.contains("not an IP address or CIDR"),
+            "the rejection must name the offending entry and the reason: {message}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_literal_and_cidr_rule_addresses_at_0_8() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = wxc_common::models::NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["203.0.113.7".into(), "10.0.0.0/8".into()];
+        req.policy.blocked_hosts = vec!["2001:db8::/32".into()];
+
+        let runner = BubblewrapScriptRunner::new();
+        let message = runner
+            .validate(&req)
+            .err()
+            .map(|err| err.error_message)
+            .unwrap_or_default();
+
+        assert!(
+            !message.contains("not an IP address or CIDR"),
+            "literals and CIDRs must be accepted: {message}"
+        );
+    }
+
+    /// The 0.8 gate must not reach back to callers already running on 0.6/0.7,
+    /// whose host lists are hostnames by construction. Their runs still enforce
+    /// nothing -- that is the pre-existing behavior this change deliberately
+    /// leaves alone rather than the behavior it introduces.
+    #[test]
+    fn validate_leaves_a_pre_0_8_hostname_rule_address_untouched() {
+        for version in ["0.6.0-alpha", "0.7.0-alpha"] {
+            let mut req = base_request();
+            req.schema_version = version.into();
+            req.policy.network_enforcement_mode =
+                wxc_common::models::NetworkEnforcementMode::Firewall;
+            req.policy.allowed_hosts = vec!["api.github.com".into()];
+
+            let runner = BubblewrapScriptRunner::new();
+            let message = runner
+                .validate(&req)
+                .err()
+                .map(|err| err.error_message)
+                .unwrap_or_default();
+
+            assert!(
+                !message.contains("not an IP address or CIDR"),
+                "schema {version} must keep parsing hostname rule addresses: {message}"
+            );
+        }
     }
 
     /// Legacy proxy mode shares the host's network, never translates the
