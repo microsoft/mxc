@@ -892,8 +892,8 @@ impl BaseContainerRunner {
     /// A successful support query identifies the capability-aware OS contract:
     /// with `SANDBOX_CAP_NETWORK_PROXY` clear, proxy is unavailable; with it
     /// set, proxy requires `allowed_appcontainer_peer` and an AppContainer-hosted
-    /// proxy. Identity-scoped schema 0.8 requests use that contract. Query-less
-    /// builds retain the older identity-less SBOX proxy behavior.
+    /// proxy. Identity-scoped proxy requests use that contract. Query-less builds
+    /// retain the older identity-less SBOX proxy behavior.
     fn legacy_sbox_compatible_with_request(
         request: &ExecutionRequest,
         queried_capabilities: Option<u64>,
@@ -2653,7 +2653,7 @@ impl SandboxBackend for BaseContainerRunner {
         {
             return Err(ScriptResponse::error(
                 "network.ingress.hostLoopback='allow' is currently supported only for the \
-                 schema 0.8 loopback proxy path",
+                 runtime loopback proxy path",
             ));
         }
         if use_process_security_environment && !capture_denials {
