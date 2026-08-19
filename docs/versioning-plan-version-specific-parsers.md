@@ -360,8 +360,8 @@ Status:
 - **Phase 5B** — one-shot development adapter, stacked on 5A in PR #910
 - **Phase 5C** — phase discriminator and state-aware development contracts,
   complete and under review in PR #929
-- **Phase 5D** — state-aware adapter and wire-equivalence tests, in progress on
-  `user/gudge/version_specific_config_parsers_phase5d`
+- **Phase 5D** — state-aware adapter and wire-equivalence tests, complete and
+  under review in PR #941
 
 Separate the mutable development contract into:
 
@@ -391,6 +391,7 @@ Add mutable development adapters outside the contract crate:
 
 ```text
 src/core/wxc_common/src/config_contract_adapters/dev/
+  common.rs
   mod.rs
   one_shot.rs
   one_shot_tests/
@@ -399,6 +400,15 @@ src/core/wxc_common/src/config_contract_adapters/dev/
     stable_candidate.rs
     experimental.rs
   state_aware.rs
+  state_aware_tests/
+    mod.rs
+    common.rs
+    start.rs
+    exec.rs
+    stop.rs
+    deprovision.rs
+    provision.rs
+src/core/wxc_common/src/state_aware_wire.rs
 ```
 
 The development adapter follows the mutable `dev` contract rather than an
@@ -418,9 +428,11 @@ This typed path replaces permissive experimental acceptance and eventually
 removes the need to mask the experimental source block before base parsing.
 
 The adapters exhaustively map the one-shot request and each phase-specific
-state-aware request into the existing one-shot and state-aware normalization
-models. Add expected-wire and current-wire equivalence tests for representative
-stable, experimental, and phase-specific development requests.
+state-aware request into the current wire model. State-aware adaptation also
+preserves raw experimental JSON and exact source text in a neutral
+pre-normalization value. Add expected-wire and current-wire equivalence tests
+for representative stable, experimental, and phase-specific development
+requests.
 
 #### Phase 5A: Closed one-shot development contract
 
@@ -609,15 +621,33 @@ fields.
 
 #### Phase 5D: State-aware development adapter and wire equivalence
 
-Add the mutable state-aware adapter outside the contract crate. It exhaustively
-maps every phase root into the current `wire::MxcConfig` shape. Preserve the
-validated raw experimental object and original source text in a neutral
-pre-normalization value.
+Implemented in PR #941.
 
-Add direct expected-wire and current-wire-deserialization equivalence tests for
-every supported backend/phase combination, including optional-field presence,
-telemetry, and required envelope fields. Add focused tests proving the neutral
-adapter output preserves raw experimental data and source text.
+The mutable state-aware adapter exhaustively maps every phase root into the
+current `wire::MxcConfig` shape:
+
+- `StartRequest`, `ExecRequest`, `StopRequest`, and `DeprovisionRequest`
+- Windows Sandbox, IsolationSession, and WSLC provision requests
+- annotations, correlation vectors, process and policy fields, telemetry, and
+  backend-specific provision payloads
+
+The development adapter exposes one crate-visible facade,
+`dev::adapt_request`, returning `AdaptedWireRequest`. One-shot requests contain
+their `wire::MxcConfig` directly. State-aware requests contain a neutral
+`StateAwareWireInput` with:
+
+- the adapted `wire::MxcConfig`
+- the validated raw experimental JSON object
+- the exact decoded source text needed for later positional diagnostics
+
+Internal conversion modules and helpers remain private or `pub(super)`; Phase 7
+consumes only the facade.
+
+Direct expected-wire and current-wire-deserialization equivalence tests cover
+every supported backend/phase combination, optional-field presence, explicit
+false and empty values, telemetry, required envelope fields, and all provision
+backend payloads. Focused facade tests begin with JSON source and prove request
+selection, raw experimental preservation, and exact source-text preservation.
 
 Comprehensive rolling-versus-exact final-model convergence, acceptance mismatch
 classification, and diagnostic parity are explicitly deferred to Phase 7, where
@@ -645,6 +675,10 @@ together.
 
 Add a private exact-contract path in `config_parser` while retaining the current
 path as authoritative.
+
+The exact development path calls `dev::adapt_request`. One-shot results proceed
+through the existing one-shot normalization. State-aware results supply their
+neutral `StateAwareWireInput` to the shared normalizer introduced below.
 
 Extract a behavior-preserving shared state-aware normalization seam from the
 rolling parser when the exact path becomes its second caller. Both parser paths
