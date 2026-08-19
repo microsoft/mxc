@@ -361,7 +361,6 @@ impl BubblewrapScriptRunner {
                     &egress.plan(),
                     egress.pin(),
                     logger,
-                    request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -382,12 +381,7 @@ impl BubblewrapScriptRunner {
                         return Err(ScriptResponse::error(&error));
                     }
                 };
-                match proxy_network::ProxyNetworkNamespace::start(
-                    &plan,
-                    None,
-                    logger,
-                    request.script_timeout,
-                ) {
+                match proxy_network::ProxyNetworkNamespace::start(&plan, None, logger) {
                     Ok(network) => Some(network),
                     Err(error) => {
                         proxy.stop(logger);

@@ -28,7 +28,8 @@ requiring root privileges or a container runtime.
   the backend as unavailable — with the detected version — when the host is
   below that floor.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
-  plus `nsenter`, `iptables`, and `ip6tables` for the egress rules. These are
+  plus `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
+  `ip6tables-restore` for the egress rules. These are
   needed by **both** 0.8 modes that build a private network namespace — proxy
   mode (`network.proxy`) and firewall enforcement
   (`enforcementMode: "firewall"`), which share the same slirp-backed namespace
@@ -373,9 +374,10 @@ request fails if its private namespace cannot be configured.
 
 0. Before anything is launched, `validate` probes the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `nsenter`, `iptables`, and `ip6tables` — so a host that is
+   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
+   `ip6tables-restore` — so a host that is
    missing one fails immediately with a message naming it, rather than partway
-   through supervisor startup. For `iptables`/`ip6tables` presence is not
+   through supervisor startup. For the `iptables` family presence is not
    enough: the probe also reads the backend from the version banner and refuses
    a legacy backend whose `/run/xtables.lock` this user cannot open, because
    the unprivileged supervisor would otherwise die at the first rule. Each
@@ -396,8 +398,12 @@ request fails if its private namespace cannot be configured.
    through slirp's `10.0.2.2` host gateway. Once slirp is up, the supervisor
    programs a default-DROP `MXC_EGRESS` chain into that namespace via
    `nsenter`, permitting only loopback and the proxy endpoint (IPv6 gets a
-   DROP-only chain). The workload is released only after every rule is
-   installed, so it can never run with egress open. A failure to program any
+   DROP-only chain). Each family's whole table — the chain, its rules in
+   order, the terminal verdict and the `OUTPUT` hook — is applied in a single
+   `iptables-restore` transaction, so the cost of a policy does not grow with
+   the caller's host lists and the hook is never live over a half-built chain.
+   The workload is released only after both transactions are
+   applied, so it can never run with egress open. A failure to program any
    rule aborts the supervisor rather than starting an unenforced sandbox.
 
    Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
@@ -580,7 +586,7 @@ resolution.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; the 0.8 private-namespace modes (proxy and firewall enforcement) add a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
 | Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables`, `ip6tables` and their `-restore` counterparts on the `nf_tables` backend |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**

@@ -39,16 +39,6 @@ pub(crate) enum RuleFamily {
     V6,
 }
 
-impl RuleFamily {
-    /// The field the supervisor reads to pick its binary.
-    fn tag(self) -> &'static str {
-        match self {
-            Self::V4 => "4",
-            Self::V6 => "6",
-        }
-    }
-}
-
 /// What the packet filter does with a match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleVerdict {
@@ -244,24 +234,18 @@ pub(crate) struct EgressRule {
 }
 
 impl EgressRule {
-    /// The supervisor's record format: `<family> <verdict> <address> <proto> <port>`.
-    ///
-    /// Five fixed fields keep the script's `read` trivial and its quoting
-    /// total; `-` stands in for an absent protocol/port so the field count
-    /// never varies.
+    /// The rule's `iptables-restore` line, without the leading `-A <chain>`.
     fn render(&self) -> String {
-        let (protocol, port) = match self.port {
-            Some((protocol, port)) => (protocol.to_string(), port.to_string()),
-            None => ("-".to_string(), "-".to_string()),
-        };
-        format!(
-            "{} {} {} {} {}",
-            self.address.family.tag(),
-            self.verdict.target(),
-            self.address.text,
-            protocol,
-            port
-        )
+        match self.port {
+            Some((protocol, port)) => format!(
+                "-p {} -d {} --dport {} -j {}",
+                protocol,
+                self.address.text,
+                port,
+                self.verdict.target()
+            ),
+            None => format!("-d {} -j {}", self.address.text, self.verdict.target()),
+        }
     }
 }
 
@@ -277,10 +261,10 @@ pub(crate) struct EgressPlan {
     v6_terminal: RuleVerdict,
 }
 
-/// `iptables` calls the supervisor makes regardless of rule count: per family a
-/// chain creation, the loopback exemption, the terminal verdict, and the
-/// `OUTPUT` hook.
-pub(crate) const BASE_RULE_COMMANDS: u32 = 8;
+/// `iptables-restore` invocations the supervisor makes: one per family,
+/// whatever the policy contains. The whole table arrives in a single
+/// transaction, so this no longer grows with the rule count.
+pub(crate) const RESTORE_INVOCATIONS: u32 = 2;
 
 impl EgressPlan {
     /// The proxy-only posture: one endpoint reachable, everything else dropped.
@@ -343,30 +327,30 @@ impl EgressPlan {
         })
     }
 
-    pub(crate) fn v4_terminal(&self) -> RuleVerdict {
-        self.v4_terminal
-    }
-
-    pub(crate) fn v6_terminal(&self) -> RuleVerdict {
-        self.v6_terminal
-    }
-
-    /// How many `iptables` calls installing this plan takes, used to size the
-    /// rule-installation budget.
-    pub(crate) fn command_count(&self) -> u32 {
-        BASE_RULE_COMMANDS + self.rules.len() as u32
-    }
-
-    /// The rules file handed to the supervisor, one record per line.
+    /// The `iptables-restore` payload for one family.
     ///
-    /// Empty when the plan is terminal-only; the supervisor's loop then runs
-    /// zero times and the chain is just loopback plus the terminal verdict.
-    pub(crate) fn render(&self) -> String {
-        let mut out = String::new();
-        for rule in &self.rules {
-            out.push_str(&rule.render());
-            out.push('\n');
+    /// The chain body, its terminal verdict and the `OUTPUT` hook arrive in one
+    /// transaction, so the hook is never live over a partially built chain.
+    /// Ordering inside the chain is the policy: the file is written deny-first
+    /// so an explicit deny overrides a broader allow, and loopback is exempted
+    /// ahead of everything because it is the sandbox's own isolated loopback.
+    pub(crate) fn render(&self, family: RuleFamily, chain: &str) -> String {
+        let terminal = match family {
+            RuleFamily::V4 => self.v4_terminal,
+            RuleFamily::V6 => self.v6_terminal,
+        };
+
+        let mut out = format!("*filter\n:{chain} - [0:0]\n-A {chain} -o lo -j ACCEPT\n");
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| rule.address.family == family)
+        {
+            out.push_str(&format!("-A {chain} {}\n", rule.render()));
         }
+        out.push_str(&format!("-A {chain} -j {terminal}\n"));
+        out.push_str(&format!("-A OUTPUT -j {chain}\n"));
+        out.push_str("COMMIT\n");
         out
     }
 }
@@ -570,14 +554,34 @@ mod tests {
         }
     }
 
+    /// The chain's fixed opening: creation plus the loopback exemption.
+    fn head() -> String {
+        "*filter\n:C - [0:0]\n-A C -o lo -j ACCEPT\n".into()
+    }
+
+    /// The chain's fixed close: the terminal verdict and the `OUTPUT` hook.
+    fn tail(terminal: &str) -> String {
+        format!("-A C -j {terminal}\n-A OUTPUT -j C\nCOMMIT\n")
+    }
+
+    fn v4(plan: &EgressPlan) -> String {
+        plan.render(RuleFamily::V4, "C")
+    }
+
+    fn v6(plan: &EgressPlan) -> String {
+        plan.render(RuleFamily::V6, "C")
+    }
+
     #[test]
     fn a_block_policy_closes_both_families_and_accepts_its_allowlist() {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["10.0.0.0/8"], &[]))
             .expect("a CIDR allowlist is enforceable");
 
-        assert_eq!(plan.render(), "4 ACCEPT 10.0.0.0/8 - -\n");
-        assert_eq!(plan.v4_terminal(), RuleVerdict::Drop);
-        assert_eq!(plan.v6_terminal(), RuleVerdict::Drop);
+        assert_eq!(
+            v4(&plan),
+            format!("{}-A C -d 10.0.0.0/8 -j ACCEPT\n{}", head(), tail("DROP"))
+        );
+        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
     }
 
     #[test]
@@ -585,9 +589,11 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &["192.0.2.0/24"]))
             .expect("a CIDR denylist is enforceable");
 
-        assert_eq!(plan.render(), "4 DROP 192.0.2.0/24 - -\n");
-        assert_eq!(plan.v4_terminal(), RuleVerdict::Accept);
-        assert_eq!(plan.v6_terminal(), RuleVerdict::Accept);
+        assert_eq!(
+            v4(&plan),
+            format!("{}-A C -d 192.0.2.0/24 -j DROP\n{}", head(), tail("ACCEPT"))
+        );
+        assert_eq!(v6(&plan), format!("{}{}", head(), tail("ACCEPT")));
     }
 
     /// The reported failure: a mapped `blockedHosts` entry under
@@ -600,8 +606,16 @@ mod tests {
             EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &["::ffff:192.0.2.5"]))
                 .expect("a mapped denylist entry is enforceable");
 
-        assert_eq!(plan.render(), "4 DROP 192.0.2.5 - -\n");
-        assert_eq!(plan.v4_terminal(), RuleVerdict::Accept);
+        assert_eq!(
+            v4(&plan),
+            format!("{}-A C -d 192.0.2.5 -j DROP\n{}", head(), tail("ACCEPT")),
+            "the mapped entry must be programmed on the family that carries it"
+        );
+        assert_eq!(
+            v6(&plan),
+            format!("{}{}", head(), tail("ACCEPT")),
+            "programming it in ip6tables would never match, so the deny would fail open"
+        );
     }
 
     /// D4: an explicit deny overrides a broader allow, which in an ordered
@@ -616,17 +630,29 @@ mod tests {
         .expect("an allow-with-exception policy is enforceable");
 
         assert_eq!(
-            plan.render(),
-            "4 DROP 192.0.2.1 - -\n4 ACCEPT 0.0.0.0/0 - -\n"
+            v4(&plan),
+            format!(
+                "{}-A C -d 192.0.2.1 -j DROP\n-A C -d 0.0.0.0/0 -j ACCEPT\n{}",
+                head(),
+                tail("DROP")
+            )
         );
     }
 
     #[test]
-    fn a_v6_rule_is_tagged_for_ip6tables() {
+    fn a_v6_rule_lands_only_in_the_ip6tables_payload() {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["2001:db8::/32"], &[]))
             .expect("a v6 CIDR is enforceable");
 
-        assert_eq!(plan.render(), "6 ACCEPT 2001:db8::/32 - -\n");
+        assert_eq!(
+            v6(&plan),
+            format!(
+                "{}-A C -d 2001:db8::/32 -j ACCEPT\n{}",
+                head(),
+                tail("DROP")
+            )
+        );
+        assert_eq!(v4(&plan), format!("{}{}", head(), tail("DROP")));
     }
 
     #[test]
@@ -644,35 +670,40 @@ mod tests {
     fn the_proxy_plan_opens_exactly_one_endpoint() {
         let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
 
-        assert_eq!(plan.render(), "4 ACCEPT 10.0.2.2 tcp 3128\n");
-        assert_eq!(plan.v4_terminal(), RuleVerdict::Drop);
-        assert_eq!(plan.v6_terminal(), RuleVerdict::Drop);
-    }
-
-    /// The budget must track the rule list, or a long allowlist would be given
-    /// the same time as a single endpoint.
-    #[test]
-    fn the_command_count_grows_with_the_rule_list() {
         assert_eq!(
-            EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128).command_count(),
-            BASE_RULE_COMMANDS + 1
+            v4(&plan),
+            format!(
+                "{}-A C -p tcp -d 10.0.2.2 --dport 3128 -j ACCEPT\n{}",
+                head(),
+                tail("DROP")
+            )
         );
-
-        let plan = EgressPlan::for_policy(&request(
-            NetworkPolicy::Block,
-            &["10.0.0.0/8", "192.0.2.0/24"],
-            &["203.0.113.7"],
-        ))
-        .expect("a mixed policy is enforceable");
-        assert_eq!(plan.command_count(), BASE_RULE_COMMANDS + 3);
+        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
     }
 
+    /// The hook is the last line of the transaction, so it is only ever
+    /// committed together with the chain it jumps to.
     #[test]
-    fn a_policy_with_no_host_rules_renders_no_records() {
+    fn the_output_hook_is_committed_with_the_chain_it_jumps_to() {
+        for payload in [
+            v4(&EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128)),
+            v6(&EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128)),
+        ] {
+            let lines: Vec<&str> = payload.lines().collect();
+            assert_eq!(lines.first(), Some(&"*filter"));
+            assert_eq!(lines[lines.len() - 2], "-A OUTPUT -j C");
+            assert_eq!(lines.last(), Some(&"COMMIT"));
+        }
+    }
+
+    /// A family with no rules of its own still gets its terminal verdict, so
+    /// IPv6 under an IPv4-only policy fails closed rather than being left open.
+    #[test]
+    fn a_policy_with_no_host_rules_still_closes_both_families() {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &[], &[]))
             .expect("a bare block policy is enforceable");
 
-        assert!(plan.render().is_empty());
-        assert_eq!(plan.command_count(), BASE_RULE_COMMANDS);
+        assert_eq!(v4(&plan), format!("{}{}", head(), tail("DROP")));
+        assert_eq!(v6(&plan), format!("{}{}", head(), tail("DROP")));
     }
 }
