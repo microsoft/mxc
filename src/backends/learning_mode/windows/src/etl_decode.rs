@@ -1926,7 +1926,7 @@ mod tests {
     #[test]
     fn non_actionable_events_are_dropped() {
         let events = vec![
-            kernel_event(14, 1, 1, &[("ObjectType", "\"Section\"")]),
+            kernel_event(14, 1, 1, &[("ObjectType", "\"Process\"")]),
             kernel_event(28, 0, 2, &[("ProcessId", "0x10"), ("Denied", "false")]),
             kernel_event(9999, 1, 3, &[("Foo", "\"bar\"")]),
         ];
@@ -1991,11 +1991,6 @@ mod tests {
     fn output_gap_object_types_are_individually_retained() {
         let cases = [
             ("Directory", r"\BaseNamedObjects"),
-            (
-                "Section",
-                r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-1\cache.db",
-            ),
-            ("SymbolicLink", r"\??\FDC#GENERIC_FLOPPY_DRIVE"),
             (
                 "ALPC Port",
                 r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-1\RPC Control\ubpmtaskhostchannel",
@@ -2072,13 +2067,72 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        assert!(out.denials.is_empty());
+        assert_eq!(out.denials.len(), names.len());
+        assert!(out.denials.iter().all(|denial| {
+            denial.resource_type == ResourceType::Other
+                && denial.access_type == AccessType::Write
+                && names.contains(&denial.resource)
+        }));
         assert_eq!(out.data_loop.signatures.len(), names.len());
         assert!(out.data_loop.signatures.iter().all(|group| {
-            group.signature.reason == DataLoopExclusionReason::UnsupportedObjectType
+            group.signature.reason == DataLoopExclusionReason::CanonicalDenial
                 && group.count == 1
                 && property(&group.signature, "ObjectName").contains("<sha256=")
         }));
+    }
+
+    #[test]
+    fn observed_timer_and_event_28_ui_checks_are_canonical() {
+        let events = vec![
+            kernel_event(
+                14,
+                9576,
+                1,
+                &[
+                    ("Mode", "\"Permissive\""),
+                    ("ObjectType", "\"Timer\""),
+                    (
+                        "ObjectName",
+                        r#""\Sessions\1\BaseNamedObjects\MXC-NS20-Time-test""#,
+                    ),
+                    ("AccessMask", "0x1"),
+                ],
+            ),
+            kernel_event(
+                28,
+                0x1594,
+                2,
+                &[
+                    ("ProcessName", "\"powershell.exe\""),
+                    ("ProcessId", "0x1594"),
+                    ("SequenceNumber", "302"),
+                    ("Category", "2"),
+                    ("Detail", "1"),
+                    ("Denied", "false"),
+                    ("UserSid", "S-1-5-21-1-2-3-1000"),
+                    ("PackageSid", "S-1-15-2-1-2-3-4-5-6-7"),
+                ],
+            ),
+        ];
+
+        let out = resources_from_events(&events);
+
+        assert_eq!(out.denials.len(), 2);
+        assert!(out.denials.iter().any(|denial| {
+            denial.resource == r"\Sessions\1\BaseNamedObjects\MXC-NS20-Time-test"
+                && denial.resource_type == ResourceType::Other
+                && denial.access_type == AccessType::Read
+        }));
+        assert!(out.denials.iter().any(|denial| {
+            denial.resource == "Handles"
+                && denial.resource_type == ResourceType::Ui
+                && denial.access_type == AccessType::Unknown
+        }));
+        assert!(out
+            .data_loop
+            .signatures
+            .iter()
+            .all(|group| { group.signature.reason == DataLoopExclusionReason::CanonicalDenial }));
     }
 
     #[test]

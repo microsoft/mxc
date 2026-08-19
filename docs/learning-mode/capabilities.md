@@ -210,9 +210,12 @@ sandbox policy:
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
-  and the raw resource identifier otherwise. Well-known capability SIDs are
+  and the raw resource identifier otherwise. Named Section, SymbolicLink, and
+  Timer access checks are emitted as `other`. Well-known capability SIDs are
   resolved to their policy name; custom (hashed) capability SIDs that can't be
-  reversed fall back to the `S-1-15-3-…` SID string.
+  reversed fall back to the `S-1-15-3-…` SID string. Event 28 is
+  schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
+  resources instead of treating the package SID as a capability.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
   `accessType` is one of `read`, `write`, `execute`, `unknown`. Capability
   denials are recorded under `block`; current `allow` traces expose capability
@@ -284,8 +287,9 @@ reason and their sanitized event properties:
   `\Device\MountPointManager` is useful Devices-namespace evidence, but it is
   not a directly authorable filesystem grant.
 - `unsupportedObjectType` means the event names a resource outside the
-  canonical policy model. Examples include `\BaseNamedObjects` as a Directory,
-  shared-cache Sections, SymbolicLinks, ALPC Ports such as
+  canonical policy model. Observed Section, SymbolicLink, and Timer checks are
+  canonical `other` resources; remaining examples include
+  `\BaseNamedObjects` as a Directory, ALPC Ports such as
   `ubpmtaskhostchannel`, and RPC Interface GUIDs.
 
 Property values longer than 256 characters retain bounded prefix and suffix

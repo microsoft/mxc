@@ -29,23 +29,23 @@
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
 //!   resource type: `File` → [`ResourceType::File`], `Key` →
 //!   [`ResourceType::Other`] (registry), and an **empty** `ObjectType` is a
-//!   brokered-capability check → [`ResourceType::Capability`]. Any other
-//!   object type (Section, Process, Thread, ...) is dropped (not actionable
-//!   via sandbox policy). The [`AccessType`] is derived from the
+//!   brokered-capability check → [`ResourceType::Capability`]. Named Section,
+//!   SymbolicLink, and Timer objects also map to [`ResourceType::Other`].
+//!   Other object types are dropped until their access-mask vocabulary is
+//!   understood. The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
 //!   learning modes (`block` → `Mode="Normal"`, `allow` →
 //!   `Mode="Permissive"`).
 //! - **27 — `LearningModeViolation`** — UI-surface denials →
 //!   [`ResourceType::Ui`]. Carries no usable access mask, so the access type
 //!   stays [`AccessType::Unknown`].
-//! - **28 — capability denial** — a compact capability-access-manager
-//!   record (`Denied` / `PackageSid` / `ProcessId`), emitted under
-//!   `block`; `allow` folds the same information into the
-//!   empty-`ObjectType` event 14 above. Mapped to [`ResourceType::Capability`].
-//!   The capability *name* is resolved from the `PackageSid` capability SID
-//!   via [`crate::capability_names`] (well-known SID → friendly name; custom
-//!   hashed capabilities fall back to the SID string). Records without a
-//!   decoded identifier are omitted.
+//! - **28 — schema-dependent denial** — either a UI violation carrying
+//!   `Category` / `Detail` / `Denied`, or a compact capability-access-manager
+//!   record (`Denied` / `PackageSid` / `ProcessId`). UI violations map to
+//!   [`ResourceType::Ui`]. Capability records map to
+//!   [`ResourceType::Capability`], with the capability name resolved from the
+//!   capability SID via [`crate::capability_names`] (well-known SID → friendly
+//!   name; custom hashed capabilities fall back to the SID string).
 
 use learning_mode_core::{AccessType, DataLoopExclusionReason, DataLoopProvider, ResourceType};
 use sha2::{Digest, Sha256};
@@ -144,6 +144,9 @@ pub fn extract_denial(
         LEARNING_MODE_VIOLATION_EVENT_ID => {
             build_denial_from_learning_mode(parts, pid, filetime, provider)
         }
+        CAPABILITY_DENIAL_EVENT_ID if is_ui_violation_schema(parts) => {
+            build_denial_from_learning_mode(parts, pid, filetime, provider)
+        }
         CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime, provider),
         _ => Err(DataLoopExclusionReason::UnsupportedEventSchema),
     }
@@ -178,11 +181,25 @@ pub(crate) fn data_loop_classification(
                     ),
                     Some(ResourceType::Other),
                 ),
+                "Section" | "SymbolicLink" | "Timer" => (
+                    Some(
+                        find_prop(&parts.props, "AccessMask")
+                            .and_then(|value| parse_u32(value))
+                            .map(|mask| {
+                                named_object_access_type(object_type.trim_matches('"'), mask)
+                            })
+                            .unwrap_or(AccessType::Unknown),
+                    ),
+                    Some(ResourceType::Other),
+                ),
                 "" => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
                 _ => (None, None),
             }
         }
         LEARNING_MODE_VIOLATION_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Ui)),
+        CAPABILITY_DENIAL_EVENT_ID if is_ui_violation_schema(parts) => {
+            (Some(AccessType::Unknown), Some(ResourceType::Ui))
+        }
         CAPABILITY_DENIAL_EVENT_ID => (Some(AccessType::Unknown), Some(ResourceType::Capability)),
         _ => (None, None),
     }
@@ -215,6 +232,12 @@ pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) ->
     } else {
         Some(header_pid)
     }
+}
+
+fn is_ui_violation_schema(parts: &DecodedEventParts) -> bool {
+    parts.event_id == CAPABILITY_DENIAL_EVENT_ID
+        && find_prop(&parts.props, "Detail").is_some()
+        && find_prop(&parts.props, "Category").is_some()
 }
 
 pub(crate) fn effective_capability_event_pid(process_id: Option<&str>) -> Option<u32> {
@@ -582,9 +605,10 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 ///
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
-/// brokered-capability check, and any other object type (Section, Process,
-/// Thread, ...) is dropped as not actionable via sandbox policy. An absent
-/// `ObjectType` field drops the event.
+/// brokered-capability check, and the observed named-object types `Section`,
+/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Other object
+/// types are dropped until their access-mask vocabulary is understood. An
+/// absent `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
 /// event's `AccessMask` field (the desired access the caller was denied;
@@ -618,6 +642,7 @@ pub fn build_denial_from_access_check(
     let resource_type = match object_type_str {
         "File" => ResourceType::File,
         "Key" => ResourceType::Other,
+        "Section" | "SymbolicLink" | "Timer" => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
         _ => return Err(DataLoopExclusionReason::UnsupportedObjectType),
@@ -651,13 +676,13 @@ pub fn build_denial_from_access_check(
         // classifier over it.
         AccessType::Unknown
     } else {
-        // Registry keys and files share the standard/generic mask bits but
-        // assign different meanings to the object-specific low bits, so the
-        // classifier needs to know which vocabulary applies.
-        let is_registry = object_type_str == "Key";
         find_prop(&parts.props, "AccessMask")
             .and_then(|v| parse_u32(v))
-            .map(|mask| access_type_from_mask(mask, is_registry))
+            .map(|mask| match object_type_str {
+                "Key" => access_type_from_mask(mask, true),
+                "File" => access_type_from_mask(mask, false),
+                _ => named_object_access_type(object_type_str, mask),
+            })
             .unwrap_or(AccessType::Unknown)
     };
 
@@ -923,6 +948,37 @@ fn access_type_from_mask(mask: u32, is_registry: bool) -> AccessType {
     } else if mask & execute_bits != 0 {
         AccessType::Execute
     } else if mask & read_bits != 0 {
+        AccessType::Read
+    } else {
+        AccessType::Unknown
+    }
+}
+
+fn named_object_access_type(object_type: &str, mask: u32) -> AccessType {
+    let (read_bits, write_bits, execute_bits) = match object_type {
+        // ntifs.h SECTION_* rights.
+        "Section" => (0x0001 | 0x0004, 0x0002 | 0x0010, 0x0008 | 0x0020),
+        // ntifs.h SYMBOLIC_LINK_* rights.
+        "SymbolicLink" => (0x0001, 0x0002, 0),
+        // winnt.h TIMER_* rights.
+        "Timer" => (0x0001, 0x0002, 0),
+        _ => return AccessType::Unknown,
+    };
+
+    // Standard and generic rights are object-type independent.
+    const DELETE: u32 = 0x0001_0000;
+    const WRITE_DAC: u32 = 0x0004_0000;
+    const WRITE_OWNER: u32 = 0x0008_0000;
+    const GENERIC_READ: u32 = 0x8000_0000;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const GENERIC_EXECUTE: u32 = 0x2000_0000;
+    const GENERIC_ALL: u32 = 0x1000_0000;
+
+    if mask & (write_bits | DELETE | WRITE_DAC | WRITE_OWNER | GENERIC_WRITE | GENERIC_ALL) != 0 {
+        AccessType::Write
+    } else if mask & (execute_bits | GENERIC_EXECUTE) != 0 {
+        AccessType::Execute
+    } else if mask & (read_bits | GENERIC_READ) != 0 {
         AccessType::Read
     } else {
         AccessType::Unknown
@@ -1203,8 +1259,43 @@ mod tests {
     }
 
     #[test]
-    fn access_check_unknown_object_type_dropped() {
-        let p = parts(14, &[("ObjectType", "\"Section\"")]);
+    fn access_check_observed_named_object_types_are_retained() {
+        for (object_type, object_name, mask, expected_access) in [
+            (
+                "Section",
+                r"\Sessions\1\BaseNamedObjects\shared-section",
+                "0x6",
+                AccessType::Write,
+            ),
+            ("SymbolicLink", r"\??\C:", "0x1", AccessType::Read),
+            (
+                "Timer",
+                r"\Sessions\1\BaseNamedObjects\deadline",
+                "0x1",
+                AccessType::Read,
+            ),
+        ] {
+            let p = parts(
+                14,
+                &[
+                    ("ObjectType", object_type),
+                    ("ObjectName", object_name),
+                    ("AccessMask", mask),
+                ],
+            );
+            let denial = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
+            assert_eq!(denial.resource_type, ResourceType::Other);
+            assert_eq!(denial.object_name, object_name);
+            assert_eq!(denial.access_type, expected_access);
+        }
+    }
+
+    #[test]
+    fn access_check_unrecognized_object_type_is_dropped() {
+        let p = parts(
+            14,
+            &[("ObjectType", "\"Process\""), ("ObjectName", "\"target\"")],
+        );
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
             DataLoopExclusionReason::UnsupportedObjectType
@@ -1340,6 +1431,32 @@ mod tests {
         assert_eq!(ev.pid, 0x1acc);
         assert_eq!(ev.object_name, "internetClient");
         assert_eq!(ev.provider, DataLoopProvider::KernelGeneral);
+    }
+
+    #[test]
+    fn event_28_ui_violation_is_not_misclassified_as_capability() {
+        let p = parts(
+            28,
+            &[
+                ("ProcessName", "\"powershell.exe\""),
+                ("ProcessId", "0x1594"),
+                ("SequenceNumber", "302"),
+                ("Category", "2"),
+                ("Detail", "1"),
+                ("Denied", "false"),
+                ("UserSid", "S-1-5-21-1-2-3-1000"),
+                ("PackageSid", "S-1-15-2-1-2-3-4-5-6-7"),
+            ],
+        );
+
+        let denial = extract_denial(&p, 0x1594, FIXED_FILETIME).unwrap();
+        assert_eq!(denial.resource_type, ResourceType::Ui);
+        assert_eq!(denial.object_name, "Handles");
+        assert_eq!(denial.pid, 0x1594);
+        assert_eq!(
+            data_loop_classification(&p),
+            (Some(AccessType::Unknown), Some(ResourceType::Ui))
+        );
     }
 
     #[test]
