@@ -4,8 +4,10 @@ Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
 #838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
 and under review as GitHub stack #948: Phase 5A merged in PR #909, Phase 5B in
 PR #910, Phase 5C in PR #929, Phase 5D in PR #941, and the Phase 5A review
-follow-up in PR #949. Phases 6-11 remain to be implemented; Phase 6 has a
-detailed design below.
+follow-up in PR #949. Phase 6 is implemented in 11 commits on the local branch
+`user/gudge/version_specific_config_parsers_phase6`, branched from #949; it has
+not been pushed and has no pull request, so it is unreviewed. Phases 7-11 remain
+to be implemented.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -785,7 +787,9 @@ This phase generates development artifacts only; it does not publish or freeze
 those changes update the Rust contract, JSON Schema, and TypeScript oracle
 together.
 
-The detailed design is in the Phase 6 detailed design section below.
+The detailed design, the resolved decisions, and the implementation record are
+in the Phase 6 detailed design section below. Phase 6 is implemented on an
+unpushed local branch and has not been reviewed.
 
 ### Phase 7: Add shadow exact-contract dispatch
 
@@ -1399,12 +1403,15 @@ stable, meaningful fragments where necessary.
 
 ## Phase 6 detailed design
 
-Phase 6 is the next phase to implement. It depends on the complete Phase 5
-stack (PRs #909, #910, #929, #941, and the #949 follow-up) and should be
-branched from #949, the current top of that stack, or from `main` once the
-stack merges. Branching from #941 instead will conflict: #949 rewrites the
-`string_enum!` macros and the enum declarations in `dev/` that Phase 6.1 and
-Phase 6.2 both edit.
+Phase 6 is implemented, but not yet reviewed: it exists as 11 commits on the
+local branch `user/gudge/version_specific_config_parsers_phase6`, branched from
+PR #949 as this section instructed. The branch has not been pushed and no pull
+request has been opened, so nothing here has been through review, and the
+branch predates the current `main`. It will need a rebase once the Phase 5
+stack merges.
+
+It adds versioned development-contract schema and TypeScript generation without
+changing parser dispatch, corpus validation, or runtime behavior.
 
 ### Phase 6 objective
 
@@ -1469,20 +1476,53 @@ value set from the macro's own value table, never from a list written into
 the generator, so that Phase 11's `STABLE_CANDIDATE_CONTAINMENTS` narrowing
 yields the narrower published schema automatically.
 
-### Phase 6 decisions required
+### Phase 6 decisions resolved
 
-Resolve these before implementation; each changes committed paths or output.
+All six decisions were resolved during implementation.
 
-| # | Decision | Recommendation |
+| # | Decision | Resolution |
 | --- | --- | --- |
-| 1 | Path of the contract-generated schema, given that the rolling `schemas/dev/mxc-config.schema.0.8.0-dev.json` already exists | `schemas/dev/mxc-config.schema.0.8.0-alpha.json`, keyed by the exact registry version and visibly distinct from the rolling `-dev` artifact that Phase 9 deletes. Both gates tolerate the second file — `check-schema-versions.js` only tests existence of the `devSchemaFile` path and `validate-configs.js` resolves that same path; neither enumerates `schemas/dev/`. Nothing stops an author pointing `$schema` at the new file and being validated against a contract the parser does not enforce until Phase 9, so say so in the artifact banner |
-| 2 | Path of the versioned TypeScript oracle | `sdk/node/src/generated/v0_8_0_alpha/wire.ts`; confirm it is neither re-exported nor listed in the package `files` array, otherwise place it under `sdk/node/tests/` |
-| 3 | How eight concrete roots become one schema document | A single root with `oneOf` over the eight roots and a shared `definitions` block |
-| 4 | Whether the schema advertises the compatibility aliases `appContainer` and `macos_sandbox` | Yes; the rolling schema omits them and `docs/schema-codegen.md` records that as a known reduction |
-| 5 | Fate of the current `-- <path>` and `-- --ts <path>` argument forms | Replace them and update all call sites in the same commit; do not retain a hidden legacy form |
-| 6 | Whether to accept the authoring-diagnostics cost of a bare `oneOf`, or discriminate with `if`/`then` | Decide deliberately; do not leave it implicit. `oneOf` is correct — every branch pins `version`, each state-aware root pins a distinct `phase`, each provision root pins a distinct `containment`, and every root is closed, so at most one branch can match. But the schema also serves editor validation through `$schema`, and a failing document under an eight-branch `oneOf` produces errors from all eight branches where the rolling single root produced one. Either discriminate on `phase` (and `containment`) with `if`/`then` so only the matching branch is evaluated, at the cost of a more verbose document, or keep `oneOf` and record the regression in `docs/schema-codegen.md` beside the other deliberate differences |
+| 1 | Path of the contract-generated schema | `schemas/dev/mxc-config.schema.0.8.0-alpha.json` |
+| 2 | Path of the versioned TypeScript oracle | `sdk/node/src/generated/v0_8_0_alpha/wire.ts`, not exported |
+| 3 | How eight concrete roots become one schema document | Nested `if`/`then` phase and containment discrimination over one shared `definitions` table, rather than a bare root `oneOf` |
+| 4 | Whether the schema advertises the compatibility aliases | Yes. `appContainer` and `macos_sandbox` are advertised, and each is mutually exclusive with its canonical property |
+| 5 | Fate of the positional and `--ts` argument forms | Replaced by `schema`, `types`, and `versions` subcommands; rolling generation moves to `--legacy-wire` |
+| 6 | Whether to accept the authoring-diagnostics cost of a bare `oneOf` | Not accepted. Nested `if`/`then` was selected specifically to keep editor diagnostics focused on the declared phase and backend |
+
+Decisions 3 and 6 resolved together: the diagnostics concern raised by decision
+6 is what selected the `if`/`then` composition in decision 3, so the plan's
+original `oneOf` recommendation was deliberately not taken.
+
+### Phase 6 as implemented
+
+- `mxc_config_contract` gained optional `schema-gen` support and carries no
+  Schemars dependency in its default build.
+- Constrained primitives, `string_enum!`, and `string_marker!` carry
+  hand-written schema implementations matching their deserialization behavior.
+- `mxc_schema_support` is the dependency-light shared renderer and TypeScript
+  emitter, taking the second of the two placements this section offered.
+- Exact artifact paths and schema identifiers live in the contract registry.
+- `mxc_schema_gen versions --json` drives the development artifact gate.
+- `check-contract-codegen.js` regenerates both exact artifacts, asserts the
+  dispatched root set exactly matches fixture coverage, requires valid and
+  invalid fixtures for every root, and checks focused authoring diagnostics.
+- The exact schema records in its own banner that it is not authoritative until
+  Phase 9.
+- Integer normalization preserves signed and unsigned minimum and maximum
+  bounds after Schemars-specific formats are removed.
+- The TypeScript emitter handles named scalar definitions, literal constants,
+  conditional root unions, externally tagged object unions, and mutually
+  exclusive aliases.
+
+The fixture reorganization this section required was carried out: the gate
+demands valid and invalid fixtures per root, which is what makes the
+one-shot-scoped corpus problem recorded in Phase 6.7 impossible to reintroduce.
 
 ### Phase 6 step breakdown
+
+Steps 6.0 through 6.10 are all implemented on the branch. The text below is
+retained as the design record and as the review checklist for the pull request
+that has yet to be opened.
 
 #### Phase 6.0: Prepare the implementation branch
 
@@ -1809,7 +1849,9 @@ regressions.
 
 Feature-gated Rust tests in the contract crate should cover:
 
-1. All eight roots appear in the root `oneOf`.
+1. All eight roots are reachable through the root discrimination. Written
+   against a bare `oneOf`; decision 3 selected nested `if`/`then`, so this
+   asserts over the conditional structure instead.
 2. No duplicate definition names, since a collision is silently overwritten.
 3. Every root pins `version` to the `0.8.0-alpha` constant.
 4. The one-shot root has no `phase` property; each state-aware root pins
@@ -1841,14 +1883,23 @@ Feature-gated Rust tests in the contract crate should cover:
 
 ### Phase 6 exit criteria
 
+Every exit criterion below is reported satisfied on the implementation branch.
+The rolling and exact generated artifact families coexist and are independently
+gated. Parser dispatch, corpus validation, `schemas/schema-version.json`, the
+published contracts, and runtime behavior are unchanged.
+
+They remain unverified by review: the branch is unpushed and has no pull
+request, so no reviewer, no CI run, and no gate outside the author's machine has
+confirmed them.
+
 - The contract crate builds with and without `schema-gen`, the default build
   carries no Schemars dependency, and the crate's dependency boundary is
   unchanged.
 - The generator produces deterministic `0.8.0-alpha` artifacts from the
   contract crate, and reproduces the rolling artifacts byte-for-byte.
 - Both committed `0.8.0-alpha` artifacts are gated and cannot drift.
-- Every existing valid `0.8.0-alpha` fixture validates against the generated
-  schema and every invalid fixture fails.
+- Every valid `0.8.0-alpha` fixture validates against the generated schema and
+  every invalid fixture fails, per root.
 - The parser, the corpus gate, `schemas/schema-version.json`, the published
   contracts, and all runtime behavior are unchanged.
 
@@ -1866,11 +1917,19 @@ Feature-gated Rust tests in the contract crate should cover:
 
 ## Phase 7 detailed design
 
-Phase 7 may proceed in parallel with Phase 6. It depends on the complete
-Phase 5 stack and should be branched from PR #949, the current top of that
-stack, or from `main` once the stack merges. Its only overlap with Phase 6 is
-`wxc_common/src/lib.rs` and `Cargo.toml`; Phase 6 does not touch
-`config_parser.rs` and Phase 7 does not modify the contract crate.
+Phase 7 is independent of Phase 6 and the two proceeded in parallel. It depends
+on the complete Phase 5 stack and should be branched from PR #949, the current
+top of that stack, or from `main` once the stack merges. Its only overlap with
+Phase 6 is `wxc_common/src/lib.rs` and `Cargo.toml`; Phase 6 does not touch
+`config_parser.rs` and Phase 7 does not modify the contract crate — except for
+the one construction impl required by the decision 3 resolution, which Phase 6
+also does not touch.
+
+Because Phase 6 is now implemented on its own unpushed branch from the same
+base, the remaining question is merge order rather than conflict. Whichever
+lands second rebases; if that is Phase 6, its committed artifacts must be
+regenerated rather than merely replayed, or its drift gate will fail on a
+textually clean rebase.
 
 ### Phase 7 objective
 
