@@ -169,7 +169,10 @@ and its
 [SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
 
 Per-invocation opt-in:
-- One-shot (`Run`/`Spawn`): set `SandboxPolicy.TelemetryEnabled = true`.
+- One-shot (`Run`/`Spawn`): set
+  `SandboxPolicy.Telemetry = new TelemetrySettings { Enabled = true }`.
+  `SandboxPolicy.TelemetryEnabled = true` is an equivalent convenience
+  projection onto that canonical nested setting.
 - State-aware phases: set each phase's `TelemetryEnabled = true` independently.
   `ProvisionResult` contains the sandbox identity used by later phases; no
   telemetry context needs to be forwarded between phases.
