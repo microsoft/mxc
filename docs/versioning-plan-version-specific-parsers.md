@@ -2,9 +2,10 @@
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
 #838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
-and under review as GitHub stack #948: Phase 5A in PR #909, Phase 5B in PR #910,
-Phase 5C in PR #929, and Phase 5D in PR #941. Phases 6-11 remain to be
-implemented; Phase 6 has a detailed design below.
+and under review as GitHub stack #948: Phase 5A merged in PR #909, Phase 5B in
+PR #910, Phase 5C in PR #929, Phase 5D in PR #941, and the Phase 5A review
+follow-up in PR #949. Phases 6-11 remain to be implemented; Phase 6 has a
+detailed design below.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -459,14 +460,20 @@ version and reject unknown fields more consistently than those advisory files.
 
 Status:
 
-- **Phase 5A** — one-shot development contract, complete and under review in
-  PR #909
+- **Phase 5A** — one-shot development contract, merged in PR #909
 - **Phase 5B** — one-shot development adapter, complete and under review in
   PR #910, stacked on 5A
 - **Phase 5C** — phase discriminator and state-aware development contracts,
   complete and under review in PR #929, stacked on 5B
 - **Phase 5D** — state-aware adapter and wire-equivalence tests, complete and
   under review in PR #941, stacked on 5C
+- **Phase 5A follow-up** — string enum contract coverage generated from each
+  `string_enum!` declaration, addressing Phase 5A review feedback after #909
+  merged. Complete and under review in PR #949, stacked on 5D. It rewrites the
+  `string_enum!` macro in the `dev`, `published/v0_6_0_alpha`, and
+  `published/v0_7_0_alpha` modules so canonical, alias, non-string, and
+  externally tagged object coverage derives from the macro's own value table.
+  Phase 6.2 extends those same macros, so it must build on this shape
 
 Separate the mutable development contract into:
 
@@ -1379,8 +1386,11 @@ stable, meaningful fragments where necessary.
 ## Phase 6 detailed design
 
 Phase 6 is the next phase to implement. It depends on the complete Phase 5
-stack (PRs #909, #910, #929, and #941) and should be branched from Phase 5D
-or from `main` once that stack merges.
+stack (PRs #909, #910, #929, #941, and the #949 follow-up) and should be
+branched from #949, the current top of that stack, or from `main` once the
+stack merges. Branching from #941 instead will conflict: #949 rewrites the
+`string_enum!` macros and the enum declarations in `dev/` that Phase 6.1 and
+Phase 6.2 both edit.
 
 ### Phase 6 objective
 
@@ -1462,7 +1472,9 @@ Resolve these before implementation; each changes committed paths or output.
 
 #### Phase 6.0: Prepare the implementation branch
 
-Base the branch on Phase 5D, or on `main` once the Phase 5 stack has merged.
+Base the branch on PR #949, the top of the Phase 5 stack, or on `main` once the
+stack has merged. Do not base it on #941: #949 rewrites the `string_enum!`
+macros and reformats the enum declarations this phase annotates.
 Confirm `cargo test -p mxc_config_contract` is green before adding anything,
 so a later failure is unambiguously attributable to this phase.
 
@@ -1533,6 +1545,15 @@ a feature-gated hand-written implementation.
 Emit the last two from inside the macros under `#[cfg(feature =
 "schema-gen")]`. A variant or marker value must not be addable without
 appearing in the generated artifact.
+
+PR #949 already established this pattern for tests: it derives canonical,
+alias, non-string, and externally tagged object coverage from `string_enum!`'s
+own value table. Schema emission is the second consumer of that table, so
+extend the post-#949 macro rather than reintroducing a parallel value list.
+Only the `dev` copy of the macro needs schema emission in this phase; the
+`published/v0_6_0_alpha` and `published/v0_7_0_alpha` copies are Phase 11 work,
+and the macro is deliberately duplicated per contract module so published
+contracts share no field-bearing machinery.
 
 Suggested commit boundary: `Add contract primitive schema implementations`.
 
