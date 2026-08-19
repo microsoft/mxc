@@ -93,11 +93,30 @@ const BASELINE_RO_BIND_PATHS: &[&str] = &[
 /// Full isolation applies only when the default policy denies outbound, no
 /// per-host rules need iptables on the shared namespace, and no loopback proxy
 /// has to stay reachable.
-fn uses_private_netns(request: &ExecutionRequest, proxy_address: Option<&ProxyAddress>) -> bool {
+fn uses_private_netns(request: &ExecutionRequest, proxy_active: bool) -> bool {
     request.policy.default_network_policy == NetworkPolicy::Block
         && request.policy.allowed_hosts.is_empty()
         && request.policy.blocked_hosts.is_empty()
-        && proxy_address.is_none()
+        && !proxy_active
+}
+
+/// Whether this schema opts into rejecting network elements Bubblewrap cannot
+/// honor. Pre-0.8 callers keep the warning, so existing configs still run.
+fn rejects_unhonorable_network(request: &ExecutionRequest) -> bool {
+    wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
+}
+
+/// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
+/// only for schemas that reject it rather than warn.
+///
+/// Keys off proxy *enablement* rather than a resolved address because
+/// `builtinTestServer` has no address until the proxy starts, which is after
+/// validation.
+pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    local_network_mismatch(request, request.policy.network_proxy.is_enabled())
 }
 
 /// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
@@ -123,19 +142,25 @@ pub fn local_network_diagnostic(
     request: &ExecutionRequest,
     proxy_address: Option<&ProxyAddress>,
 ) -> Option<&'static str> {
+    local_network_mismatch(request, proxy_address.is_some())
+}
+
+/// The mismatch text itself, carrying no severity prefix so it can serve both
+/// the pre-0.8 warning and the 0.8+ rejection.
+fn local_network_mismatch(request: &ExecutionRequest, proxy_active: bool) -> Option<&'static str> {
     match (
         request.policy.allow_local_network,
-        uses_private_netns(request, proxy_address),
+        uses_private_netns(request, proxy_active),
     ) {
         (false, false) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+            "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
              sandbox shares the host network namespace (defaultPolicy='allow' or network.proxy). \
              The sandboxed process can still bind, listen and accept on host-local addresses. For \
              an unreachable sandbox use defaultPolicy='block' with no proxy, which applies \
              --unshare-net.",
         ),
         (true, true) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+            "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
              network namespace. defaultPolicy='block' with no proxy applies --unshare-net, so a \
              listener inside the sandbox is reachable only from within it, never from the host. \
              Use defaultPolicy='allow' to share the host network namespace.",
@@ -197,7 +222,7 @@ pub fn build_args_classified(
     // applies iptables rules separately. When a network proxy is active we
     // also keep the host network namespace so the sandbox can reach the
     // loopback proxy.
-    if uses_private_netns(request, proxy_address) {
+    if uses_private_netns(request, proxy_address.is_some()) {
         args.push("--unshare-net".into());
     }
 
@@ -404,6 +429,51 @@ mod tests {
         r.policy.allow_local_network = true;
         r.policy.default_network_policy = NetworkPolicy::Allow;
         assert!(local_network_diagnostic(&r, None).is_none());
+    }
+
+    // ------- allowLocalNetwork rejection (schema 0.8+) ------------------
+
+    #[test]
+    fn local_network_mismatch_is_not_rejected_before_0_8() {
+        // A 0.7 proxy config shares the host netns and leaves allowLocalNetwork
+        // at its default false. That combination must keep warning rather than
+        // start failing, or every existing 0.6/0.7 proxy caller breaks.
+        let mut r = base_request();
+        r.schema_version = "0.7.0-alpha".into();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 8080));
+        assert!(local_network_diagnostic(&r, r.policy.network_proxy.address.as_ref()).is_some());
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn local_network_mismatch_is_rejected_at_0_8() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+        // The text is reused verbatim as an error, so it must carry no severity.
+        assert!(!msg.contains("WARNING"));
+    }
+
+    #[test]
+    fn honored_local_network_is_not_rejected_at_0_8() {
+        // block + no host rules + no proxy is a private netns, which satisfies
+        // allowLocalNetwork=false; nothing to reject.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn builtin_test_server_counts_as_an_active_proxy_when_rejecting() {
+        // builtinTestServer has no address until the proxy starts, which is
+        // after validation, so the rejection keys off enablement instead.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.network_proxy.builtin_test_server = true;
+        assert!(r.policy.network_proxy.address.is_none());
+        assert!(local_network_rejection(&r).is_some());
     }
 
     #[test]

@@ -180,27 +180,28 @@ reach in. Runs fully unprivileged.
 }
 ```
 
-**Per-host filtering** (`allowedHosts`/`blockedHosts`) — shares the host
-network namespace and applies iptables rules via `NetworkIptablesManager`
-(the same approach used by the LXC backend). **Requires root** for
-iptables.
+**Per-host filtering** (`allowedHosts`/`blockedHosts` with
+`enforcementMode: "firewall"` or `"both"`) — **not supported.**
+`NetworkIptablesManager` scopes its chain to a container's host-side veth so
+it can be hooked into `FORWARD`. Unprivileged Bubblewrap has no veth, so the
+chain is built but never attached: nothing is filtered.
 
-> **IPv4 only.** Host names are resolved to IPv4 addresses only; AAAA
-> records and IPv6 literals are silently dropped because `iptables` (the
-> IPv4 tool) cannot accept IPv6 destinations. A host with only AAAA
-> records is effectively unreachable under firewall mode. For dual-stack
-> hosts, use proxy mode (below) instead.
+> **Schema 0.8+ rejects `enforcementMode: "firewall"` and `"both"`** rather
+> than reporting success on an unenforced policy. Pre-0.8 configs keep their
+> existing behavior (accepted, not enforced) so current callers are
+> unaffected. Use proxy mode below for per-host filtering.
 
 ```json
 {
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"],
-    "blockedHosts": ["evil.example.com"]
+    "allowedHosts": ["api.github.com"]
   }
 }
 ```
+
+The config above is rejected on schema `0.8.0-alpha` and later.
 
 **Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
 shares the host network namespace with no restrictions.
@@ -224,8 +225,9 @@ namespace choice alone decides the outcome:
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 emit a `WARNING:` line to the runner log at preflight rather
-than failing silently. Windows (AppContainer's `privateNetworkClientServer`
+Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later, and emit a
+`WARNING:` line to the runner log at preflight on earlier schemas rather than
+failing silently. Windows (AppContainer's `privateNetworkClientServer`
 capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
 enforce the field at the syscall level; this divergence is Linux-specific.
 
@@ -317,8 +319,9 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
   `network.proxy` so the runner can apply `--unshare-net` instead.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`
-  or `"both"` is rejected at config-parse time because iptables-based
-  enforcement requires root and would defeat the proxy's privilege story.
+  or `"both"` is rejected at config-parse time on every schema version.
+  Firewall mode enforces nothing under unprivileged Bubblewrap (see above),
+  so the proxy is the only working per-host mechanism.
 - **External proxy delegates policy**: when `network.proxy` uses
   `localhost: <port>` or `url: <url>` (not `builtinTestServer`), the
   external proxy is responsible for any host filtering. The runner does
@@ -393,10 +396,10 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
   visible paths are bind-mounted from the host.
-- **Network filtering** — per-host `allowedHosts`/`blockedHosts` is best
+- **Network filtering** — per-host `allowedHosts`/`blockedHosts` must be
   done via the cooperative env-var **network proxy** (no privilege
   required, see above). The legacy iptables path
-  (`network.enforcementMode: "firewall"` / `"both"`) still works but
-  requires root and is mutually exclusive with the proxy.
+  (`network.enforcementMode: "firewall"` / `"both"`) enforces nothing under
+  unprivileged Bubblewrap and is rejected on schema 0.8+.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`

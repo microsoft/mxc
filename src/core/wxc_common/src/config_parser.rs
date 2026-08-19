@@ -294,6 +294,15 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// section or graduating one from experimental.
 const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
 
+/// Whether a schema version opts into the 0.8 network contract, under which a
+/// network element the backend cannot enforce is a hard error rather than a
+/// warning. An absent or unparsable version is treated as pre-0.8.
+pub fn schema_enforces_network_strictly(version: &str) -> bool {
+    semver::Version::parse(version)
+        .map(|parsed| (parsed.major, parsed.minor) >= (0, 8))
+        .unwrap_or(false)
+}
+
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str) -> Result<(), WxcError> {
@@ -1165,9 +1174,31 @@ fn convert_wire_config(
             }
         }
 
-        // Bubblewrap is unprivileged by design; iptables-based enforcement
-        // (firewall / both) requires CAP_NET_ADMIN, which defeats the backend's
-        // privilege story. Reject the combination explicitly.
+        // Bubblewrap's iptables chain is scoped to a container's host-side veth
+        // so it can be hooked into FORWARD. Unprivileged Bubblewrap has no
+        // veth, so `bwrap_runner` calls `allow_missing_veth_interface()` and the
+        // chain is built but never attached: the run reports success having
+        // enforced nothing. Schema 0.8+ fails closed instead. Pre-0.8 keeps its
+        // current behavior so existing configs are unaffected.
+        if containment == ContainmentBackend::Bubblewrap
+            && schema_enforces_network_strictly(&schema_version)
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Bubblewrap: network.enforcementMode='firewall' and 'both' are not \
+                       supported. Unprivileged Bubblewrap has no veth interface to scope the \
+                       iptables chain to, so the rules would never be reached from FORWARD and \
+                       the policy would not be enforced. Use network.proxy with \
+                       enforcementMode='cooperative' instead.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Bubblewrap's cooperative env-var proxy enforces hosts at the proxy
+        // layer, which is mutually exclusive with iptables-based enforcement.
+        // Rejected at every schema version, unlike the guard above.
         if containment == ContainmentBackend::Bubblewrap
             && policy.network_proxy.is_enabled()
             && matches!(
@@ -4080,6 +4111,54 @@ mod tests {
             "unexpected error message: {}",
             msg
         );
+    }
+
+    #[test]
+    fn bubblewrap_firewall_enforcement_is_rejected_at_0_8() {
+        // The chain is built but never hooked into FORWARD (no veth), so the
+        // run would report success having enforced nothing.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("network.enforcementMode='firewall' and 'both' are not supported"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn bubblewrap_firewall_enforcement_is_accepted_before_0_8() {
+        // Pre-0.8 keeps its current behavior; the fail-closed gate is 0.8+ only
+        // so existing 0.6/0.7 callers are unaffected.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "enforcementMode": "firewall"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("0.7 firewall configs must keep parsing");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 
     #[test]

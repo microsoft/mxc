@@ -108,6 +108,14 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
+        // Schema 0.8+ fails closed on a network element Bubblewrap cannot
+        // honor, rather than running more permissive than requested. Pre-0.8
+        // keeps the warning, so existing configs are unaffected. Sits with the
+        // input checks so a host without bwrap is still told what is wrong.
+        if let Some(reason) = bwrap_command::local_network_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
+
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
         // an opaque "unknown option" error.
@@ -217,7 +225,7 @@ impl BubblewrapScriptRunner {
         //    subset classified during symlink resolution (see
         //    [`resolve_denied_paths`]).
         if let Some(warning) = bwrap_command::local_network_diagnostic(request, proxy.address()) {
-            let _ = writeln!(logger, "{}", warning);
+            let _ = writeln!(logger, "WARNING: {}", warning);
         }
         let args = bwrap_command::build_args_classified(request, proxy.address(), denied_files);
         let _ = writeln!(
@@ -736,6 +744,41 @@ mod tests {
 
         let runner = BubblewrapScriptRunner::new();
         assert!(runner.validate(&req).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_an_unhonorable_local_network_request_at_0_8() {
+        // Host rules keep the sandbox on the shared netns, so allowLocalNetwork
+        // =false cannot be honored. Runs ahead of the bwrap probe, so this holds
+        // on hosts without bwrap installed.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.blocked_hosts = vec!["evil.example.com".into()];
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("allowLocalNetwork=false"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_accepts_the_same_request_before_0_8() {
+        // Pre-0.8 warns at run time instead of failing, so existing callers are
+        // unaffected. Tolerant of a host without bwrap: it only rules out the
+        // local-network rejection.
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.blocked_hosts = vec!["evil.example.com".into()];
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert!(
+                !err.error_message.contains("allowLocalNetwork"),
+                "0.7 must not be rejected for allowLocalNetwork: {}",
+                err.error_message
+            );
+        }
     }
 
     #[test]
