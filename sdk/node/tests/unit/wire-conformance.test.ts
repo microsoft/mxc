@@ -4,7 +4,7 @@
 // Wire-type conformance oracle (Phase 2C, option C).
 //
 // The generated module `../../src/generated/wire.ts` is emitted from the Rust
-// wire model (`wxc_common::wire`) by the `mxc_schema_gen --ts` Rust TypeScript
+// wire model (`wxc_common::wire`) by the `mxc_schema_gen types` Rust TypeScript
 // emitter. It is the single source of truth for the wire shape.
 //
 // This file asserts — at COMPILE TIME — that the hand-written public SDK types

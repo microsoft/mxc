@@ -6,7 +6,7 @@
 // be identical (modulo line endings) to the output of the Rust TypeScript
 // emitter (`mxc_schema_gen types --legacy-wire`), so the SDK's drift oracle can
 // never go stale
-// relative to the Rust wire model. The emitter lives in `wxc_common::ts_emit`
+// relative to the Rust wire model. The emitter lives in `mxc_schema_support`
 // and uses no third-party generator.
 //
 // Mirrors `check-schema-codegen.js`. Run from anywhere:

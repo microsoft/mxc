@@ -186,9 +186,17 @@ pub struct Experimental {
 }
 ```
 
-After editing `wire.rs`, regenerate the schema
-(`cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json`)
-— do not hand-edit the generated schema.
+During the exact-parser transition, edit both the rolling `wire.rs` model used
+by the current parser and the closed mutable contract under
+`src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
+
+```text
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.8.0-alpha --out schemas/dev/mxc-config.schema.0.8.0-alpha.json
+```
+
+Also regenerate their TypeScript oracles with the corresponding
+`mxc_schema_gen types` commands. Do not hand-edit generated artifacts.
 
 **In `models.rs`:**
 ```rust

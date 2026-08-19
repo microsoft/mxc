@@ -112,8 +112,10 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/core/wxc_common/src/wire.rs` | Add a `gpuIsolation` field + `GpuIsolation` struct to the wire `Experimental` model (the schema is generated from this) |
-| `schemas/dev/mxc-config.schema.0.8.0-dev.json` | **Generated** — regenerate with `mxc_schema_gen` after editing the wire model; do not hand-edit |
+| `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model used by the current parser until Phase 9 |
+| `src/core/mxc_config_contract/src/dev/` | Add the field to the closed exact mutable development contract |
+| `schemas/dev/mxc-config.schema.0.8.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
+| `schemas/dev/mxc-config.schema.0.8.0-alpha.json` | **Generated exact artifact** — do not hand-edit |
 | `src/core/wxc_common/src/models.rs` | Add `GpuIsolationConfig` struct, add field to `ExperimentalConfig` |
 | `src/core/wxc_common/src/config_parser.rs` | Map the new wire field to the domain struct in `convert_wire_config` |
 | Runner (`appcontainer.rs` or `lxc_runner.rs`) | Feature logic, guarded behind `experimental_enabled` |
@@ -121,11 +123,11 @@ Adding a feature may touch these files:
 
 ## Step 1: Add the field to the wire model (the schema source of truth)
 
-The JSON schema is **generated** from the Rust wire model
-(`src/core/wxc_common/src/wire.rs`); you never hand-edit
-`schemas/dev/mxc-config.schema.0.8.0-dev.json`. Add your feature as a typed field
-on the wire `Experimental` struct (which is intentionally permissive — no
-`deny_unknown_fields` — so in-flux experimental shapes stay forward-compatible):
+Until exact dispatch is authoritative, add the feature to both the rolling
+Rust wire model (`src/core/wxc_common/src/wire.rs`) and the matching closed
+request types under `src/core/mxc_config_contract/src/dev/`. The rolling
+experimental struct remains permissive; the exact development contract and
+every nested experimental object are recursively closed.
 
 ```rust
 // in wire.rs
@@ -153,11 +155,14 @@ The `///` doc comments become schema `description`s and `#[schemars(...)]`
 attributes become constraints. Then regenerate the committed schema:
 
 ```
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.8.0-alpha --out schemas/dev/mxc-config.schema.0.8.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.8.0-alpha --out sdk/node/src/generated/v0_8_0_alpha/wire.ts
 ```
 
-The `check-schema-codegen.js` CI gate fails if the committed schema drifts from
-the wire model, so the regenerate step is mandatory.
+The rolling and exact codegen gates fail if any committed artifact drifts, so
+all applicable regeneration steps are mandatory.
 
 ## Step 2: Add the model struct
 
@@ -324,9 +329,9 @@ The SDK passes `--experimental` to the underlying binary when this is set.
 
 When your experimental feature is ready to ship:
 
-1. Move the field from the wire `Experimental` struct to the top-level
-   `MxcConfig` (e.g., `experimental.gpuIsolation` → top-level `gpuIsolation`),
-   then regenerate the schema with `mxc_schema_gen`
+1. Move the field from `experimental` to the top-level stable-candidate surface
+   in both transitional Rust models, then regenerate all rolling and exact
+   artifacts with `mxc_schema_gen`
 2. Move the struct from `ExperimentalConfig` to `ExecutionRequest`
 3. Map the now-top-level wire field in `convert_wire_config` (and add
    `deny_unknown_fields` to the wire struct so the promoted, stable surface is
@@ -341,7 +346,8 @@ When your experimental feature is ready to ship:
 
 ## Checklist
 
-- [ ] Schema updated in `schemas/dev/mxc-config.schema.X.Y.Z-dev.json`
+- [ ] Rolling and exact development contract types updated
+- [ ] Rolling and exact generated schemas and TypeScript oracles regenerated
 - [ ] Model struct added to `models.rs`
 - [ ] Parsing added to `config_parser.rs` with unit tests
 - [ ] `--experimental` flag wired through (if not already)
