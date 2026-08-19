@@ -18,6 +18,7 @@
         },
         "image": {
           "description": "OCI image reference. The image must provide `/bin/sh`.",
+          "minLength": 1,
           "type": "string"
         },
         "memoryMb": {
