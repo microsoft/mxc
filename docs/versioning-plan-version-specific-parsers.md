@@ -1961,9 +1961,11 @@ Resolve these before implementation; each changes the shape of the work.
 | --- | --- | --- |
 | 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | **Resolved.** The contract is the structural authority and the backend config type is the semantic authority; dispatch keeps reading `experimental_raw`. See "Phase 7 decision 1 resolved" below |
 | 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path — that is, differential testing rather than true shadowing. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. The usual justification for shadowing, discovering inputs the corpus lacks, does not apply: MXC has no live traffic, and its inputs are enumerable. Test-only does not mean the phase has no production diff: see "Phase 7 production surface" below |
-| 3 | How `load_request_from_value` reaches an exact contract | Prefer giving `mxc_engine::policy` a typed builder that constructs the contract request directly, rather than serializing its `Value` to text and re-parsing. A round-trip works and is the cheaper interim answer, but it reintroduces exactly the text-to-value-to-text churn this plan avoids elsewhere. Decide now; Phase 9 depends on it |
+| 3 | How `load_request_from_value` reaches an exact contract | **Resolved.** Construct the declared version's contract root directly in Rust and adapt it, rather than round-tripping JSON. See "Phase 7 decision 3 resolved" below |
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
 | 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
+| 6 | When the script reaches `mxc_engine::policy` | **Resolved.** At build time. `build_request` and `build_request_with_containment` take the script as an argument, so the required `process.commandLine` is satisfied structurally. See "Phase 7 decision 3 resolved" below |
+| 7 | Whether `SandboxRequest::set_script` survives decision 6 | **Open.** Keeping it as a post-build override reintroduces mutation of an already-validated model, which is the pattern decision 6 removes. Removing it slightly widens the `mxc-sdk` API change. `set_experimental` is unaffected either way: it gates execution rather than altering the validated shape |
 
 #### Phase 7 decision 1 resolved: split structural and semantic authority
 
@@ -2056,6 +2058,87 @@ with no normalization — `appId`, `image`, `imageTarPath`. The moment a payload
 field gains defaulting or canonicalization, the two authorities could interpret
 the same bytes differently, and that is the trigger to move to option B.
 
+#### Phase 7 decision 3 resolved: build the declared version's contract root
+
+**Resolution.** `mxc_engine::policy` constructs the contract root for the
+version the policy declares, then reuses the existing per-version adapter to
+reach `wire::MxcConfig` and the normal semantic validation. It does not
+serialize to text, and it does not deserialize a synthesized `Value`. The
+script becomes a build-time argument, so the root's required
+`process.commandLine` is satisfied structurally.
+
+**Why this path is different from every other entry point.** The `Value` this
+caller passes today is entirely synthesized by `build_wire_config` from typed
+Rust — `json!` literals over `SandboxPolicy`, `Containment`, and
+`WslcSection`. No user-authored JSON text exists anywhere on this path, so
+there are no source positions to preserve and nothing is lost by never
+producing text. There is exactly one production caller, at `policy.rs:848`;
+the other occurrence is in `mod tests`.
+
+**Why not deserialize a synthesized `Value` into the version's root.** That
+alternative needs no new construction API and keeps one builder, but it
+reintroduces a version-insensitive builder: a single function emitting a union
+shape whose correctness is delegated to a downstream check. That is
+structurally the pattern this plan exists to remove, even though its failure
+mode is milder. It also surfaces errors as JSON field names for combinations
+the caller expressed as typed values, and it makes "`build_wire_config` never
+emits an explicit `null`" a load-bearing property, because `OptionalField`
+rejects `null`.
+
+**What construction costs.** Less than it first appears. Every contract root
+field is already `pub`, `NonEmptyString::new` is public, and the `True` and
+`string_marker!` types are unit structs. The entire gap is that
+`OptionalField<T>` has no way to build a present value, so this adds one impl:
+
+```rust
+impl<T> From<Option<T>> for OptionalField<T>
+```
+
+The contract crate thereby becomes bidirectional — an input contract that can
+also be constructed. Record that as intentional rather than incidental. A
+feature gate (`build`) would make the boundary louder at the cost of a CI
+matrix entry; it is not required.
+
+**What it buys.** Version expressibility becomes largely a compile-time
+property rather than a runtime check. A `published::v0_6_0_alpha::Request` has
+no `wslc` field, so a WSLC section under a `0.6.0-alpha` policy cannot be
+written at all. The declared version stops being an assertion about the
+document and becomes the thing that selects the type.
+
+**Recurring cost.** One builder per supported version — three today, plus one
+at each publication, frozen alongside the frozen adapter that Phase 11 already
+forks. Phase 10 makes this unavoidable in any design: `0.8.0-alpha` gains
+`network.egress` and `network.ingress` while `0.6` and `0.7` keep the legacy
+shape, so construction must branch on version regardless. The only question is
+whether that branching lives in the type system or in `json!` literals.
+
+**Cross-version combinations need explicit errors.** A `Containment::Wslc`
+under a `0.6.0-alpha` policy must fail with a message naming the requirement,
+for example "wslc requires 0.8.0-alpha", produced at the version match arm.
+
+**The script becomes a build-time argument.** This is the second consumer of
+`allow_missing_command`, and the reason Phase 7.1 is not only a CLI concern.
+Today the builder emits `"commandLine": ""`, parses, and the caller patches the
+parsed model through `set_script` — the same parse-then-patch pattern the CLI
+splice removes. Both FFI call sites already hold the command at that point:
+
+```rust
+let mut request = build_request(&policy, None)?;
+request.set_script(command);
+run(request) / spawn_sandbox(request)
+```
+
+Change surface: the `build_request` and `build_request_with_containment`
+signatures in `mxc-sdk` and `mxc_engine::policy`, the two `mxc_ffi` call sites
+(`lib.rs` and `streaming.rs`), and the rustdoc examples in both crates. The C
+ABI does **not** change — `mxc_run` and `mxc_spawn` already take the policy and
+the command together — so the generated C# bindings, the csbindgen codegen
+gate, and the `ErrorCode` parity gate are untouched. The Node SDK is unaffected
+because it spawns binaries.
+
+With this and the CLI splice in place, `allow_missing_command` has no consumers
+and is deleted outright.
+
 ### Phase 7 production surface
 
 Decision 2 keeps the comparison in tests, but the phase still carries a
@@ -2063,9 +2146,11 @@ production diff. Three changes land in non-test code:
 
 | Change | Kind | Step |
 | --- | --- | --- |
-| Command splice replaces `allow_missing_command` | Behavior-visible, entry point only | 7.1 |
+| Command splice replaces `allow_missing_command` at the CLI entry point | Behavior-visible, entry point only | 7.1 |
+| Script becomes a build-time argument to `build_request`, removing the second `allow_missing_command` consumer | Behavior-visible, `mxc-sdk` and `mxc_ffi` | 7.1 |
 | `normalize_state_aware` extracted from `convert_wire_state_aware` | Behavior-preserving refactor | 7.2 |
 | Exact-contract path added, dead in production | Compiled but uncalled | 7.3 |
+| `From<Option<T>> for OptionalField<T>` added to the contract crate | New construction surface | 7.3 |
 
 Nothing else moves: no call site of the rolling parser changes, `wxc_common`
 grows no public API, and no runtime behavior differs. The seam in particular
@@ -2080,25 +2165,32 @@ Base on PR #949 or on `main` once the Phase 5 stack merges. Confirm
 `cargo test -p wxc_common` is green first, so a later failure is attributable
 to this phase. No source files change in this step.
 
-#### Phase 7.1: Rework the entry-point command splice
+#### Phase 7.1: Remove `allow_missing_command` from both of its consumers
 
-Implement the design recorded under "Entry-point-dependent command
+`allow_missing_command` has two consumers, not one, and both follow the same
+parse-then-patch pattern. Remove the flag, the `command_required` relaxation in
+`convert_wire_config`, and both patch sites.
+
+**The CLI.** Implement the design recorded under "Entry-point-dependent command
 requirements": resolve the CLI command override before the parser runs by
-splicing it into the request source, then parse one complete document.
-
-Remove `LoadOptions::allow_missing_command`, the `command_required`
-relaxation in `convert_wire_config`, and the post-parse
-`apply_command_override` mutation of `ExecutionRequest::script_code`.
+splicing it into the request source, then parse one complete document. This
+replaces the post-parse `apply_command_override` mutation of
+`ExecutionRequest::script_code`.
 
 The ordering obstacle is that `cmdline_from_argv_for_context` needs a
 backend-specific `CommandLineContext`, which today comes from the parsed
 request. Run the splice as a probe-driven pre-parse step, and after the typed
 parse assert that the context used matches the resolved containment.
 
-This step stands alone, changes only the entry point, and is independently
-reviewable. Land it first so the rest of the phase shadows the real shape.
+**The programmatic builder.** `mxc_engine::policy::build_request` and
+`build_request_with_containment` take the script as an argument instead of
+emitting `"commandLine": ""` and relying on the caller's later `set_script`.
+See the decision 3 resolution for the change surface; the C ABI is unaffected.
 
-Suggested commit boundary: `Splice the CLI command override before parsing`.
+Both halves stand alone, change only entry points, and are independently
+reviewable. Land them first so the rest of the phase shadows the real shape.
+
+Suggested commit boundary: one commit per consumer.
 
 #### Phase 7.2: Extract the shared state-aware normalization seam
 
@@ -2163,6 +2255,12 @@ Keep the existing `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
 adapter modules and on `state_aware_wire`. They are still required: an uncalled
 exact path leaves everything it calls dead in production too. Phase 9 removes
 all of them together when the router first calls the exact path.
+
+This step also adds `impl<T> From<Option<T>> for OptionalField<T>` to the
+contract crate and repoints `mxc_engine::policy` at the per-version contract
+builders, per the decision 3 resolution. Unlike the parser path, that builder is
+live in production immediately: it is not a shadow, it is the only way that
+entry point reaches a request.
 
 Suggested commit boundary: `Add the shadow exact-contract parser path`.
 
