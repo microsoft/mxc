@@ -281,6 +281,29 @@ describe('defaultConsentProtocolRunner (real code path)', () => {
     assert.strictEqual(child.killCount, 1);
   });
 
+  it('rejects a status response on the request protocol', async () => {
+    const box = installFakeChildFactory();
+    const promise = requestTelemetryConsent(() => 'yes');
+    const rejection = assert.rejects(promise, /unrecognised telemetry consent output/);
+    await new Promise((r) => setImmediate(r));
+    const child = box.current;
+
+    child.writeStdout(`${JSON.stringify({
+      action: 'status',
+      result: 'status',
+      storedState: 'granted',
+      effectiveState: 'granted',
+      needsPrompt: false,
+      policy: 'allowed',
+    })}\n`);
+
+    await waitFor(() => child.killed);
+    child.emitClose(1);
+    await rejection;
+    assert.strictEqual(child.killCount, 1);
+    assert.deepStrictEqual(child.stdinChunks, []);
+  });
+
   it('does not process queued lines after a protocol failure', async () => {
     const box = installFakeChildFactory();
     const promise = requestTelemetryConsent(() => 'yes');

@@ -129,6 +129,36 @@ describe('telemetry consent', () => {
     assert.strictEqual(needsTelemetryConsentPrompt(), false);
   });
 
+  it('fails status queries closed for mismatched actions and invalid results', async () => {
+    _setTelemetryConsentRunner(() => JSON.stringify({
+      action: 'request',
+      result: 'status',
+      storedState: 'granted',
+      effectiveState: 'granted',
+      needsPrompt: false,
+      policy: 'allowed',
+    }));
+    const syncQuery = queryTelemetryConsent();
+    assert.strictEqual(syncQuery.storedState, 'undetermined');
+    assert.strictEqual(syncQuery.effectiveState, 'undetermined');
+    assert.strictEqual(syncQuery.policy, 'blocked');
+    assert.strictEqual(syncQuery.needsPrompt, false);
+    assert.match(syncQuery.error ?? '', /unrecognised telemetry consent output/);
+
+    _setTelemetryConsentAsyncRunner(async () => JSON.stringify({
+      action: 'status',
+      result: 'withdrawn',
+      storedState: 'granted',
+      effectiveState: 'granted',
+      needsPrompt: false,
+      policy: 'allowed',
+    }));
+    const asyncQuery = await queryTelemetryConsentAsync();
+    assert.strictEqual(asyncQuery.effectiveState, 'undetermined');
+    assert.strictEqual(asyncQuery.policy, 'blocked');
+    assert.strictEqual(asyncQuery.needsPrompt, false);
+  });
+
   it('binds a synchronous presenter decision to the canonical prompt', async () => {
     let observedLocale: string | undefined;
     _setTelemetryConsentProtocolRunner(async (locale, presenter) => {
@@ -231,6 +261,31 @@ describe('telemetry consent', () => {
     assert.strictEqual((await queryTelemetryConsentAsync()).effectiveState, 'granted');
     assert.strictEqual((await withdrawTelemetryConsentAsync()).result, 'withdrawn');
     assert.deepStrictEqual(actions, ['status', 'withdraw']);
+  });
+
+  it('rejects withdrawal responses with mismatched actions or invalid results', async () => {
+    _setTelemetryConsentRunner(() => JSON.stringify({
+      action: 'status',
+      result: 'withdrawn',
+      storedState: 'denied',
+      effectiveState: 'denied',
+      needsPrompt: false,
+      policy: 'blocked',
+    }));
+    assert.throws(withdrawTelemetryConsent, /unrecognised telemetry consent output/);
+
+    _setTelemetryConsentAsyncRunner(async () => JSON.stringify({
+      action: 'withdraw',
+      result: 'status',
+      storedState: 'denied',
+      effectiveState: 'denied',
+      needsPrompt: false,
+      policy: 'blocked',
+    }));
+    await assert.rejects(
+      withdrawTelemetryConsentAsync(),
+      /unrecognised telemetry consent output/,
+    );
   });
 });
 

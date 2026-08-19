@@ -39,6 +39,7 @@ export interface TelemetryConsentQuery {
 
 type ConsentRunner = (args: readonly string[]) => string;
 type ConsentAsyncRunner = (args: readonly string[]) => Promise<string>;
+type ConsentAction = 'request' | 'withdraw' | 'status';
 type ConsentProtocolRunner = (
   locale: string | undefined,
   presenter: TelemetryConsentPresenter,
@@ -193,7 +194,7 @@ async function defaultConsentProtocolRunner(
       if (line.trim() === '') return;
       let response: TelemetryConsentMaintenanceResponse;
       try {
-        response = parseMaintenanceResponse(line);
+        response = parseMaintenanceResponse(line, 'request');
       } catch (error) {
         fail(error);
         return;
@@ -303,7 +304,7 @@ async function defaultConsentProtocolRunner(
         clearProtocolDeadline();
         if (stdout.trim() !== '') {
           try {
-            finalResponse = parseMaintenanceResponse(stdout);
+            finalResponse = parseMaintenanceResponse(stdout, 'request');
           } catch (error) {
             fail(error);
             return;
@@ -407,7 +408,33 @@ function isResult(value: unknown): value is TelemetryConsentResult {
   ].includes(value as string);
 }
 
-function parseMaintenanceResponse(stdout: string): TelemetryConsentMaintenanceResponse {
+function isResultForAction(
+  action: ConsentAction,
+  result: TelemetryConsentResult,
+): boolean {
+  switch (action) {
+    case 'status':
+      return result === 'status' || result === 'notApplicable';
+    case 'withdraw':
+      return result === 'withdrawn' || result === 'notApplicable';
+    case 'request':
+      return [
+        'presentationRequired',
+        'granted',
+        'denied',
+        'dismissed',
+        'alreadyGranted',
+        'policyBlocked',
+        'presentationUnavailable',
+        'notApplicable',
+      ].includes(result);
+  }
+}
+
+function parseMaintenanceResponse(
+  stdout: string,
+  expectedAction: ConsentAction,
+): TelemetryConsentMaintenanceResponse {
   const parsed: unknown = JSON.parse(stdout);
   if (parsed === null || typeof parsed !== 'object') {
     throw new Error('unrecognised telemetry consent output');
@@ -418,6 +445,8 @@ function parseMaintenanceResponse(stdout: string): TelemetryConsentMaintenanceRe
     || !isConsentState(value.effectiveState)
     || !isPolicyState(value.policy)
     || !isResult(value.result)
+    || value.action !== expectedAction
+    || !isResultForAction(expectedAction, value.result)
     || typeof value.needsPrompt !== 'boolean'
   ) {
     throw new Error(`unrecognised telemetry consent output: ${stdout.trim().slice(0, 200)}`);
@@ -504,7 +533,7 @@ export function queryTelemetryConsent(): TelemetryConsentQuery {
   }
   try {
     return consentQueryFromResponse(
-      parseMaintenanceResponse(consentRunner(maintenanceArgs('status'))),
+      parseMaintenanceResponse(consentRunner(maintenanceArgs('status')), 'status'),
     );
   } catch (error) {
     return failedConsentQuery('queryTelemetryConsent', error);
@@ -518,7 +547,7 @@ export async function queryTelemetryConsentAsync(): Promise<TelemetryConsentQuer
   }
   try {
     return consentQueryFromResponse(
-      parseMaintenanceResponse(await consentAsyncRunner(maintenanceArgs('status'))),
+      parseMaintenanceResponse(await consentAsyncRunner(maintenanceArgs('status')), 'status'),
     );
   } catch (error) {
     return failedConsentQuery('queryTelemetryConsentAsync', error);
@@ -568,7 +597,10 @@ export function withdrawTelemetryConsent(): TelemetryConsentOutcome {
   }
   invalidateConvenienceQueryCache();
   try {
-    const outcome = parseMaintenanceResponse(consentRunner(maintenanceArgs('withdraw')));
+    const outcome = parseMaintenanceResponse(
+      consentRunner(maintenanceArgs('withdraw')),
+      'withdraw',
+    );
     invalidateConvenienceQueryCache();
     return outcome;
   } catch (error) {
@@ -588,6 +620,7 @@ export async function withdrawTelemetryConsentAsync(): Promise<TelemetryConsentO
   try {
     return parseMaintenanceResponse(
       await consentAsyncRunner(maintenanceArgs('withdraw')),
+      'withdraw',
     );
   } catch (error) {
     throw new Error(

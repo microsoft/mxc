@@ -236,7 +236,7 @@ public sealed class MxcTelemetryTestsReleaseSafe
                 Assert.Equal(1, presenter(ConsentPromptJson()));
                 return new(
                     (int)ErrorCode.Success,
-                    ConsentOutcomeJson("futureResult", "undetermined", "undetermined", "blocked"));
+                    ConsentOutcomeJson("futureResult", "granted", "granted", "allowed"));
             },
         };
 
@@ -246,7 +246,31 @@ public sealed class MxcTelemetryTestsReleaseSafe
         var outcome = MxcTelemetry.RequestConsent(_ => TelemetryConsentDecision.Yes);
 
         Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
         Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryConsentStatusReason.Unknown, outcome.Reason);
+        Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
+    }
+
+    [Fact]
+    public void WithdrawConsent_UnknownWireResultReturnsFailClosedSentinel()
+    {
+        var native = new FakeTelemetryNativeApi
+        {
+            WithdrawConsentImpl = () => new(
+                (int)ErrorCode.Success,
+                ConsentOutcomeJson("futureResult", "granted", "granted", "allowed")),
+        };
+
+        using var nativeScope = MxcTelemetry.OverrideNativeApiForTesting(native);
+        using var platformScope = MxcTelemetry.OverrideWindowsHostForTesting(true);
+
+        var outcome = MxcTelemetry.WithdrawConsent();
+
+        Assert.Equal(TelemetryConsentActionResult.Unknown, outcome.Result);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.StoredState);
+        Assert.Equal(TelemetryConsentState.Undetermined, outcome.EffectiveState);
+        Assert.Equal(TelemetryConsentStatusReason.Unknown, outcome.Reason);
         Assert.Equal(TelemetryPolicyState.Blocked, outcome.Policy);
     }
 
