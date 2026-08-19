@@ -6,6 +6,7 @@ use serde::{de, Deserialize, Deserializer};
 
 /// Container lifecycle settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lifecycle {
     /// Whether to destroy the container when execution ends.
@@ -18,6 +19,7 @@ pub struct Lifecycle {
 
 /// Process execution settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Process {
     /// The non-empty command line to execute.
@@ -35,6 +37,7 @@ pub struct Process {
 
 /// Filesystem access policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Filesystem {
     /// Optional paths granted read-write access.
@@ -50,6 +53,7 @@ pub struct Filesystem {
 
 /// Operator consent for containment fallback behavior.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Fallback {
     /// Whether the runtime may mutate host filesystem DACLs as a fallback.
@@ -74,6 +78,7 @@ string_enum! {
 
 /// Cross-platform user-interface policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ui {
     /// Whether visible user interface is disabled.
@@ -104,6 +109,7 @@ string_enum! {
 
 /// ProcessContainer-specific user-interface policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainerUi {
     /// Optional desktop-resource isolation level.
@@ -133,6 +139,7 @@ string_enum! {
 
 /// Windows denial-capture settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaptureDenials {
     /// How each ungranted access is handled while it is recorded.
@@ -199,6 +206,7 @@ impl<'de> Deserialize<'de> for ProcessContainerCapability {
 
 /// ProcessContainer-specific settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainer {
     /// Whether least-privilege mode is enabled.
@@ -223,6 +231,7 @@ pub struct ProcessContainer {
 
 /// Linux LXC distribution settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lxc {
     /// The Linux distribution name.
@@ -244,6 +253,7 @@ string_enum! {
 
 /// macOS Seatbelt backend settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seatbelt {
     /// Optional override of the generated sandbox profile.

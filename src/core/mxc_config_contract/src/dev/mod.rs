@@ -32,6 +32,71 @@ macro_rules! string_enum {
             )+
         }
 
+        #[cfg(feature = "schema-gen")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> String {
+                stringify!($name).to_string()
+            }
+
+            fn json_schema(
+                _generator: &mut schemars::gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                use schemars::schema::{
+                    InstanceType, Metadata, Schema, SchemaObject, SingleOrVec,
+                    SubschemaValidation,
+                };
+
+                let branches = vec![
+                    $(
+                        Schema::Object(SchemaObject {
+                            metadata: Some(Box::new(Metadata {
+                                description: Some(
+                                    stringify!($variant).to_string(),
+                                ),
+                                ..Default::default()
+                            })),
+                            instance_type: Some(SingleOrVec::Single(Box::new(
+                                InstanceType::String,
+                            ))),
+                            enum_values: Some(vec![
+                                serde_json::Value::String(
+                                    $canonical.to_string(),
+                                ),
+                            ]),
+                            ..Default::default()
+                        }),
+                        $(
+                            Schema::Object(SchemaObject {
+                                metadata: Some(Box::new(Metadata {
+                                    description: Some(
+                                        stringify!($variant).to_string(),
+                                    ),
+                                    ..Default::default()
+                                })),
+                                instance_type: Some(SingleOrVec::Single(Box::new(
+                                    InstanceType::String,
+                                ))),
+                                enum_values: Some(vec![
+                                    serde_json::Value::String(
+                                        $alias.to_string(),
+                                    ),
+                                ]),
+                                ..Default::default()
+                            }),
+                        )*
+                    )+
+                ];
+
+                Schema::Object(SchemaObject {
+                    subschemas: Some(Box::new(SubschemaValidation {
+                        one_of: Some(branches),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })
+            }
+        }
+
         impl $name {
             const WIRE_VALUES: &'static [&'static str] = &[
                 $(

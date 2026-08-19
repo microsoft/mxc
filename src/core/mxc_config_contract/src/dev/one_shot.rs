@@ -43,6 +43,7 @@ string_enum! {
 
 /// A complete one-shot `0.8.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     /// Optional JSON Schema reference for editor validation.

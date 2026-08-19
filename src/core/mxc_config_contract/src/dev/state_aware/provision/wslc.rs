@@ -13,6 +13,7 @@ string_marker! {
 
 /// WSLC settings accepted during provisioning.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WslcProvision {
     /// Optional container image reference.
@@ -25,6 +26,7 @@ pub struct WslcProvision {
 
 /// State-aware WSLC experimental settings.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StateAwareWslc {
     /// Optional provision-phase settings.
@@ -34,6 +36,7 @@ pub struct StateAwareWslc {
 
 /// Experimental settings accepted by a WSLC provision request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WslcProvisionExperimental {
     /// Optional WSLC backend settings.
@@ -46,6 +49,7 @@ pub struct WslcProvisionExperimental {
 
 /// A complete state-aware `provision` request for wslc
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WslcProvisionRequest {
     /// Optional JSON Schema reference for editor validation.
