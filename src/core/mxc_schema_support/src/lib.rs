@@ -59,6 +59,11 @@ pub fn emit_ts(schema: &Value) -> String {
     ts_emit::emit_ts(schema)
 }
 
+/// Emits the versioned contract TypeScript wire oracle.
+pub fn emit_contract_ts(schema: &Value, version: &str) -> String {
+    ts_emit::emit_contract_ts(schema, version)
+}
+
 fn normalize_integer_formats(value: &mut Value) {
     match value {
         Value::Object(map) => {

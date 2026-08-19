@@ -1565,6 +1565,10 @@ dependencies = [
 name = "mxc_schema_gen"
 version = "0.7.0"
 dependencies = [
+ "clap",
+ "mxc_config_contract",
+ "mxc_schema_support",
+ "serde_json",
  "wxc_common",
 ]
 

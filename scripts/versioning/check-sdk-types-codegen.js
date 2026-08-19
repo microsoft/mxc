@@ -4,7 +4,8 @@
 
 // SDK wire-types codegen gate: the committed `sdk/node/src/generated/wire.ts` must
 // be identical (modulo line endings) to the output of the Rust TypeScript
-// emitter (`mxc_schema_gen --ts`), so the SDK's drift oracle can never go stale
+// emitter (`mxc_schema_gen types --legacy-wire`), so the SDK's drift oracle can
+// never go stale
 // relative to the Rust wire model. The emitter lives in `wxc_common::ts_emit`
 // and uses no third-party generator.
 //
@@ -38,7 +39,17 @@ try {
   // Build + run the emitter. Quiet so only our diagnostics surface.
   execFileSync(
     "cargo",
-    ["run", "-q", "-p", "mxc_schema_gen", "--", "--ts", tmpOut],
+    [
+      "run",
+      "-q",
+      "-p",
+      "mxc_schema_gen",
+      "--",
+      "types",
+      "--legacy-wire",
+      "--out",
+      tmpOut,
+    ],
     { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
   );
   const generated = readFileSync(tmpOut, "utf8");
@@ -58,7 +69,7 @@ try {
         `      committed:  ${JSON.stringify(c[line])}\n` +
         `      generated:  ${JSON.stringify(g[line])}\n` +
         `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
-        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts`
+        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts`
     );
   }
 } finally {
