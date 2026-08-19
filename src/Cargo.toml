@@ -93,6 +93,7 @@ seatbelt_common = { path = "backends/seatbelt/common" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
+schemars = "0.8"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"

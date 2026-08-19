@@ -1493,6 +1493,7 @@ dependencies = [
 name = "mxc_config_contract"
 version = "0.7.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
