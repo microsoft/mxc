@@ -691,7 +691,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
 /// An omitted `containment` (`None`) resolves identically to the abstract
 /// `process` intent: the OS-native process sandbox. Concrete and abstract
 /// variants are mapped by `From<wire::Containment>`.
-fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
+pub(crate) fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     match c {
         Some(c) => c.clone().into(),
         None => wire::Containment::Process.into(),
