@@ -909,7 +909,13 @@ impl BaseContainerRunner {
         // Match legacy AppContainer behaviour: when network enforcement uses
         // capabilities and the default policy is Allow, ensure internetClient
         // is present so the sandboxed process has network access.
-        let mut caps = request.policy.capabilities.clone();
+        let mut caps: Vec<_> = request
+            .policy
+            .capabilities
+            .iter()
+            .filter(|capability| !capability.is_empty())
+            .cloned()
+            .collect();
         if Self::needs_internet_client(request) {
             caps.push("internetClient".to_string());
         }
@@ -3715,6 +3721,22 @@ mod tests {
         assert_eq!(version.major(), 1);
         assert_eq!(version.minor(), 0);
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
+        assert!(spec.disallow_win32k_system_calls());
+        assert_eq!(
+            spec.ui_restrictions(),
+            expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+            })
+        );
         assert_eq!(
             spec.fs_read_write().unwrap().iter().collect::<Vec<_>>(),
             vec!["C:\\temp"]
@@ -3734,6 +3756,18 @@ mod tests {
         assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
         assert!(egress.allow().is_none());
         assert!(egress.deny().is_none());
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_ignores_empty_capability() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capabilities = vec![String::new()];
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(spec.capabilities(), Some("internetClient"));
     }
 
     #[test]
