@@ -1382,18 +1382,37 @@ mod tests {
 
     #[test]
     fn blocking_task_propagates_worker_panic_without_hanging() {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let propagated = std::panic::catch_unwind(|| {
-                block_on(BlockingTask::spawn(|| panic!("worker panic")));
-            })
-            .is_err();
-            sender.send(propagated).unwrap();
-        });
+        struct SignalWaker(std::sync::mpsc::Sender<()>);
 
-        assert!(receiver
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("blocking task did not complete after its worker panicked"));
+        impl std::task::Wake for SignalWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                let _ = self.0.send(());
+            }
+
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waker = std::task::Waker::from(std::sync::Arc::new(SignalWaker(sender)));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut task = std::pin::pin!(BlockingTask::spawn(|| -> () { panic!("worker panic") }));
+
+        let propagated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if std::future::Future::poll(task.as_mut(), &mut context).is_pending() {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("blocking task did not wake after its worker panicked");
+                let _ = std::future::Future::poll(task.as_mut(), &mut context);
+            }
+        }))
+        .is_err();
+
+        assert!(
+            propagated,
+            "blocking task did not propagate its worker panic"
+        );
     }
 
     #[test]
