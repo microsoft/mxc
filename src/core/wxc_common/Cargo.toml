@@ -8,7 +8,7 @@ license.workspace = true
 microvm = ["dep:nanvix_common", "dep:uuid"]
 # Enables JSON Schema generation from the dedicated wire model. Off by default
 # so normal builds don't carry schemars.
-schema-gen = ["dep:schemars"]
+schema-gen = ["dep:mxc_schema_support", "dep:schemars"]
 
 [dependencies]
 serde = { workspace = true }
@@ -24,6 +24,7 @@ schemars = { workspace = true, optional = true }
 nanvix_common = { path = "../../backends/nanvix/common", optional = true }
 uuid = { workspace = true, optional = true }
 mxc_config_contract = { workspace = true }
+mxc_schema_support = { workspace = true, optional = true }
 mxc_telemetry = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]

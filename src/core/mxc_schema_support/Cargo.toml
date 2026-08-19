@@ -1,0 +1,9 @@
+[package]
+name = "mxc_schema_support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared JSON Schema rendering and TypeScript emission for MXC code generation"
+
+[dependencies]
+serde_json.workspace = true

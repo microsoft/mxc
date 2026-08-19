@@ -1569,6 +1569,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxc_schema_support"
+version = "0.7.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "mxc_telemetry"
 version = "0.7.0"
 dependencies = [
@@ -3176,6 +3183,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
+ "mxc_schema_support",
  "mxc_telemetry",
  "nanvix_common",
  "schemars",

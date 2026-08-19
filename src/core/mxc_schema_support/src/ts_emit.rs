@@ -5,7 +5,7 @@
 //!
 //! Walks the generated JSON Schema as a `serde_json::Value` — built from the
 //! `MxcConfig` wire model, the same value that
-//! [`crate::wire::generate_config_schema_json`] renders to JSON text — and emits
+//! [`crate::render_root_ordered`] renders to JSON text — and emits
 //! the SDK's wire TypeScript types, with no third-party generator.
 //! The result is `sdk/node/src/generated/wire.ts`, a drift oracle that the SDK's
 //! hand-written public types are asserted to conform to (and that a CI gate
@@ -45,7 +45,7 @@ const BANNER: &str = "\
 const ROOT_NAME: &str = "MXCConfiguration";
 
 /// Emit the full `wire.ts` content for the given schema root value.
-pub fn emit_ts(schema: &Value) -> String {
+pub(crate) fn emit_ts(schema: &Value) -> String {
     let root = schema.as_object().expect("schema root is an object");
     let mut out = String::from(BANNER);
 
