@@ -44,7 +44,7 @@ pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
 pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
 pub use paired_output::{
     relocate_output_file, relocate_paired_output_files, write_paired_output_files,
-    ExistingOutputPolicy,
+    ExistingOutputPolicy, RelocationOutcome,
 };
 pub use summary::DenialSummary;
 pub use verbose_logging::{

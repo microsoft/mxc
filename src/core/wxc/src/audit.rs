@@ -45,7 +45,7 @@ pub fn finalize(
     context: &AuditContext,
     exe_dir: &Path,
     verbose: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let metadata = response
         .output_metadata
         .as_mut()
@@ -124,7 +124,7 @@ pub fn finalize(
     let final_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&final_denials)
         .map_err(|error| format!("failed to derive audit verbose logging output path: {error}"))?;
     let final_etl = context.log_dir.join("trace.etl");
-    relocate_artifacts(
+    let cleanup_warnings = relocate_artifacts(
         capture,
         &ArtifactRelocation {
             source_denials: &source_denials,
@@ -153,7 +153,7 @@ pub fn finalize(
     )
     .map_err(|error| format!("failed to generate audit compatibility artifacts: {error:#}"))?;
 
-    Ok(())
+    Ok(cleanup_warnings)
 }
 
 fn validate_metadata(
@@ -195,12 +195,18 @@ struct ArtifactRelocation<'a> {
 fn relocate_artifacts(
     capture: &mut wxc_common::models::CaptureDenialsOutput,
     paths: &ArtifactRelocation<'_>,
-    relocate_pair: impl FnOnce(&str, &Path, &Path, &Path, &Path) -> std::io::Result<()>,
-    mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
-) -> Result<(), String> {
+    relocate_pair: impl FnOnce(
+        &str,
+        &Path,
+        &Path,
+        &Path,
+        &Path,
+    ) -> std::io::Result<learning_mode_core::RelocationOutcome>,
+    mut move_file: impl FnMut(&Path, &Path) -> Result<learning_mode_core::RelocationOutcome, String>,
+) -> Result<Vec<String>, String> {
     ensure_destination_available(paths.source_etl, paths.final_etl)?;
 
-    relocate_pair(
+    let pair_outcome = relocate_pair(
         "audit output relocation",
         paths.source_denials,
         paths.source_verbose_logging,
@@ -209,16 +215,21 @@ fn relocate_artifacts(
     )
     .map_err(|error| format!("failed to relocate audit output pair: {error}"))?;
     capture.output_path = paths.final_denials.to_string_lossy().into_owned();
+    let mut cleanup_warnings = pair_outcome.into_cleanup_warnings();
 
     // Retained ETL last: on failure it stays at its source and `etl_path`
     // still points there (unchanged), so each artifact remains individually
     // truthful even though the relocation as a whole failed.
-    move_file(paths.source_etl, paths.final_etl)?;
+    let etl_outcome = move_file(paths.source_etl, paths.final_etl)?;
     capture.etl_path = Some(paths.final_etl.to_string_lossy().into_owned());
-    Ok(())
+    cleanup_warnings.extend(etl_outcome.into_cleanup_warnings());
+    Ok(cleanup_warnings)
 }
 
-fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
+fn move_new_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<learning_mode_core::RelocationOutcome, String> {
     learning_mode_core::relocate_output_file(
         "audit artifact relocation",
         "retained ETL",
@@ -590,7 +601,9 @@ mod tests {
                 if calls == 1 {
                     Err("injected ETL move failure".to_string())
                 } else {
-                    std::fs::rename(source, destination).map_err(|error| error.to_string())
+                    std::fs::rename(source, destination)
+                        .map(|_| learning_mode_core::RelocationOutcome::default())
+                        .map_err(|error| error.to_string())
                 }
             },
         )

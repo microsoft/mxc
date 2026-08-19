@@ -102,6 +102,35 @@ pub enum ExistingOutputPolicy {
     Replace,
 }
 
+/// Result of a successfully committed output relocation.
+///
+/// Source cleanup happens after the destination is committed. Cleanup failures
+/// are warnings rather than relocation failures so callers can publish the
+/// authoritative destination path.
+#[derive(Debug, Default)]
+pub struct RelocationOutcome {
+    cleanup_warnings: Vec<String>,
+}
+
+impl RelocationOutcome {
+    /// Returns warnings produced while removing verified source artifacts.
+    pub fn cleanup_warnings(&self) -> &[String] {
+        &self.cleanup_warnings
+    }
+
+    /// Consumes the outcome and returns its source-cleanup warnings.
+    pub fn into_cleanup_warnings(self) -> Vec<String> {
+        self.cleanup_warnings
+    }
+
+    fn record_cleanup_error(&mut self, kind: &str, path: &Path, error: std::io::Error) {
+        self.cleanup_warnings.push(format!(
+            "relocation committed, but failed to remove {kind} source {}: {error}",
+            path.display()
+        ));
+    }
+}
+
 /// Stages, flushes, and promotes a canonical output and its verbose logging sibling.
 ///
 /// Both documents are serialized before either final path is changed. Replace
@@ -115,7 +144,10 @@ pub fn write_paired_output_files(
     write_canonical: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
     write_verbose_logging: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let _pair_lock = OutputPairLock::acquire(operation, canonical_path)?;
+    let _pair_lock = match policy {
+        ExistingOutputPolicy::CreateNew => None,
+        ExistingOutputPolicy::Replace => Some(OutputPairLock::acquire(operation, canonical_path)?),
+    };
     match policy {
         ExistingOutputPolicy::CreateNew => {
             ensure_output_absent(operation, canonical_path, "canonical")?;
@@ -212,19 +244,20 @@ pub fn write_paired_output_files(
 ///
 /// # Errors
 ///
-/// Returns an error when the source pair cannot be read, the destination pair
-/// cannot be committed atomically, or verified source cleanup fails.
+/// Returns an error when the source pair cannot be read or the destination pair
+/// cannot be committed atomically. Source-cleanup failures are returned as
+/// warnings in [`RelocationOutcome`] after destination commit.
 pub fn relocate_paired_output_files(
     operation: &str,
     canonical_source_path: &Path,
     verbose_logging_source_path: &Path,
     canonical_destination_path: &Path,
     verbose_logging_destination_path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<RelocationOutcome> {
     if canonical_source_path == canonical_destination_path
         && verbose_logging_source_path == verbose_logging_destination_path
     {
-        return Ok(());
+        return Ok(RelocationOutcome::default());
     }
     if canonical_source_path == canonical_destination_path
         || verbose_logging_source_path == verbose_logging_destination_path
@@ -264,14 +297,14 @@ pub fn relocate_paired_output_files(
     let canonical_cleanup =
         remove_promoted_output_if_owned(canonical_source_path, canonical_identity, None)
             .and_then(cleanup_result);
-    match (verbose_logging_cleanup, canonical_cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(first), Err(second)) => Err(std::io::Error::other(format!(
-            "{first}; additionally failed to remove relocated canonical source {}: {second}",
-            canonical_source_path.display()
-        ))),
+    let mut outcome = RelocationOutcome::default();
+    if let Err(error) = verbose_logging_cleanup {
+        outcome.record_cleanup_error("verbose logging", verbose_logging_source_path, error);
     }
+    if let Err(error) = canonical_cleanup {
+        outcome.record_cleanup_error("canonical", canonical_source_path, error);
+    }
+    Ok(outcome)
 }
 
 /// Copies one existing output to a new no-clobber destination, then removes
@@ -279,16 +312,17 @@ pub fn relocate_paired_output_files(
 ///
 /// # Errors
 ///
-/// Returns an error when the source cannot be read, the destination cannot be
-/// committed without clobbering, or verified source cleanup fails.
+/// Returns an error when the source cannot be read or the destination cannot be
+/// committed without clobbering. Source-cleanup failures are returned as
+/// warnings in [`RelocationOutcome`] after destination commit.
 pub fn relocate_output_file(
     operation: &str,
     kind: &str,
     source_path: &Path,
     destination_path: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<RelocationOutcome> {
     if source_path == destination_path {
-        return Ok(());
+        return Ok(RelocationOutcome::default());
     }
 
     let mut source = std::fs::File::open(source_path)?;
@@ -300,7 +334,13 @@ pub fn relocate_output_file(
     })?;
     let promoted = promote_output_file(operation, temp, destination_path, kind)?;
     drop((source, promoted));
-    remove_promoted_output_if_owned(source_path, source_identity, None).and_then(cleanup_result)
+    let mut outcome = RelocationOutcome::default();
+    if let Err(error) =
+        remove_promoted_output_if_owned(source_path, source_identity, None).and_then(cleanup_result)
+    {
+        outcome.record_cleanup_error(kind, source_path, error);
+    }
+    Ok(outcome)
 }
 
 fn cleanup_result(error: Option<std::io::Error>) -> std::io::Result<()> {
@@ -516,12 +556,7 @@ fn remove_promoted_output_if_owned(
     });
     drop(promoted);
     match matches {
-        Ok(true) => Ok(remove_if_present(&quarantine_path).err().map(|error| {
-            std::io::Error::other(format!(
-                "failed to remove quarantined promoted output {}: {error}",
-                quarantine_path.display()
-            ))
-        })),
+        Ok(true) => remove_quarantine_or_restore(final_path, &quarantine_path, remove_if_present),
         Ok(false) => {
             let restore_result = persist_existing_file_noclobber(&quarantine_path, final_path);
             if let Err(restore_error) = restore_result {
@@ -543,6 +578,25 @@ fn remove_promoted_output_if_owned(
             error,
             persist_existing_file_noclobber(&quarantine_path, final_path),
             &quarantine_path,
+            final_path,
+        ),
+    }
+}
+
+fn remove_quarantine_or_restore(
+    final_path: &Path,
+    quarantine_path: &Path,
+    remove: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> std::io::Result<Option<std::io::Error>> {
+    match remove(quarantine_path) {
+        Ok(()) => Ok(None),
+        Err(error) => combine_error_with_restore(
+            std::io::Error::other(format!(
+                "failed to remove quarantined promoted output {}: {error}",
+                quarantine_path.display()
+            )),
+            persist_existing_file_noclobber(quarantine_path, final_path),
+            quarantine_path,
             final_path,
         ),
     }
@@ -901,5 +955,44 @@ mod tests {
         assert!(error.to_string().contains("another process"));
         drop(first);
         OutputPairLock::acquire("test", &canonical_path).unwrap();
+    }
+
+    #[test]
+    fn create_new_pair_does_not_leave_a_lock_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let canonical_path = directory.path().join("denials.json");
+        let verbose_logging_path = directory.path().join("denials.verbose.json");
+
+        write_paired_output_files(
+            "test",
+            &canonical_path,
+            &verbose_logging_path,
+            ExistingOutputPolicy::CreateNew,
+            |writer| writer.write_all(b"canonical"),
+            |writer| writer.write_all(b"verbose"),
+        )
+        .unwrap();
+
+        assert!(!directory.path().join(".denials.json.pair.lock").exists());
+    }
+
+    #[test]
+    fn quarantine_cleanup_failure_restores_the_original_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let final_path = directory.path().join("source.json");
+        let quarantine_path = directory.path().join("source.quarantine");
+        std::fs::write(&quarantine_path, b"source").unwrap();
+
+        let error = remove_quarantine_or_restore(&final_path, &quarantine_path, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected cleanup failure",
+            ))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("injected cleanup failure"));
+        assert_eq!(std::fs::read(final_path).unwrap(), b"source");
+        assert!(!quarantine_path.exists());
     }
 }

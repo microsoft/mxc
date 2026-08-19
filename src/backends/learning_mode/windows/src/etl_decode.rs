@@ -469,10 +469,17 @@ impl<'visitor> Accumulator<'visitor> {
                     Some(learning_mode_core::AccessType::Unknown),
                     Some(learning_mode_core::ResourceType::Ui),
                 ),
-                crate::extractors::CAPABILITY_DENIAL_EVENT_ID => (
-                    Some(learning_mode_core::AccessType::Unknown),
-                    Some(learning_mode_core::ResourceType::Capability),
-                ),
+                crate::extractors::CAPABILITY_DENIAL_EVENT_ID => match error.event_name() {
+                    Some(name) if name.eq_ignore_ascii_case("CapabilityDenial") => (
+                        Some(learning_mode_core::AccessType::Unknown),
+                        Some(learning_mode_core::ResourceType::Capability),
+                    ),
+                    Some(name) if name.eq_ignore_ascii_case("LearningModeViolation") => (
+                        Some(learning_mode_core::AccessType::Unknown),
+                        Some(learning_mode_core::ResourceType::Ui),
+                    ),
+                    _ => (None, None),
+                },
                 _ => (None, None),
             };
             self.record_outcome(category, event_id, reason, pid, classification, properties);
@@ -2584,6 +2591,12 @@ mod tests {
             find_signature(&out.verbose_logging, 28).signature.reason,
             VerboseLoggingExclusionReason::UnsupportedPropertyEncoding
         );
+        assert_eq!(
+            find_signature(&out.verbose_logging, 28)
+                .signature
+                .resource_type,
+            Some(ResourceType::Capability)
+        );
         assert!(out.verbose_logging.signatures.iter().all(|aggregate| {
             aggregate
                 .signature
@@ -2591,5 +2604,48 @@ mod tests {
                 .iter()
                 .all(|(name, _)| name == "EventName")
         }));
+    }
+
+    #[test]
+    fn event_28_decode_failure_classification_requires_a_known_schema_name() {
+        let analyze = |event_name: Option<&str>| {
+            let mut accumulator = Accumulator::analyze();
+            accumulator.record_event_decode_error(
+                crate::extractors::KERNEL_GENERAL_PROVIDER,
+                28,
+                11,
+                tdh_decode::DecodeError::event(
+                    tdh_decode::EventDecodeKind::PayloadMalformed,
+                    "property payload is malformed".to_string(),
+                    event_name.map(str::to_string),
+                ),
+            );
+            accumulator.into_analysis().unwrap()
+        };
+
+        assert_eq!(
+            find_signature(&analyze(Some("CapabilityDenial")).verbose_logging, 28)
+                .signature
+                .resource_type,
+            Some(ResourceType::Capability)
+        );
+        assert_eq!(
+            find_signature(&analyze(Some("LearningModeViolation")).verbose_logging, 28)
+                .signature
+                .resource_type,
+            Some(ResourceType::Ui)
+        );
+        assert_eq!(
+            find_signature(&analyze(Some("UnknownEvent28")).verbose_logging, 28)
+                .signature
+                .resource_type,
+            None
+        );
+        assert_eq!(
+            find_signature(&analyze(None).verbose_logging, 28)
+                .signature
+                .resource_type,
+            None
+        );
     }
 }
