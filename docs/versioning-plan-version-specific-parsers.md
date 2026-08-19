@@ -1972,7 +1972,7 @@ Resolve these before implementation; each changes the shape of the work.
 | 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
 | 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
 | 6 | When the script reaches `mxc_engine::policy` | **Resolved.** At build time. `build_request` and `build_request_with_containment` take the script as an argument, so the required `process.commandLine` is satisfied structurally. See "Phase 7 decision 3 resolved" below |
-| 7 | Whether `SandboxRequest::set_script` survives decision 6 | **Open.** Keeping it as a post-build override reintroduces mutation of an already-validated model, which is the pattern decision 6 removes. Removing it slightly widens the `mxc-sdk` API change. `set_experimental` is unaffected either way: it gates execution rather than altering the validated shape |
+| 7 | Whether `SandboxRequest::set_script` survives decision 6 | **Resolved: remove it.** Keeping it as a post-build override would preserve mutation of an already-validated model, which is the pattern decision 6 exists to remove. Both `mxc_ffi` call sites already hold the command at build time, so neither needs it. `set_experimental` stays: it gates execution rather than altering the validated shape |
 
 #### Phase 7 decision 1 resolved: split structural and semantic authority
 
@@ -2136,12 +2136,18 @@ run(request) / spawn_sandbox(request)
 ```
 
 Change surface: the `build_request` and `build_request_with_containment`
-signatures in `mxc-sdk` and `mxc_engine::policy`, the two `mxc_ffi` call sites
-(`lib.rs` and `streaming.rs`), and the rustdoc examples in both crates. The C
+signatures in `mxc-sdk` and `mxc_engine::policy`, the removal of
+`SandboxRequest::set_script`, the two `mxc_ffi` call sites (`lib.rs` and
+`streaming.rs`), and the rustdoc examples in both crates. The C
 ABI does **not** change — `mxc_run` and `mxc_spawn` already take the policy and
 the command together — so the generated C# bindings, the csbindgen codegen
 gate, and the `ErrorCode` parity gate are untouched. The Node SDK is unaffected
 because it spawns binaries.
+
+`set_script` is removed rather than retained as an override: keeping it would
+preserve exactly the parse-then-patch pattern this decision eliminates, and no
+caller needs it once the script is a build-time argument. `set_experimental`
+stays, because it gates execution rather than altering the validated shape.
 
 With this and the CLI splice in place, `allow_missing_command` has no consumers
 and is deleted outright.
