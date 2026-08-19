@@ -54,7 +54,7 @@ use wxc_common::sandbox_process::{
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
-use wxc_common::validator::validate_network_policy_support;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
@@ -721,6 +721,17 @@ impl AppContainerScriptRunner {
             && !capabilities_to_add.iter().any(|c| c == "internetClient")
         {
             capabilities_to_add.push("internetClient".to_string());
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
+            && !capabilities_to_add
+                .iter()
+                .any(|c| c == "privateNetworkClientServer")
+        {
+            capabilities_to_add.push("privateNetworkClientServer".to_string());
         }
 
         // --- Derive SIDs for each capability ---
@@ -1529,6 +1540,14 @@ impl AppContainerScriptRunner {
 }
 
 impl SandboxBackend for AppContainerScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        NetworkPolicySupport {
+            host_loopback: true,
+            runtime_proxy: true,
+            ..NetworkPolicySupport::NONE
+        }
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
 
@@ -1562,6 +1581,19 @@ impl SandboxBackend for AppContainerScriptRunner {
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
+            ));
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| {
+                ingress.host_loopback == wxc_common::models::NetworkAction::Allow
+            })
+            && !request.policy.network_proxy.is_enabled()
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.hostLoopback='allow' requires a BaseContainer path",
             ));
         }
         Ok(())
@@ -2455,6 +2487,25 @@ mod tests {
             .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_identity_scoped_proxy() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_proxy = wxc_common::models::ProxyConfig {
+            address: Some(wxc_common::models::ProxyAddress::new(
+                "127.0.0.1".to_string(),
+                8080,
+            )),
+            builtin_test_server: false,
+        };
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer cannot enforce proxy peer identity");
+        assert!(error.error_message.contains("allowedProxyPeer"));
     }
 
     #[test]
