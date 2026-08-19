@@ -2264,6 +2264,92 @@ reviewable. Land them first so the rest of the phase shadows the real shape.
 
 Suggested commit boundary: one commit per consumer.
 
+
+##### Phase 7.1.1: The CLI consumer
+
+Grounding facts, verified against the branch: there is exactly one production
+call site (`wxc/src/main.rs:954`); everything from line 1315 onward is
+`mod tests`. There is one post-parse mutation to remove
+(`apply_command_override`, `main.rs:250`). `lxc` and `mxc_darwin` are
+unaffected — they call `load_request`, where the flag is always false, and they
+never mutate `script_code`.
+
+**7.1.1.0 — Characterize the current behavior.** Pin the four behaviors below
+with tests before changing anything. See "Phase 7.1.1.0 tests" for the list and
+placement.
+
+- An override replaces a policy-supplied `commandLine` **and logs**
+  `Overriding policy process.commandLine with CLI command: {cmd}`.
+- An override is accepted for one-shot and for state-aware **exec only**; any
+  other phase errors with "CLI command override is only supported for
+  state-aware exec requests".
+- Error routing differs by request kind: one-shot and decode failures print a
+  stderr diagnostic, state-aware failures print a JSON error envelope on
+  stdout.
+- Quoting is backend-specific across all three `CommandLineContext` values.
+
+**7.1.1.1 — Add pre-parse probes in `wxc_common`.** Three source-text probes,
+each reusing existing machinery rather than introducing a second mapping:
+
+| Probe | Reuses | Purpose |
+| --- | --- | --- |
+| `phase` | the existing `RequestDiscriminator` | one-shot versus state-aware, and which error convention applies |
+| `containment` | `wire::Containment` deserialization, then `From<wire::Containment> for ContainmentBackend` | the one-shot quoting context |
+| `sandboxId` | `parse_sandbox_id_prefix` and `backend_from_prefix` | the state-aware exec quoting context |
+
+Do not hand-roll the containment-to-backend mapping. `map_wire_containment` is
+`Some(c) => c.into()` with `None => Process.into()`, and the `From` impl already
+resolves the abstract `process` and `vm` intents per host, including the
+`appcontainer` and `macos_sandbox` aliases. Reusing both is what removes the
+drift risk that would otherwise justify the post-parse assertion.
+
+**7.1.1.2 — Implement the splice.** A function over decoded JSON text that
+overwrites `process.commandLine`, creating the `process` object when absent —
+both cases exist today — and reports whether the field was previously present
+and non-empty so the override log still fires exactly when it does now. A
+`serde_json::Value` round-trip is the agreed implementation. A non-object
+`process` must error rather than panic.
+
+**7.1.1.3 — Change `LoadOptions`.** Replace `allow_missing_command: bool` with
+the CLI command, and perform decode, probe, splice, and parse inside
+`load_mxc_request_with_options`. The loader is the right home: it already owns
+`decode_request_input_without_logging` and the `ParseError` routing, so placing
+the splice in the driver would duplicate the decode step and re-derive the error
+conventions. Route splice failures by the probed phase, so a state-aware failure
+still produces an envelope. An empty or unconvertible command becomes an
+entry-point error — a genuinely new failure site, since `has_cli_command` makes
+it unreachable today.
+
+**7.1.1.4 — Assert the context after parsing.** Compare the context used for the
+splice against the resolved containment and fail loudly on a mismatch. This is
+the Phase 9 acceptance criterion recorded under "Entry-point-dependent command
+requirements".
+
+**7.1.1.5 — Wire the driver and delete the old path.** Pass the CLI command
+through `LoadOptions`; delete `apply_command_override`, the
+`has_command_override` plumbing, and the `command_override_context_for_state_aware`
+call in the state-aware branch. `command_override_from_cli`'s argv conversion
+moves into the loader rather than dying. In `config_parser`, delete
+`allow_missing_command`, the `command_required` computation, and the parameter
+from `convert_wire_config` and `convert_wire_state_aware`.
+
+`load_request_from_value`'s third parameter belongs to Phase 7.1.2. Either land
+both halves together, or leave that one parameter in place until 7.1.2 removes
+it.
+
+**7.1.1.6 — Tests and verification.** Splice-path equivalents of the existing
+`allow_missing_command` tests, plus the matrix in "Phase 7.1.1.0 tests" re-run
+against the new implementation. Then the standard ladder: `cargo fmt --all --
+--check`, `cargo check --workspace --all-targets`, `cargo clippy -p wxc_common
+-p wxc --all-targets -- -D warnings`, `cargo test -p wxc_common -p wxc`, and a
+manual smoke run with and without a policy command.
+
+Two hazards worth stating. Error routing is behavior, not cosmetics: probing
+`phase` before splicing is what preserves the envelope-on-stdout convention for
+state-aware requests. And the ordering is fixed — probe phase, probe context,
+convert argv, splice, parse — because obtaining the command string before the
+backend is known is the defect this design exists to prevent.
+
 #### Phase 7.2: Extract the shared state-aware normalization seam
 
 `convert_wire_state_aware` currently interleaves three concerns: recovering
@@ -2410,3 +2496,55 @@ break MXC would be shipping without deciding to.
 | `serde_json::to_value` equivalence hides a difference in a skipped field | Audit `ExecutionRequest`'s `Serialize` for `skip_serializing`, or add a test-only `PartialEq` |
 | The experimental authority question is deferred again | It is decision 1 and it gates Phase 7.2; after Phase 9 the asymmetry is permanent |
 | `load_request_from_value` is discovered to have no exact path during Phase 9 | It is decision 3, resolved here rather than at cutover |
+
+### Phase 7.1.1.0 tests
+
+**File:** `src/core/wxc/src/main.rs`, inside the existing `mod tests` (begins at
+line 1315), beside the current CLI command-override tests. That module is the
+only place where the CLI parsing helpers and the loader are both visible, and it
+already provides `parse_cli`, `encoded_policy`, and `test_logger`.
+
+**Write them through a helper, not against the current call shape.** Today the
+behavior is split across two calls that the refactor merges into one:
+
+```rust
+let command_override = command_override_from_cli(&cli, context)?;
+let opts = LoadOptions { is_base64: true, allow_missing_command: command_override.is_some() };
+let mut request = load_mxc_request_with_options(&encoded_policy(policy), &mut logger, opts)?;
+apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+```
+
+Tests written against that shape must be rewritten in the same commit that
+changes the behavior, which defeats the point of writing them first. Introduce
+one helper — resolve a CLI argv plus a policy document into the final
+`ExecutionRequest` and the logger buffer — and have every test assert only on
+those two outputs. The refactor then edits the helper body and leaves the
+assertions untouched.
+
+**Existing coverage, verified.** Already present and worth keeping:
+`cli_command_overrides_policy_command_line_in_resolved_request` (the override
+plus its log line), `windows_sandbox_cli_command_uses_cmd_context`,
+`isolation_session_cli_command_quotes_shell_metacharacters`,
+`wslc_cli_command_uses_posix_shell_quoting`, the five argv-capture tests, and
+`state_aware_command_override_only_applies_to_exec_phase`. The quoting tests
+survive the refactor unchanged, because `command_override_from_cli` and
+`cmdline_from_argv_for_context` both survive it.
+
+**Gaps to close before refactoring.**
+
+| # | Test | Why it is missing today |
+| --- | --- | --- |
+| 1 | One-shot, policy has a command, CLI overrides it | Exists; move onto the helper |
+| 2 | One-shot, policy has **no** command, CLI supplies it, and the override log does **not** fire | The `if !script_code.is_empty()` branch in `apply_command_override` is unasserted |
+| 3 | One-shot, no CLI command, policy command survives untouched | No test pins the no-override path end to end |
+| 4 | State-aware **exec** accepts the override and the command reaches `script_code` | Only the rejection case is covered |
+| 5 | State-aware **non-exec** is rejected, asserting the error is envelope-routed | The existing test calls `command_override_context_for_state_aware` on a hand-built request; routing is decided in `main()` and is untested |
+| 6 | One case per `CommandLineContext`, asserting the final `script_code` rather than the intermediate string | Existing tests assert the intermediate conversion, not the resolved request |
+| 7 | Negative: empty CLI command, non-object `process`, malformed JSON | Empty command is unreachable today via `has_cli_command`; it becomes reachable in 7.1.1.3 |
+
+Test 5 is the highest value of these. Error routing is the behavior most likely
+to regress silently, because 7.1.1.3 moves that decision from `main()` into the
+loader, and `main()` cannot be called from a test.
+
+The `allow_missing_command` tests already in `config_parser.rs` characterize the
+loader half and are replaced, not preserved, by 7.1.1.6.
