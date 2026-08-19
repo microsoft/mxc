@@ -1849,3 +1849,198 @@ Feature-gated Rust tests in the contract crate should cover:
 | Eight-branch `oneOf` degrades editor diagnostics | Resolve decision 6 explicitly, and measure it with the Phase 6 authoring-diagnostics test |
 | The TypeScript emitter cannot express the root `oneOf` | Emit a discriminated union type alias; the drift gate and the SDK build cover it |
 | The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the Phase 6.5 commit |
+
+## Phase 7 detailed design
+
+Phase 7 may proceed in parallel with Phase 6. It depends on the complete
+Phase 5 stack and should be branched from PR #949, the current top of that
+stack, or from `main` once the stack merges. Its only overlap with Phase 6 is
+`wxc_common/src/lib.rs` and `Cargo.toml`; Phase 6 does not touch
+`config_parser.rs` and Phase 7 does not modify the contract crate.
+
+### Phase 7 objective
+
+Run the exact-contract parser beside the rolling parser, prove the two agree
+on the runtime model for every input the corpus and the test suite can supply,
+and classify every input where they deliberately disagree.
+
+Phase 7 changes no runtime behavior. The rolling parser stays authoritative;
+Phase 9 flips that over. The deliverable is a classification: for each parser
+mode and each representative request shape, either the two paths converge, or
+the difference is recorded as intentional tightening with a reason.
+
+### Phase 7 parser surface
+
+The loader has six public entry points, all in `wxc_common::config_parser`,
+and they do not all carry the same information:
+
+| Entry point | Input | Returns | Callers |
+| --- | --- | --- | --- |
+| `load_request` | file path or base64 | `ExecutionRequest` | `lxc`, `mxc_darwin`, `wxc --probe` |
+| `load_request_with_options` | file path or base64 | `ExecutionRequest` | options-aware variant |
+| `load_request_from_value` | `serde_json::Value` | `ExecutionRequest` | `mxc_engine::policy` (two sites) |
+| `load_mxc_request` | file path or base64 | `MxcRequest` | fuzz targets |
+| `load_mxc_request_with_options` | file path or base64 | `MxcRequest` | `wxc` (four sites) |
+| `load_mxc_request_from_json` | decoded JSON text | `MxcRequest` | `mxc_engine::state_aware` |
+
+`parse_mxc_request_json` is the shared core: it borrows a
+`RequestDiscriminator`, routes on the presence of `phase`, and calls either
+`convert_wire_config` or `convert_wire_state_aware`.
+
+**`load_request_from_value` has no source text.** It takes an already-parsed
+`serde_json::Value` built in process by `mxc_engine::policy`, and the exact
+contract deserializes from source text by design — that is what preserves line
+and column diagnostics and what the non-goals protect when they exclude a JSON
+`Value` migration engine. This entry point therefore cannot be shadowed the
+same way as the others, and Phase 9 cannot simply repoint it. Resolve it as
+decision 3 below.
+
+### Phase 7 decisions required
+
+Resolve these before implementation; each changes the shape of the work.
+
+| # | Decision | Recommendation |
+| --- | --- | --- |
+| 1 | Whether the raw experimental JSON or the typed contract payload is authoritative for state-aware backend configuration | Settle before extracting the seam. The dispatcher reads `experimental.<backend>.<phase>` from `experimental_raw` and `source_text` through `deserialize_config<C>`, so after Phase 9 the closed contract becomes a second acceptance authority over the same bytes, permanently, because Phase 11 never publishes state-aware types. Either make the typed provision payloads authoritative at dispatch, or shrink the contract's experimental modelling to the envelope and declare raw authoritative. The adapters currently populate both `config.experimental` and `experimental_raw`, with no stated precedence |
+| 2 | Where the shadow comparison runs | In a test-only harness, not in the production call path. Running both parsers in production doubles parse cost on every request and turns any equivalence bug into a runtime failure in a security-sensitive path. A test harness over the corpus and fixtures gives the same evidence with none of that exposure |
+| 3 | How `load_request_from_value` reaches an exact contract | Prefer giving `mxc_engine::policy` a typed builder that constructs the contract request directly, rather than serializing its `Value` to text and re-parsing. A round-trip works and is the cheaper interim answer, but it reintroduces exactly the text-to-value-to-text churn this plan avoids elsewhere. Decide now; Phase 9 depends on it |
+| 4 | Whether the entry-point command splice lands in Phase 7 or Phase 9 | Phase 7. Shadow dispatch cannot cover a path that does not exist, and the splice is the prerequisite that lets every contract keep `process.commandLine` required. It changes the entry point, not parser semantics, so it can land while the rolling parser stays authoritative |
+| 5 | How runtime-model equivalence is asserted | `ExecutionRequest` derives `Serialize` but not `PartialEq`, so compare `serde_json::to_value` of both sides, as the Phase 5D adapter tests already do for `wire::MxcConfig`. `ParsedStateAwareRequest` derives neither, so it needs a field-by-field comparator or a test-only `PartialEq`. Audit that no field is `skip_serializing`, or a difference will compare equal |
+
+### Phase 7 step breakdown
+
+#### Phase 7.0: Prepare the implementation branch
+
+Base on PR #949 or on `main` once the Phase 5 stack merges. Confirm
+`cargo test -p wxc_common` is green first, so a later failure is attributable
+to this phase. No source files change in this step.
+
+#### Phase 7.1: Rework the entry-point command splice
+
+Implement the design recorded under "Entry-point-dependent command
+requirements": resolve the CLI command override before the parser runs by
+splicing it into the request source, then parse one complete document.
+
+Remove `LoadOptions::allow_missing_command`, the `command_required`
+relaxation in `convert_wire_config`, and the post-parse
+`apply_command_override` mutation of `ExecutionRequest::script_code`.
+
+The ordering obstacle is that `cmdline_from_argv_for_context` needs a
+backend-specific `CommandLineContext`, which today comes from the parsed
+request. Run the splice as a probe-driven pre-parse step, and after the typed
+parse assert that the context used matches the resolved containment.
+
+This step stands alone, changes only the entry point, and is independently
+reviewable. Land it first so the rest of the phase shadows the real shape.
+
+Suggested commit boundary: `Splice the CLI command override before parsing`.
+
+#### Phase 7.2: Extract the shared state-aware normalization seam
+
+`convert_wire_state_aware` currently interleaves three concerns: recovering
+`experimental_raw` and the masked base JSON, a series of validations that read
+the raw block, and the normalization into `ParsedStateAwareRequest`.
+
+Extract the third concern into a function over the neutral value both parsers
+can produce:
+
+```rust
+fn normalize_state_aware(
+    input: StateAwareWireInput,
+    logger: &mut Logger,
+) -> Result<ParsedStateAwareRequest, WxcError>
+```
+
+Keep this behavior-preserving: the rolling parser must produce byte-identical
+results before and after, proven by the existing `wxc_common` tests. Do not
+fold the exact path in yet.
+
+Note which of the interleaved validations become structurally impossible for
+exact input — the non-object `experimental` guard, the moved-to-stable
+`seatbelt` / `macos_sandbox` check, the stray one-shot section rejection, and
+the `containment`-on-non-provision rejection are all closed by the contract
+roots. They stay in the seam for the rolling path; for exact input they are
+unreachable, and the difference in the resulting *error message* is Phase 7.4
+classification material.
+
+Suggested commit boundary: `Extract the shared state-aware normalization seam`.
+
+#### Phase 7.3: Add the private exact-contract path
+
+Add a private path in `config_parser` that probes the version, dispatches to
+the exact registry, calls `dev::adapt_request`, and produces the same runtime
+model:
+
+- one-shot results feed the existing one-shot normalization
+- state-aware results feed `normalize_state_aware` from Phase 7.2
+
+Nothing calls this path in production. It exists for the harness in Phase 7.4
+and becomes authoritative in Phase 9.
+
+Remove the `#[cfg_attr(not(test), allow(dead_code))]` suppressions on the
+adapter modules and on `state_aware_wire` as they become genuinely reachable.
+
+Suggested commit boundary: `Add the shadow exact-contract parser path`.
+
+#### Phase 7.4: Build the equivalence harness and classify differences
+
+For each input, parse with both paths, adapt both to the runtime model, and
+assert semantic equivalence by the mechanism chosen in decision 5.
+
+Inputs must cover every loader mode, both request kinds, every state-aware
+phase, every provision backend, `0.6`, `0.7`, and `0.8` declarations, the
+command-splice path from Phase 7.1, immutable post-provision policy, telemetry,
+required envelope fields, and source-position diagnostics.
+
+Differences are not failures; unclassified differences are. Record each one in
+a table with its input, both behaviors, and the reason. Expect at least:
+
+- a `0.6.0-alpha` document carrying `experimental`, which the rolling parser
+  accepts and the exact contract rejects as an unknown field
+- explicit `null` on any optional field, which `OptionalField` rejects
+- `"phase": null`, which the rolling parser treats as one-shot and the exact
+  phase probe rejects as a malformed declaration
+- curated policy diagnostics replaced by structural Serde errors, most visibly
+  the IsolationSession `filesystem` and `ui` rejections, whose current messages
+  explain *why* the backend cannot honor the policy
+- any corpus document that is valid under one root and invalid under another
+
+Suggested commit boundary: `Add rolling-versus-exact parser equivalence tests`.
+
+#### Phase 7.5: Record the classification in this plan
+
+Fold the difference table into the plan as the input to Phase 8's migration and
+Phase 9's cutover. A difference that survives to Phase 9 unclassified is a
+break MXC would be shipping without deciding to.
+
+### Phase 7 tests
+
+1. Rolling-path behavior is unchanged, proven by the existing `wxc_common`
+   suite before and after the Phase 7.2 extraction.
+2. Both paths converge for every representative one-shot request across `0.6`,
+   `0.7`, and `0.8`.
+3. Both paths converge for every state-aware phase and provision backend.
+4. Both paths converge across every loader mode, including the spliced
+   command-override path.
+5. Every divergence is asserted explicitly and matches its classification.
+6. Source-position diagnostics are compared, not just accept/reject outcomes.
+7. The corpus parses through the exact path with its acceptance classified,
+   which is the direct input to Phase 8.
+
+### Phase 7 exit criteria
+
+- The rolling parser is still authoritative and its behavior is unchanged.
+- The exact path produces the same runtime model for every convergent input.
+- Every divergence is classified with a recorded reason.
+- `allow_missing_command` is gone and the command splice is covered by tests.
+- Decisions 1 through 5 are resolved and recorded.
+
+### Phase 7 risks
+
+| Risk | Mitigation |
+| --- | --- |
+| The seam extraction silently changes rolling behavior | Extract without tidying; the existing suite is the regression test, run before and after |
+| Shadow parsing lands in the production path | Resolve decision 2 first; keep the harness in tests |
+| `serde_json::to_value` equivalence hides a difference in a skipped field | Audit `ExecutionRequest`'s `Serialize` for `skip_serializing`, or add a test-only `PartialEq` |
+| The experimental authority question is deferred again | It is decision 1 and it gates Phase 7.2; after Phase 9 the asymmetry is permanent |
+| `load_request_from_value` is discovered to have no exact path during Phase 9 | It is decision 3, resolved here rather than at cutover |
