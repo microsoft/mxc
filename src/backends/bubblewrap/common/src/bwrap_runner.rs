@@ -120,6 +120,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // The parser rejects both of these too, but only sees JSON configs; a
         // Rust caller can build an `ExecutionRequest` and reach the runner
         // directly, so the checks are repeated here rather than assumed.
+        if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
         if let Some(reason) = bwrap_command::unenforced_host_rules_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
@@ -965,6 +968,9 @@ mod tests {
     fn validate_rejects_an_ipv6_loopback_proxy_endpoint_before_the_environment_probe() {
         let mut req = base_request();
         req.schema_version = "0.8.0-alpha".into();
+        // An external proxy with the default 'block' would be refused earlier,
+        // by the host-policy gate; this test is about the endpoint itself.
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("[::1]".into(), 3128)),
             builtin_test_server: false,
@@ -1062,6 +1068,7 @@ mod tests {
     fn validate_rejects_a_hostname_proxy_that_would_defeat_a_denied_hosts_file() {
         let mut req = base_request();
         req.schema_version = "0.8.0-alpha".into();
+        req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
         req.policy.denied_paths = vec!["/etc/hosts".into()];
         req.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),

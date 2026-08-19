@@ -104,7 +104,7 @@ cat >"$PROBE_CONFIG" <<'PROBE'
   "containerId": "CLI-Bubblewrap-Firewall-Reachability-Probe",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1 && echo DENY_TARGET_REACHABLE'"
+    "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1 && echo DENY_TARGET_REACHABLE; exit 0'"
   },
   "network": {
     "defaultPolicy": "allow",
@@ -113,7 +113,24 @@ cat >"$PROBE_CONFIG" <<'PROBE'
   }
 }
 PROBE
-PROBE_OUT=$("$LXC_EXEC" --experimental --allow-testing-features "$PROBE_CONFIG" 2>&1) || true
+# The workload prints a start marker and always exits 0, so a missing
+# sentinel means "no connectivity" and nothing else. A nonzero launcher exit
+# or a missing start marker means the firewall path is broken, which must fail
+# the suite rather than skip it -- skipping on breakage would false-green the
+# very enforcement these tests exist to prove.
+PROBE_RC=0
+PROBE_OUT="$("$LXC_EXEC" --experimental --allow-testing-features "$PROBE_CONFIG" 2>&1)" || PROBE_RC=$?
+if [ "$PROBE_RC" -ne 0 ]; then
+    echo "FAIL: reachability probe exited $PROBE_RC; the firewall path itself is broken."
+    echo "$PROBE_OUT"
+    exit 1
+fi
+if ! grep -q PROBE_WORKLOAD_STARTED <<<"$PROBE_OUT"; then
+    echo "FAIL: reachability probe workload never ran (no start marker)."
+    echo "      The sandbox failed before executing the command line."
+    echo "$PROBE_OUT"
+    exit 1
+fi
 if ! grep -q DENY_TARGET_REACHABLE <<<"$PROBE_OUT"; then
     echo "SKIP: 1.1.1.1:443 is not reachable from an unfiltered sandbox on this host."
     echo "      The deny assertions would pass without proving anything."

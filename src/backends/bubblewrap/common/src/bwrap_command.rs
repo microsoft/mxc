@@ -187,8 +187,9 @@ impl ResolvedNetworkMode {
     ///
     /// `FirewallEnforced` filters by address in the sandbox's own namespace.
     /// `ProxyOnly` closes egress to everything but the proxy endpoint, so the
-    /// lists are enforced at the proxy the sandbox is forced through. Every
-    /// other mode leaves the lists unapplied.
+    /// lists are enforced at the proxy — true only for the builtin proxy; an
+    /// external one is refused by [`external_proxy_host_rules_rejection`].
+    /// Every other mode leaves the lists unapplied.
     pub(crate) fn enforces_host_rules(self) -> bool {
         matches!(self, Self::FirewallEnforced | Self::ProxyOnly)
     }
@@ -218,6 +219,24 @@ pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'s
 
     (has_host_rules && !mode.enforces_host_rules())
         .then_some(wxc_common::config_parser::BWRAP_UNENFORCED_HOST_RULES)
+}
+
+/// Validate-time twin of the parser's external-proxy host-list rejection.
+///
+/// MXC applies the host lists itself only for the builtin test proxy; an
+/// operator-supplied proxy is never handed them, so accepting the combination
+/// would drop the requested policy silently. Not schema-gated, matching the
+/// parser.
+pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    let proxy = &request.policy.network_proxy;
+    if !proxy.is_enabled() || proxy.builtin_test_server {
+        return None;
+    }
+    let conflicts = !request.policy.allowed_hosts.is_empty()
+        || !request.policy.blocked_hosts.is_empty()
+        || request.policy.default_network_policy == NetworkPolicy::Block;
+
+    conflicts.then_some(wxc_common::config_parser::BWRAP_EXTERNAL_PROXY_HOST_RULES)
 }
 
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
@@ -274,20 +293,8 @@ pub(crate) fn local_network_diagnostic_for_mode(
         request.policy.allow_local_network,
         network_mode.uses_private_netns(),
     ) {
-        (false, false) => Some(
-            "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
-             sandbox shares the host network namespace (defaultPolicy='allow'). \
-             The sandboxed process can still bind, listen and accept on host-local addresses. For \
-             an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
-             which applies --unshare-net.",
-        ),
-        (true, true) => Some(
-            "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-             network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
-             listener inside the sandbox is reachable only from within it, never from the host. \
-             Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
-             namespace.",
-        ),
+        (false, false) => Some(wxc_common::config_parser::BWRAP_LOCAL_NETWORK_SHARED_NS),
+        (true, true) => Some(wxc_common::config_parser::BWRAP_LOCAL_NETWORK_PRIVATE_NS),
         _ => None,
     }
 }
@@ -863,6 +870,85 @@ mod tests {
         r.policy.network_proxy.builtin_test_server = true;
         assert!(r.policy.network_proxy.address.is_none());
         assert!(local_network_rejection(&r).is_some());
+    }
+
+    /// Without this twin a programmatic caller would sail past the parser's
+    /// rejection and have the host policy dropped on the floor.
+    #[test]
+    fn external_proxy_with_host_rules_is_rejected() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_proxy.address = Some(ProxyAddress::new("proxy.example.com".into(), 3128));
+        assert!(external_proxy_host_rules_rejection(&r).is_none());
+
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        let msg = external_proxy_host_rules_rejection(&r).expect("lists are never forwarded");
+        assert!(msg.contains("external network.proxy"));
+
+        r.policy.allowed_hosts.clear();
+        r.policy.blocked_hosts = vec!["10.0.0.1".into()];
+        assert!(external_proxy_host_rules_rejection(&r).is_some());
+
+        r.policy.blocked_hosts.clear();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        assert!(external_proxy_host_rules_rejection(&r).is_some());
+    }
+
+    /// The builtin test proxy *is* handed the lists, so it must stay accepted.
+    #[test]
+    fn builtin_test_server_with_host_rules_is_not_rejected() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.network_proxy.builtin_test_server = true;
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        assert!(external_proxy_host_rules_rejection(&r).is_none());
+    }
+
+    /// The parser cannot depend on this crate, so it re-derives the namespace
+    /// choice. Drift between the two would let a config be accepted by one path
+    /// and refused by the other, so pin them together across the mode matrix.
+    #[test]
+    fn parser_private_netns_helper_matches_resolved_mode() {
+        for schema in ["", "0.7.0-alpha", "0.8.0-alpha"] {
+            for proxy in [false, true] {
+                for mode in [
+                    NetworkEnforcementMode::Capabilities,
+                    NetworkEnforcementMode::Firewall,
+                    NetworkEnforcementMode::Both,
+                ] {
+                    for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+                        for hosts in [false, true] {
+                            let mut r = base_request();
+                            r.schema_version = schema.into();
+                            r.policy.network_proxy.builtin_test_server = proxy;
+                            r.policy.network_enforcement_mode = mode.clone();
+                            r.policy.default_network_policy = policy.clone();
+                            r.policy.allowed_hosts = if hosts {
+                                vec!["10.0.0.1".into()]
+                            } else {
+                                vec![]
+                            };
+
+                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
+                            let helper = wxc_common::config_parser::bwrap_uses_private_netns(
+                                proxy,
+                                &r.policy.network_enforcement_mode,
+                                &r.policy.default_network_policy,
+                                hosts,
+                                &r.schema_version,
+                            );
+                            assert_eq!(
+                                resolved.uses_private_netns(),
+                                helper,
+                                "schema={schema} proxy={proxy} mode={mode:?} \
+                                 policy={policy:?} hosts={hosts}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

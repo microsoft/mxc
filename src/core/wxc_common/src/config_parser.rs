@@ -371,6 +371,64 @@ pub const BWRAP_UNENFORCED_HOST_RULES: &str =
      drop the host lists to get the namespace-level block that defaultPolicy='block' applies \
      on its own.";
 
+/// Rejection text for an external proxy combined with host lists.
+///
+/// Shared with the Bubblewrap runner's twin. Not schema-gated: the lists have
+/// never been forwarded to an operator-supplied proxy.
+pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
+    "Bubblewrap: an external network.proxy (url/localhost) cannot be combined with \
+     allowedHosts, blockedHosts, or defaultPolicy='block'. The external proxy is expected to \
+     enforce its own host policy; MXC does not forward host lists to it. Use \
+     'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
+     or remove the host policy.";
+
+/// Rejection text for `allowLocalNetwork=false` under a shared namespace.
+/// Shared with the Bubblewrap runner's twin.
+pub const BWRAP_LOCAL_NETWORK_SHARED_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+     sandbox shares the host network namespace (defaultPolicy='allow'). \
+     The sandboxed process can still bind, listen and accept on host-local addresses. For \
+     an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
+     which applies --unshare-net.";
+
+/// Rejection text for `allowLocalNetwork=true` under a private namespace.
+/// Shared with the Bubblewrap runner's twin.
+pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+     network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
+     listener inside the sandbox is reachable only from within it, never from the host. \
+     Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
+     namespace.";
+
+/// Whether a Bubblewrap request resolves to a private network namespace.
+///
+/// Twin of `ResolvedNetworkMode::uses_private_netns` in the backend crate,
+/// which `wxc_common` must not depend on. A parity test in `bwrap_common`
+/// pins the two together.
+pub fn bwrap_uses_private_netns(
+    proxy_enabled: bool,
+    enforcement_mode: &NetworkEnforcementMode,
+    default_policy: &NetworkPolicy,
+    has_host_rules: bool,
+    schema_version: &str,
+) -> bool {
+    let strict = schema_enforces_network_strictly(schema_version);
+    if proxy_enabled {
+        // ProxyOnly under 0.8; LegacyProxy shares the host netns.
+        return strict;
+    }
+    let uses_firewall = matches!(
+        enforcement_mode,
+        NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+    );
+    if uses_firewall && has_host_rules {
+        // FirewallEnforced under 0.8; FirewallFiltered shares the host netns.
+        return strict;
+    }
+    // Only Isolated applies --unshare-net.
+    *default_policy == NetworkPolicy::Block && !has_host_rules
+}
+
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
 fn validate_schema_version(version: &str) -> Result<(), WxcError> {
@@ -1159,6 +1217,29 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // `allowLocalNetwork` is inbound-only and the resolved namespace decides
+        // the outcome. Twin of the runner's `local_network_rejection`.
+        if containment == ContainmentBackend::Bubblewrap
+            && schema_enforces_network_strictly(&schema_version)
+        {
+            let private_netns = bwrap_uses_private_netns(
+                policy.network_proxy.is_enabled(),
+                &policy.network_enforcement_mode,
+                &policy.default_network_policy,
+                !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty(),
+                &schema_version,
+            );
+            let msg = match (policy.allow_local_network, private_netns) {
+                (false, false) => Some(BWRAP_LOCAL_NETWORK_SHARED_NS),
+                (true, true) => Some(BWRAP_LOCAL_NETWORK_PRIVATE_NS),
+                _ => None,
+            };
+            if let Some(msg) = msg {
+                logger.log_line(msg);
+                return Err(WxcError::ConfigParse(msg.to_string()));
+            }
+        }
+
         // Seatbelt has no privileged packet-filter layer on macOS: it enforces
         // network policy through the sandbox profile (capabilities-style) and
         // ignores enforcementMode. Combining network.proxy with a firewall mode
@@ -1279,12 +1360,7 @@ fn convert_wire_config(
                 || !policy.blocked_hosts.is_empty()
                 || policy.default_network_policy == NetworkPolicy::Block)
         {
-            let msg = "Bubblewrap: an external network.proxy (url/localhost) cannot be \
-                       combined with allowedHosts, blockedHosts, or defaultPolicy='block'. \
-                       The external proxy is expected to enforce its own host policy; \
-                       MXC does not forward host lists to it. Use \
-                       'network.proxy.builtinTestServer: true' (testing only) for \
-                       MXC-enforced host filtering, or remove the host policy.";
+            let msg = BWRAP_EXTERNAL_PROXY_HOST_RULES;
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
@@ -4188,6 +4264,73 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true)
             .expect("0.7 firewall configs must keep parsing");
+        assert_eq!(req.schema_version, "0.7.0-alpha");
+    }
+
+    #[test]
+    fn bubblewrap_rejects_an_unhonorable_allow_local_network_at_0_8() {
+        // Twin of the runner's `local_network_rejection`: a shared namespace
+        // cannot honor allowLocalNetwork=false, so it must fail at parse time
+        // rather than surfacing later as a backend error.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": false
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a shared namespace cannot honor allowLocalNetwork=false");
+        assert!(
+            matches!(&err, WxcError::ConfigParse(m) if m.contains("allowLocalNetwork=false")),
+            "expected a parse-time rejection: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bubblewrap_rejects_allow_local_network_true_under_a_private_namespace_at_0_8() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowLocalNetwork": true
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true)
+            .expect_err("a private namespace confines the listener to the sandbox");
+        assert!(
+            matches!(&err, WxcError::ConfigParse(m) if m.contains("allowLocalNetwork=true")),
+            "expected a parse-time rejection: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bubblewrap_allow_local_network_mismatch_is_only_warned_before_0_8() {
+        // GHCP consumes proxy mode on 0.6/0.7; the gate must not reach them.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowLocalNetwork": false
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("0.7 keeps the warning rather than rejecting");
         assert_eq!(req.schema_version, "0.7.0-alpha");
     }
 

@@ -227,9 +227,12 @@ Rule addresses must be **IP literals or CIDR blocks**; a DNS name is rejected
 at validation time rather than resolved on the caller's behalf. The backend
 does not resolve, because the sandbox resolves names itself and a lookup that
 disagreed with the one behind the rules would hand the workload an address the
-chain never authorized. Both families are covered — an IPv6 rule programs
-`ip6tables` — and the terminal verdict of the unmatched family follows
-`defaultPolicy`, so a v4-only allowlist under `block` does not leave IPv6 open.
+chain never authorized. An IPv6 rule programs `ip6tables`, but the sandbox's
+namespace has no IPv6 connectivity today — slirp4netns is launched without
+`--enable-ipv6` — so an allowed IPv6 destination stays unreachable regardless
+of the rule (see #955). The terminal verdict of the unmatched family still
+follows `defaultPolicy`, so a v4-only allowlist under `block` does not leave
+IPv6 open.
 
 An explicit `blockedHosts` entry outranks any `allowedHosts` entry that covers
 it, including a broader CIDR: denies are installed ahead of allows in a
@@ -240,7 +243,7 @@ first-match chain.
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": ["10.0.2.2/32", "2001:db8::/32"],
+    "allowedHosts": ["10.0.2.2/32", "203.0.113.0/24"],
     "blockedHosts": ["10.0.2.2"]
   }
 }
@@ -256,8 +259,9 @@ only. Names are accepted on this path and resolved to IPv4 only.
 > **Legacy path, IPv4 only.** On schema ≤ 0.7, host names are resolved to
 > IPv4 addresses only; AAAA records and IPv6 literals are silently dropped
 > because `iptables` (the IPv4 tool) cannot accept IPv6 destinations. A host
-> with only AAAA records is effectively unreachable. For dual-stack hosts, use
-> proxy mode (below) or move to 0.8, where `ip6tables` is programmed too.
+> with only AAAA records is effectively unreachable. Moving to 0.8 programs
+> `ip6tables` as well, but does not make such a host reachable while the
+> sandbox namespace has no IPv6 (see #955); use proxy mode (below) instead.
 
 **Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
 shares the host network namespace with no restrictions.
@@ -281,7 +285,9 @@ namespace choice alone decides the outcome:
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later, and emit a
+Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later — at config parse,
+and again in the runner for programmatic callers that bypass the parser — and
+emit a
 `WARNING:` line to the runner log at preflight on earlier schemas rather than
 failing silently. Windows (AppContainer's `privateNetworkClientServer`
 capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)

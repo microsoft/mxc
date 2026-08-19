@@ -113,6 +113,13 @@ cannot mix both formats in one request.
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
+        "allowedHosts": ["203.0.113.0/24"],
+        "blockedHosts": ["203.0.113.7"],   // Denies outrank allows, including broader CIDRs
+                                           // Under bubblewrap at schema 0.8+ with
+                                           //  enforcementMode "firewall", entries must be IP
+                                           //  literals or CIDR blocks: DNS names are rejected at
+                                           //  validation time rather than resolved. Use proxy
+                                           //  mode for hostname-based control.
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
