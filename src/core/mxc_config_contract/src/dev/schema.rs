@@ -81,6 +81,17 @@ fn phase_dispatch(
     )
 }
 
+fn add_property_alias(definitions: &mut Value, definition: &str, canonical: &str, alias: &str) {
+    let properties = definitions[definition]["properties"]
+        .as_object_mut()
+        .expect("object definition properties");
+    let schema = properties
+        .get(canonical)
+        .unwrap_or_else(|| panic!("missing canonical property {definition}.{canonical}"))
+        .clone();
+    properties.insert(alias.to_string(), schema);
+}
+
 /// Generates the unrendered JSON Schema for the mutable `0.8.0-alpha`
 /// development contract.
 ///
@@ -102,8 +113,20 @@ pub fn development_schema() -> Value {
     let provision = provision_dispatch(windows_sandbox, isolation_session, wslc);
     let state_aware = phase_dispatch(provision, start, exec, stop, deprovision);
     let dispatch = branch(json!({ "required": ["phase"] }), state_aware, one_shot);
-    let definitions =
+    let mut definitions =
         serde_json::to_value(generator.take_definitions()).expect("definitions serialize to JSON");
+    add_property_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "processContainer",
+        "appContainer",
+    );
+    add_property_alias(
+        &mut definitions,
+        "OneShotRequest",
+        "seatbelt",
+        "macos_sandbox",
+    );
 
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -198,6 +221,15 @@ mod tests {
         assert!(serialized.contains("\"phase\""), "{serialized}");
         assert!(serialized.contains("\"containment\""), "{serialized}");
         assert!(!serialized.contains("\"property\""), "{serialized}");
+    }
+
+    #[test]
+    fn one_shot_schema_advertises_compatibility_aliases() {
+        let schema = development_schema();
+        let properties = &schema["definitions"]["OneShotRequest"]["properties"];
+
+        assert_eq!(properties["appContainer"], properties["processContainer"]);
+        assert_eq!(properties["macos_sandbox"], properties["seatbelt"]);
     }
 
     #[test]

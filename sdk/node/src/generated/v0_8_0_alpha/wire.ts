@@ -346,6 +346,10 @@ export interface OneShotRequest {
    */
   _comment?: unknown;
   /**
+   * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
+   */
+  appContainer?: ProcessContainer;
+  /**
    * Optional externally assigned container identifier.
    */
   containerId?: string;
@@ -373,6 +377,10 @@ export interface OneShotRequest {
    * Optional LXC distribution settings.
    */
   lxc?: Lxc;
+  /**
+   * Optional macOS Seatbelt configuration.
+   */
+  macos_sandbox?: Seatbelt;
   /**
    * Optional network policy.
    */

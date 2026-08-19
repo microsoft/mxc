@@ -740,6 +740,10 @@
         "_comment": {
           "description": "Optional human-readable annotation ignored by the runtime."
         },
+        "appContainer": {
+          "$ref": "#/definitions/ProcessContainer",
+          "description": "Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias."
+        },
         "containerId": {
           "description": "Optional externally assigned container identifier.",
           "type": "string"
@@ -767,6 +771,10 @@
         "lxc": {
           "$ref": "#/definitions/Lxc",
           "description": "Optional LXC distribution settings."
+        },
+        "macos_sandbox": {
+          "$ref": "#/definitions/Seatbelt",
+          "description": "Optional macOS Seatbelt configuration."
         },
         "network": {
           "$ref": "#/definitions/Network",
