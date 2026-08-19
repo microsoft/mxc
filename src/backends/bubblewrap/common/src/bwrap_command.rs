@@ -13,6 +13,13 @@ use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress};
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
+/// The fixed prefix of the command bwrap is asked to run.
+///
+/// `build_args` appends this last, so its position identifies where the
+/// options end -- unlike a bare `--` token, which a caller-supplied
+/// environment value can also be. Shared so the two cannot drift apart.
+pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
+
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
 /// deny-by-default baseline. Mirrors the seatbelt backend's
 /// `SYSTEM_READ_ALLOW` (`src/backends/seatbelt/common/src/profile_builder.rs`):
@@ -378,9 +385,7 @@ pub(crate) fn build_args_classified_with_mode(
     }
 
     // -- Command -----------------------------------------------------------
-    args.push("--".into());
-    args.push("sh".into());
-    args.push("-c".into());
+    args.extend(COMMAND_TAIL.iter().map(|arg| arg.to_string()));
     args.push(request.script_code.clone());
 
     args

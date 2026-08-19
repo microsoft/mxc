@@ -135,7 +135,10 @@ cannot mix both formats in one request.
                                            //  127.0.0.0/8 and the wildcards 0.0.0.0 / :: are
                                            //  rewritten to the slirp gateway; `::1` is rejected,
                                            //  because an IPv6-loopback listener cannot accept the
-                                           //  IPv4 connection that gateway produces. On schema
+                                           //  IPv4 connection that gateway produces. Because the
+                                           //  pin outranks every filesystem mount, a `deniedPaths`
+                                           //  entry covering /etc/hosts is rejected rather than
+                                           //  silently overridden. On schema
                                            //  0.6/0.7 Bubblewrap keeps the cooperative-only
                                            //  behavior (no egress rules).
     },

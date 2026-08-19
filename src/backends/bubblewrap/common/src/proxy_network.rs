@@ -3,6 +3,7 @@
 
 //! Rootless private networking for Bubblewrap proxy mode.
 
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
@@ -17,8 +18,11 @@ use std::time::{Duration, Instant};
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, OFlag};
 use nix::unistd::{access, dup2, pipe2, AccessFlags};
 use tempfile::TempDir;
+use wxc_common::filesystem_resolve::{resolve_mount_order, FsIntent};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ProxyAddress, ProxyHostPin};
+use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyHostPin};
+
+use crate::bwrap_command::COMMAND_TAIL;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -193,6 +197,36 @@ impl SandboxProxy {
         Self::resolve_with(configured, resolve_ipv4)
     }
 
+    /// Apply every rejection [`Self::resolve`] can reach without a lookup.
+    ///
+    /// A hostname's verdict depends on what it resolves to, and that answer is
+    /// also the pin the sandbox is given -- so it has to come from the single
+    /// lookup `run` performs, not from a second one here. Deferring is detected
+    /// rather than predicted: the injected resolver records that it was asked.
+    pub(crate) fn check_without_resolving(configured: &ProxyAddress) -> Result<(), String> {
+        let (needs_lookup, checked) = Self::inspect_without_resolving(configured);
+        if needs_lookup {
+            return Ok(());
+        }
+        checked
+    }
+
+    /// Run the static checks, reporting whether a lookup would have followed.
+    ///
+    /// A lookup is needed exactly when the endpoint is a hostname, which is
+    /// also exactly when a hosts pin is created -- an IP literal resolves to
+    /// `Ok(None)` from [`ProxyAddress::host_pin`]. Callers use the flag to
+    /// reason about the pin without duplicating that classification.
+    fn inspect_without_resolving(configured: &ProxyAddress) -> (bool, Result<(), String>) {
+        let asked_to_resolve = Cell::new(false);
+        let checked = Self::resolve_with(configured, |_, _| {
+            asked_to_resolve.set(true);
+            Err(String::new())
+        });
+
+        (asked_to_resolve.get(), checked.map(|_| ()))
+    }
+
     /// [`Self::resolve`] against an injected resolver.
     ///
     /// Resolution is the one step that depends on the host's DNS, so it is a
@@ -297,9 +331,11 @@ impl SandboxProxy {
 ///
 /// slirp gives the sandbox its own loopback, so a name that resolves to the
 /// host's loopback is pinned to the gateway instead: pinning it verbatim would
-/// aim the workload at itself.
+/// aim the workload at itself. `0.0.0.0` is an answer `/etc/hosts` can produce
+/// and names the host the same way, so it is translated alongside loopback --
+/// matching the IP-literal path, which rewrites both.
 fn sandbox_facing_ip(resolved: Ipv4Addr) -> Ipv4Addr {
-    if resolved.is_loopback() {
+    if resolved.is_loopback() || resolved.is_unspecified() {
         SLIRP_HOST_GATEWAY_IP
     } else {
         resolved
@@ -810,6 +846,58 @@ fn write_pinned_hosts(path: &PathBuf, pin: &ProxyHostPin) -> Result<(), String> 
         .map_err(|error| format!("Bubblewrap: failed to write the proxy hosts pin: {error}"))
 }
 
+/// Reject a hostname endpoint whose pin would defeat a denied `/etc/hosts`.
+///
+/// The pin is spliced after every filesystem-policy mount so it survives them
+/// (see [`insert_hosts_bind`]), which means it would also survive a denial --
+/// handing back a readable file, populated from the host's own `/etc/hosts`,
+/// that the policy asked to mask. Refusing at policy time is the only honest
+/// outcome: dropping the pin instead would leave the proxy name unresolvable
+/// and fail at connect time, long after the caller could act on it.
+///
+/// Only a denial is refused. A `readonlyPaths` or `readwritePaths` entry is
+/// still overridden with a warning: shadowing a mount the caller asked to
+/// *read* narrows their access rather than widening it.
+pub(crate) fn check_hosts_pin_against_policy(
+    configured: &ProxyAddress,
+    policy: &ContainerPolicy,
+) -> Result<(), String> {
+    let (needs_pin, _) = SandboxProxy::inspect_without_resolving(configured);
+    if !needs_pin || !hosts_file_is_denied(policy) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "Bubblewrap: the proxy endpoint '{}' is a hostname, which is reached by pinning it in \
+         the sandbox's {SANDBOX_HOSTS_PATH}, but the filesystem policy denies that path. The pin \
+         is applied after every policy mount, so honouring it would expose the file the policy \
+         masks. Remove {SANDBOX_HOSTS_PATH} from deniedPaths, or give the proxy an IP address, \
+         which needs no pin.",
+        configured.host()
+    ))
+}
+
+/// Whether the filesystem policy masks the sandbox's hosts file.
+///
+/// The plan is ordered shallow-to-deep and bwrap applies the last mount at a
+/// path, so the deepest entry covering the file is the one that takes effect:
+/// an ancestor denial counts, and a more specific grant beneath it wins back.
+fn hosts_file_is_denied(policy: &ContainerPolicy) -> bool {
+    resolve_mount_order(policy)
+        .iter()
+        .rfind(|mount| covers_hosts_file(&mount.path))
+        .is_some_and(|mount| mount.intent == FsIntent::Denied)
+}
+
+/// Whether `path` is the sandbox hosts file or a directory holding it.
+fn covers_hosts_file(path: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    path == SANDBOX_HOSTS_PATH
+        || SANDBOX_HOSTS_PATH
+            .strip_prefix(path)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Splice the pinned-hosts bind in just before the command separator.
 ///
 /// bwrap applies mounts in argument order and the last mount at a path wins,
@@ -817,11 +905,23 @@ fn write_pinned_hosts(path: &PathBuf, pin: &ProxyHostPin) -> Result<(), String> 
 /// pin to survive -- including one that would otherwise expose the host's own
 /// `/etc/hosts`. Returns `true` when an earlier mount already targeted
 /// `/etc/hosts`, so the caller can report that the pin overrides it.
+/// Index of the separator that ends bwrap's options and begins the command.
+///
+/// Scanning for the first `--` would find a caller-controlled value instead:
+/// `process.env` of `FOO=--` is emitted as `--setenv FOO --` ahead of the real
+/// separator, and splicing there would shift the pin's three arguments into
+/// that option's operands. Scanning for the *last* one is no better -- the
+/// script is arbitrary text. The command is appended last with a fixed shape,
+/// so that trailing shape is what identifies it.
+fn command_separator(args: &[String]) -> Result<usize, String> {
+    args.len()
+        .checked_sub(COMMAND_TAIL.len() + 1)
+        .filter(|&separator| args[separator..separator + COMMAND_TAIL.len()] == COMMAND_TAIL[..])
+        .ok_or_else(|| "Bubblewrap: argument list has no command separator".to_string())
+}
+
 fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, String> {
-    let separator = args
-        .iter()
-        .position(|arg| arg == "--")
-        .ok_or_else(|| "Bubblewrap: argument list has no command separator".to_string())?;
+    let separator = command_separator(args)?;
     let overrides = args[..separator]
         .iter()
         .any(|arg| arg == SANDBOX_HOSTS_PATH);
@@ -1207,6 +1307,67 @@ mod tests {
         assert_eq!(resolved.egress().ip.to_string(), SLIRP_HOST_GATEWAY);
     }
 
+    /// The pre-flight check exists to fail fast, not to duplicate work: a name
+    /// must survive it untouched so `run` performs the only lookup, whose
+    /// answer is also the pin the sandbox is given.
+    #[test]
+    fn the_pre_flight_check_defers_every_verdict_that_needs_a_lookup() {
+        // `.invalid` is reserved as never-resolvable (RFC 2606), so a real
+        // lookup here could only fail -- passing proves none was made.
+        let named = ProxyAddress::new("proxy.this-name-cannot-exist.invalid".into(), 3128);
+        assert!(
+            SandboxProxy::check_without_resolving(&named).is_ok(),
+            "a hostname's verdict belongs to the lookup in `run`"
+        );
+    }
+
+    #[test]
+    fn the_pre_flight_check_still_rejects_what_no_lookup_could_rescue() {
+        // Decided by the configured address alone, so deferring these would
+        // only move the same rejection past a started proxy.
+        for unusable in [
+            ProxyAddress::new("[::1]".into(), 3128),
+            ProxyAddress::new("2001:db8::1".into(), 3128),
+            ProxyAddress::new("127.0.0.1".into(), 0),
+        ] {
+            assert!(
+                SandboxProxy::check_without_resolving(&unusable).is_err(),
+                "endpoint '{}' is unusable regardless of DNS",
+                unusable.host()
+            );
+        }
+    }
+
+    /// The effective intent is the deepest entry covering the file, so an
+    /// ancestor denial masks it and a grant beneath that denial wins it back.
+    #[test]
+    fn a_denied_ancestor_counts_as_denying_the_hosts_file() {
+        let denied_parent = ContainerPolicy {
+            denied_paths: vec!["/etc".into()],
+            ..Default::default()
+        };
+        assert!(hosts_file_is_denied(&denied_parent));
+
+        let regranted = ContainerPolicy {
+            denied_paths: vec!["/etc".into()],
+            readonly_paths: vec![SANDBOX_HOSTS_PATH.into()],
+            ..Default::default()
+        };
+        assert!(
+            !hosts_file_is_denied(&regranted),
+            "a more specific grant beneath the denial takes effect"
+        );
+
+        let unrelated = ContainerPolicy {
+            denied_paths: vec!["/etc/hostname".into(), "/etc/hosts.allow".into()],
+            ..Default::default()
+        };
+        assert!(
+            !hosts_file_is_denied(&unrelated),
+            "a sibling with a shared prefix must not be mistaken for the file"
+        );
+    }
+
     #[test]
     fn pins_a_routable_hostname_to_its_resolved_address() {
         // Only a loopback answer is redirected to the gateway; a routable one
@@ -1217,6 +1378,12 @@ mod tests {
         );
         assert_eq!(
             sandbox_facing_ip(Ipv4Addr::new(127, 0, 0, 1)),
+            SLIRP_HOST_GATEWAY_IP
+        );
+        // `/etc/hosts` can map a name to `0.0.0.0`, which names the host the
+        // same way loopback does -- and which the IP-literal path rewrites.
+        assert_eq!(
+            sandbox_facing_ip(Ipv4Addr::UNSPECIFIED),
             SLIRP_HOST_GATEWAY_IP
         );
     }
@@ -1355,9 +1522,8 @@ mod tests {
             "--bind".to_string(),
             "/etc/hosts".to_string(),
             "/etc/hosts".to_string(),
-            "--".to_string(),
-            "sh".to_string(),
         ];
+        args.extend(command_tail());
         insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap();
 
         let pin = args
@@ -1368,7 +1534,7 @@ mod tests {
             .windows(3)
             .position(|window| window == ["--bind", "/etc/hosts", "/etc/hosts"])
             .expect("policy mount should be retained");
-        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        let separator = command_separator(&args).unwrap();
 
         assert!(pin > policy, "pin must be applied after the policy mount");
         assert!(pin < separator, "pin must precede the command separator");
@@ -1382,11 +1548,12 @@ mod tests {
             "--bind".to_string(),
             "/custom/hosts".to_string(),
             "/etc/hosts".to_string(),
-            "--".to_string(),
         ];
+        args.extend(command_tail());
         assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap());
 
-        let mut untouched = vec!["--ro-bind-try".to_string(), "--".to_string()];
+        let mut untouched = vec!["--ro-bind-try".to_string()];
+        untouched.extend(command_tail());
         assert!(!insert_hosts_bind(&mut untouched, "/tmp/pin/hosts").unwrap());
     }
 
@@ -1396,6 +1563,55 @@ mod tests {
         // the bind to the workload as arguments and leave it unpinned.
         let mut args = vec!["--ro-bind-try".to_string(), "/etc".to_string()];
         assert!(insert_hosts_bind(&mut args, "/tmp/pin/hosts").is_err());
+    }
+
+    /// The command bwrap is asked to run, as `build_args` appends it.
+    fn command_tail() -> Vec<String> {
+        COMMAND_TAIL
+            .iter()
+            .map(|arg| arg.to_string())
+            .chain(["echo hello".to_string()])
+            .collect()
+    }
+
+    /// Environment values are caller-controlled and reach the argument vector
+    /// verbatim, so one that happens to be `--` must not be mistaken for the
+    /// separator: splicing there would consume the pin's arguments as that
+    /// `--setenv`'s operands and leave the sandbox reading the host's hosts
+    /// file.
+    #[test]
+    fn a_caller_supplied_separator_value_is_not_mistaken_for_the_command() {
+        let mut args = vec![
+            "--setenv".to_string(),
+            "FOO".to_string(),
+            "--".to_string(),
+            "--ro-bind-try".to_string(),
+            "/etc".to_string(),
+            "/etc".to_string(),
+        ];
+        args.extend(command_tail());
+        let decoy = 2;
+
+        insert_hosts_bind(&mut args, "/tmp/pin/hosts").unwrap();
+
+        assert_eq!(
+            args[..=decoy],
+            ["--setenv", "FOO", "--"],
+            "the environment value must survive the splice intact"
+        );
+        let pin = args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/tmp/pin/hosts", SANDBOX_HOSTS_PATH])
+            .expect("pin bind should be present");
+        assert!(
+            pin > decoy,
+            "the pin must be spliced at the command, not at the decoy value"
+        );
+        assert_eq!(
+            args[args.len() - COMMAND_TAIL.len() - 1..],
+            ["--", "sh", "-c", "echo hello"],
+            "the command must remain last"
+        );
     }
 
     /// Byte offset of `needle` in the normalised supervisor script.

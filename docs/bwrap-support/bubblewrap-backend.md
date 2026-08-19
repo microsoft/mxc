@@ -446,8 +446,16 @@ request fails if its private namespace cannot be configured.
     (RFC 6761) and a pin is a sandbox-wide mapping, so pinning it would
     redirect the workload's own loopback traffic to the host.
   - The generated `/etc/hosts` preserves the host's existing entries after the
-    pin line, so `localhost` and friends keep working. A `readwritePaths` entry
-    covering `/etc/hosts` is overridden by the pin mount.
+    pin line, so `localhost` and friends keep working. A `readwritePaths` or
+    `readonlyPaths` entry covering `/etc/hosts` is overridden by the pin mount,
+    with a warning — that narrows the caller's access rather than widening it.
+  - A **`deniedPaths`** entry covering `/etc/hosts` (directly or via an
+    ancestor such as `/etc`) is **rejected** instead. The pin is applied after
+    every policy mount, so honouring it would hand back a readable file
+    populated from the host's own `/etc/hosts` — the opposite of the requested
+    denial. Give the proxy an IP address instead, which needs no pin. A more
+    specific grant beneath the denial (for example denying `/etc` while listing
+    `/etc/hosts` under `readonlyPaths`) takes effect and is accepted.
   - IPv6-only proxy hostnames are rejected, matching the IPv6 egress denial.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`
