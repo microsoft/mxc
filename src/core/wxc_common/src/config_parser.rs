@@ -258,12 +258,10 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
     let Some(config) = config.as_object() else {
         return Ok(());
     };
-    if config
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(supports_directional_network)
-    {
-        return Ok(());
+    if let Some(version) = config.get("version").and_then(serde_json::Value::as_str) {
+        if semver::Version::parse(version).is_err() || supports_directional_network(version) {
+            return Ok(());
+        }
     }
 
     let has_directional_network = config
@@ -5710,6 +5708,22 @@ mod tests {
 
         let result = load_request(&encoded, &mut logger, true);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn malformed_schema_version_precedes_directional_field_gate() {
+        let json = r#"{
+            "version": "0.8x",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "deny"}}
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::OneShot(error)) => error.to_string(),
+            other => panic!("expected one-shot rejection, got: {other:?}"),
+        };
+
+        assert!(error.contains("Invalid schema version"));
+        assert!(!error.contains("require schema version 0.8"));
     }
 
     #[test]
