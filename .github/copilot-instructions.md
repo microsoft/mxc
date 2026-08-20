@@ -332,6 +332,23 @@ When changing behavior covered by existing documentation, update the relevant do
 - **Versioning or promotion changes** → update `docs/versioning.md`
 - **Telemetry consent or policy changes** → update `docs/telemetry/telemetry-consent-design.md` and/or `docs/telemetry/telemetry-administrative-policy.md`, and keep `scripts/check-telemetry-policy-parity.js` green across all three bindings
 
+### Maintaining published stacked pull requests
+
+Once a branch in a stacked PR series has been pushed for review, preserve its
+published commits and review history:
+
+- Advance every published branch only with new commits or merge commits. Do
+  not squash, rebase, amend, reset, or force-push reviewed commits.
+- When a lower branch changes, merge that updated branch forward into each
+  descendant branch in stack order, then push every branch as a fast-forward.
+  Do not recreate descendant commits on the new base.
+- Before pushing, fetch each remote branch and verify the local update is a
+  descendant of the current remote head. If any update is not fast-forward,
+  stop rather than replacing remote history.
+- Preserve human review context even when rewriting would produce a cleaner
+  commit graph. Add a follow-up fix commit instead of making existing comments
+  outdated or detaching them from the reviewed lines.
+
 ### Policy versioning
 
 The `SandboxPolicy.version` in the SDK must match a JSON schema version in the supported range (`0.6.0-alpha` minimum, `0.8.0-alpha` maximum). The SDK validates this in `sandbox.ts` — if the policy version is older than `MIN_VERSION` or newer than `SUPPORTED_VERSION` it throws. State-aware lifecycle requests use `0.6.0-alpha`. These bounds are mirrored from the canonical `schemas/schema-version.json` and enforced by `scripts/versioning/check-schema-versions.js`. See `docs/versioning.md` for the full design.
