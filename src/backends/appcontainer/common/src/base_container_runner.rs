@@ -92,6 +92,9 @@ use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
+const LOOPBACK_NETWORK_CAPABILITY: &str = "loopbackNetwork";
+const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
+
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
 /// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
@@ -980,6 +983,18 @@ impl BaseContainerRunner {
         }
     }
 
+    fn allowed_appcontainer_peer(policy: &ContainerPolicy) -> Option<String> {
+        if policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
+        {
+            Some(LOOPBACK_NETWORK_PEER.to_string())
+        } else {
+            policy.allowed_proxy_peer.clone()
+        }
+    }
+
     // A BaseContainer network policy contains either proxy settings or an egress policy.
     fn build_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
         let mut network = SboxNetworkPolicy::default();
@@ -990,7 +1005,6 @@ impl BaseContainerRunner {
                     proxy.url = Some(address.to_url());
                     Box::new(proxy)
                 });
-                network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
             }
             ResolvedNetworkPolicy::Egress => {
                 let egress_policy = policy.network_egress.clone().unwrap_or_else(|| {
@@ -1007,13 +1021,14 @@ impl BaseContainerRunner {
                     NetworkAction::Allow => SboxFilterAction::allow,
                     NetworkAction::Deny => SboxFilterAction::deny,
                 };
-                egress.allow =
-                    (!egress_policy.allow.is_empty()).then(|| sbox_endpoint_rules(&egress_policy.allow));
-                egress.deny =
-                    (!egress_policy.deny.is_empty()).then(|| sbox_endpoint_rules(&egress_policy.deny));
+                egress.allow = (!egress_policy.allow.is_empty())
+                    .then(|| sbox_endpoint_rules(&egress_policy.allow));
+                egress.deny = (!egress_policy.deny.is_empty())
+                    .then(|| sbox_endpoint_rules(&egress_policy.deny));
                 network.egress = Some(Box::new(egress));
             }
         }
+        network.allowed_appcontainer_peer = Self::allowed_appcontainer_peer(policy);
         network
     }
 
@@ -1028,7 +1043,6 @@ impl BaseContainerRunner {
                     proxy.url = Some(address.to_url());
                     Box::new(proxy)
                 });
-                network.allowed_appcontainer_peer = policy.allowed_proxy_peer.clone();
             }
             ResolvedNetworkPolicy::Egress => {
                 let egress_policy = policy.network_egress.clone().unwrap_or_else(|| {
@@ -1045,13 +1059,14 @@ impl BaseContainerRunner {
                     NetworkAction::Allow => PsecFilterAction::allow,
                     NetworkAction::Deny => PsecFilterAction::deny,
                 };
-                egress.allow =
-                    (!egress_policy.allow.is_empty()).then(|| psec_endpoint_rules(&egress_policy.allow));
-                egress.deny =
-                    (!egress_policy.deny.is_empty()).then(|| psec_endpoint_rules(&egress_policy.deny));
+                egress.allow = (!egress_policy.allow.is_empty())
+                    .then(|| psec_endpoint_rules(&egress_policy.allow));
+                egress.deny = (!egress_policy.deny.is_empty())
+                    .then(|| psec_endpoint_rules(&egress_policy.deny));
                 network.egress = Some(Box::new(egress));
             }
         }
+        network.allowed_appcontainer_peer = Self::allowed_appcontainer_peer(policy);
         network
     }
 
@@ -1299,6 +1314,17 @@ impl BaseContainerRunner {
                 .any(|capability| capability == "privateNetworkClientServer")
         {
             caps.push("privateNetworkClientServer".to_string());
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
+            && !caps
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case(LOOPBACK_NETWORK_CAPABILITY))
+        {
+            caps.push(LOOPBACK_NETWORK_CAPABILITY.to_string());
         }
         caps
     }
@@ -2497,18 +2523,6 @@ impl SandboxBackend for BaseContainerRunner {
             return Err(ScriptResponse::error(
                 "the process-security-environment path cannot be combined with network.proxy \
                  until it can supply the required proxy AppContainer peer identity",
-            ));
-        }
-        if request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
-            && !request.policy.network_proxy.is_enabled()
-        {
-            return Err(ScriptResponse::error(
-                "network.ingress.hostLoopback='allow' is currently supported only for the \
-                 runtime loopback proxy path",
             ));
         }
         if use_process_security_environment && !capture_denials {
@@ -4202,6 +4216,25 @@ mod tests {
 
         assert_eq!(egress.default_action(), psec_layout::FilterAction::allow);
         assert_eq!(spec.capabilities(), Some("internetClient"));
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_enables_host_loopback() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let network = spec.network_policy().expect("network policy");
+
+        assert_eq!(spec.capabilities(), Some(LOOPBACK_NETWORK_CAPABILITY));
+        assert_eq!(
+            network.allowed_appcontainer_peer(),
+            Some(LOOPBACK_NETWORK_PEER)
+        );
     }
 
     #[test]

@@ -777,6 +777,15 @@ pub fn needs_host_filtering(
 }
 
 impl ContainerPolicy {
+    /// True when the effective legacy or directional egress default allows
+    /// outbound traffic.
+    pub fn allows_network_egress(&self) -> bool {
+        self.network_egress.as_ref().map_or(
+            self.default_network_policy == NetworkPolicy::Allow,
+            |egress| egress.default == NetworkAction::Allow,
+        )
+    }
+
     /// True when this policy's host lists require per-host egress filtering.
     pub fn needs_host_filtering(&self) -> bool {
         needs_host_filtering(

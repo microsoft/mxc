@@ -105,6 +105,8 @@ opening general host-loopback access, so identity-scoped paths keep `hostLoopbac
 non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That authorizes both
 host-loopback directions, but Model 2 WFP still restricts client-container egress to the configured proxy endpoint.
 Host-loopback clients can reach listeners in the MXC client container.
+On the PSEC path, MXC maps `hostLoopback: "allow"` to the `loopbackNetwork` capability and the reserved
+`MXC-Loopback` peer identity passed to `CreateProcessSecurityEnvironment`.
 
 #### Identity-scoped proxy
 
