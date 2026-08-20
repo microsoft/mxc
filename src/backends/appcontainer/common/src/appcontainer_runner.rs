@@ -42,8 +42,7 @@ use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, SandboxOutputMetadata,
-    ScriptResponse,
+    ExecutionRequest, FailurePhase, NetworkEnforcementMode, SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -717,7 +716,7 @@ impl AppContainerScriptRunner {
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
         );
         if use_capabilities_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
+            && request.policy.allows_network_egress()
             && !capabilities_to_add.iter().any(|c| c == "internetClient")
         {
             capabilities_to_add.push("internetClient".to_string());
@@ -1541,7 +1540,8 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
-        NetworkPolicySupport::INGRESS_DEFAULT
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
             | NetworkPolicySupport::RUNTIME_PROXY
     }
