@@ -1031,16 +1031,29 @@ impl AppContainerScriptRunner {
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
         // full environment). Always build an explicit block:
-        //   1. If explicit env vars were provided, use only those (+ proxy injection).
-        //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
-        //      default user environment and merge proxy vars if needed.
-        let env_block: Vec<u16> = if !request.env.is_empty() {
-            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
-            encode_env_block(&entries)
-        } else {
-            // Get clean default user env without inheriting process env vars.
+        //   1. Start with CreateEnvironmentBlock(bInherit=FALSE) for a clean
+        //      default user environment (includes SYSTEMROOT etc. required by
+        //      CreateProcessW under AppContainer).
+        //   2. If explicit env vars were provided, merge them on top (user vars
+        //      override defaults). This ensures system-critical variables are
+        //      always present — without them CreateProcessW returns
+        //      ERROR_BAD_ENVIRONMENT (0x800700CB) in AppContainer mode.
+        //   3. Inject proxy vars if configured.
+        let env_block: Vec<u16> = {
             let mut entries = create_default_env_entries()?;
-            if let Some(addr) = self.proxy_address.as_ref() {
+            if !request.env.is_empty() {
+                let explicit = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+                for (key, value) in explicit {
+                    if let Some(existing) = entries
+                        .iter_mut()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(&key))
+                    {
+                        existing.1 = value;
+                    } else {
+                        entries.push((key, value));
+                    }
+                }
+            } else if let Some(addr) = self.proxy_address.as_ref() {
                 inject_proxy_vars(&mut entries, addr);
             }
             encode_env_block(&entries)

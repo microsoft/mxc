@@ -88,27 +88,6 @@ use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
-/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
-///
-/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
-fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
-    let mut entries: Vec<(&str, &str)> =
-        env_vars.iter().filter_map(|e| e.split_once('=')).collect();
-
-    entries.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
-
-    let mut block = Vec::new();
-    for (key, value) in &entries {
-        for ch in format!("{}={}", key, value).encode_utf16() {
-            block.push(ch);
-        }
-
-        block.push(0);
-    }
-    block.push(0);
-    block
-}
-
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
 type PfnCreateProcessInSandbox = unsafe extern "system" fn(
     application_name: *const u16,
@@ -1601,6 +1580,12 @@ impl BaseContainerRunner {
         // The one-shot API supplies its own default when this is NULL, but the
         // attribute-based CreateProcessW capture path must receive an explicit
         // clean block or it would inherit all wxc-exec process variables.
+        //
+        // When explicit env vars are provided, we merge them on top of the
+        // clean default environment (from CreateEnvironmentBlock with
+        // bInherit=FALSE). This ensures system-critical variables like
+        // SYSTEMROOT are always present — without them CreateProcessW returns
+        // ERROR_BAD_ENVIRONMENT (0x800700CB) in AppContainer mode.
         let env_block: Option<Vec<u16>> = if request.env.is_empty() {
             if use_process_security_environment {
                 let entries =
@@ -1614,7 +1599,26 @@ impl BaseContainerRunner {
                 None
             }
         } else {
-            Some(encode_env_block(&request.env))
+            // Start with clean default env, then merge user-provided vars on top.
+            let mut entries =
+                crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
+                    ScriptResponse::error(&format!(
+                        "failed to create the default environment for the sandboxed child: {error}"
+                    ))
+                })?;
+            for entry in &request.env {
+                if let Some((key, value)) = entry.split_once('=') {
+                    if let Some(existing) = entries
+                        .iter_mut()
+                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+                    {
+                        existing.1 = value.to_string();
+                    } else {
+                        entries.push((key.to_string(), value.to_string()));
+                    }
+                }
+            }
+            Some(crate::appcontainer_runner::encode_env_block(&entries))
         };
 
         let env_ptr = env_block
