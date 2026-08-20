@@ -117,6 +117,11 @@ production configs and the dev schema when working on experimental features:
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
         },
+        "apple_container": {               // Apple Container settings (macOS, 0.8 only)
+            "image": "docker.io/library/alpine:3.23", // Required OCI image with /bin/sh
+            "cpuCount": 2,                 // Optional positive virtual CPU count
+            "memoryMb": 1024               // Optional positive memory limit in MB
+        },
         "seatbelt": {                 // macOS sandbox settings (macOS only)
             "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
             "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
@@ -270,6 +275,7 @@ force a particular backend.
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
 | `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
+| `"apple_container"` | Experimental Apple Container configuration surface for macOS. Requires schema version `0.8.0-alpha`, `--experimental`, and `experimental.apple_container.image`. Runtime execution is currently fail-closed with `unsupported_containment`. |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is accepted;

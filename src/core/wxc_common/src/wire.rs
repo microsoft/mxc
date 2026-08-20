@@ -554,6 +554,7 @@ pub struct Wslc {
 #[serde(rename_all = "camelCase")]
 pub struct AppleContainer {
     /// OCI image reference. The image must provide `/bin/sh`.
+    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
     pub image: String,
     /// Requested virtual CPU count.
     #[cfg_attr(feature = "schema-gen", schemars(range(min = 1)))]

@@ -370,6 +370,9 @@ export function createConfigFromPolicy(
 
 /**
  * Creates an experimental Apple Container config for macOS.
+ *
+ * Runtime execution is not implemented yet; spawning the returned config
+ * currently fails with `unsupported_containment` before creating resources.
  */
 export function createAppleContainerConfig(
     policy: SandboxPolicy,
@@ -386,8 +389,9 @@ export function createAppleContainerConfig(
         throw new Error('Apple Container image is required.');
     }
     if (options.cpuCount !== undefined &&
-        (!Number.isInteger(options.cpuCount) || options.cpuCount <= 0)) {
-        throw new Error('Apple Container cpuCount must be a positive integer.');
+        (!Number.isInteger(options.cpuCount) || options.cpuCount <= 0 ||
+            options.cpuCount > 0xFFFF_FFFF)) {
+        throw new Error('Apple Container cpuCount must be a positive 32-bit integer.');
     }
     if (options.memoryMb !== undefined &&
         (!Number.isSafeInteger(options.memoryMb) || options.memoryMb <= 0)) {

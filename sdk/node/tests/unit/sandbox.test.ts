@@ -838,6 +838,13 @@ describe('createConfigFromPolicy', () => {
           ),
           /cpuCount/,
         );
+        assert.throws(
+          () => createAppleContainerConfig(
+            { version: '0.8.0-alpha' },
+            { image: 'alpine', cpuCount: 0x1_0000_0000 },
+          ),
+          /cpuCount/,
+        );
       } finally {
         restore();
       }
