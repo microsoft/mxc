@@ -1,15 +1,17 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
-and under review as GitHub stack #948: Phase 5A merged in PR #909, Phase 5B in
-PR #910, Phase 5C in PR #929, Phase 5D in PR #941, and the Phase 5A review
-follow-up in PR #949. Phase 6 is implemented in 11 commits on the local branch
+#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete;
+Phase 5A merged in PR #909, Phase 5B in PR #910, Phase 5C in PR #929, and Phase
+5D in PR #941. Two stacked pull requests remain open and unreviewed: the Phase
+5A review follow-up in PR #949 (now based on `main`) and the capabilities parity
+remediation in PR #966. Phase 6 is implemented in 11 commits on the local branch
 `user/gudge/version_specific_config_parsers_phase6`, branched from #949; it has
 not been pushed and has no pull request, so it is unreviewed. Phase 7.1 is
 complete and pushed to `user/gudge/version_specific_config_parsers_phase7`, also
-unreviewed; Phases 7.2-7.5 and Phases 8-11 remain. Phase 7 is paused pending
-parser-parity remediation on the Phase 5 stack.
+unreviewed; Phases 7.2-7.5 and Phases 8-11 remain. The parser-parity
+remediation that paused Phase 7 is addressed by PR #966; Phase 7 resumes when
+that PR merges.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -465,19 +467,22 @@ version and reject unknown fields more consistently than those advisory files.
 Status:
 
 - **Phase 5A** — one-shot development contract, merged in PR #909
-- **Phase 5B** — one-shot development adapter, complete and under review in
-  PR #910, stacked on 5A
+- **Phase 5B** — one-shot development adapter, merged in PR #910
 - **Phase 5C** — phase discriminator and state-aware development contracts,
-  complete and under review in PR #929, stacked on 5B
-- **Phase 5D** — state-aware adapter and wire-equivalence tests, complete and
-  under review in PR #941, stacked on 5C
+  merged in PR #929
+- **Phase 5D** — state-aware adapter and wire-equivalence tests, merged in
+  PR #941
 - **Phase 5A follow-up** — string enum contract coverage generated from each
   `string_enum!` declaration, addressing Phase 5A review feedback after #909
-  merged. Complete and under review in PR #949, stacked on 5D. It rewrites the
-  `string_enum!` macro in the `dev`, `published/v0_6_0_alpha`, and
+  merged. Complete and under review in PR #949, now based on `main`. It
+  rewrites the `string_enum!` macro in the `dev`, `published/v0_6_0_alpha`, and
   `published/v0_7_0_alpha` modules so canonical, alias, non-string, and
   externally tagged object coverage derives from the macro's own value table.
   Phase 6.2 extends those same macros, so it must build on this shape
+- **Phase 5A remediation** — the `ProcessContainerCapability` validating
+  newtype closing the Phase 6 review finding, complete and under review in
+  PR #966, stacked on the follow-up. See "Phase 6 review finding: contract
+  value-rule gaps"
 
 Separate the mutable development contract into:
 
@@ -552,7 +557,7 @@ requests.
 
 #### Phase 5A: Closed one-shot development contract
 
-Complete and under review in PR #909.
+Merged in PR #909.
 
 The exact one-shot root:
 
@@ -587,7 +592,7 @@ runtime-incompatible combinations belong in focused inline tests.
 
 #### Phase 5B: One-shot development adapter
 
-Complete and under review in PR #910.
+Merged in PR #910.
 
 The adapter exhaustively converts `dev::OneShotRequest` into the current
 `wire::MxcConfig`. It explicitly destructures every source field and fills
@@ -616,7 +621,7 @@ not share test fixtures or conversion helpers.
 
 #### Phase 5C: State-aware development contracts
 
-Complete and under review in PR #929.
+Merged in PR #929.
 
 The source-text phase probe, the closed `start`, `exec`, `stop`, and
 `deprovision` roots, the backend-specific provision roots, and typed root
@@ -739,7 +744,7 @@ fields.
 
 #### Phase 5D: State-aware development adapter and wire equivalence
 
-Complete and under review in PR #941.
+Merged in PR #941.
 
 The mutable state-aware adapter exhaustively maps every phase root into the
 current `wire::MxcConfig` shape:
@@ -1528,9 +1533,10 @@ that has yet to be opened.
 
 #### Phase 6.0: Prepare the implementation branch
 
-Base the branch on PR #949, the top of the Phase 5 stack, or on `main` once the
-stack has merged. Do not base it on #941: #949 rewrites the `string_enum!`
-macros and reformats the enum declarations this phase annotates.
+Base the branch on PR #966, the top of the Phase 5 stack, or on `main` once the
+stack has merged. Do not base it on anything below #949: that pull request
+rewrites the `string_enum!` macros and reformats the enum declarations this
+phase annotates.
 Confirm `cargo test -p mxc_config_contract` is green before adding anything,
 so a later failure is unambiguously attributable to this phase.
 
@@ -1971,7 +1977,13 @@ Remediation, in order:
    and `0.7` contracts are immutable, so the fix cannot be applied uniformly
    across versions; and it places the rule in two implementations, so it needs
    a shared constant and a parity test, or it will drift — the failure mode
-   this plan exists to prevent.
+   this plan exists to prevent. **Resolved: the newtype landed in PR #966.**
+   `dev::stable::ProcessContainerCapability` rejects comma-bearing entries and
+   the two reserved names case-insensitively at deserialization, with invalid
+   fixtures for each rejected class. The drift risk this item warns about is
+   now live and unclosed: the rule exists in the contract newtype and in
+   `convert_wire_config`, and neither a shared constant nor a parity test has
+   been added yet.
 3. Treat the finding as a class rather than an instance, and cover it in
    Phase 7.4 by running the harness over the corpus's invalid documents. See
    the "exact looser than rolling" direction recorded there.
@@ -1995,6 +2007,27 @@ If the newtype lands, record the resulting asymmetry deliberately: development
 continue to reject them at conversion. That is defensible, since immutability
 leaves no alternative, but it should be a recorded choice rather than a
 consequence nobody decided.
+
+**Recorded, as of PR #966.** The asymmetry above is now the accepted state:
+`0.8.0-alpha` rejects a comma-bearing or reserved capability during
+deserialization, with a contract-level message, while `0.6.0-alpha` and
+`0.7.0-alpha` accept it structurally and reject it later in
+`convert_wire_config` with that function's message. Two consequences follow for
+the remaining phases. Phase 7.4 must classify the differing *diagnostic* for
+these inputs across versions, not only the accept/reject outcome, since all
+three versions still reject. And Phase 11 must decide whether publishing
+`0.8.0-alpha` freezes the newtype into `published/v0_8_0_alpha`, which would
+make the published contracts permanently inconsistent with each other on this
+rule.
+
+**Where the fix landed.** Remediation moved out of the Phase 6 branch and into
+the Phase 5 stack, as `user/gudge/version_specific_config_parsers_phase5a_2`
+stacked on #949. This is the better placement: the defect is in the Phase 5
+contract, not in Phase 6's generation of artifacts from it, and fixing it
+upstream means the Phase 6 schema and TypeScript oracle inherit the constraint
+on regeneration. It does mean the unpushed Phase 6 branch now carries its own
+`Validate exact contract capabilities` commit for the same defect; drop that
+commit during the rebase onto the merged stack, or the rule lands twice.
 
 **Related finding, deliberately not addressed.** The review also records, at
 Medium severity and out of scope, that the exact parser accepts positional-array
@@ -2020,7 +2053,7 @@ when it was written, but not one being acted on yet.
 ## Phase 7 detailed design
 
 Phase 7 is independent of Phase 6 and the two proceeded in parallel. It depends
-on the complete Phase 5 stack and should be branched from PR #949, the current
+on the complete Phase 5 stack and should be branched from PR #966, the current
 top of that stack, or from `main` once the stack merges. Its only overlap with
 Phase 6 is `wxc_common/src/lib.rs` and `Cargo.toml`; Phase 6 does not touch
 `config_parser.rs` and Phase 7 does not modify the contract crate — except for
