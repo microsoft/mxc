@@ -406,8 +406,9 @@ fn decode_properties(
     event_record: *mut EVENT_RECORD,
     pointer_size: usize,
 ) -> Result<Vec<(String, String)>, PropertyDecodeError> {
-    // SAFETY: caller passes a valid EVENT_RECORD; the field accesses
-    // are reads of POD fields.
+    // SAFETY: `decode_event_property` and the ETW callback supply a non-null
+    // `EVENT_RECORD` that remains valid for this synchronous decode. This
+    // borrow reads only its fixed-size header fields.
     let event = unsafe { &*event_record };
     let user_data = event.UserData as *const u8;
     let user_data_len = event.UserDataLength as usize;

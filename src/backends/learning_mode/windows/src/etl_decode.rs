@@ -374,7 +374,7 @@ impl<'visitor> Accumulator<'visitor> {
         let (access_type, resource_type) = classification;
         let signature = VerboseLoggingSignature {
             provider,
-            provider_guid: crate::extractors::provider_guid_string(provider),
+            provider_guid: crate::extractors::verbose_logging_provider_guid(provider),
             event_id,
             reason,
             pid,
@@ -444,7 +444,7 @@ impl<'visitor> Accumulator<'visitor> {
             }
             return;
         }
-        if let Some(category) = crate::extractors::provider_category(provider) {
+        if let Some(category) = crate::extractors::verbose_logging_provider_for_guid(provider) {
             let reason = match error.event_kind() {
                 Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
                     VerboseLoggingExclusionReason::EventPayloadMalformed
@@ -610,7 +610,8 @@ pub fn visit_raw_events(
     process_trace_file(source_path, &mut accumulator)?;
     if accumulator.processing_limit_reached {
         return Err(AnalyzeError::Decode(format!(
-            "trace exceeded the {MAX_PROCESSED_EVENTS}-event processing limit"
+            "trace exceeded the {MAX_PROCESSED_EVENTS}-event processing limit; \
+             rerun a smaller workload or split it into multiple captureDenials runs"
         )));
     }
     if let Some(error) = accumulator.decode_error {
@@ -785,7 +786,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let event_id = header.EventDescriptor.Id;
 
     if matches!(acc.mode, CollectionMode::SelectForRelogging) {
-        if crate::extractors::provider_category(provider).is_none() {
+        if crate::extractors::verbose_logging_provider_for_guid(provider).is_none() {
             return;
         }
         let event_index = acc.relog_event_count;
@@ -825,7 +826,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
     let mut analyze_filetime = None;
 
     if matches!(acc.mode, CollectionMode::Analyze) {
-        let Some(category) = crate::extractors::provider_category(provider) else {
+        let Some(category) = crate::extractors::verbose_logging_provider_for_guid(provider) else {
             // Unrelated provider: unrelated host traffic, ignored entirely
             // (not aggregated as an excluded Learning Mode outcome).
             return;
@@ -970,7 +971,8 @@ fn select_event_for_relogging(
     }
     if acc.relog_selected_event_indices.len() >= MAX_PROCESSED_EVENTS {
         acc.decode_error = Some(format!(
-            "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit"
+            "trace exceeded the {MAX_PROCESSED_EVENTS}-event process-scoped relogging limit; \
+             rerun a smaller workload or split it into multiple captureDenials runs"
         ));
         acc.stop_requested = true;
         return;
@@ -991,7 +993,8 @@ fn handle_decoded_event(
     filetime: u64,
     acc: &mut Accumulator<'_>,
 ) {
-    let Some(category) = crate::extractors::provider_category(parts.provider) else {
+    let Some(category) = crate::extractors::verbose_logging_provider_for_guid(parts.provider)
+    else {
         return;
     };
     if !is_learning_mode_event(parts.provider, parts.event_id) {
@@ -1024,11 +1027,11 @@ fn handle_decoded_event(
     }
 
     let primary = extract_denial(parts, pid, filetime);
-    // Some permissive capability checks leave the primary access-check event
-    // unidentified (`ObjectType`/`ObjectName` both empty); the identifier may
-    // still be recoverable from the event's DACL payload. Each recovered
-    // candidate is fed independently, and the primary `UnresolvedCapability`
-    // outcome is only counted if none of them panned out.
+    // Some permissive Event 14 capability checks leave `ObjectType` and
+    // `ObjectName` empty. `capability_dacl::KNOWN_CAPABILITIES` defines the
+    // capability names recoverable from ACE SIDs in the DACL payload. Each
+    // recovered candidate is fed independently, and the primary
+    // `UnresolvedCapability` outcome is counted only when none are recovered.
     let capability_candidates = crate::capability_dacl::extract_denials(parts, pid, filetime);
     for raw in capability_candidates.iter().cloned() {
         acc.add_raw_denial(raw);
@@ -1071,6 +1074,11 @@ fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64>
 mod tests {
     use super::*;
     use learning_mode_core::{AccessType, ResourceType};
+
+    const SCOPED_PID: u32 = 42;
+    const SCOPED_START_FILETIME: u64 = 100;
+    const SCOPED_END_FILETIME: u64 = 200;
+    const SCOPED_EVENT_FILETIME: u64 = 150;
 
     #[test]
     fn process_lifetime_index_matches_pid_and_merged_time_ranges() {
@@ -1185,9 +1193,9 @@ mod tests {
     #[test]
     fn scoped_analysis_classifies_malformed_capability_from_in_scope_emitter() {
         let mut accumulator = Accumulator::analyze_for_process_lifetimes(&[ProcessLifetime {
-            pid: 42,
-            start_filetime: 100,
-            end_filetime: 200,
+            pid: SCOPED_PID,
+            start_filetime: SCOPED_START_FILETIME,
+            end_filetime: SCOPED_END_FILETIME,
         }]);
         let parts = DecodedEventParts {
             provider: crate::extractors::KERNEL_GENERAL_PROVIDER,
@@ -1195,7 +1203,7 @@ mod tests {
             props: Vec::new(),
         };
 
-        handle_decoded_event(&parts, 42, 150, &mut accumulator);
+        handle_decoded_event(&parts, SCOPED_PID, SCOPED_EVENT_FILETIME, &mut accumulator);
         let analysis = accumulator.into_analysis().unwrap();
 
         assert_eq!(
@@ -1415,8 +1423,13 @@ mod tests {
 
         let analysis = dedup_to_resources(denials);
 
-        assert_eq!(analysis.denials.len(), 1);
-        assert_eq!(analysis.denials[0].resource, r"\\server\share\file.txt");
+        assert_eq!(
+            analysis
+                .denials
+                .first()
+                .map(|denial| denial.resource.as_str()),
+            Some(r"\\server\share\file.txt")
+        );
         let excluded = analysis
             .verbose_logging
             .signatures
@@ -1740,7 +1753,8 @@ mod tests {
     /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
     #[test]
     fn allow_shape_recovers_capability_from_dacl() {
-        // DWORD-padded allow ACE carrying S-1-15-3-1 (internetClient).
+        // DWORD-padded allow ACE containing the decimal SID S-1-15-3-1
+        // (`internetClient`).
         let dacl = "hex:000000000000000001000000010200000000000F0300000001000000";
         let events = vec![
             permissive_event(
@@ -2382,8 +2396,6 @@ mod tests {
         assert_eq!(signature.resource_type, Some(ResourceType::Capability));
     }
 
-    // ---- verbose logging signature retention (identifiers + redaction + dedup) --
-
     fn find_signature(
         summary: &learning_mode_core::VerboseLoggingSummary,
         event_id: u16,
@@ -2483,7 +2495,7 @@ mod tests {
         );
         assert_eq!(
             group.signature.provider_guid,
-            crate::extractors::provider_guid_string(VerboseLoggingProvider::KernelGeneral)
+            crate::extractors::verbose_logging_provider_guid(VerboseLoggingProvider::KernelGeneral)
         );
         assert_eq!(group.signature.pid, 42, "process identifier retained");
         assert_eq!(

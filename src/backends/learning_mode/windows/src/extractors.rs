@@ -133,7 +133,7 @@ pub fn extract_denial(
     // Callers on the real trace path gate on `is_learning_mode_event` before
     // decoding via TDH at all, so this branch only matters for direct/test
     // callers that skip that gate.
-    let provider = provider_category(parts.provider)
+    let provider = verbose_logging_provider_for_guid(parts.provider)
         .ok_or(VerboseLoggingExclusionReason::UnsupportedEventSchema)?;
     if !is_learning_mode_event(parts.provider, parts.event_id) {
         return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
@@ -251,7 +251,7 @@ pub(crate) fn effective_capability_event_pid(process_id: Option<&str>) -> Option
 /// Returns `None` for providers outside the Learning Mode vocabulary; those
 /// events are ignored entirely (not aggregated), since they are unrelated
 /// host traffic rather than an excluded Learning Mode outcome.
-pub(crate) fn provider_category(provider: GUID) -> Option<VerboseLoggingProvider> {
+pub(crate) fn verbose_logging_provider_for_guid(provider: GUID) -> Option<VerboseLoggingProvider> {
     if provider == KERNEL_GENERAL_PROVIDER {
         Some(VerboseLoggingProvider::KernelGeneral)
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
@@ -261,20 +261,24 @@ pub(crate) fn provider_category(provider: GUID) -> Option<VerboseLoggingProvider
     }
 }
 
-/// Renders a symbolic verbose logging provider category back to its raw ETW
-/// provider GUID, in canonical braced string form, for retention in a Data
-/// Loop signature. Provider GUIDs are stable component identifiers, not
+/// Renders a symbolic verbose logging provider category as its raw ETW
+/// provider GUID, in stable uppercase braced form, for retention in a verbose
+/// logging signature. Provider GUIDs are stable component identifiers, not
 /// personal data, so unlike account/user values they are never redacted.
-pub(crate) fn provider_guid_string(provider: VerboseLoggingProvider) -> String {
+pub(crate) fn verbose_logging_provider_guid(provider: VerboseLoggingProvider) -> String {
     match provider {
-        VerboseLoggingProvider::KernelGeneral => format_guid(KERNEL_GENERAL_PROVIDER),
+        VerboseLoggingProvider::KernelGeneral => {
+            format_guid_braced_uppercase(KERNEL_GENERAL_PROVIDER)
+        }
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
-            format_guid(PRIVACY_LEARNING_MODE_PROVIDER)
+            format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
         }
     }
 }
 
-fn format_guid(guid: GUID) -> String {
+// Keep the serialized spelling independent of formatting changes in the
+// `windows` crate: verbose signatures require braces and uppercase hex.
+fn format_guid_braced_uppercase(guid: GUID) -> String {
     format!(
         "{{{:08X}-{:04X}-{:04X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}}}",
         guid.data1,
@@ -316,6 +320,30 @@ pub(crate) const MAX_SIGNATURE_VALUE_LEN: usize = 256;
 const SHA256_HEX_LEN: usize = 64;
 const BOUNDED_VALUE_MARKER_LEN: usize = "...<sha256=".len() + SHA256_HEX_LEN + ">...".len();
 const _: () = assert!(MAX_SIGNATURE_VALUE_LEN > BOUNDED_VALUE_MARKER_LEN);
+const TIMESTAMP_PROPERTY_NAMES: &[&str] = &[
+    "time",
+    "timestamp",
+    "filetime",
+    "systemtime",
+    "eventtime",
+    "timecreated",
+    "creationtime",
+    "createtime",
+    "starttime",
+    "endtime",
+    "exittime",
+    "lastwritetime",
+];
+const RETAINED_IDENTIFIER_SUFFIXES: &[&str] = &["sid", "guid", "identifier", "id"];
+const IDENTITY_PROPERTY_NAMES: &[&str] = &["user", "account", "owner", "upn"];
+const IDENTITY_PROPERTY_SUFFIXES: &[&str] = &[
+    "username",
+    "accountname",
+    "ownername",
+    "principalname",
+    "account",
+    "upn",
+];
 
 #[derive(Clone, Copy)]
 struct NormalizedPropertyName<'a>(&'a str);
@@ -339,50 +367,20 @@ impl<'a> NormalizedPropertyName<'a> {
             .rev()
             .all(|expected| bytes.next() == Some(expected))
     }
-
-    fn contains(self, needle: &str) -> bool {
-        let needle = needle.as_bytes();
-        if needle.is_empty() {
-            return true;
-        }
-        let mut bytes = self.bytes();
-        while let Some(byte) = bytes.next() {
-            if byte == needle[0] {
-                let mut remainder = bytes.clone();
-                if needle[1..]
-                    .iter()
-                    .all(|expected| remainder.next() == Some(*expected))
-                {
-                    return true;
-                }
-            }
-        }
-        false
-    }
 }
 
 /// Returns whether `name` looks like it carries a timestamp, so it is
 /// dropped from a verbose logging signature entirely (never redacted or
 /// truncated) — exact timestamps must not prevent otherwise-identical
-/// events from deduplicating.
+/// events from deduplicating. These are trusted ETW schema property names, so
+/// matching is deliberately limited to known names and suffixes rather than
+/// fuzzy spellings that could discard unrelated properties.
 fn is_timestamp_like_property(name: &str) -> bool {
     let normalized = NormalizedPropertyName(name);
-    [
-        "time",
-        "timestamp",
-        "filetime",
-        "systemtime",
-        "eventtime",
-        "timecreated",
-        "creationtime",
-        "createtime",
-        "starttime",
-        "endtime",
-        "exittime",
-        "lastwritetime",
-    ]
-    .into_iter()
-    .any(|expected| normalized.equals(expected))
+    TIMESTAMP_PROPERTY_NAMES
+        .iter()
+        .copied()
+        .any(|expected| normalized.equals(expected))
         || normalized.ends_with("timestamp")
         || normalized.ends_with("filetime")
 }
@@ -393,23 +391,21 @@ fn is_timestamp_like_property(name: &str) -> bool {
 /// content.
 fn is_identity_property(name: &str) -> bool {
     let normalized = NormalizedPropertyName(name);
-    if normalized.contains("sid")
-        || normalized.contains("guid")
-        || normalized.contains("identifier")
-        || normalized.ends_with("id")
+    if RETAINED_IDENTIFIER_SUFFIXES
+        .iter()
+        .copied()
+        .any(|suffix| normalized.equals(suffix) || normalized.ends_with(suffix))
     {
         return false;
     }
-    normalized.equals("user")
-        || normalized.equals("account")
-        || normalized.equals("owner")
-        || normalized.contains("username")
-        || normalized.contains("accountname")
-        || normalized.contains("ownername")
-        || normalized.contains("principalname")
-        || normalized.ends_with("account")
-        || normalized.equals("upn")
-        || normalized.ends_with("upn")
+    IDENTITY_PROPERTY_NAMES
+        .iter()
+        .copied()
+        .any(|expected| normalized.equals(expected))
+        || IDENTITY_PROPERTY_SUFFIXES
+            .iter()
+            .copied()
+            .any(|suffix| normalized.ends_with(suffix))
 }
 
 fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
@@ -487,8 +483,9 @@ fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(suffix))
 }
 
-/// Bounds an already-sanitized property list to [`MAX_SIGNATURE_PROPERTIES`]
-/// entries and [`MAX_SIGNATURE_VALUE_LEN`] characters per value.
+/// Deterministically discards sorted properties after
+/// [`MAX_SIGNATURE_PROPERTIES`] and bounds retained values to
+/// [`MAX_SIGNATURE_VALUE_LEN`] characters.
 ///
 /// Overlong values retain prefix and suffix context plus a digest of the full
 /// sanitized value. The digest prevents distinct values with a long shared
@@ -522,8 +519,8 @@ fn bound_property_value(value: &str, char_count: usize) -> String {
     format!("{prefix}{marker}{suffix}")
 }
 
-/// Produces the deterministic, sanitized, bounded property list for a Data
-/// Loop signature from one decoded event's raw TDH properties.
+/// Produces the deterministic, sanitized, bounded property list for a verbose
+/// logging signature from one decoded event's raw TDH properties.
 ///
 /// Never includes a free-form decoder error message (decode failures are
 /// recorded with an empty property list by the caller, before this
@@ -532,7 +529,9 @@ fn bound_property_value(value: &str, char_count: usize) -> String {
 /// prevent their signatures from deduplicating. SIDs, capability names,
 /// PIDs carried as properties, and GUID-shaped values are retained
 /// verbatim; account/user-identity content and complete file paths are
-/// redacted.
+/// redacted. Classification is schema-independent: newly decoded properties
+/// automatically pass through these name/value checks without requiring a new
+/// extractor branch.
 pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, String)> {
     let usernames = props
         .iter()
@@ -1534,9 +1533,10 @@ mod tests {
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
             VerboseLoggingExclusionReason::UnsupportedEventSchema
         );
-        assert!(
-            provider_category(GUID::from_u128(0x12345678_1234_1234_1234_1234567890ab)).is_none()
-        );
+        assert!(verbose_logging_provider_for_guid(GUID::from_u128(
+            0x12345678_1234_1234_1234_1234567890ab
+        ))
+        .is_none());
     }
 
     #[test]
@@ -1567,26 +1567,33 @@ mod tests {
     }
 
     #[test]
-    fn known_provider_category_is_symbolic_and_pii_free() {
+    fn known_provider_guid_maps_to_symbolic_pii_free_category() {
         assert_eq!(
-            provider_category(KERNEL_GENERAL_PROVIDER),
+            verbose_logging_provider_for_guid(KERNEL_GENERAL_PROVIDER),
             Some(VerboseLoggingProvider::KernelGeneral)
         );
         assert_eq!(
-            provider_category(PRIVACY_LEARNING_MODE_PROVIDER),
+            verbose_logging_provider_for_guid(PRIVACY_LEARNING_MODE_PROVIDER),
             Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
         );
-        assert_eq!(provider_category(GUID::from_u128(0)), None);
+        assert_eq!(verbose_logging_provider_for_guid(GUID::from_u128(0)), None);
     }
 
     #[test]
-    fn provider_guid_string_is_stable_and_round_trips_by_category() {
-        let kernel_guid = provider_guid_string(VerboseLoggingProvider::KernelGeneral);
-        let privacy_guid =
-            provider_guid_string(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode);
+    fn verbose_logging_provider_guid_has_stable_spelling() {
+        let kernel_guid = verbose_logging_provider_guid(VerboseLoggingProvider::KernelGeneral);
+        let privacy_guid = verbose_logging_provider_guid(
+            VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
+        );
         assert_ne!(kernel_guid, privacy_guid);
-        assert_eq!(kernel_guid, format_guid(KERNEL_GENERAL_PROVIDER));
-        assert_eq!(privacy_guid, format_guid(PRIVACY_LEARNING_MODE_PROVIDER));
+        assert_eq!(
+            kernel_guid,
+            format_guid_braced_uppercase(KERNEL_GENERAL_PROVIDER)
+        );
+        assert_eq!(
+            privacy_guid,
+            format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
+        );
         assert!(kernel_guid.starts_with('{') && kernel_guid.ends_with('}'));
     }
 
@@ -1833,6 +1840,29 @@ mod tests {
                 Some(REDACTED_PATH)
             );
         }
+    }
+
+    #[test]
+    fn identity_detection_does_not_match_embedded_name_fragments() {
+        let props = vec![
+            (
+                "AccountNamePolicy".to_string(),
+                "\"retain-this-value\"".to_string(),
+            ),
+            (
+                "ConsiderationUserName".to_string(),
+                "\"redact-this-value\"".to_string(),
+            ),
+        ];
+
+        let out = sanitize_properties(&props);
+        let value_for = |name: &str| {
+            out.iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value_for("AccountNamePolicy"), Some("retain-this-value"));
+        assert_eq!(value_for("ConsiderationUserName"), Some(REDACTED_USER));
     }
 
     #[test]

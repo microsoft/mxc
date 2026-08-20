@@ -254,7 +254,8 @@ pub(crate) fn extract_denials(
     }
     // `is_supported_event` above only matches the two known Learning Mode
     // providers, so this always resolves.
-    let Some(provider) = crate::extractors::provider_category(parts.provider) else {
+    let Some(provider) = crate::extractors::verbose_logging_provider_for_guid(parts.provider)
+    else {
         return Vec::new();
     };
 

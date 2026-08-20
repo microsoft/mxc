@@ -69,7 +69,8 @@ impl AnalysisResult {
         }
     }
 
-    /// Trims verbose logging signatures so the complete compact JSON result fits.
+    /// Trims verbose logging signatures so the complete compact JSON
+    /// serialization is no larger than `max_bytes`.
     ///
     /// Returns `false` when the canonical denials and empty verbose logging envelope
     /// alone exceed `max_bytes`; canonical denials are never discarded.
@@ -267,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_guarded_payload_defaults_verbose_logging_summary() {
+    fn analysis_payload_without_verbose_logging_defaults_summary() {
         let payload = br#"{"denials":[],"deniedResourcesTruncated":false}"#;
         let result: AnalysisResult = serde_json::from_slice(payload).unwrap();
         assert!(result.verbose_logging.is_empty());
@@ -339,6 +340,43 @@ mod tests {
         assert!(result.verbose_logging.aggregate_groups_truncated);
         assert_eq!(result.verbose_logging.total_occurrences, 6);
         assert!(result.verbose_logging.overflow_occurrences > 0);
+    }
+
+    #[test]
+    fn serialized_size_limit_saturates_overflow_counters() {
+        let mut result = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: VerboseLoggingSummary {
+                signatures: vec![VerboseLoggingAggregate {
+                    signature: VerboseLoggingSignature {
+                        provider: VerboseLoggingProvider::KernelGeneral,
+                        provider_guid: "provider".to_string(),
+                        event_id: 14,
+                        reason: VerboseLoggingExclusionReason::CanonicalDenial,
+                        pid: 1,
+                        access_type: Some(AccessType::Read),
+                        resource_type: Some(ResourceType::File),
+                        properties: vec![("ObjectName".to_string(), "x".repeat(4_096))],
+                    },
+                    count: 3,
+                }],
+                total_occurrences: u64::MAX,
+                overflow_occurrences: u64::MAX - 1,
+                canonical_overflow_occurrences: u64::MAX - 1,
+                ..Default::default()
+            },
+        };
+        let original_len = serde_json::to_vec(&result).unwrap().len();
+
+        assert!(result
+            .fit_verbose_logging_within_serialized_bytes(original_len - 1)
+            .unwrap());
+        assert_eq!(result.verbose_logging.overflow_occurrences, u64::MAX);
+        assert_eq!(
+            result.verbose_logging.canonical_overflow_occurrences,
+            u64::MAX
+        );
     }
 
     #[test]

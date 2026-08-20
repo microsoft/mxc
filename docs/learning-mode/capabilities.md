@@ -105,9 +105,9 @@ stays enforced:
    hosts use native capture without PLM or UAC, while legacy or incompatible
    tiers use the session-scoped guarded-WPR fallback and elevate only its
    fixed-operation guardian. The CLI consumes the returned JSON and ETL paths,
-   relocates the canonical output, its verbose logging sibling, and the trace to
+   relocates the policy output, its verbose logging sibling, and the trace to
    `denials.json`, `denials.verbose.json`, and `trace.etl`, and generates the
-   source snapshot and `Adjusted_*.json` from canonical denials without decoding
+   source snapshot and `Adjusted_*.json` from the policy denials without decoding
    ETL again. Truncated analysis skips the adjusted config.
 
    ```
@@ -172,7 +172,7 @@ ungranted access is handled while it is recorded:
 ### Output file the caller consumes
 
 After the sandboxed workload exits, MXC decodes the captured denials and writes
-the canonical JSON deliverable a host application reads to regenerate its
+the policy JSON deliverable a host application reads to regenerate its
 sandbox policy:
 
 ```json
@@ -204,11 +204,11 @@ sandbox policy:
 - `denials` is already de-duplicated per `(resource, accessType)`, so
   `summary.totalDenials` equals `denials.length`.
 - Analysis retains at most 10,000 unique denials and processes at most
-  1,000,000 ETW events. Reaching the unique-denial bound stops adding canonical
-  entries but continues bounded aggregate accounting; reaching either bound
+  1,000,000 ETW events. Reaching the unique-denial bound stops adding policy
+  entries but continues bounded diagnostic accounting; reaching either bound
   sets `summary.deniedResourcesTruncated` to `true`.
 - `resource` is the user-visible identifier for the denied resource,
-  interpreted by `resourceType`: a canonical `C:\…` path for `file`, the
+  interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
   and the raw resource identifier otherwise. Named Section, SymbolicLink, and
   Timer access checks are emitted as `other`. Well-known capability SIDs are
@@ -229,7 +229,7 @@ sandbox policy:
 Every successful decode also writes a deterministic sibling file:
 `denials.<run-id>.json` produces `denials.<run-id>.verbose.json`. This verbose
 logging artifact is a bounded, sensitive-value-redacted superset containing
-canonical denial occurrences plus outcomes omitted from canonical denials:
+policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
@@ -272,14 +272,14 @@ non-file resource values are retained. Complete file paths are replaced with
 Exact header timestamps and timestamp-like properties are omitted so otherwise
 identical events deduplicate, and free-form decoder errors are never serialized.
 
-Every valid denial candidate is classified as `canonicalDenial`, including its
-first canonical occurrence, later duplicates, and candidates observed after
-the canonical unique-denial bound. Those occurrences deduplicate under the
+Every valid denial candidate is classified as `canonicalDenial` in the verbose
+file, including its first occurrence, later duplicates, and candidates observed
+after the policy file's unique-denial bound. Those occurrences deduplicate under the
 same signature and increment its count. `accessType` and `resourceType` are
 included when denial extraction determined them; diagnostic outcomes without
 those classifications omit the fields.
 
-Candidates excluded from canonical policy output retain a closed diagnostic
+Candidates excluded from the policy output retain a closed diagnostic
 reason and their sanitized event properties:
 
 - `unusableResourcePath` means a File access-check resource could not be
@@ -287,8 +287,8 @@ reason and their sanitized event properties:
   `\Device\MountPointManager` is useful Devices-namespace evidence, but it is
   not a directly authorable filesystem grant.
 - `unsupportedObjectType` means the event names a resource outside the
-  canonical policy model. Observed Section, SymbolicLink, and Timer checks are
-  canonical `other` resources; remaining examples include
+  supported policy model. Observed Section, SymbolicLink, and Timer checks are
+  retained as `other` resources; remaining examples include
   `\BaseNamedObjects` as a Directory, ALPC Ports such as
   `ubpmtaskhostchannel`, and RPC Interface GUIDs.
 
@@ -311,25 +311,18 @@ as the bounded `EventName` signature property. Free-form decoder errors are
 never serialized. Failure to obtain the event schema remains a fatal analysis
 error rather than being represented as a verbose logging signature.
 
-Verbose logging retains at most 4,096 distinct signatures, 24 sorted properties per
-signature, 256 characters per property value, and 16 MiB of compact serialized
-signature data. Canonical-denial signatures take priority over diagnostic
-signatures at these bounds. Additional keys are collapsed into
-`overflowOccurrences`; `canonicalOverflowOccurrences` reports the subset of
-canonical occurrences that could not be represented even after diagnostic
-groups were evicted, and `aggregateGroupsTruncated` is set.
-Before returning analysis, the decoder also fits the complete canonical plus
-verbose logging result within the guarded 64 MiB transport limit by moving additional
-verbose logging groups into overflow; canonical denials are never discarded.
-`processedEventsTruncated` indicates that the 1,000,000-event bound prevented
-complete accounting. Counts are candidate-level when extraction identifies
-individual denial candidates and one event-level outcome when decoding cannot
-determine candidate cardinality.
+To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
+signatures, 24 sorted properties per signature, and 256 characters per property
+value. `overflowOccurrences` and `aggregateGroupsTruncated` indicate that
+additional diagnostic groups were omitted. `canonicalOverflowOccurrences`
+counts omitted policy-denial occurrences, while `processedEventsTruncated`
+indicates that the 1,000,000-event limit prevented complete accounting. The
+policy file itself is never reduced to make room for verbose logging.
 
-The canonical and verbose logging files fail together: MXC stages both and reports
+The policy and verbose logging files fail together: MXC stages both and reports
 capture failure unless both final artifacts are committed. The verbose logging path
 is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
-metadata; callers derive it from the canonical path using the naming rule
+metadata; callers derive it from the policy output path using the naming rule
 above.
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file
@@ -345,8 +338,8 @@ so CLI callers can locate the deliverable without scanning the filesystem:
 {"type":"captureDenials","outputPath":"C:\\logs\\denials.4321_0123456789abcdef0123456789abcdef.json","exitCode":0,"totalDenials":2,"deniedResourcesTruncated":false}
 ```
 
-The pointer echoes the canonical file's `summary`; the authoritative policy
-record is that file. In-process Rust callers receive the same information through
+The pointer echoes the policy file's `summary`; that file is the authoritative
+record of denials. In-process Rust callers receive the same summary information through
 `Output::output_metadata` or `Sandbox::output_metadata()` after waiting. The
 C# SDK exposes it through `RunResult.OutputMetadata` and
 `MxcSandboxProcess.OutputMetadata`.

@@ -19,7 +19,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 };
 
 use crate::etl_decode::select_learning_mode_events_for_relogging;
-use crate::extractors::{is_learning_mode_event, provider_category};
+use crate::extractors::{is_learning_mode_event, verbose_logging_provider_for_guid};
 use crate::process_lifetime::{attested_process_lifetimes, JobMembershipSnapshot};
 use crate::tdh_decode;
 
@@ -101,7 +101,7 @@ impl RelogSelectionState {
         // lifetime bounds. Revalidate the second pass's current PID before
         // injection so a different equal-timestamp ordering cannot substitute
         // a foreign process's event at the same ordinal. Do not advance the
-        // selected cursor on mismatch: the final count reconciliation then
+        // selected-event index on mismatch: the final count reconciliation then
         // fails closed and the partial destination is deleted.
         if self.selected_event_pids.get(selected_index) != Some(&pid)
             || !self.attested_pids.contains(&pid)
@@ -156,13 +156,13 @@ impl ITraceEventCallback_Impl for ProcessScopedTraceFilter_Impl {
             ));
         };
         let header = &record.EventHeader;
-        if provider_category(header.ProviderId).is_none() {
+        if verbose_logging_provider_for_guid(header.ProviderId).is_none() {
             return Ok(());
         }
-        let effective_pid = if header.EventDescriptor.Id
+        let is_supported_capability_event = header.EventDescriptor.Id
             == crate::extractors::CAPABILITY_DENIAL_EVENT_ID
-            && is_learning_mode_event(header.ProviderId, header.EventDescriptor.Id)
-        {
+            && is_learning_mode_event(header.ProviderId, header.EventDescriptor.Id);
+        let effective_pid = if is_supported_capability_event {
             let payload_pid = self
                 .schema_cache
                 .lock()
