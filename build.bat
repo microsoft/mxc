@@ -115,6 +115,10 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             copy /Y "!BIN_DIR!\wxc-host-prep.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\wxc-host-prep.exe
         )
+        if exist "!BIN_DIR!\mxc-diagnostic-console.exe" (
+            copy /Y "!BIN_DIR!\mxc-diagnostic-console.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
+            echo   Copied !SDK_ARCH!\mxc-diagnostic-console.exe
+        )
         if exist "!BIN_DIR!\plm.exe" (
             copy /Y "!BIN_DIR!\plm.exe" "sdk\node\bin\!SDK_ARCH!\" >nul
             echo   Copied !SDK_ARCH!\plm.exe
@@ -169,7 +173,8 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
 echo.
 echo Building npm SDK package...
 pushd sdk\node
-call npm install & call npm run build
+call npm install || goto :error
+call npm run build || goto :error
 popd
 
 echo.
@@ -180,7 +185,8 @@ pushd sdk\node\tests\integration
 :: stale packed copy. Force a refresh of the @microsoft/mxc-sdk link so
 :: type-checking sees the dist we just rebuilt above.
 if exist node_modules\@microsoft\mxc-sdk rmdir /s /q node_modules\@microsoft\mxc-sdk
-call npm install & call npm run build
+call npm install || goto :error
+call npm run build || goto :error
 popd
 
 echo.

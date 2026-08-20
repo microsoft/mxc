@@ -40,31 +40,34 @@ public sealed class SandboxPolicy
     public uint? TimeoutMs { get; set; }
 
     /// <summary>
-    /// Canonical per-invocation telemetry settings serialized as
-    /// <c>{"telemetry":{"enabled":...}}</c>.
+    /// Stable per-invocation telemetry settings.
     /// </summary>
     [JsonPropertyName("telemetry")]
     public TelemetrySettings? Telemetry { get; set; }
 
     /// <summary>
-    /// Convenience projection for <see cref="Telemetry"/>. Serializes through
-    /// the canonical nested <c>telemetry.enabled</c> field, not the legacy
-    /// top-level alias accepted by the native FFI for compatibility.
+    /// Convenience projection for <see cref="TelemetrySettings.Enabled"/>.
+    /// Setting this to <see langword="true"/> is necessary but does not bypass
+    /// persisted user consent or administrative policy. Omitted or false
+    /// keeps telemetry off.
     /// </summary>
     [JsonIgnore]
     public bool? TelemetryEnabled
     {
         get => Telemetry?.Enabled;
-        set => Telemetry = value is null ? null : new TelemetrySettings { Enabled = value.Value };
+        set => Telemetry = value is null ? null : new TelemetrySettings { Enabled = value };
     }
 }
 
 /// <summary>Telemetry section of a <see cref="SandboxPolicy"/>.</summary>
 public sealed class TelemetrySettings
 {
-    /// <summary>Whether this invocation opts telemetry on, subject to consent and policy.</summary>
+    /// <summary>
+    /// Opt this invocation into telemetry, subject to persisted user consent
+    /// and administrative policy.
+    /// </summary>
     [JsonPropertyName("enabled")]
-    public bool Enabled { get; set; }
+    public bool? Enabled { get; set; }
 }
 
 /// <summary>

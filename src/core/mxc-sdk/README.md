@@ -458,7 +458,7 @@ Two things worth designing around:
 It never fails: any unreadable or unrecognized value reads back as
 `PolicyState::Blocked`. Off Windows it is always `PolicyState::NotApplicable`.
 `telemetry::is_blocked_by_policy()` is the convenience predicate. See
-[`docs/telemetry/telemetry-policy.md`](../../../docs/telemetry/telemetry-policy.md).
+[`docs/telemetry/telemetry-administrative-policy.md`](../../../docs/telemetry/telemetry-administrative-policy.md).
 
 ## No pty
 

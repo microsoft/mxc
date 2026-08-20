@@ -182,4 +182,73 @@ public class MxcLifecycleTests
         Assert.Equal("iso:abc", root.GetProperty("sandboxId").GetString());
         Assert.False(root.TryGetProperty("experimental", out _));
     }
+
+    [Fact]
+    public void BuildStartEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
+    {
+        var options = new StartSandboxOptions
+        {
+            TelemetryEnabled = true,
+        };
+        var root = MxcLifecycle
+            .BuildStartEnvelope(new SandboxId("iso:abc"), options);
+
+        Assert.False(root.ContainsKey("correlationVector"));
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void BuildExecEnvelope_RelaysStableTelemetryWithoutCorrelationVector()
+    {
+        var options = new StateAwareOperationOptions
+        {
+            TelemetryEnabled = true,
+        };
+        var root = MxcLifecycle.BuildExecEnvelope(
+            new SandboxId("iso:abc"),
+            "echo hi",
+            options);
+
+        Assert.False(root.ContainsKey("correlationVector"));
+        Assert.True(root["telemetry"]?["enabled"]?.GetValue<bool>());
+        Assert.Null(root["experimental"]);
+    }
+
+    [Fact]
+    public void ExecInSandboxAsync_PreservesCancellationTokenAsThirdParameter()
+    {
+        static Task<RunResult> InvokeWithDefaultLiteral(SandboxId id, string command) =>
+            MxcLifecycle.ExecInSandboxAsync(id, command, default);
+
+        Assert.NotNull((Func<SandboxId, string, Task<RunResult>>)InvokeWithDefaultLiteral);
+    }
+
+    [Fact]
+    public async Task RunBlockingOperationAsync_CancellationCleansUpLateResult()
+    {
+        using var releaseOperation = new ManualResetEventSlim();
+        var operationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cleanedUp = new TaskCompletionSource<int>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellation = new CancellationTokenSource();
+
+        var task = MxcLifecycle.RunBlockingOperationAsync(
+            () =>
+            {
+                operationStarted.SetResult();
+                releaseOperation.Wait();
+                return 42;
+            },
+            cleanedUp.SetResult,
+            cancellation.Token);
+
+        await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => task);
+
+        releaseOperation.Set();
+        Assert.Equal(42, await cleanedUp.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
 }

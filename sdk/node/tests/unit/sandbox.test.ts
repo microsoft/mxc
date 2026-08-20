@@ -1197,4 +1197,50 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
       );
     });
   });
+
+  describe('one-shot telemetry options', () => {
+    function decodeConfig(args: string[]): ContainerConfig {
+      const index = args.indexOf('--config-base64');
+      assert.ok(index >= 0, '--config-base64 should be present in args');
+      return JSON.parse(
+        Buffer.from(args[index + 1], 'base64').toString('utf-8'),
+      ) as ContainerConfig;
+    }
+
+    it('copies options.telemetry into the one-shot execution config', () => {
+      const config = makeConfig('process');
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+        telemetry: { enabled: true },
+      });
+
+      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
+      assert.strictEqual(config.telemetry, undefined, 'caller config must not be mutated');
+    });
+
+    it('preserves config.telemetry when the option is omitted', () => {
+      const config = makeConfig('process');
+      config.telemetry = { enabled: true };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+      });
+
+      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
+    });
+
+    it('lets the per-invocation option override config.telemetry', () => {
+      const config = makeConfig('process');
+      config.telemetry = { enabled: false };
+      const { args } = resolveExecutableAndArgs(config, {
+        executablePath: fakeExe,
+        skipPlatformCheck: true,
+        telemetry: { enabled: true },
+      });
+
+      assert.deepStrictEqual(decodeConfig(args).telemetry, { enabled: true });
+      assert.deepStrictEqual(config.telemetry, { enabled: false });
+    });
+  });
 });

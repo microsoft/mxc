@@ -24,6 +24,9 @@ serde_json = { workspace = true }
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+# Debug-only telemetry test seam used by the .NET SDK integration suite so it
+# can redirect consent storage/policy away from the real machine state.
+test-support = ["mxc-sdk/test-support"]
 
 [dev-dependencies]
 # Gives the FFI tests the policy-key redirector, so they can assert the exact

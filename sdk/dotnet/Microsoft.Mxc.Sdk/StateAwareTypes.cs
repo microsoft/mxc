@@ -29,6 +29,9 @@ public sealed class ProvisionSandboxOptions
 
     /// <summary>Optional Entra credentials for a cloud-agent sandbox.</summary>
     public SandboxUserCredentials? User { get; set; }
+
+    /// <summary>Enable stable telemetry for this phase, subject to consent and policy.</summary>
+    public bool? TelemetryEnabled { get; set; }
 }
 
 /// <summary>Options for <see cref="MxcLifecycle.StartSandbox"/>.</summary>
@@ -44,6 +47,16 @@ public sealed class StartSandboxOptions
 
     /// <summary>Optional Entra credentials (must match those given at provision).</summary>
     public SandboxUserCredentials? User { get; set; }
+
+    /// <summary>Enable stable telemetry for this phase, subject to consent and policy.</summary>
+    public bool? TelemetryEnabled { get; set; }
+}
+
+/// <summary>Options shared by state-aware exec, stop, and deprovision phases.</summary>
+public sealed class StateAwareOperationOptions
+{
+    /// <summary>Enable stable telemetry for this phase, subject to consent and policy.</summary>
+    public bool? TelemetryEnabled { get; set; }
 }
 
 /// <summary>The result of <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>
@@ -57,4 +70,5 @@ public sealed class ProvisionResult
     /// user identity), or null when the backend produced none.
     /// </summary>
     public string? MetadataJson { get; init; }
+
 }

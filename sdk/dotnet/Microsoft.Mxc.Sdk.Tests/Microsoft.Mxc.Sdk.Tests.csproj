@@ -8,6 +8,14 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- The native detail struct is marshalled with raw pointers. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <MxcSrcDir>$(MSBuildProjectDirectory)/../../../src</MxcSrcDir>
+    <MxcTestCargoTargetDir>$(MxcSrcDir)/target/dotnet-test-support</MxcTestCargoTargetDir>
+    <MxcTestCargoProfileArg Condition="'$(Configuration)' == 'Release'">--release</MxcTestCargoProfileArg>
+    <MxcTestCargoProfileDir Condition="'$(Configuration)' == 'Release'">release</MxcTestCargoProfileDir>
+    <MxcTestCargoProfileDir Condition="'$(Configuration)' != 'Release'">debug</MxcTestCargoProfileDir>
+    <MxcTestNativeOutput Condition="'$(OS)' == 'Windows_NT'">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/mxc_ffi.dll</MxcTestNativeOutput>
+    <MxcTestNativeOutput Condition="$([MSBuild]::IsOSPlatform('OSX'))">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.dylib</MxcTestNativeOutput>
+    <MxcTestNativeOutput Condition="'$(MxcTestNativeOutput)' == ''">$(MxcTestCargoTargetDir)/$(MxcTestCargoProfileDir)/libmxc_ffi.so</MxcTestNativeOutput>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,5 +27,17 @@
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
   </ItemGroup>
+
+  <Target Name="BuildMxcTestSupportNativeLibrary"
+          AfterTargets="Build"
+          Condition="'$(DesignTimeBuild)' != 'true'">
+    <Message Importance="high" Text="mxc: building isolated test-support native library" />
+    <Exec Command="cargo build -p mxc_ffi --features test-support $(MxcTestCargoProfileArg) --target-dir &quot;$(MxcTestCargoTargetDir)&quot;" WorkingDirectory="$(MxcSrcDir)" />
+    <Error Condition="!Exists('$(MxcTestNativeOutput)')"
+           Text="The test-support native build did not produce $(MxcTestNativeOutput)." />
+    <Copy SourceFiles="$(MxcTestNativeOutput)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
 
 </Project>

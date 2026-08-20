@@ -98,6 +98,56 @@ public class MxcSandboxTests
         Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SandboxPolicy_TelemetrySerializesCanonicalNestedShape(bool enabled)
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.8.0-alpha",
+            Telemetry = new TelemetrySettings { Enabled = enabled },
+        };
+
+        var json = MxcSandbox.SerializePolicy(policy);
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        Assert.Equal(enabled, root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
+
+        var roundTrip = JsonSerializer.Deserialize<SandboxPolicy>(json);
+        Assert.NotNull(roundTrip);
+        Assert.Equal(enabled, roundTrip.Telemetry?.Enabled);
+        Assert.Equal(enabled, roundTrip.TelemetryEnabled);
+    }
+
+    [Fact]
+    public void SandboxPolicy_TelemetryEnabledConvenienceUsesCanonicalNestedShape()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.8.0-alpha",
+            TelemetryEnabled = true,
+        };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var root = document.RootElement;
+        Assert.True(root.GetProperty("telemetry").GetProperty("enabled").GetBoolean());
+        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
+    }
+
+    [Fact]
+    public void SandboxPolicy_OmittedTelemetrySerializesNoTelemetryField()
+    {
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+
+        using var document = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var root = document.RootElement;
+        Assert.False(root.TryGetProperty("telemetry", out _));
+        Assert.False(root.TryGetProperty("telemetryEnabled", out _));
+    }
+
     [Fact]
     public void CaptureDenialsOutput_DeserializesRetainedEtlPath()
     {
