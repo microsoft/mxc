@@ -1,15 +1,24 @@
 #!/bin/bash
-# Bubblewrap firewall-enforcement tests (schema 0.8+).
+# Bubblewrap firewall-enforcement tests (schema 0.8+), and the pre-0.8 twin.
 #
-# These tests do NOT require root: enforcement runs inside the sandbox's own
+# Most cases here do NOT require root: enforcement runs inside the sandbox's own
 # network namespace, where the supervisor holds CAP_NET_ADMIN through an
-# unprivileged user namespace.
+# unprivileged user namespace. The exception is the pre-0.8 compatibility case
+# at the end, which exercises the legacy HOST-side chain and so needs privilege
+# to run to completion.
 #
 # The point of this file is that the rules are *enforced*, not merely emitted.
 # Pre-0.8 firewall mode builds a host chain the sandbox never traverses, so a
 # test that only checked "the run succeeded" passed against a sandbox with no
-# filtering at all. Every case here therefore asserts a destination that must
-# be reachable and one that must not.
+# filtering at all. Every enforcement case here therefore asserts a destination
+# that must be reachable and one that must not.
+#
+# The other half of the contract is that 0.8 changed nothing for existing
+# callers: GHCP consumes Bubblewrap on 0.6/0.7. The 0.8 restrictions are
+# therefore paired with a pre-0.8 twin asserting the old behavior still holds,
+# since a test that only proves the new rejection cannot tell "correctly gated"
+# from "rejects everyone". The allowLocalNetwork axis is paired the same way in
+# run_bwrap_localnet_test.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +39,77 @@ else
         echo "Error: lxc-exec not found. Run build.sh first."
         exit 1
     fi
+fi
+
+HOST_NETNS="$(readlink /proc/self/ns/net)"
+
+# Schema <= 0.7 must be untouched. Those callers pass hostnames by construction
+# and run today against a host chain that filters nothing; the 0.8 work must
+# neither reject them nor change what they get. This asserts the compatibility
+# promise, not that the legacy path is secure -- it is not, which is why the
+# enforcing behavior is 0.8-only.
+#
+# Deliberately ahead of the slirp4netns and reachability gates below. The
+# legacy path needs neither -- it shares the host namespace and this config's
+# workload makes no connection -- so gating it behind them would drop the
+# compatibility check entirely on hosts that skip the enforcement tests, which
+# are exactly the hosts where nothing else would notice a gate leak.
+#
+# The outcome is deliberately tri-state rather than a flat "must succeed".
+# Pre-0.8 firewall mode is the one legacy path that installs HOST-side rules,
+# so `apply_firewall_rules` needs CAP_NET_ADMIN and the run legitimately fails
+# unprivileged -- which is why this case used to be written as `|| true`. That
+# swallowed everything, including a panic or a missing binary, so the assertion
+# passed against a build that never ran the sandbox at all. Splitting the
+# outcomes keeps the privilege tolerance without keeping the blind spot: a
+# config rejection always fails, a privilege failure is tolerated but named,
+# a success is held to the sentinel and the namespace, and anything else fails.
+echo "Running Bubblewrap firewall test: pre-0.8 is unchanged..."
+LEGACY_RC=0
+LEGACY_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1) || LEGACY_RC=$?
+
+# Any of these means a 0.8 gate leaked into the legacy schema. Checked first
+# and unconditionally, because this is the invariant the case exists for and
+# it is the one assertion that holds with or without privilege.
+for marker in \
+    "not an IP address or CIDR" \
+    "require an enforcement mechanism" \
+    "is not enforced while the sandbox shares" \
+    "Configuration parse error"; do
+    if grep -qF "$marker" <<<"$LEGACY_OUT"; then
+        echo "$LEGACY_OUT"
+        echo "FAIL: pre-0.8 firewall (inherited a 0.8 rejection: '$marker')"
+        exit 1
+    fi
+done
+
+if [ "$LEGACY_RC" = 0 ]; then
+    # Privileged run: the legacy path went all the way through, so the
+    # behavior itself is assertable. FirewallFiltered is not a private-netns
+    # mode, so sharing the host namespace is the pin -- if a future change
+    # routed pre-0.8 firewall configs through the enforcing path, the run would
+    # still exit 0 and only this check would notice.
+    if ! grep -q LEGACY_FIREWALL_OK <<<"$LEGACY_OUT"; then
+        echo "$LEGACY_OUT"
+        echo "FAIL: pre-0.8 firewall (succeeded without running the workload)"
+        exit 1
+    fi
+    LEGACY_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$LEGACY_OUT" | tail -n 1)"
+    if [ "$LEGACY_NETNS" != "$HOST_NETNS" ]; then
+        echo "$LEGACY_OUT"
+        echo "FAIL: pre-0.8 firewall (expected the host namespace $HOST_NETNS, got $LEGACY_NETNS)"
+        exit 1
+    fi
+    echo "PASS: pre-0.8 firewall is unchanged (enforced end to end)"
+elif grep -qE "failed to apply iptables firewall rules|network policy error" <<<"$LEGACY_OUT"; then
+    # Unprivileged: host-side iptables was refused. The compatibility invariant
+    # above still held, which is all this host can prove.
+    echo "PASS: pre-0.8 firewall is unchanged (host iptables needs privilege; behavior not asserted)"
+else
+    echo "$LEGACY_OUT"
+    echo "FAIL: pre-0.8 firewall (exited $LEGACY_RC for a reason that is neither a rejection nor a privilege failure)"
+    exit 1
 fi
 
 if ! command -v slirp4netns >/dev/null 2>&1; then
@@ -90,8 +170,6 @@ if [ -z "$ALLOWED_PORT" ]; then
     exit 1
 fi
 echo "  host listener is on 127.0.0.1:$ALLOWED_PORT (10.0.2.2:$ALLOWED_PORT from the sandbox)"
-
-HOST_NETNS="$(readlink /proc/self/ns/net)"
 
 # A drop is only evidence of enforcement if the same destination would have
 # been reachable without the rule. On a runner with no outbound access every
@@ -229,21 +307,6 @@ if ! grep -qF "require an enforcement mechanism" <<<"$UNENF_OUT"; then
     exit 1
 fi
 echo "PASS: unenforced host rules rejected"
-
-# Schema <= 0.7 must be untouched. Those callers pass hostnames by construction
-# and run today against a host chain that filters nothing; the 0.8 work must
-# neither reject them nor change what they get. This asserts the compatibility
-# promise, not that the legacy path is secure -- it is not, which is why the
-# enforcing behavior is 0.8-only.
-echo "Running Bubblewrap firewall test: schema 0.7 is unchanged..."
-LEGACY_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1) || true
-if grep -qF "not an IP address or CIDR" <<<"$LEGACY_OUT"; then
-    echo "$LEGACY_OUT"
-    echo "FAIL: schema 0.7 (inherited the 0.8 rule-address rejection)"
-    exit 1
-fi
-echo "PASS: schema 0.7 is unchanged"
 
 cleanup
 trap - EXIT
