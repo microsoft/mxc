@@ -567,7 +567,7 @@ pub struct AppContainerScriptRunner {
     ///
     /// `None` (the default for every plain constructor) means the
     /// runner behaves exactly as it always has: `captureDenials` is
-    /// rejected in [`SandboxBackend::validate_backend`]. Only a caller that
+    /// rejected in [`SandboxBackend::validate`]. Only a caller that
     /// explicitly chains [`Self::with_guarded_capture_factory`] (the
     /// dispatcher, when it selects a legacy tier for a request that
     /// asked for `captureDenials`) opts a runner into accepting it — see
@@ -632,7 +632,7 @@ impl AppContainerScriptRunner {
     /// a `captureDenials` request (the dispatcher, when the native
     /// BaseContainer tier is unavailable) — an `AppContainerScriptRunner`
     /// constructed any other way keeps rejecting `captureDenials` in
-    /// [`SandboxBackend::validate_backend`]. See [`crate::guarded_capture`] for the
+    /// [`SandboxBackend::validate`]. See [`crate::guarded_capture`] for the
     /// full rationale: `appcontainer_common` never depends on `plm`
     /// directly, so `factory` is a trait object implemented by a higher
     /// layer (`mxc_engine`) that does.
@@ -2506,7 +2506,7 @@ mod tests {
         request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
 
         let error = runner
-            .validate_backend(&request)
+            .validate(&request)
             .expect_err("AppContainer cannot enforce proxy peer identity");
         assert!(error.error_message.contains("allowedProxyPeer"));
     }
