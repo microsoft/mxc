@@ -67,7 +67,14 @@ pub(super) fn validate_post_provision_policy(
 ) -> Result<(), IsolationSessionError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
-    if request.policy.network_specified {
+    if request.policy.network_proxy.is_enabled() {
+        return Err(IsolationSessionError::Policy(ERR_PROXY_POLICY.to_string()));
+    }
+    if request.policy.network_specified
+        || request.policy.network_mode_specified
+        || request.policy.network_egress.is_some()
+        || request.policy.network_ingress.is_some()
+    {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_IMMUTABLE.to_string(),
         ));

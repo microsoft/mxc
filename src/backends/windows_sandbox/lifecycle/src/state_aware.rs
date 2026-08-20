@@ -217,6 +217,9 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         || !p.allowed_hosts.is_empty()
         || !p.blocked_hosts.is_empty()
         || p.network_proxy.is_enabled()
+        || p.network_mode_specified
+        || p.network_egress.is_some()
+        || p.network_ingress.is_some()
     {
         return Err(MxcError::policy_validation(
             "Windows Sandbox filesystem/network policy is fixed at provision; it cannot be \
@@ -1048,7 +1051,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
 
     /// A `Library` exec is refused before the backend looks for the daemon.
@@ -1306,6 +1309,22 @@ mod tests {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".into()],
                 default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = backend
+            .validate_start("wsb:abcd1234", &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_start_rejects_directional_network() {
+        let backend = WindowsSandboxRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
                 ..Default::default()
             },
             ..Default::default()
