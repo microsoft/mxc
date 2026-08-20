@@ -457,8 +457,8 @@ jobs:
       Copy-Item -LiteralPath $msiPath -Destination '$(releaseContentDirectory)' -Force
     displayName: Stage signed MSI for release
 
-  - task: EsrpRelease@10
-    displayName: Publish MSI
+  - task: EsrpRelease@12
+    displayName: Publish MSI to ESRP CDN
     inputs:
       connectedservicename: ${{ parameters.ESRPInfo.serviceName }}
       usemanagedidentity: false
@@ -466,7 +466,7 @@ jobs:
       authcertname: ${{ parameters.ESRPInfo.authCertName }}
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
       clientid: ${{ parameters.ESRPInfo.clientId }}
-      intent: PackageDistribution
+      intent: filedownloadlinkgeneration
       contenttype: binaries
       contentsource: Folder
       folderlocation: $(releaseContentDirectory)
