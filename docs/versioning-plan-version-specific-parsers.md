@@ -1945,6 +1945,21 @@ the rolling one told the author and the exact one does not. The contract's doc
 comments were written fresh rather than carried over from the wire model, and
 the loss propagates into both the generated schema and the TypeScript oracle.
 
+The four generated artifacts line up as follows. No schema in any version
+enforces the rule; only the rolling development schema documents it:
+
+| Schema | Enforces | Documents |
+| --- | --- | --- |
+| stable `0.6.0-alpha` | no | no — "AppContainer capabilities (e.g., 'internetClient', 'registryRead')." |
+| stable `0.7.0-alpha` | no | no — same wording, under `processContainer`; the `appContainer` alias carries no `capabilities` at all |
+| rolling `0.8.0-dev` | no | yes — the full prose above |
+| exact `0.8.0-alpha` | no | no — reverts to the older stable wording |
+
+Two consequences. The regression is specifically against the rolling
+development schema, not against the published ones. And a caller reading a
+published schema has never been told the rule, which is an argument for fixing
+the prose regardless of what is decided about enforcement.
+
 Remediation, in order:
 
 1. Port the descriptive prose from `wxc_common::wire` into the contract doc
@@ -1960,6 +1975,35 @@ Remediation, in order:
 3. Treat the finding as a class rather than an instance, and cover it in
    Phase 7.4 by running the harness over the corpus's invalid documents. See
    the "exact looser than rolling" direction recorded there.
+
+**Disposition.** The updated review marks this finding "Verified; fix in this
+branch" and concludes the Phase 6 branch is "not ready to merge as-is", with
+three other in-branch fixes: a gate check that selects whichever invalid exec
+fixture sorts first, manual Rust fixture registration against automatic
+JavaScript discovery, and roughly 826 lines of incidental line-ending churn.
+No merge-blocking High finding survived verification.
+
+The plan's position on severity stands: the fix is worth making as defense in
+depth rather than because the guard would otherwise vanish. Nothing structurally
+enforces that the exact path keeps routing through `convert_wire_config`, and if
+the adapters ever produced `ExecutionRequest` directly the rule would disappear
+silently. That is a better reason to move it into the contract than the one the
+review gives, and it reaches the same conclusion.
+
+If the newtype lands, record the resulting asymmetry deliberately: development
+`0.8` would reject these values at parse time while published `0.6` and `0.7`
+continue to reject them at conversion. That is defensible, since immutability
+leaves no alternative, but it should be a recorded choice rather than a
+consequence nobody decided.
+
+**Related finding, deliberately not addressed.** The review also records, at
+Medium severity and out of scope, that the exact parser accepts positional-array
+roots the generated schema declares impossible. This plan's non-goals already
+exclude that hardening from every phase, and it remains excluded. Note only that
+the generated schema now states `"type": "object"` on every root, so the split
+between what the schema forbids and what `parse_request` accepts is visible in a
+shipped artifact — a stronger argument for revisiting the non-goal than existed
+when it was written, but not one being acted on yet.
 
 ### Phase 6 risks
 
