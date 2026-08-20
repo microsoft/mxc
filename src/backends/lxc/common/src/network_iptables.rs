@@ -1432,11 +1432,15 @@ impl NetworkIptablesManager {
     /// establishing that order this function's job.
     fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
         let mut entries = Vec::new();
+        let default_action = match egress.default {
+            NetworkAction::Allow => RuleAction::Allow,
+            NetworkAction::Deny => RuleAction::Deny,
+        };
         for rule in &egress.deny {
-            Self::lower_rule(rule, RuleAction::Deny, &mut entries);
+            Self::lower_rule(rule, RuleAction::Deny, default_action, &mut entries);
         }
         for rule in &egress.allow {
-            Self::lower_rule(rule, RuleAction::Allow, &mut entries);
+            Self::lower_rule(rule, RuleAction::Allow, default_action, &mut entries);
         }
         entries
     }
@@ -1451,7 +1455,12 @@ impl NetworkIptablesManager {
     /// documented wildcard behavior for an absent field. The parser rejects
     /// an explicitly empty array, so an empty `to` here can only be the
     /// omitted form.
-    fn lower_rule(rule: &NetworkRule, action: RuleAction, entries: &mut Vec<EgressEntry>) {
+    fn lower_rule(
+        rule: &NetworkRule,
+        action: RuleAction,
+        default_action: RuleAction,
+        entries: &mut Vec<EgressEntry>,
+    ) {
         let matches = Self::lower_port_selectors(&rule.ports);
         let wildcard_peers;
         let peers = if rule.to.is_empty() {
@@ -1467,17 +1476,24 @@ impl NetworkIptablesManager {
                 // chain is first-match-wins, so the carve-out must be emitted
                 // before the rule it narrows or it can never be reached.
                 //
-                // Only an allow rule gets carve-outs. Inside a deny rule the
-                // peer's own DROP already covers every excepted address, so a
-                // carve-out DROP would be a rule that cannot change any
-                // packet's fate while still costing an `iptables` invocation
-                // on the container-start path. `warn_on_deny_exclusions`
-                // reports what that leaves unhonored.
-                if matches!(action, RuleAction::Allow) {
+                // The carve-out carries the direction's default verdict rather
+                // than the opposite of the rule's own. The schema defines
+                // `except` as an exclusion from the peer, which puts the range
+                // outside the rule entirely and leaves it whatever the
+                // direction would have given it. Emitting the rule's opposite
+                // instead denies an excepted range under `default: allow` —
+                // the operator asking for a range to be spared and getting it
+                // blocked.
+                //
+                // Nothing is emitted when the two already agree: the range
+                // reaches the identical verdict at the closing rule, and an
+                // extra `iptables` invocation on the container-start path buys
+                // no change in behavior.
+                if default_action != action {
                     for excluded in &peer.except {
                         entries.push(EgressEntry {
                             destination: Self::cidr_destination(excluded),
-                            action: RuleAction::Deny,
+                            action: default_action,
                             matching: *matching,
                         });
                     }
@@ -1575,41 +1591,6 @@ impl NetworkIptablesManager {
         }
     }
 
-    /// Warn for every `except` range inside a `deny` rule, which this backend
-    /// leaves denied rather than carving out.
-    ///
-    /// There is no lowering that means "this rule does not cover these
-    /// addresses". A chain rule either matches or is skipped, and emitting
-    /// ACCEPT would promote the excluded range from *not denied by this rule*
-    /// to *allowed outright*, widening access past what the operator wrote.
-    /// Leaving the peer's DROP to cover the range is the fail-closed reading,
-    /// and this warning is what keeps it from being a silent one.
-    fn warn_on_deny_exclusions(policy: &ContainerPolicy, logger: &mut Logger) {
-        let Some(egress) = Self::stated_egress(policy) else {
-            return;
-        };
-
-        let excluded: Vec<String> = egress
-            .deny
-            .iter()
-            .flat_map(|rule| rule.to.iter())
-            .flat_map(|peer| peer.except.iter())
-            .map(Self::cidr_destination)
-            .collect();
-
-        if excluded.is_empty() {
-            return;
-        }
-
-        logger.log_line(&format!(
-            "Warning: network.egress.deny carries except range(s) {}. This backend keeps \
-             them denied: a first-match-wins chain has no rule meaning 'this deny does not \
-             cover these addresses', and accepting them would widen access beyond the \
-             policy. Move the range to network.egress.allow to permit it.",
-            excluded.join(", ")
-        ));
-    }
-
     /// Resolve every lowered entry exactly once and build the rule args from
     /// that single resolution, logging a warning for any entry that resolved
     /// to nothing. This is the shipping rule-generation path.
@@ -1641,7 +1622,6 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        Self::warn_on_deny_exclusions(policy, logger);
         let entries = Self::lower_egress(policy);
         for entry in &entries {
             let host = entry.destination.as_str();

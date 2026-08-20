@@ -203,12 +203,14 @@ Three points where one schema field does not map to one iptables rule:
 - **ICMP is named by address family.** A rule reaching the IPv4 chain matches
   `icmp` and the same rule reaching the IPv6 chain matches `icmpv6`, because
   `ip6tables` rejects `-p icmp` outright.
-- **`except` on a deny peer emits nothing.** On an allow peer it becomes a DROP
-  ahead of the ACCEPT it narrows. On a deny peer the peer's own DROP already
-  covers the excepted range, and a carve-out DROP inside it could never change
-  a verdict. The condition is reported as a warning rather than silently
-  dropped, because a policy author who wrote one was expressing an intent the
-  chain does not carry.
+- **`except` takes the direction's default verdict.** The excepted range sits
+  outside the rule that names it, so it receives whatever `egress.default`
+  would have given it, emitted ahead of the rule it narrows. Nothing is emitted
+  when the rule's own action already agrees with the default, because the range
+  reaches the identical verdict at the closing rule. The case that makes this
+  matter is a `deny` rule under `egress.default: allow`: the excepted range is
+  the operator asking for addresses to be spared, and leaving it to the peer's
+  DROP would block them.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
