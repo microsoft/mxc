@@ -175,9 +175,9 @@ and its
 An IT administrator can still block MXC telemetry device-wide via MXC's own
 registry policy setting. See
 [`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
-for the stable registry contract and interaction rules. Any eventual .NET
-policy/consent query must fail closed rather than upgrading an unreadable
-device state into collection.
+for the stable registry contract and interaction rules. Policy and consent
+queries fail closed rather than upgrading an unreadable device state into
+collection.
 
 ## Projects
 

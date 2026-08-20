@@ -422,6 +422,7 @@ fn run_state_aware_main(
         telemetry_active,
         telemetry::TelemetryContext {
             backend,
+            sandbox_kind: backend,
             phase,
             correlation_vector: &correlation,
         },
