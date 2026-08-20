@@ -380,13 +380,17 @@ mod tests {
         );
         assert_eq!(
             provider_source
-                .matches(
-                    "\"PartA_PrivacyDataCategory\",\n                \
-                     &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,"
-                )
+                .matches("\"PartA_PrivacyDataCategory\"")
                 .count(),
             2,
-            "every MXC event must carry Client Diagnostic Data category 1"
+            "every MXC event must carry a privacy data category"
+        );
+        assert_eq!(
+            provider_source
+                .matches("&PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA")
+                .count(),
+            2,
+            "every MXC event must use Client Diagnostic Data category 1"
         );
         assert_eq!(
             provider_source
