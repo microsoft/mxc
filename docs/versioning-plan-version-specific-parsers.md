@@ -1,17 +1,18 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete;
-Phase 5A merged in PR #909, Phase 5B in PR #910, Phase 5C in PR #929, and Phase
-5D in PR #941. Two stacked pull requests remain open and unreviewed: the Phase
-5A review follow-up in PR #949 (now based on `main`) and the capabilities parity
-remediation in PR #966. Phase 6 is implemented in 11 commits on the local branch
-`user/gudge/version_specific_config_parsers_phase6`, branched from #949; it has
-not been pushed and has no pull request, so it is unreviewed. Phase 7.1 is
-complete and pushed to `user/gudge/version_specific_config_parsers_phase7`, also
-unreviewed; Phases 7.2-7.5 and Phases 8-11 remain. The parser-parity
-remediation that paused Phase 7 is addressed by PR #966; Phase 7 resumes when
-that PR merges.
+#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete:
+Phase 5A merged in PR #909, Phase 5B in PR #910, Phase 5C in PR #929, Phase 5D
+in PR #941, and the Phase 5A review follow-up in PR #949. One stacked pull
+request remains open and unreviewed: the capabilities parity remediation in
+PR #966, now based on `main`. Phase 6 is implemented in 11 commits on the local
+branch `user/gudge/version_specific_config_parsers_phase6`, branched from #949;
+it has not been pushed and has no pull request, so it is unreviewed. Phase 7.1
+is renamed Phase 7a: it is squashed onto `main` as
+`user/gudge/version_specific_config_parsers_phase7a`, has no pull request, and
+is therefore also unreviewed. Phases 7.2-7.5 and Phases 8-11 remain. The
+parser-parity remediation that paused Phase 7 is addressed by PR #966; Phase 7
+resumes when that PR merges.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -302,7 +303,9 @@ Required behavior:
   drift, and a drift would quote the command for one backend while another
   executes it. After the typed parse, assert that the context used for the
   splice matches the resolved containment and fail loudly on a mismatch. This
-  assertion is part of the Phase 9 acceptance criteria.
+  assertion is part of the Phase 9 acceptance criteria. **As implemented in
+  Phase 7a the probes reuse the parser's own mapping rather than reproducing
+  it, so the premise of this item no longer holds; see the 7.1.1.4 note.**
 
 Known trade-off: when a command is spliced, serde's source positions and the
 state-aware `source_text` used for positional experimental diagnostics describe
@@ -2366,19 +2369,24 @@ validate a fork of the logic rather than the logic the rolling parser runs.
 
 ### Phase 7 status
 
-Phase 7.1 is complete and pushed to
-`user/gudge/version_specific_config_parsers_phase7`, branched from PR #949 and
-rebased onto it after the Phase 5 stack was rewritten. No pull request has been
-opened, so none of it is reviewed.
+Phase 7.1 is renamed **Phase 7a** and is complete on
+`user/gudge/version_specific_config_parsers_phase7a`. Its six development
+commits, plus a follow-up covering the unconvertible-command entry-point error,
+were squashed into a single commit rebased onto `main` after the Phase 5 stack
+landed. The pre-squash history is retained locally on
+`user/gudge/version_specific_config_parsers_phase7_prerebase`. No pull request
+has been opened, so none of it is reviewed.
 
-| Commit | Step |
+The squashed commit covers the steps the plan broke out separately:
+
+| Step | Content |
 | --- | --- |
-| `ede25060` | 7.1.1.0 characterization tests |
-| `46d76dd2` | 7.1.1.1 pre-parse probes |
-| `f2a40309` | 7.1.1.2 splice |
-| `67049c81` | 7.1.1.3a override pipeline |
-| `abfa504c` | 7.1.1.3b loader wiring and deletion |
-| `98463cc1` | 7.1.2 build-time command |
+| 7.1.1.0 | characterization tests |
+| 7.1.1.1 | pre-parse probes (`wxc_common::probe`) |
+| 7.1.1.2 | splice (`wxc_common::splice`) |
+| 7.1.1.3 | override pipeline, loader wiring, and deletion |
+| 7.1.1.4 | superseded; see the 7.1.1.4 note |
+| 7.1.2 | build-time command |
 
 `allow_missing_command` and `SandboxRequest::set_script` no longer exist. Both
 consumers resolved on the same principle: the command is present before the
@@ -2392,10 +2400,9 @@ reads `RUSTDOCFLAGS`, so deleting a documented item breaks intra-doc links that
 no other gate reports. Second, the repository has 11 pre-existing broken
 intra-doc links, so compare against a baseline rather than requiring zero.
 
-Phases 7.2 through 7.5 remain. Work is paused pending parser-parity remediation
-on the Phase 5 stack, prompted by the Phase 6 review finding recorded above:
-the exact contracts accept `processContainer.capabilities` values the rolling
-parser rejects. See "Phase 6 review finding: contract value-rule gaps".
+Phases 7.2 through 7.5 remain. The parser-parity remediation that paused the
+phase is PR #966, which is open against `main`; see "Phase 6 review finding:
+contract value-rule gaps".
 
 ### Phase 7 step breakdown
 
@@ -2478,6 +2485,15 @@ and non-empty so the override log still fires exactly when it does now. A
 `serde_json::Value` round-trip is the agreed implementation. A non-object
 `process` must error rather than panic.
 
+**Refined as implemented.** `splice_command` returns `Option<Spliced>` and
+*declines* rather than erroring: a document it cannot transform — a non-object
+root, a non-object `process`, or unparseable JSON — is one the parser rejects
+anyway, so returning the source unchanged lets that input keep the parser's own
+message and output routing instead of inheriting a differently routed
+entry-point diagnostic. The same passthrough covers an unreadable `phase` or
+`containment` declaration. This is a strictly better answer than the plan's, and
+the requirement it was written to enforce — never panic — still holds.
+
 **7.1.1.3 — Change `LoadOptions`.** Replace `allow_missing_command: bool` with
 the CLI command, and perform decode, probe, splice, and parse inside
 `load_mxc_request_with_options`. The loader is the right home: it already owns
@@ -2492,6 +2508,19 @@ it unreachable today.
 splice against the resolved containment and fail loudly on a mismatch. This is
 the Phase 9 acceptance criterion recorded under "Entry-point-dependent command
 requirements".
+
+**Superseded as implemented.** Phase 7a carries no runtime assertion. The drift
+it guards against is closed at the source instead: `probe_one_shot_backend`
+deserializes `wire::Containment` and reuses the same `From` conversion the
+parser uses, and `one_shot_probe_agrees_with_the_parser_for_every_spelling`
+pins probe against `map_wire_containment` for all twelve accepted spellings,
+including the absent-containment host default and the explicit-null case. That
+is the outcome 7.1.1.1 predicted when it required the probes to reuse existing
+machinery rather than hand-roll a second mapping. The Phase 9 acceptance
+criterion is therefore restated: the requirement is that the splice context and
+the resolved containment cannot diverge, satisfied by shared code plus an
+exhaustive test rather than by a post-parse comparison. Reinstate the runtime
+assertion only if a future change gives the probe its own mapping.
 
 **7.1.1.5 — Wire the driver and delete the old path.** Pass the CLI command
 through `LoadOptions`; delete `apply_command_override`, the
