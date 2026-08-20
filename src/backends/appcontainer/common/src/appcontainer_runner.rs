@@ -1548,12 +1548,6 @@ impl SandboxBackend for AppContainerScriptRunner {
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
-        if request.policy.allowed_proxy_peer.is_some() {
-            return Err(ScriptResponse::error(
-                "processContainer.network.allowedProxyPeer requires a BaseContainer path",
-            ));
-        }
-
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(
@@ -2490,25 +2484,6 @@ mod tests {
             .validate(&request)
             .expect_err("blockedHosts is not yet supported");
         assert!(err.error_message.contains("blockedHosts"));
-    }
-
-    #[test]
-    fn validate_runner_rejects_identity_scoped_proxy() {
-        let runner = AppContainerScriptRunner::new();
-        let mut request = ExecutionRequest::default();
-        request.policy.network_proxy = wxc_common::models::ProxyConfig {
-            address: Some(wxc_common::models::ProxyAddress::new(
-                "127.0.0.1".to_string(),
-                8080,
-            )),
-            builtin_test_server: false,
-        };
-        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
-
-        let error = runner
-            .validate(&request)
-            .expect_err("AppContainer cannot enforce proxy peer identity");
-        assert!(error.error_message.contains("allowedProxyPeer"));
     }
 
     #[test]
