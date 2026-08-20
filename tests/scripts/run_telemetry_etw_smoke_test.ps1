@@ -8,7 +8,7 @@
     that at least one event was captured.
 
     This test uses the PUBLIC provider GUID (already in the open-source
-    code) — it does NOT depend on or reveal the private telemetry group GUID.
+    code) - it does NOT depend on or reveal the private telemetry group GUID.
 
     Requires: Administrator privileges (for ETW session creation),
               wxc-exec.exe built, logman.exe (ships with Windows).
@@ -112,6 +112,26 @@ New-Item -ItemType Directory -Path $etlDir -Force | Out-Null
 $etlFile = Join-Path $etlDir 'mxc_trace.etl'
 
 # ---------------------------------------------------------------------------
+# Setup: isolated consent seed for deterministic telemetry gating
+# ---------------------------------------------------------------------------
+$localAppDataOverride = Join-Path $etlDir 'localappdata'
+$consentDir = Join-Path $localAppDataOverride 'mxc'
+New-Item -ItemType Directory -Path $consentDir -Force | Out-Null
+$consentFile = Join-Path $consentDir 'telemetry-consent.json'
+
+# Seed an explicit granted consent record for this test run so event capture
+# does not depend on host-global consent state.
+$consentRecord = @{
+    version               = 2
+    consent               = 'granted'
+    promptResourceVersion = '1.0'
+    promptLocale          = 'en-US'
+    source                = 'run_telemetry_etw_smoke_test.ps1'
+    updatedAtUtc          = [DateTime]::UtcNow.ToString('o')
+}
+$consentRecord | ConvertTo-Json -Depth 4 | Set-Content -Path $consentFile -Encoding utf8
+
+# ---------------------------------------------------------------------------
 # Step 1: Start ETW trace session
 # ---------------------------------------------------------------------------
 Write-Host "`n--- Starting ETW trace session '$sessionName' ---" -ForegroundColor Yellow
@@ -132,18 +152,40 @@ Write-Host "ETW session started, writing to $etlFile"
 Write-Host "`n--- Running wxc-exec with telemetry ---" -ForegroundColor Yellow
 
 try {
-    # Run with --experimental to enable the telemetry section. The provider is
-    # registered during init (before execution); the MXC.Execution / MXC.Error
-    # events are emitted on completion, after the runner returns. The sandbox
-    # itself may fail (e.g. AppContainer prerequisites), but completion
-    # telemetry still fires for the failure, so events should be captured.
-    $proc = Start-Process -FilePath $wxcExe `
-        -ArgumentList "--debug", "--experimental", $configFile `
-        -PassThru -NoNewWindow -Wait
-    Write-Host "wxc-exec exited with code $($proc.ExitCode)"
+    $previousLocalAppData = $env:LOCALAPPDATA
+    $previousTestOverride = $env:MXC_TEST_LOCALAPPDATA_OVERRIDE
+
+    $env:LOCALAPPDATA = $localAppDataOverride
+    $env:MXC_TEST_LOCALAPPDATA_OVERRIDE = $localAppDataOverride
+    try {
+        # Run with --experimental to enable the telemetry section in this branch.
+        # The provider is registered during init (before execution); completion
+        # telemetry events are emitted after dispatch returns.
+        $executionTimeoutSeconds = 60
+        $proc = Start-Process -FilePath $wxcExe `
+            -ArgumentList "--debug", "--experimental", $configFile `
+            -PassThru -NoNewWindow
+        if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
+            Stop-Process -Id $proc.Id -Force
+            $proc.WaitForExit()
+            throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
+        }
+        Write-Host "wxc-exec exited with code $($proc.ExitCode)"
+    } finally {
+        if ($null -eq $previousLocalAppData) {
+            Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+        } else {
+            $env:LOCALAPPDATA = $previousLocalAppData
+        }
+        if ($null -eq $previousTestOverride) {
+            Remove-Item Env:MXC_TEST_LOCALAPPDATA_OVERRIDE -ErrorAction SilentlyContinue
+        } else {
+            $env:MXC_TEST_LOCALAPPDATA_OVERRIDE = $previousTestOverride
+        }
+    }
 } catch {
     Write-Host "wxc-exec failed to run: $_" -ForegroundColor Yellow
-    # Continue — even a crash after init may have emitted events.
+    # Continue - even a crash after init may have emitted events.
 }
 
 # Brief pause for ETW buffers to flush.
@@ -168,8 +210,8 @@ $etlSize = (Get-Item $etlFile).Length
 Write-Host "ETL file size: $etlSize bytes"
 
 if ($etlSize -eq 0) {
-    Write-Host "FAILED: ETL file is empty — no events captured." -ForegroundColor Red
-    Write-Host "All prerequisites were met (admin, wxc-exec present, ETW session created)," -ForegroundColor Red
+    Write-Host "FAILED: ETL file is empty - no events captured." -ForegroundColor Red
+    Write-Host 'All prerequisites were met (admin, wxc-exec present, ETW session created),' -ForegroundColor Red
     Write-Host "so the provider should have emitted at least one completion event." -ForegroundColor Red
     exit 1
 }
@@ -187,21 +229,42 @@ $eventCount = ([regex]::Matches($xmlContent, '<Event ')).Count
 Write-Host "Events captured: $eventCount"
 
 if ($eventCount -gt 0) {
-    Write-Host "`n=== ETW CAPTURE SMOKE TEST PASSED ===" -ForegroundColor Green
-    Write-Host "$eventCount event(s) captured from the MXC provider."
+    $expectedFields = @('mxc.backend', 'mxc.sandbox_kind', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
+    $eventBlocks = [regex]::Matches($xmlContent, '(?s)<Event\b.*?</Event>')
+    $matchingEvent = $null
 
-    # Check for expected field names (public, not private).
-    $expectedFields = @('mxc.backend', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
-    foreach ($field in $expectedFields) {
-        if ($xmlContent -match $field) {
-            Write-Host "  [OK] Found field: $field" -ForegroundColor Green
-        } else {
-            Write-Host "  [--] Field not found: $field (may not be in this event type)" -ForegroundColor Yellow
+    foreach ($eventBlock in $eventBlocks) {
+        $eventXml = $eventBlock.Value
+        $eventMissingFields = @(
+            $expectedFields | Where-Object {
+                $eventXml -notmatch ([regex]::Escape($_))
+            }
+        )
+        if ($eventMissingFields.Count -eq 0) {
+            $matchingEvent = $eventXml
+            break
         }
     }
+
+    if (-not $matchingEvent) {
+        $missingFieldsMessage = 'No single captured event contained all required public fields: ' + ($expectedFields -join ', ') + '.'
+        Write-Host ''
+        Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
+        Write-Host $missingFieldsMessage -ForegroundColor Red
+        exit 1
+    }
+
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST PASSED ===' -ForegroundColor Green
+    Write-Host ($eventCount.ToString() + ' event(s) captured from the MXC provider.')
+    foreach ($field in $expectedFields) {
+        Write-Host ('  [OK] Found field in one event: ' + $field) -ForegroundColor Green
+    }
 } else {
-    Write-Host "`n=== ETW CAPTURE SMOKE TEST FAILED ===" -ForegroundColor Red
-    Write-Host "ETL file had content ($etlSize bytes) but no parseable events were found." -ForegroundColor Red
+    $noEventsMessage = 'ETL file had content (' + $etlSize + ' bytes) but no parseable events were found.'
+    Write-Host ''
+    Write-Host '=== ETW CAPTURE SMOKE TEST FAILED ===' -ForegroundColor Red
+    Write-Host $noEventsMessage -ForegroundColor Red
     exit 1
 }
 

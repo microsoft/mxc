@@ -395,7 +395,6 @@ type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
 interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
-  correlationVector?: string; // MS-CV to relay onto later phases (telemetry)
 }
 
 interface StartResult<C extends StateAwareContainmentBackend> {
@@ -664,7 +663,6 @@ State-aware-only fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
-| `correlationVector` | string | No. Relayed by the client onto non-`provision` phases; absent on `provision` (seeded by the executor). Rejected as a parse error on one-shot requests. | Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in its result; the client relays it verbatim into later phases so the lifecycle shares a telemetry base prefix (emitted under `__TlgCV__`). Each non-`provision` phase validates the relayed value and *spins* a fresh child element off a mutable base (keeping repeat invocations distinct), passes an already-frozen vector through unchanged, and reseeds a new base if it is absent or malformed. Ignored unless experimental telemetry is enabled. See [telemetry docs](../telemetry/telemetry.md#correlating-a-lifecycle). |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
@@ -773,7 +771,7 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 | Phase | `TResult` shape |
 |---|---|
-| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object; correlationVector?: string }` |
+| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object }` |
 | `start` | `{ metadata?: object }` |
 | `stop` | `{ metadata?: object }` |
 | `deprovision` | `{ metadata?: object }` |
