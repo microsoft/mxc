@@ -1,0 +1,154 @@
+#!/bin/bash
+# LXC schema 0.8 egress enforcement test
+#
+# The sibling enforcement script covers the legacy 0.7 host lists. This one
+# covers the 0.8 `network.egress` section, which reaches the chain by a
+# different route: a 0.8 config cannot carry `enforcementMode` at all -- the
+# parser rejects it beside `egress` -- so the firewall gate has to be satisfied
+# by the directional posture itself.
+#
+# Every case asserts reachability rather than a log line, for the reason given
+# in run_lxc_network_enforcement_test.sh: a chain can install cleanly, name the
+# right chain, and still filter nothing.
+#
+# The three cases are chosen so that no single defect leaves the suite green:
+#
+#   deny        egress.default deny, no rules       -> unreachable
+#   allow       same default, CIDR + tcp/443 rule   -> reachable
+#   wrong_port  same CIDR, tcp/444 instead of 443   -> unreachable
+#
+# The allow case alone would pass on a backend that skipped enforcement
+# entirely, and the deny case alone would pass on a host with no working
+# network. The wrong-port case is what proves the port selector is enforced
+# rather than parsed and dropped: it differs from the allow case in one field,
+# so a backend that ignored `ports` would let it through.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$(dirname "$SCRIPT_DIR")")"
+LXC_EXEC="$REPO_DIR/src/target/release/lxc-exec"
+
+if [ ! -f "$LXC_EXEC" ]; then
+    LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
+fi
+
+# An honest skip for a missing prerequisite: exit 77 so run_lxc_all_tests.sh
+# records SKIPPED rather than PASS. A suite that could not run must not look green.
+SKIP_EXIT=77
+skip() {
+    echo "SKIP: $1"
+    exit "$SKIP_EXIT"
+}
+
+[ "$(id -u)" -eq 0 ] || skip "requires root for iptables/ip6tables and LXC."
+command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
+command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
+command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+[ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
+
+DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny.json"
+ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_allow.json"
+WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_wrong_port.json"
+
+fail() {
+    echo "FAIL: $1"
+    exit 1
+}
+
+# shellcheck source=lib/chain_name.sh
+. "$SCRIPT_DIR/lib/chain_name.sh"
+
+# Compared against a snapshot taken before the run, so chains left behind by an
+# earlier failed run are not blamed on this one.
+assert_no_new_mxc_chains() {
+    local tool="$1" before="$2" after="" leaked="" chain
+    if ! after="$(mxc_chains "$tool")"; then
+        fail "could not enumerate $tool chains, so cleanup was not verified."
+    fi
+    while IFS= read -r chain; do
+        [ -n "$chain" ] || continue
+        grep -Fxq "$chain" <<<"$before" || leaked="$leaked $chain"
+    done <<<"$after"
+    if [ -n "$leaked" ]; then
+        fail "$tool chain(s) left behind after lxc-exec completed:$leaked"
+    fi
+}
+
+assert_firewall_chain_cleaned_up() {
+    local chain="$1"
+    if iptables -S "$chain" >/dev/null 2>&1; then
+        fail "iptables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    if ip6tables -S "$chain" >/dev/null 2>&1; then
+        fail "ip6tables chain '$chain' was left behind after lxc-exec completed."
+    fi
+    assert_no_new_mxc_chains iptables "$MXC_CHAINS_BEFORE_V4"
+    assert_no_new_mxc_chains ip6tables "$MXC_CHAINS_BEFORE_V6"
+}
+
+assert_no_forward_reference() {
+    if iptables -S FORWARD 2>/dev/null | grep -Fq -- "$1"; then
+        fail "a FORWARD rule still references chain '$1' after teardown."
+    fi
+}
+
+# A 0.8 config leaves `network.enforcementMode` at its `capabilities` default
+# because the schema has no such field to set. A backend that reads the mode
+# alone skips the chain and reports success, which is a silent unenforced run
+# rather than a failure. The skip is announced in the log, so the absence of
+# that line is checkable directly and does not depend on the verdict.
+assert_enforcement_not_skipped() {
+    if echo "$1" | grep -Fq "does not use firewall, skipping"; then
+        fail "the 0.8 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
+    fi
+}
+
+# Run one case and return its output, verifying cleanup for the chain it used.
+run_case() {
+    local label="$1" config="$2" output="" 
+    echo "--- $label ---"
+    MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
+    MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
+    output=$("$LXC_EXEC" --debug "$config" 2>&1 || true)
+    echo "$output"
+    CASE_OUTPUT="$output"
+    assert_enforcement_not_skipped "$output"
+    derive_chain_name "$output"
+    assert_no_forward_reference "$CHAIN_NAME"
+    assert_firewall_chain_cleaned_up "$CHAIN_NAME"
+}
+
+assert_blocked() {
+    if echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
+        fail "$1"
+    fi
+    if ! echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
+        fail "the case produced no verdict at all; the container command did not run."
+    fi
+}
+
+assert_allowed() {
+    if echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_BLOCKED"; then
+        fail "$1"
+    fi
+    if ! echo "$CASE_OUTPUT" | grep -Fq "MXC_NET_ALLOWED"; then
+        fail "the case produced no verdict at all; the container command did not run."
+    fi
+}
+
+echo "Running LXC schema 0.8 egress enforcement test..."
+
+# This config states `egress` and nothing else. It is also the shape that a
+# backend claiming only the two egress support bits would reject outright, so
+# reaching a verdict here at all exercises the support declaration.
+run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG"
+assert_blocked "egress succeeded under egress.default deny with no allow rules. The chain is not filtering this container's traffic."
+
+run_case "allow case: same default, destination allowed on tcp/443" "$ALLOW_CONFIG"
+assert_allowed "an explicitly allowed destination was unreachable. The policy is over-blocking, so the deny case above proves nothing."
+
+run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG"
+assert_blocked "traffic to tcp/443 succeeded while the policy allowed only tcp/444. The port selector is being dropped, so the allow case above proves only that the destination matched."
+
+echo "PASS: schema 0.8 egress rules filtered by destination and by port."
+echo "LXC schema 0.8 egress enforcement test complete."
