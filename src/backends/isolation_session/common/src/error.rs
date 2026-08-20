@@ -23,7 +23,13 @@ use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 /// telemetry.
 pub(super) mod op {
     pub(crate) const ACTIVATE: &str = "IsoSessionOps.ActivateInstance";
-    pub(crate) const ADD_USER: &str = "IsoSessionOps.AddUserAsync";
+    /// The app-scoped provisioning overload, preferred when the host advertises
+    /// `IsoSessionFeature::AppScopedRegistration`.
+    pub(crate) const ADD_USER: &str = "IsoSessionOps.AddUserAsync2";
+    /// The legacy provisioning overload, used on hosts that do not support the
+    /// app-scoped one. Reported instead of [`ADD_USER`] so telemetry attributes
+    /// a failure to the overload actually invoked.
+    pub(crate) const ADD_USER_LEGACY: &str = "IsoSessionOps.AddUserAsync";
     pub(crate) const START_SESSION: &str = "IsoSessionOps.StartSessionAsync";
     pub(crate) const RUN_PROCESS: &str = "IsoSessionOps.RunProcessWithOptionsAsync";
     pub(crate) const STOP_SESSION: &str = "IsoSessionOps.StopSessionAsync";
@@ -648,7 +654,7 @@ mod tests {
         let err = windows_core::Error::from_hresult(windows_core::HRESULT(0x800706ba_u32 as i32));
         let mapped = map_lifecycle_error(transport_err(op::ADD_USER, "call failed", &err));
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
-        assert_eq!(mapped.operation(), Some("IsoSessionOps.AddUserAsync"));
+        assert_eq!(mapped.operation(), Some("IsoSessionOps.AddUserAsync2"));
         assert_eq!(mapped.native_code(), Some("0x800706ba"));
         assert_eq!(mapped.remediation(), None);
         assert!(mapped.message.starts_with("call failed: "));

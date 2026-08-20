@@ -41,14 +41,14 @@ export interface IsolationSessionProvisionConfig {
   /** Schema version (semver). When omitted, the SDK fills in its own SUPPORTED_VERSION. */
   version?: string;
   /**
-   * Optional identifier for the calling application. For a packaged
-   * application this is the Package Family Name; for an unpackaged one it may
-   * be any string — MXC does not interpret or verify it.
+   * Optional identifier for the calling application.
    *
-   * Carried verbatim inside the returned `SandboxId` so later lifecycle
-   * phases can recover it without the caller re-supplying it. Nothing
-   * consumes it yet; it is accepted now so a future OS contract that acts on
-   * the calling application's identity does not require a breaking change.
+   * **A packaged application must supply its Package Family Name in the form
+   * `PFN:<packageFamilyName>`** — the literal `PFN:` prefix followed by the
+   * PFN, e.g. `PFN:Contoso.App_8wekyb3d8bbwe`. An unpackaged application may 
+   * pass any string — MXC does not interpret or verify it. Carried verbatim
+   * inside the returned `SandboxId` so later lifecycle phases can recover it
+   * without the caller re-supplying it.
    *
    * Validated structurally only: no control characters, at most 256
    * characters. Whitespace and case are preserved exactly. An explicitly

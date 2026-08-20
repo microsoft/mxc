@@ -99,21 +99,24 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         config: Option<IsolationSessionProvisionConfig>,
     ) -> Result<ProvisionResult<IsolationSessionProvisionMetadata>, MxcError> {
         let config = config.unwrap_or_default();
-        let app_id = config.app_id;
         // The manager is discarded here — each post-provision phase builds its
         // own from the `sandboxId`. Taking it anyway keeps a single provisioning
         // path with `one_shot`, and proves the service instance that minted the
         // user is live rather than re-activating to find out.
-        let (provisioned, _manager) =
-            IsolationSessionManager::add_user().map_err(map_lifecycle_error)?;
+        //
+        // The caller-supplied `appId` is passed through verbatim. The in-proc
+        // isolation-session client resolves the default (an empty or absent id)
+        // to the calling process's PFN itself, so MXC does no PFN detection of
+        // its own; a non-empty id is used as-is.
+        let (provisioned, _manager) = IsolationSessionManager::add_user(config.app_id.as_deref())
+            .map_err(map_lifecycle_error)?;
 
-        // `appId` rides inside the id so later phases recover it without the
-        // caller re-supplying it. Nothing consumes it yet; it is carried for a
-        // future OS contract. Metadata deliberately does not echo it — the
-        // caller already has the value it supplied.
+        // `appId` rides inside the id so later phases can recover exactly what
+        // the caller supplied at provision. Metadata deliberately does not echo
+        // it; the id is the single carrier.
         let sandbox_id = sandbox_id::encode(&SandboxIdPayload::new(
             provisioned.agent_user_name.clone(),
-            app_id,
+            config.app_id,
         ))?;
 
         Ok(ProvisionResult {
@@ -183,8 +186,8 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
         validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
-        // Structural only — MXC carries `appId` for a future OS consumer and
-        // does not judge what a valid application identity looks like.
+        // Structural only — MXC does not judge what a valid application
+        // identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
             sandbox_id::validate_app_id(app_id)?;
         }
@@ -546,13 +549,13 @@ mod tests {
         // `#[serde(default)]` with no `deny_unknown_fields`, so a renamed key
         // does not error — it silently drops the value.
         let provision_phase = wxc_common::wire::IsolationSessionProvisionPhase {
-            app_id: Some("Contoso.App_8wekyb3d8bbwe".to_string()),
+            app_id: Some("PFN:Contoso.App_8wekyb3d8bbwe".to_string()),
         };
         let provision: ProvisionConfig =
             serde_json::from_value(serde_json::to_value(&provision_phase).unwrap()).unwrap();
         assert_eq!(
             provision.app_id.as_deref(),
-            Some("Contoso.App_8wekyb3d8bbwe"),
+            Some("PFN:Contoso.App_8wekyb3d8bbwe"),
             "provision dropped the wire appId (serde rename drift?)"
         );
     }
@@ -890,7 +893,7 @@ mod tests {
     #[test]
     fn validate_provision_accepts_a_well_formed_app_id() {
         let runner = IsolationSessionRunner::new();
-        let cfg = provision_config_with_app_id("Contoso.App_8wekyb3d8bbwe");
+        let cfg = provision_config_with_app_id("PFN:Contoso.App_8wekyb3d8bbwe");
         runner
             .validate_provision(&request_with_canonical_network(), Some(&cfg))
             .unwrap();

@@ -10,7 +10,8 @@ use wxc_common::process_util::OwnedHandle;
 use wxc_common::state_aware_backend::ExecOutcome;
 
 use isolation_session_bindings::bindings::{
-    IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult, IsoSessionUserResult,
+    IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
+    IsoSessionUserResult,
 };
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Console::{
@@ -39,6 +40,24 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
         // testable without depending on whether this host can activate the
         // API at all.
         Err(e) => Err(activation_error(e.code().0 as u32, &e.message())),
+    }
+}
+
+/// Decides whether the host supports app-scoped registration — i.e. the
+/// `AddUserAsync2` overload that carries an `appId` — from the result of
+/// `GetFeatureLevel(IsoSessionFeature::AppScopedRegistration)`.
+fn app_scoped_supported_from(level: windows_core::Result<i32>) -> bool {
+    matches!(level, Ok(level) if level > 0)
+}
+
+/// Maps the app-scoped support decision to the telemetry operation label of the
+/// provisioning overload that will be invoked, so a failure is attributed to
+/// the `AddUser` overload actually called.
+fn add_user_op(app_scoped: bool) -> &'static str {
+    if app_scoped {
+        op::ADD_USER
+    } else {
+        op::ADD_USER_LEGACY
     }
 }
 
@@ -99,34 +118,53 @@ impl IsolationSessionManager {
     /// exception is a failure to read the account name itself, which leaves
     /// nothing to address a removal to.
     ///
-    /// The OS interface takes an optional account name and token; MXC always
-    /// passes empty strings, which selects a local agent user.
+    /// The OS interface takes an app id plus an optional enterprise account
+    /// name and token. MXC passes the caller-supplied `app_id` verbatim to the
+    /// app-scoped [`AddUserAsync2`] overload, with empty strings for the
+    /// enterprise account name and token — which selects a local agent user.
     ///
     /// Note: the in-proc API exposes no session-lifetime knob, so `lifecycle`
     /// cannot be honored here. Unsupported values are refused by the calling
     /// surface rather than ignored — one-shot rejects `destroyOnExit: false`
     /// and `preservePolicy: true` in `validate_runner`, and the state-aware
     /// parser rejects the whole `lifecycle` section.
-    pub(super) fn add_user() -> Result<(ProvisionedUser, Self), IsolationSessionError> {
+    pub(super) fn add_user(
+        app_id: Option<&str>,
+    ) -> Result<(ProvisionedUser, Self), IsolationSessionError> {
         let ops = check_service_available_and_activate()?;
-        let async_op = ops
-            .AddUserAsync(&HSTRING::new(), &HSTRING::new())
-            .map_err(|e| transport_err(op::ADD_USER, "call failed", &e))?;
+        // Prefer the app-scoped `AddUserAsync2` overload, but only when the host
+        // advertises support for it. Else fall back to `AddUserAsync`.
+        let app_scoped = app_scoped_supported_from(
+            ops.GetFeatureLevel(IsoSessionFeature::AppScopedRegistration),
+        );
+        // The operation label reported in telemetry must name the overload
+        // actually invoked, not always `AddUserAsync2`.
+        let op_add_user = add_user_op(app_scoped);
+        let async_op = if app_scoped {
+            ops.AddUserAsync2(
+                &HSTRING::from(app_id.unwrap_or_default()),
+                &HSTRING::new(),
+                &HSTRING::new(),
+            )
+        } else {
+            ops.AddUserAsync(&HSTRING::new(), &HSTRING::new())
+        }
+        .map_err(|e| transport_err(op_add_user, "call failed", &e))?;
         let user_result: IsoSessionUserResult = async_op
             .join()
-            .map_err(|e| transport_err(op::ADD_USER, "wait failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "wait failed", &e))?;
 
         let err = user_result
             .Error()
-            .map_err(|e| transport_err(op::ADD_USER, "get Error failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "get Error failed", &e))?;
         let is_error = err
             .IsError()
-            .map_err(|e| transport_err(op::ADD_USER, "get IsError failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "get IsError failed", &e))?;
         if is_error {
             // Provision mints the agent user, so `ERROR_NOT_FOUND` here can
             // never mean "the sandbox is gone" — there is no sandbox id yet.
             return Err(format_iso_error(
-                op::ADD_USER,
+                op_add_user,
                 &err,
                 StalePromotion::NotEligible,
             ));
@@ -134,7 +172,7 @@ impl IsolationSessionManager {
 
         let agent_user_name = user_result
             .AgentUserName()
-            .map_err(|e| transport_err(op::ADD_USER, "get AgentUserName failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "get AgentUserName failed", &e))?;
 
         // Past this point the OS account exists and `agent_user_name` is the
         // key that removes it, so build the manager now rather than after the
@@ -149,15 +187,16 @@ impl IsolationSessionManager {
             ops,
         };
 
-        let provisioned = match Self::read_remaining_facts(&user_result, &agent_user_name) {
-            Ok(provisioned) => provisioned,
-            Err(e) => {
-                // Best-effort: returning here without this would abandon an
-                // account we are still able to remove.
-                let _ = manager.deprovision_agent_user();
-                return Err(e);
-            }
-        };
+        let provisioned =
+            match Self::read_remaining_facts(&user_result, &agent_user_name, op_add_user) {
+                Ok(provisioned) => provisioned,
+                Err(e) => {
+                    // Best-effort: returning here without this would abandon an
+                    // account we are still able to remove.
+                    let _ = manager.deprovision_agent_user();
+                    return Err(e);
+                }
+            };
 
         Ok((provisioned, manager))
     }
@@ -166,17 +205,20 @@ impl IsolationSessionManager {
     ///
     /// Split out of [`Self::add_user`] so that a failure in any of them lands
     /// on one error path, where the freshly created account can be removed
-    /// instead of orphaned.
+    /// instead of orphaned. `op_add_user` is the operation label of the
+    /// provisioning overload actually invoked, so these getters' failures are
+    /// attributed to the same API call in telemetry.
     fn read_remaining_facts(
         user_result: &IsoSessionUserResult,
         agent_user_name: &HSTRING,
+        op_add_user: &'static str,
     ) -> Result<ProvisionedUser, IsolationSessionError> {
         let agent_user_sid = user_result
             .AgentUserSid()
-            .map_err(|e| transport_err(op::ADD_USER, "get AgentUserSid failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "get AgentUserSid failed", &e))?;
         let ephemeral_workspace_path = user_result
             .EphemeralWorkspacePath()
-            .map_err(|e| transport_err(op::ADD_USER, "get EphemeralWorkspacePath failed", &e))?;
+            .map_err(|e| transport_err(op_add_user, "get EphemeralWorkspacePath failed", &e))?;
 
         Ok(ProvisionedUser {
             agent_user_name: agent_user_name.to_string(),
@@ -1047,5 +1089,31 @@ mod tests {
                 panic!("expected ServiceUnavailable variant, got: {:?}", other);
             }
         }
+    }
+
+    #[test]
+    fn app_scoped_support_requires_a_positive_feature_level() {
+        // Supported: any positive level.
+        assert!(app_scoped_supported_from(Ok(1)));
+        assert!(app_scoped_supported_from(Ok(7)));
+
+        // Not supported: the host knows the feature but does not offer it.
+        assert!(!app_scoped_supported_from(Ok(0)));
+        assert!(!app_scoped_supported_from(Ok(-1)));
+
+        // Not supported: an older host rejects the unknown feature value.
+        assert!(!app_scoped_supported_from(Err(
+            windows_core::Error::from_hresult(
+                windows_core::HRESULT(0x8007_0057u32 as i32), // E_INVALIDARG
+            )
+        )));
+    }
+
+    #[test]
+    fn add_user_op_names_the_invoked_overload() {
+        // App-scoped hosts use `AddUserAsync2`; older hosts fall back to the
+        // legacy `AddUserAsync`. Telemetry must name whichever was invoked.
+        assert_eq!(add_user_op(true), op::ADD_USER);
+        assert_eq!(add_user_op(false), op::ADD_USER_LEGACY);
     }
 }

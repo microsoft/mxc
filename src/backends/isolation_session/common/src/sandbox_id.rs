@@ -71,8 +71,8 @@ pub(super) const APP_ID_MAX_CHARS: usize = 256;
 /// The decoded `sandboxId` payload.
 ///
 /// `agent_user_name` is the OS-assigned account name and the addressing key for
-/// every post-provision phase. `app_id` is caller-supplied and carried only —
-/// nothing in MXC consumes it today.
+/// every post-provision phase. `app_id` is the caller-supplied value forwarded
+/// to the provisioning call and retained here so later phases can recover it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct SandboxIdPayload {
@@ -246,9 +246,9 @@ mod tests {
 
     #[test]
     fn round_trips_with_an_app_id() {
-        let got = round_trip("_iso_abc_123", Some("Contoso.App_8wekyb3d8bbwe"));
+        let got = round_trip("_iso_abc_123", Some("PFN:Contoso.App_8wekyb3d8bbwe"));
         assert_eq!(got.agent_user_name, "_iso_abc_123");
-        assert_eq!(got.app_id.as_deref(), Some("Contoso.App_8wekyb3d8bbwe"));
+        assert_eq!(got.app_id.as_deref(), Some("PFN:Contoso.App_8wekyb3d8bbwe"));
         assert_eq!(got.version, CURRENT_VERSION);
     }
 

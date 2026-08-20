@@ -331,7 +331,7 @@
       "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nThe only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
       "properties": {
         "appId": {
-          "description": "Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
+          "description": "Optional identifier for the calling application.\n\n**A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
           "type": [
             "string",
             "null"

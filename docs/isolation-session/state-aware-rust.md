@@ -50,14 +50,14 @@ without metadata use `()`.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string \| absent | absent | Optional identifier for the calling application. For a **packaged** application this is the Package Family Name; for an unpackaged one it may be any string. Carried verbatim inside the `sandboxId` (see below) so later phases recover it without the caller re-supplying it. **Nothing consumes it today** — it is accepted now so a future OS contract that acts on the calling application's identity does not require a breaking change. Validated **structurally only** (no control characters; at most 256 characters) — MXC is a pass-through carrier here and does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. Preserved verbatim: no trimming, no case folding, no normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such (a future OS API may assign it meaning, and MXC never synthesizes an empty string the caller did not send); JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
+| `appId` | string \| absent | absent | Optional identifier for the calling application, associating the provisioned agent user with its owning app. **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it. Validated **structurally only** (no control characters; at most 256 characters) — MXC does not judge what a valid application identity looks like, so enforcing a PFN grammar would risk rejecting forms a future OS API accepts. There is no trimming, case folding, or normalisation. An explicitly-supplied **empty string is a distinct value from absent** and round-trips as such; JSON `null` is a second spelling of absent. Rejections surface as `policy_validation` from `validate_provision`, before any OS call. The wire path is `experimental.isolation_session.provision.appId`. |
 
 **Metadata (`IsolationSessionProvisionMetadata`):**
 
 | Field | Type | Description |
 |---|---|---|
-| `agentUserName` | string | The OS-assigned agent account name returned by `AddUserAsync`, also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
-| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by `AddUserAsync`. Diagnostic only. |
+| `agentUserName` | string | The OS-assigned agent account name returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support), also carried inside the `sandboxId` payload where it serves as the addressing key for every post-provision phase. Format is OS-internal and not stable across builds. |
+| `agentUserSid` | string | The security identifier (SID) of the agent user, returned by the selected `AddUser` overload (`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support). Diagnostic only. |
 | `ephemeralWorkspacePath` | string | A directory shared between the calling user and this isolated agent user, through which the caller can stage files into the session. Each isolated user can access only its own workspace; the caller can access every concurrent sandbox's workspace. Created at provision and deleted when the sandbox is deprovisioned. It does **not** change the workload's working directory. |
 
 `appId` is deliberately **not** echoed in the metadata — the caller supplied
@@ -353,8 +353,9 @@ whole section for every backend. See the matrix notes above.
 
 ### Multiple sandboxes
 
-Distinct `sandboxId`s map to distinct OS agent users (each `AddUserAsync`
-mints a fresh account). There is no shared registration between them, so
+Distinct `sandboxId`s map to distinct OS agent users (each provisioning call —
+`AddUserAsync2`, or `AddUserAsync` on hosts without app-scoped support — mints a
+fresh account). There is no shared registration between them, so
 concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
