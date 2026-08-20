@@ -12,9 +12,17 @@
 // only string values. This macro generates a string-only deserializer while
 // supporting explicit compatibility aliases.
 macro_rules! string_enum {
+    (@schema_name $name:ident, $schema_name:literal) => {
+        $schema_name.to_string()
+    };
+    (@schema_name $name:ident) => {
+        stringify!($name).to_string()
+    };
     (
         $(#[$enum_meta:meta])*
-        $vis:vis enum $name:ident {
+        $vis:vis enum $name:ident
+        $(, schema_name = $schema_name:literal)?
+        {
             $(
                 $(#[$variant_meta:meta])*
                 $variant:ident => [
@@ -30,6 +38,71 @@ macro_rules! string_enum {
                 $(#[$variant_meta])*
                 $variant,
             )+
+        }
+
+        #[cfg(feature = "schema-gen")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> String {
+                string_enum!(@schema_name $name $(, $schema_name)?)
+            }
+
+            fn json_schema(
+                _generator: &mut schemars::gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                use schemars::schema::{
+                    InstanceType, Metadata, Schema, SchemaObject, SingleOrVec,
+                    SubschemaValidation,
+                };
+
+                let branches = vec![
+                    $(
+                        Schema::Object(SchemaObject {
+                            metadata: Some(Box::new(Metadata {
+                                description: Some(
+                                    stringify!($variant).to_string(),
+                                ),
+                                ..Default::default()
+                            })),
+                            instance_type: Some(SingleOrVec::Single(Box::new(
+                                InstanceType::String,
+                            ))),
+                            enum_values: Some(vec![
+                                serde_json::Value::String(
+                                    $canonical.to_string(),
+                                ),
+                            ]),
+                            ..Default::default()
+                        }),
+                        $(
+                            Schema::Object(SchemaObject {
+                                metadata: Some(Box::new(Metadata {
+                                    description: Some(
+                                        stringify!($variant).to_string(),
+                                    ),
+                                    ..Default::default()
+                                })),
+                                instance_type: Some(SingleOrVec::Single(Box::new(
+                                    InstanceType::String,
+                                ))),
+                                enum_values: Some(vec![
+                                    serde_json::Value::String(
+                                        $alias.to_string(),
+                                    ),
+                                ]),
+                                ..Default::default()
+                            }),
+                        )*
+                    )+
+                ];
+
+                Schema::Object(SchemaObject {
+                    subschemas: Some(Box::new(SubschemaValidation {
+                        one_of: Some(branches),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                })
+            }
         }
 
         impl $name {
@@ -151,6 +224,8 @@ mod network;
 mod one_shot;
 mod primitives;
 mod request;
+#[cfg(feature = "schema-gen")]
+mod schema;
 mod stable;
 /// The development `0.8.0-alpha` state-aware configuration contract.
 mod state_aware;
@@ -163,6 +238,8 @@ pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, Network
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, OptionalField, True};
 pub use request::{parse_request, Request, RequestParseError};
+#[cfg(feature = "schema-gen")]
+pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
     Process, ProcessContainer, ProcessContainerCapability, ProcessContainerUi,
