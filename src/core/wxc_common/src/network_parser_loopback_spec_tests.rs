@@ -1,5 +1,4 @@
-//! Spec-derived tests for loopback proxy-host rejection.
-//! Written from the documented contract only.
+//! Tests loopback proxy-host detection.
 //!
 //! Contract source: doc comment on `host_is_loopback`:
 //!   "127.0.0.0/8, ::1, or the name "localhost".

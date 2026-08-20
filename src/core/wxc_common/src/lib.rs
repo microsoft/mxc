@@ -20,6 +20,7 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+mod network_parser;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;

@@ -308,6 +308,86 @@ pub enum NetworkEnforcementMode {
     Both,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkAction {
+    Allow,
+    #[default]
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkCidr {
+    pub address: IpAddr,
+    pub prefix_length: u8,
+}
+
+impl std::str::FromStr for NetworkCidr {
+    type Err = cidr::errors::NetworkParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let network = value.parse::<cidr::IpCidr>()?;
+
+        Ok(Self {
+            address: network.first_address(),
+            prefix_length: network.network_length(),
+        })
+    }
+}
+
+impl NetworkCidr {
+    pub fn contains_cidr(&self, other: &Self) -> bool {
+        let Ok(parent) = cidr::IpCidr::new(self.address, self.prefix_length) else {
+            return false;
+        };
+        let Ok(child) = cidr::IpCidr::new(other.address, other.prefix_length) else {
+            return false;
+        };
+        parent.network_length() <= child.network_length() && parent.contains(&child.first_address())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPeer {
+    pub cidr: NetworkCidr,
+    pub except: Vec<NetworkCidr>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPort {
+    pub protocol: NetworkProtocol,
+    pub port: Option<u16>,
+    pub end_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkRule {
+    pub to: Vec<NetworkPeer>,
+    pub ports: Vec<NetworkPort>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkEgressPolicy {
+    pub default: NetworkAction,
+    pub allow: Vec<NetworkRule>,
+    pub deny: Vec<NetworkRule>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkIngressPolicy {
+    pub default: NetworkAction,
+    pub host_loopback: NetworkAction,
+}
+
 impl From<crate::wire::NetworkEnforcement> for NetworkEnforcementMode {
     fn from(m: crate::wire::NetworkEnforcement) -> Self {
         match m {
@@ -625,6 +705,12 @@ pub struct ContainerPolicy {
     pub allow_local_network: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
+    /// Outbound CIDR, protocol, and port policy.
+    pub network_egress: Option<NetworkEgressPolicy>,
+    /// Inbound and host-loopback policy.
+    pub network_ingress: Option<NetworkIngressPolicy>,
+    /// ProcessContainer proxy peer identity.
+    pub allowed_proxy_peer: Option<String>,
     #[serde(skip)]
     pub network_proxy: ProxyConfig,
     /// Whether the caller supplied a `network` block on the wire (any field
@@ -636,13 +722,12 @@ pub struct ContainerPolicy {
     /// never on the wire.
     #[serde(skip)]
     pub network_specified: bool,
-    /// Whether the caller supplied any network *mode* field (`defaultPolicy`,
-    /// `enforcementMode`, `allowLocalNetwork`, `allowedHosts`, `blockedHosts`) —
-    /// i.e. anything other than `proxy`. Distinguishes an explicit
-    /// `defaultPolicy: "block"` from an omitted network block (both leave
-    /// `default_network_policy == Block`), so backends can reject a mode change
-    /// on a phase where the network posture is immutable while still honouring a
-    /// proxy-only network block. Parse-derived, never on the wire.
+    /// Whether the caller supplied network posture fields: the legacy mode
+    /// fields (`defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
+    /// `allowedHosts`, `blockedHosts`) or directional `egress`/`ingress`.
+    /// Runtime proxy data is excluded. This lets state-aware backends reject a
+    /// post-provision posture change by presence while still accepting a
+    /// proxy-only exec request. Parse-derived, never on the wire.
     #[serde(skip)]
     pub network_mode_specified: bool,
     /// Cross-platform UI policy.
@@ -687,6 +772,14 @@ pub fn needs_host_filtering(
 }
 
 impl ContainerPolicy {
+    /// Returns whether the effective outbound default allows network access.
+    pub fn allows_network_egress(&self) -> bool {
+        self.network_egress.as_ref().map_or(
+            self.default_network_policy == NetworkPolicy::Allow,
+            |egress| egress.default == NetworkAction::Allow,
+        )
+    }
+
     /// True when this policy's host lists require per-host egress filtering.
     pub fn needs_host_filtering(&self) -> bool {
         needs_host_filtering(
@@ -1083,6 +1176,20 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directional_network_defaults_deny() {
+        assert_eq!(NetworkAction::default(), NetworkAction::Deny);
+
+        let egress = NetworkEgressPolicy::default();
+        assert_eq!(egress.default, NetworkAction::Deny);
+        assert!(egress.allow.is_empty());
+        assert!(egress.deny.is_empty());
+
+        let ingress = NetworkIngressPolicy::default();
+        assert_eq!(ingress.default, NetworkAction::Deny);
+        assert_eq!(ingress.host_loopback, NetworkAction::Deny);
+    }
 
     fn request_with_paths(readwrite: &[&str], readonly: &[&str]) -> ExecutionRequest {
         ExecutionRequest {

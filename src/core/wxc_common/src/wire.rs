@@ -105,6 +105,9 @@ pub struct MxcConfig {
     /// Network access policy. Shared across all backends.
     pub network: Option<Network>,
 
+    /// Runtime values supplied alongside, but separate from, sandbox policy.
+    pub runtime_config: Option<RuntimeConfig>,
+
     /// Cross-platform UI isolation policy.
     pub ui: Option<Ui>,
 
@@ -222,6 +225,18 @@ pub struct ProcessContainer {
     pub capture_denials: Option<CaptureDenials>,
     /// BaseProcessContainer UI settings (Windows).
     pub ui: Option<BaseProcessUi>,
+    /// ProcessContainer-specific network configuration.
+    pub network: Option<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific network configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerNetwork {
+    /// Installed package family name or AppContainer profile allowed to host
+    /// the configured loopback proxy.
+    pub allowed_proxy_peer: Option<String>,
 }
 
 /// Windows denial-capture settings. The presence of the `captureDenials`
@@ -364,6 +379,100 @@ pub struct Network {
     pub blocked_hosts: Option<Vec<String>>,
     /// Proxy configuration (one of localhost / builtinTestServer / url).
     pub proxy: Option<Proxy>,
+    /// Outbound network policy.
+    pub egress: Option<NetworkEgress>,
+    /// Inbound and host-loopback network policy.
+    pub ingress: Option<NetworkIngress>,
+}
+
+/// Outbound network policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkEgress {
+    /// Action used when no explicit rule matches. Defaults to `deny`.
+    pub default: Option<NetworkAction>,
+    /// Explicit allow rules.
+    pub allow: Option<Vec<NetworkRule>>,
+    /// Explicit deny rules. Deny rules take precedence over allow rules.
+    pub deny: Option<Vec<NetworkRule>>,
+}
+
+/// Inbound and host-loopback network policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkIngress {
+    /// Default action for LAN/private-network inbound traffic.
+    pub default: Option<NetworkAction>,
+    /// Bidirectional host-loopback connectivity action.
+    pub host_loopback: Option<NetworkAction>,
+}
+
+/// Allow or deny network action.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkAction {
+    Allow,
+    Deny,
+}
+
+/// Outbound network rule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkRule {
+    /// Destination CIDRs. Omission matches both IP families.
+    pub to: Option<Vec<NetworkPeer>>,
+    /// Destination protocols and ports. Omission matches all.
+    pub ports: Option<Vec<NetworkPort>>,
+}
+
+/// CIDR network peer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPeer {
+    /// IPv4 or IPv6 CIDR.
+    pub cidr: String,
+    /// CIDRs excluded from this peer.
+    pub except: Option<Vec<String>>,
+}
+
+/// Protocol and destination-port selector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPort {
+    /// Transport protocol. Defaults to `any`.
+    pub protocol: Option<NetworkProtocol>,
+    /// Destination port. Omission matches every port.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub port: Option<u16>,
+    /// Inclusive end of a destination-port range. Requires `port`.
+    #[cfg_attr(feature = "schema-gen", schemars(range(min = 1, max = 65535)))]
+    pub end_port: Option<u16>,
+}
+
+/// Transport protocol selector.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+/// Runtime values supplied alongside, but separate from, sandbox policy.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// HTTP/S loopback proxy URL.
+    pub network_proxy: Option<String>,
 }
 
 /// Default network policy.

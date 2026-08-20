@@ -1,8 +1,9 @@
 # MXC Network Configuration, GA
 
-The `network.egress` and `network.ingress` sections described in this document
-are planned for schema 0.8.0 but are not yet accepted by the current parser.
-Schema 0.7 and earlier retain their legacy network configuration shape.
+Schema 0.8.0 accepts the `network.egress` and `network.ingress` sections
+described in this document. Schema 0.7 and earlier retain their legacy network
+configuration shape; the two shapes are selected by `version` and cannot be
+mixed.
 
 ## Overview
 
@@ -140,7 +141,7 @@ On backends with private loopback, traffic between processes in the same
 sandbox is not governed by outbound IP/CIDR rules or host-to-container inbound
 policy.
 
-## Proposed Schema
+## Schema
 
 ### Connectivity model 1 and 3
 

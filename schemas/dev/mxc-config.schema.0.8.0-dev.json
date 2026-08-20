@@ -443,6 +443,17 @@
           ],
           "description": "Default outbound policy when no host rule matches."
         },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Outbound network policy."
+        },
         "enforcementMode": {
           "anyOf": [
             {
@@ -454,6 +465,17 @@
           ],
           "description": "How the policy is enforced."
         },
+        "ingress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkIngress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inbound and host-loopback network policy."
+        },
         "proxy": {
           "anyOf": [
             {
@@ -464,6 +486,52 @@
             }
           ],
           "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkAction": {
+      "description": "Allow or deny network action.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "NetworkEgress": {
+      "additionalProperties": false,
+      "description": "Outbound network policy.",
+      "properties": {
+        "allow": {
+          "description": "Explicit allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Action used when no explicit rule matches. Defaults to `deny`."
+        },
+        "deny": {
+          "description": "Explicit deny rules. Deny rules take precedence over allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -494,6 +562,59 @@
         }
       ]
     },
+    "NetworkIngress": {
+      "additionalProperties": false,
+      "description": "Inbound and host-loopback network policy.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default action for LAN/private-network inbound traffic."
+        },
+        "hostLoopback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bidirectional host-loopback connectivity action."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkPeer": {
+      "additionalProperties": false,
+      "description": "CIDR network peer.",
+      "properties": {
+        "cidr": {
+          "description": "IPv4 or IPv6 CIDR.",
+          "type": "string"
+        },
+        "except": {
+          "description": "CIDRs excluded from this peer.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cidr"
+      ],
+      "type": "object"
+    },
     "NetworkPolicy": {
       "description": "Default network policy.",
       "enum": [
@@ -501,6 +622,79 @@
         "block"
       ],
       "type": "string"
+    },
+    "NetworkPort": {
+      "additionalProperties": false,
+      "description": "Protocol and destination-port selector.",
+      "properties": {
+        "endPort": {
+          "description": "Inclusive end of a destination-port range. Requires `port`.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Destination port. Omission matches every port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transport protocol. Defaults to `any`."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkProtocol": {
+      "description": "Transport protocol selector.",
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp",
+        "any"
+      ],
+      "type": "string"
+    },
+    "NetworkRule": {
+      "additionalProperties": false,
+      "description": "Outbound network rule.",
+      "properties": {
+        "ports": {
+          "description": "Destination protocols and ports. Omission matches all.",
+          "items": {
+            "$ref": "#/definitions/NetworkPort"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Destination CIDRs. Omission matches both IP families.",
+          "items": {
+            "$ref": "#/definitions/NetworkPeer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
     },
     "Phase": {
       "description": "State-aware lifecycle phase.",
@@ -624,6 +818,17 @@
             "null"
           ]
         },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessContainerNetwork"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ProcessContainer-specific network configuration."
+        },
         "ui": {
           "anyOf": [
             {
@@ -634,6 +839,20 @@
             }
           ],
           "description": "BaseProcessContainer UI settings (Windows)."
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainerNetwork": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific network configuration.",
+      "properties": {
+        "allowedProxyPeer": {
+          "description": "Installed package family name or AppContainer profile allowed to host the configured loopback proxy.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -660,6 +879,20 @@
         },
         "url": {
           "description": "Proxy URL (parsed into host:port).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy.",
+      "properties": {
+        "networkProxy": {
+          "description": "HTTP/S loopback proxy URL.",
           "type": [
             "string",
             "null"
@@ -1061,6 +1294,17 @@
         }
       ],
       "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
+    },
+    "runtimeConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RuntimeConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy."
     },
     "sandboxId": {
       "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",

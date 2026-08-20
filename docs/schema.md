@@ -19,6 +19,64 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json"
 ```
 
+### Schema 0.8 networking
+
+Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy
+endpoint into runtime configuration:
+
+```json
+{
+    "version": "0.8.0-alpha",
+    "network": {
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "140.82.112.0/20" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    }
+}
+```
+
+Direct egress rules and `runtimeConfig.networkProxy` select different
+connectivity models and cannot be combined. A ProcessContainer proxy requires
+`ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
+keep `hostLoopback: "deny"`; identity-less host proxies omit
+`allowedProxyPeer` and require `hostLoopback: "allow"`.
+
+```json
+{
+    "version": "0.8.0-alpha",
+    "containment": "processcontainer",
+    "network": {
+        "egress": { "default": "deny" },
+        "ingress": {
+            "default": "allow",
+            "hostLoopback": "deny"
+        }
+    },
+    "runtimeConfig": {
+        "networkProxy": "http://127.0.0.1:8080"
+    },
+    "processContainer": {
+        "network": {
+            "allowedProxyPeer": "Contoso.Proxy_123"
+        }
+    }
+}
+```
+
+The legacy `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
+`allowedHosts`, `blockedHosts`, and `network.proxy` fields remain supported by
+schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
+continue to use those legacy fields or use the directional fields above, but
+cannot mix both formats in one request.
+
 ### Full Schema
 
 ```json
