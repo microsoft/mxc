@@ -335,13 +335,84 @@ default):
 | Host    | Backend(s)                                      | Selected by             |
 |---------|-------------------------------------------------|-------------------------|
 | Linux   | Bubblewrap                                      | `Containment::Process`  |
+| Linux   | LXC                                             | `Containment::Lxc`      |
 | macOS   | Seatbelt                                        | `Containment::Process`  |
-| Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`  |
+| Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process` or `Containment::ProcessContainer` |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`     |
 
-Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC)
+Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight)
 returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the
 standalone executor binaries for those.
+
+LXC currently supports `run` only. `spawn_sandbox` returns
+`ErrorCode::UnsupportedContainment` because the LXC backend has no streaming
+implementation.
+
+### ProcessContainer and LXC authoring
+
+Use the concrete containment variants when backend-specific settings are
+required. `Containment::Process` remains the portable host-default selection.
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment, Containment, LxcSection,
+    ProcessContainerSection, SandboxPolicy,
+};
+
+# let policy = SandboxPolicy {
+#     version: "0.7.0-alpha".to_string(),
+#     filesystem: None, network: None, ui: None, timeout_ms: None,
+#     capture_denials: None,
+# };
+let process_container = ProcessContainerSection {
+    least_privilege: true,
+    capabilities: vec!["documentsLibrary".to_string()],
+    ..Default::default()
+};
+let windows_request = build_request_with_containment(
+    &policy,
+    &Containment::ProcessContainer(process_container),
+    None,
+)?;
+
+let lxc = LxcSection {
+    distribution: "ubuntu".to_string(),
+    release: "24.04".to_string(),
+};
+let linux_request =
+    build_request_with_containment(&policy, &Containment::Lxc(lxc), None)?;
+# let _ = (windows_request, linux_request);
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+Schema 0.8 directional networking is additive to the legacy schema 0.6/0.7
+fields. Author `egress`, `ingress`, and `runtime_config` on `NetworkSection`;
+do not combine them with active legacy fields such as `allow_outbound`,
+`allowed_hosts`, or `proxy`.
+
+```rust,no_run
+use mxc_sdk::policy::NetworkSection;
+use mxc_sdk::{
+    NetworkAction, NetworkEgressSection, NetworkIngressSection,
+    RuntimeConfigSection,
+};
+
+let network = NetworkSection {
+    egress: Some(NetworkEgressSection {
+        default: Some(NetworkAction::Deny),
+        ..Default::default()
+    }),
+    ingress: Some(NetworkIngressSection {
+        default: Some(NetworkAction::Allow),
+        host_loopback: Some(NetworkAction::Allow),
+    }),
+    runtime_config: Some(RuntimeConfigSection {
+        network_proxy: Some("http://127.0.0.1:8080".to_string()),
+    }),
+    ..Default::default()
+};
+# let _ = network;
+```
 
 ### WSLC (experimental)
 

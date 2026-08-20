@@ -493,6 +493,80 @@ pub struct NetworkSection {
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     pub proxy: Option<ProxySpec>,
+    /// Schema 0.8 outbound network policy.
+    pub egress: Option<NetworkEgressSection>,
+    /// Schema 0.8 inbound and host-loopback network policy.
+    pub ingress: Option<NetworkIngressSection>,
+    /// Schema 0.8 runtime values supplied separately from sandbox policy.
+    pub runtime_config: Option<RuntimeConfigSection>,
+}
+
+/// Allow or deny network action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkAction {
+    Allow,
+    Deny,
+}
+
+/// Transport protocol selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkProtocol {
+    Tcp,
+    Udp,
+    Icmp,
+    Any,
+}
+
+/// CIDR network peer.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPeerSection {
+    pub cidr: String,
+    pub except: Option<Vec<String>>,
+}
+
+/// Protocol and destination-port selector.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPortSection {
+    pub protocol: Option<NetworkProtocol>,
+    pub port: Option<u16>,
+    pub end_port: Option<u16>,
+}
+
+/// Outbound network rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkRuleSection {
+    pub to: Option<Vec<NetworkPeerSection>>,
+    pub ports: Option<Vec<NetworkPortSection>>,
+}
+
+/// Schema 0.8 outbound network policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkEgressSection {
+    pub default: Option<NetworkAction>,
+    pub allow: Option<Vec<NetworkRuleSection>>,
+    pub deny: Option<Vec<NetworkRuleSection>>,
+}
+
+/// Schema 0.8 inbound and host-loopback network policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkIngressSection {
+    pub default: Option<NetworkAction>,
+    pub host_loopback: Option<NetworkAction>,
+}
+
+/// Schema 0.8 runtime values supplied separately from sandbox policy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeConfigSection {
+    /// HTTP/S loopback proxy URL.
+    pub network_proxy: Option<String>,
 }
 
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
@@ -566,6 +640,10 @@ pub enum Containment {
     /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
     #[default]
     Process,
+    /// Windows ProcessContainer backend with explicit backend settings.
+    ProcessContainer(ProcessContainerSection),
+    /// Linux LXC backend with explicit distribution settings.
+    Lxc(LxcSection),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -573,6 +651,103 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
+}
+
+/// ProcessContainer settings carried by [`Containment::ProcessContainer`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessContainerSection {
+    /// Enable least-privilege process creation.
+    pub least_privilege: bool,
+    /// Enable deny-and-record AppContainer learning mode.
+    pub learning_mode: bool,
+    /// Additional AppContainer capability names.
+    pub capabilities: Vec<String>,
+    /// Optional BaseProcessContainer user-interface settings.
+    pub ui: Option<ProcessContainerUiSection>,
+    /// Optional ProcessContainer-specific network settings.
+    pub network: Option<ProcessContainerNetworkSection>,
+}
+
+impl Default for ProcessContainerSection {
+    fn default() -> Self {
+        Self {
+            least_privilege: false,
+            learning_mode: false,
+            capabilities: Vec::new(),
+            ui: Some(ProcessContainerUiSection::default()),
+            network: None,
+        }
+    }
+}
+
+/// ProcessContainer-specific network settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessContainerNetworkSection {
+    /// Package family name or AppContainer profile authorized as proxy peer.
+    pub allowed_proxy_peer: Option<String>,
+}
+
+/// BaseProcessContainer user-interface settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessContainerUiSection {
+    /// Desktop-resource isolation level.
+    pub isolation: ProcessContainerUiIsolation,
+    /// Permit desktop system control.
+    pub desktop_system_control: bool,
+    /// System-settings access level.
+    pub system_settings: String,
+    /// Permit Input Method Editor access.
+    pub ime: bool,
+}
+
+impl Default for ProcessContainerUiSection {
+    fn default() -> Self {
+        Self {
+            isolation: ProcessContainerUiIsolation::Container,
+            desktop_system_control: false,
+            system_settings: "none".to_string(),
+            ime: false,
+        }
+    }
+}
+
+/// Desktop-resource isolation level for BaseProcessContainer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcessContainerUiIsolation {
+    Desktop,
+    Handles,
+    Atoms,
+    #[default]
+    Container,
+}
+
+impl ProcessContainerUiIsolation {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Handles => "handles",
+            Self::Atoms => "atoms",
+            Self::Container => "container",
+        }
+    }
+}
+
+/// LXC distribution settings carried by [`Containment::Lxc`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LxcSection {
+    /// Linux distribution image.
+    pub distribution: String,
+    /// Distribution release.
+    pub release: String,
+}
+
+impl Default for LxcSection {
+    fn default() -> Self {
+        Self {
+            distribution: "alpine".to_string(),
+            release: "3.19".to_string(),
+        }
+    }
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -906,9 +1081,51 @@ fn build_wire_config(
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
     let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
-        || matches!(containment, Containment::Wslc(_));
+        || matches!(containment, Containment::Lxc(_) | Containment::Wslc(_));
 
-    if let Some(net) = &policy.network {
+    let uses_process_container_network = matches!(
+        containment,
+        Containment::ProcessContainer(ProcessContainerSection {
+            network: Some(ProcessContainerNetworkSection {
+                allowed_proxy_peer: Some(_),
+            }),
+            ..
+        })
+    );
+    let uses_directional_network = policy.network.as_ref().is_some_and(|network| {
+        network.egress.is_some() || network.ingress.is_some() || network.runtime_config.is_some()
+    }) || uses_process_container_network;
+
+    if uses_directional_network {
+        let net = policy.network.as_ref();
+        let mixes_legacy = net.is_some_and(|network| {
+            network.allow_outbound
+                || network.allow_local_network
+                || !network.allowed_hosts.is_empty()
+                || !network.blocked_hosts.is_empty()
+                || network.proxy.is_some()
+        });
+        if mixes_legacy {
+            return Err(MxcError::malformed_request(
+                "schema 0.8 directional networking cannot be combined with legacy network fields",
+            ));
+        }
+
+        if let Some(net) = net {
+            if net.egress.is_some() || net.ingress.is_some() {
+                config["network"] = json!({});
+                if let Some(egress) = &net.egress {
+                    config["network"]["egress"] = json!(egress);
+                }
+                if let Some(ingress) = &net.ingress {
+                    config["network"]["ingress"] = json!(ingress);
+                }
+            }
+            if let Some(runtime_config) = &net.runtime_config {
+                config["runtimeConfig"] = json!(runtime_config);
+            }
+        }
+    } else if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
             && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
             && !net.allow_outbound
@@ -934,6 +1151,13 @@ fn build_wire_config(
 
     match containment {
         Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
+        Containment::ProcessContainer(process_container) => apply_process_container_backend(
+            &mut config,
+            policy,
+            process_container,
+            "processcontainer",
+        ),
+        Containment::Lxc(lxc) => apply_lxc_backend(&mut config, lxc),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -979,43 +1203,13 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "windows")]
     {
-        let mut capabilities: Vec<&str> = Vec::new();
-        if let Some(net) = &policy.network {
-            if net.allow_outbound {
-                capabilities.push("internetClient");
-            }
-            if net.allow_local_network {
-                capabilities.push("privateNetworkClientServer");
-            }
-        }
-        // The container id is carried only at the top level (`containerId`); the
-        // wire `processContainer` object intentionally has no `name` field.
         let _ = container_id;
-        config["processContainer"] = json!({
-            "leastPrivilege": false,
-            "capabilities": capabilities,
-            "ui": {
-                "isolation": "container",
-                "desktopSystemControl": false,
-                "systemSettings": "none",
-                "ime": false,
-            },
-        });
-        if let Some(cd) = &policy.capture_denials {
-            config["processContainer"]["captureDenials"] = json!({
-                "mode": cd.mode.wire(),
-                "outputPath": cd.output_path,
-                "retainEtl": cd.retain_etl,
-            });
-        }
-        if let Some(network) = config.get_mut("network") {
-            let mode = if has_host_rules(network) {
-                "both"
-            } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
-        }
+        apply_process_container_backend(
+            config,
+            policy,
+            &ProcessContainerSection::default(),
+            "process",
+        );
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -1024,9 +1218,77 @@ fn apply_host_process_backend(
     }
 }
 
+fn apply_process_container_backend(
+    config: &mut serde_json::Value,
+    policy: &SandboxPolicy,
+    process_container: &ProcessContainerSection,
+    containment: &str,
+) {
+    use serde_json::json;
+
+    config["containment"] = json!(containment);
+
+    let mut capabilities = process_container.capabilities.clone();
+    if let Some(net) = &policy.network {
+        if net.allow_outbound
+            && !capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case("internetClient"))
+        {
+            capabilities.push("internetClient".to_string());
+        }
+        if net.allow_local_network
+            && !capabilities
+                .iter()
+                .any(|capability| capability.eq_ignore_ascii_case("privateNetworkClientServer"))
+        {
+            capabilities.push("privateNetworkClientServer".to_string());
+        }
+    }
+
+    config["processContainer"] = json!({
+        "leastPrivilege": process_container.least_privilege,
+        "learningMode": process_container.learning_mode,
+        "capabilities": capabilities,
+    });
+    if let Some(ui) = &process_container.ui {
+        config["processContainer"]["ui"] = json!({
+            "isolation": ui.isolation.wire(),
+            "desktopSystemControl": ui.desktop_system_control,
+            "systemSettings": ui.system_settings,
+            "ime": ui.ime,
+        });
+    }
+    if let Some(allowed_proxy_peer) = process_container
+        .network
+        .as_ref()
+        .and_then(|network| network.allowed_proxy_peer.as_ref())
+    {
+        config["processContainer"]["network"] = json!({
+            "allowedProxyPeer": allowed_proxy_peer,
+        });
+    }
+    if let Some(cd) = &policy.capture_denials {
+        config["processContainer"]["captureDenials"] = json!({
+            "mode": cd.mode.wire(),
+            "outputPath": cd.output_path,
+            "retainEtl": cd.retain_etl,
+        });
+    }
+    if let Some(network) = config.get_mut("network") {
+        if network.get("egress").is_none() && network.get("ingress").is_none() {
+            let mode = if has_host_rules(network) {
+                "both"
+            } else {
+                "capabilities"
+            };
+            network["enforcementMode"] = json!(mode);
+        }
+    }
+}
+
 /// True when the network section carries any host allow/deny rules, deciding
 /// whether host-level enforcement is engaged. (Linux + Windows only.)
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 fn has_host_rules(network: &serde_json::Value) -> bool {
     let non_empty = |key: &str| {
         network
@@ -1035,6 +1297,19 @@ fn has_host_rules(network: &serde_json::Value) -> bool {
             .is_some_and(|a| !a.is_empty())
     };
     non_empty("allowedHosts") || non_empty("blockedHosts")
+}
+
+fn apply_lxc_backend(config: &mut serde_json::Value, lxc: &LxcSection) {
+    use serde_json::json;
+
+    config["containment"] = json!("lxc");
+    config["lxc"] = json!({
+        "distribution": lxc.distribution,
+        "release": lxc.release,
+    });
+
+    #[cfg(target_os = "linux")]
+    apply_linux_network_policy(config);
 }
 
 /// Apply the WSL Container backend fields — the Rust port of the SDK's
@@ -1601,7 +1876,13 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, WslcSection};
+    use super::{
+        build_request_with_containment, Containment, LxcSection, NetworkAction,
+        NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+        NetworkProtocol, NetworkRuleSection, ProcessContainerNetworkSection,
+        ProcessContainerSection, ProcessContainerUiIsolation, ProcessContainerUiSection,
+        RuntimeConfigSection, WslcSection,
+    };
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1621,6 +1902,197 @@ mod tests {
         // WSLC selection is strictly opt-in and must not change the default.
         let request = build_request(&minimal_policy(), None).expect("build_request");
         assert_ne!(request.inner.containment, ContainmentBackend::Wslc);
+    }
+
+    #[test]
+    fn process_container_containment_maps_config_to_the_request() {
+        let process_container = ProcessContainerSection {
+            least_privilege: true,
+            learning_mode: true,
+            capabilities: vec!["documentsLibrary".to_string()],
+            ui: Some(ProcessContainerUiSection {
+                isolation: ProcessContainerUiIsolation::Handles,
+                desktop_system_control: true,
+                system_settings: "read".to_string(),
+                ime: true,
+            }),
+            network: None,
+        };
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect("build_request_with_containment");
+
+        assert_eq!(
+            request.inner.containment,
+            ContainmentBackend::ProcessContainer
+        );
+        assert!(request.inner.policy.least_privilege_mode);
+        assert_eq!(
+            request.inner.policy.capabilities,
+            ["learningModeLogging", "documentsLibrary"]
+        );
+        assert_eq!(request.inner.policy.base_process_ui.isolation, "handles");
+        assert!(request.inner.policy.base_process_ui.desktop_system_control);
+        assert_eq!(request.inner.policy.base_process_ui.system_settings, "read");
+        assert!(request.inner.policy.base_process_ui.ime);
+    }
+
+    #[test]
+    fn process_container_network_peer_requires_and_survives_schema_0_8() {
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        policy.network = Some(NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://127.0.0.1:8080".to_string()),
+            }),
+            ..Default::default()
+        });
+        let process_container = ProcessContainerSection {
+            network: Some(ProcessContainerNetworkSection {
+                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+            }),
+            ..Default::default()
+        };
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect("schema 0.8 ProcessContainer proxy peer");
+
+        assert_eq!(
+            request.inner.policy.allowed_proxy_peer.as_deref(),
+            Some("Contoso.Proxy_123")
+        );
+    }
+
+    #[test]
+    fn directional_networking_maps_to_the_shared_policy() {
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        policy.network = Some(NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                allow: Some(vec![NetworkRuleSection {
+                    to: Some(vec![NetworkPeerSection {
+                        cidr: "10.0.0.0/8".to_string(),
+                        except: Some(vec!["10.1.0.0/16".to_string()]),
+                    }]),
+                    ports: Some(vec![NetworkPortSection {
+                        protocol: Some(NetworkProtocol::Tcp),
+                        port: Some(443),
+                        end_port: None,
+                    }]),
+                }]),
+                deny: None,
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Deny),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            runtime_config: None,
+            ..Default::default()
+        });
+
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            None,
+        )
+        .expect("schema 0.8 directional networking");
+
+        assert!(request.inner.policy.network_egress.is_some());
+        assert!(request.inner.policy.network_ingress.is_some());
+        assert!(!request.inner.policy.network_proxy.is_enabled());
+    }
+
+    #[test]
+    fn directional_networking_rejects_active_legacy_fields() {
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        policy.network = Some(NetworkSection {
+            allow_outbound: true,
+            egress: Some(NetworkEgressSection::default()),
+            ..Default::default()
+        });
+
+        let err = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            None,
+        )
+        .expect_err("mixed legacy and directional networking must fail");
+
+        assert!(
+            err.message
+                .contains("cannot be combined with legacy network fields"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn schema_0_8_still_accepts_legacy_networking() {
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        policy.network = Some(NetworkSection {
+            allow_outbound: true,
+            allowed_hosts: vec!["example.com".to_string()],
+            ..Default::default()
+        });
+
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            None,
+        )
+        .expect("schema 0.8 retains the legacy networking path");
+
+        assert_eq!(
+            request.inner.policy.default_network_policy,
+            wxc_common::models::NetworkPolicy::Allow
+        );
+        assert_eq!(request.inner.policy.allowed_hosts, ["example.com"]);
+        assert!(request.inner.policy.network_egress.is_none());
+    }
+
+    #[test]
+    fn lxc_containment_maps_distribution_to_the_request() {
+        let lxc = LxcSection {
+            distribution: "ubuntu".to_string(),
+            release: "24.04".to_string(),
+        };
+        let request =
+            build_request_with_containment(&minimal_policy(), &Containment::Lxc(lxc), None)
+                .expect("build_request_with_containment");
+
+        assert_eq!(request.inner.containment, ContainmentBackend::Lxc);
+        assert_eq!(request.inner.lxc_config.distribution, "ubuntu");
+        assert_eq!(request.inner.lxc_config.release, "24.04");
+    }
+
+    #[test]
+    fn lxc_defaults_match_the_node_sdk() {
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Lxc(LxcSection::default()),
+            None,
+        )
+        .expect("build_request_with_containment");
+
+        assert_eq!(request.inner.lxc_config.distribution, "alpine");
+        assert_eq!(request.inner.lxc_config.release, "3.19");
     }
 
     #[test]

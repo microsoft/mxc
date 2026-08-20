@@ -49,16 +49,25 @@
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] |
 //! | Seatbelt | macOS | [`Containment::Process`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] or [`Containment::ProcessContainer`] |
+//! | LXC | Linux | [`Containment::Lxc`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
+//!
+//! [`Containment::ProcessContainer`] and [`Containment::Lxc`] carry their
+//! backend-specific authoring sections. Schema 0.8 directional network values
+//! are available through [`policy::NetworkSection`] while the legacy fields
+//! remain available for schema 0.6/0.7 policies.
+//! LXC currently supports [`run`] only; [`spawn_sandbox`] returns
+//! [`ErrorCode::UnsupportedContainment`] because the LXC backend has no
+//! streaming implementation.
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
 //! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
 //! on the request. Its container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
-//! Other backends (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-//! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
+//! Other backends (Windows Sandbox, IsolationSession, MicroVM, Hyperlight)
+//! return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
 //! the standalone executor binaries for those.
 //!
 //! # Diagnosing a failure
@@ -140,8 +149,11 @@ pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
-    SandboxPolicy, SandboxRequest, WslcSection,
+    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, LxcSection,
+    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
+    ProcessContainerNetworkSection, ProcessContainerSection, ProcessContainerUiIsolation,
+    ProcessContainerUiSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{
