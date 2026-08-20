@@ -233,8 +233,8 @@ message instead of surfacing later as an opaque backend error.
 
 `prepare-linux-host.sh`:
 
-- `bubblewrap` — installs `bwrap` and `slirp4netns`
-  (apt/dnf/yum/microdnf) and relaxes
+- `bubblewrap` — installs `bwrap`, `slirp4netns`, `util-linux`, and `iptables`
+  (apt/dnf/yum/microdnf), verifies their required commands, and relaxes
   `kernel.apparmor_restrict_unprivileged_userns` (ephemeral CI hosts only).
 - `lxc` — installs the LXC stack, reloads the AppArmor profile, starts and waits
   for `lxcbr0`, enables bridge netfilter, and makes sure the bridge's NAT rule
