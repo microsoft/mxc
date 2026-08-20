@@ -158,6 +158,8 @@ fn select_network_format(
         .is_some_and(has_process_container_network_fields);
     let has_directional =
         has_directional_policy || has_runtime_config || has_process_container_network;
+    let has_directional_section =
+        sections.runtime.is_some() || sections.process_container.is_some();
     let supports_directional = supports_directional_network(version);
 
     if has_legacy && has_directional {
@@ -169,7 +171,7 @@ fn select_network_format(
         ));
     }
 
-    if has_directional && !supports_directional {
+    if (has_directional_policy || has_directional_section) && !supports_directional {
         return Err(WxcError::ConfigParse(
             "network.egress, network.ingress, runtimeConfig, and processContainer.network \
              require schema version 0.8 or later"

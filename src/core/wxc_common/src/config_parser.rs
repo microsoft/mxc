@@ -5240,12 +5240,21 @@ mod tests {
 
     #[test]
     fn schema_v07_rejects_v08_network_fields() {
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"egress": {"default": "deny"}}
-        }"#;
-        assert!(load_mxc(json).is_err());
+        for extra in [
+            r#""network": {"egress": {"default": "deny"}}"#,
+            r#""runtimeConfig": {}"#,
+            r#""processContainer": {"network": {}}"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.7.0-alpha",
+                    "process": {{"commandLine": "echo hi"}},
+                    "containment": "processcontainer",
+                    {extra}
+                }}"#
+            );
+            assert!(load_mxc(&json).is_err());
+        }
     }
 
     #[test]
