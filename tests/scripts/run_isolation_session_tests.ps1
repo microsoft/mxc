@@ -114,12 +114,7 @@ Write-Host "Configs: $ConfigDir`n" -ForegroundColor Gray
 # ---------------- Backend-availability probe ----------------
 #
 # Availability is decided by a single call to `wxc-exec --probe`, which reports
-# `probes.isolationSessionAvailable`. That one signal covers both reasons this
-# suite can be unrunnable:
-#
-#   - the host cannot activate the isolation session API, or
-#   - wxc-exec was built without `--features isolation_session`, in which case
-#     the field stays false because the backend is not compiled in.
+# `probes.isolationSessionAvailable`.
 #
 # This deliberately replaces the earlier checks for a specific DLL and a
 # hard-coded WinRT activatable-class registry key. Those named a runtime class
@@ -199,7 +194,7 @@ function Get-IsolationSessionProbe {
 
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
-    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
     exit 0
 }
 if ($probeResult.Status -ne 'available') {
