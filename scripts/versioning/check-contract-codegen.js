@@ -94,14 +94,20 @@ function readFixtures(root, kind) {
   const fixtures = readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
     .sort()
-    .map((name) => ({
-      name: `${root}/${kind}/${name}`,
-      value: JSON.parse(readFileSync(join(directory, name), "utf8")),
-    }));
+    .map((name) => readFixture(root, kind, name));
   if (fixtures.length === 0) {
     fail(`fixture directory ${root}/${kind} is empty`);
   }
   return fixtures;
+}
+
+function readFixture(root, kind, name) {
+  return {
+    name: `${root}/${kind}/${name}`,
+    value: JSON.parse(
+      readFileSync(join(fixtureRoot, root, kind, name), "utf8")
+    ),
+  };
 }
 
 function collectDispatchRoots(value, references = new Set()) {
@@ -173,7 +179,11 @@ function validateFixtures(schema) {
     }
   }
 
-  const malformedExec = readFixtures("exec", "invalid")[0];
+  const malformedExec = readFixture(
+    "exec",
+    "invalid",
+    "missing_process.json"
+  );
   if (composed(malformedExec.value)) {
     fail("malformed exec diagnostic fixture unexpectedly passed");
   }
