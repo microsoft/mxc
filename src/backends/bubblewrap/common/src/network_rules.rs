@@ -30,7 +30,9 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
+use wxc_common::models::{
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy,
+};
 
 /// Which `iptables` binary carries a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -344,6 +346,60 @@ impl EgressPlan {
         }
     }
 
+    /// The outbound posture for one request, from whichever schema shape it used.
+    ///
+    /// Schema 0.8 carries the outbound posture in either the legacy host lists
+    /// or the directional `network.egress` section, never both, so this selects
+    /// the authoritative one instead of merging them. Every caller goes through
+    /// here; [`Self::for_policy`] stays legacy-only so the chain consumers have
+    /// today cannot drift.
+    ///
+    /// `network_egress` is the format discriminator because the parser fills it
+    /// in only on the directional path (`network_parser::apply_directional_network`)
+    /// and leaves it `None` on the legacy one. `network_mode_specified` looks like
+    /// the obvious signal and is *not*: the legacy path sets it too, from
+    /// `defaultPolicy`/`allowedHosts`/`blockedHosts`, so keying on it would route
+    /// every legacy firewall config into the directional builder.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the selected builder's rejection.
+    pub(crate) fn for_request(request: &ExecutionRequest) -> Result<Self, String> {
+        match request.policy.network_egress.as_ref() {
+            Some(egress) => Self::for_directional_policy(egress),
+            None => Self::for_policy(request),
+        }
+    }
+
+    /// The directional `network.egress` posture.
+    ///
+    /// `egress.default` sets the terminal verdict for both families, matching
+    /// the legacy arm: a family with no rules of its own inherits the requested
+    /// posture rather than being left silently open or silently closed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects `allow`/`deny` rules, which this backend does not yet program.
+    fn for_directional_policy(egress: &NetworkEgressPolicy) -> Result<Self, String> {
+        if !egress.allow.is_empty() || !egress.deny.is_empty() {
+            return Err(
+                "network.egress allow/deny rules are not supported by the Bubblewrap backend"
+                    .to_string(),
+            );
+        }
+
+        let terminal = match egress.default {
+            NetworkAction::Allow => RuleVerdict::Accept,
+            NetworkAction::Deny => RuleVerdict::Drop,
+        };
+
+        Ok(Self {
+            rules: Vec::new(),
+            v4_terminal: terminal,
+            v6_terminal: terminal,
+        })
+    }
+
     /// The `enforcementMode: "firewall"` posture, from the policy's host lists.
     ///
     /// `defaultPolicy` sets the terminal verdict for both families, so a family
@@ -428,21 +484,33 @@ pub(crate) struct IngressPlan {
 impl IngressPlan {
     /// The posture the policy asks for.
     ///
-    /// Legacy-derived: the posture comes from `allowLocalNetwork`. The
-    /// directional `network.ingress` section exists in the 0.8 contract, but
-    /// Bubblewrap declares `NetworkPolicySupport::LEGACY`, so an explicit
-    /// `ingress` request is rejected in `validate` before this runs.
+    /// Schema 0.8 carries the inbound posture in either the legacy
+    /// `allowLocalNetwork` field or the directional `network.ingress` section,
+    /// never both, so the format selects which one is authoritative rather than
+    /// the two being merged. The legacy arm is left exactly as it was:
+    /// consumers still on the legacy shape must keep the chain they have.
     ///
-    /// Only the deny posture is reachable on the private-namespace path today:
+    /// `network_ingress` is the format discriminator because the parser fills it
+    /// in only on the directional path and leaves it `None` on the legacy one.
+    /// `network_mode_specified` is *not* usable here: the legacy path sets it
+    /// too, from `defaultPolicy`/`allowLocalNetwork`/host lists.
+    ///
+    /// Only the deny posture is reachable on the private-namespace path today.
     /// `allowLocalNetwork: true` is refused before this point at schema 0.8+
-    /// (see `bwrap_command::local_network_diagnostic_for_mode`) because
-    /// honoring it needs slirp port forwarding and a port contract that the
-    /// legacy schema cannot express. The mapping is written out in full anyway
-    /// so the policy lives in one readable place and lifting that rejection is
-    /// a change at the rejection, not here.
+    /// (see `bwrap_command::local_network_diagnostic_for_mode`) and its
+    /// directional twins `ingress.default: allow` and `ingress.hostLoopback:
+    /// allow` are refused alongside it, because honoring either needs slirp port
+    /// forwarding and a port contract neither schema expresses. The mapping is
+    /// written out in full anyway so the policy lives in one readable place and
+    /// lifting a rejection is a change at the rejection, not here.
     pub(crate) fn for_policy(policy: &ContainerPolicy) -> Self {
+        let accepts_new_inbound = match policy.network_ingress.as_ref() {
+            Some(ingress) => ingress.default == NetworkAction::Allow,
+            None => policy.allow_local_network,
+        };
+
         Self {
-            new_inbound: if policy.allow_local_network {
+            new_inbound: if accepts_new_inbound {
                 RuleVerdict::Accept
             } else {
                 RuleVerdict::Drop
@@ -584,7 +652,11 @@ pub(crate) fn render_filter_payloads(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ContainerPolicy;
+    use wxc_common::logger::{Logger, Mode};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+    };
+    use wxc_common::state_aware_request::MxcRequest;
 
     /// The supervisor applies payloads in shell-glob (lexical) order, so lexical
     /// order must equal numeric order for *every* count. A fixed 3-digit width
@@ -868,6 +940,219 @@ mod tests {
 
         assert_eq!(v4(&plan), egress(&["-d 192.0.2.0/24 -j DROP"], "ACCEPT"));
         assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
+    }
+
+    /// A legacy config keeps the chain it has today, all the way through the
+    /// real parser.
+    ///
+    /// Schema 0.8 accepts either the legacy network shape or the directional
+    /// one, and consumers still on the legacy shape must be unaffected by the
+    /// directional work. This goes through `load_mxc_request_from_json` rather
+    /// than building a policy by hand because the bug it guards is in the
+    /// *parser's* output: the legacy path also sets `network_mode_specified`,
+    /// so a dispatcher keyed on that flag routes legacy configs into the
+    /// directional builder. Only a parser-driven test sees that.
+    fn plan_for_config(json: &str) -> EgressPlan {
+        let mut logger = Logger::new(Mode::Buffer);
+        let parsed = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+            .expect("the config parses");
+        let MxcRequest::OneShot(request) = parsed else {
+            panic!("expected a one-shot request");
+        };
+        EgressPlan::for_request(&request).expect("the parsed posture is enforceable")
+    }
+
+    #[test]
+    fn a_legacy_config_keeps_its_chain_at_schema_0_8() {
+        let plan = plan_for_config(
+            r#"{
+                "version": "0.8.0-alpha",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo hi"},
+                "network": {
+                    "defaultPolicy": "allow",
+                    "enforcementMode": "firewall",
+                    "blockedHosts": ["192.0.2.0/24"]
+                }
+            }"#,
+        );
+
+        assert_eq!(v4(&plan), egress(&["-d 192.0.2.0/24 -j DROP"], "ACCEPT"));
+        assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
+    }
+
+    #[test]
+    fn a_legacy_config_keeps_its_chain_at_schema_0_7() {
+        let plan = plan_for_config(
+            r#"{
+                "version": "0.7.0-alpha",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo hi"},
+                "network": {
+                    "defaultPolicy": "block",
+                    "enforcementMode": "firewall",
+                    "allowedHosts": ["10.0.0.0/8"]
+                }
+            }"#,
+        );
+
+        assert_eq!(v4(&plan), egress(&["-d 10.0.0.0/8 -j ACCEPT"], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    /// The directional shape reaches the directional builder, again through the
+    /// parser, so the two arms are proven to be selected by real configs.
+    #[test]
+    fn a_directional_config_closes_both_families_at_schema_0_8() {
+        let plan = plan_for_config(
+            r#"{
+                "version": "0.8.0-alpha",
+                "containment": "bubblewrap",
+                "process": {"commandLine": "echo hi"},
+                "network": {
+                    "egress": {"default": "deny"},
+                    "ingress": {"default": "deny", "hostLoopback": "deny"}
+                }
+            }"#,
+        );
+
+        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    /// A policy that selected the directional shape, as the parser marks it.
+    fn directional_ingress_policy(
+        default: NetworkAction,
+        host_loopback: NetworkAction,
+    ) -> ContainerPolicy {
+        ContainerPolicy {
+            network_ingress: Some(NetworkIngressPolicy {
+                default,
+                host_loopback,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_directional_ingress_deny_closes_the_inbound_chain() {
+        assert_eq!(
+            IngressPlan::for_policy(&directional_ingress_policy(
+                NetworkAction::Deny,
+                NetworkAction::Deny
+            )),
+            denied_ingress()
+        );
+    }
+
+    /// The two shapes are mutually exclusive, so once the directional section is
+    /// authoritative a legacy `allowLocalNetwork` left alongside it must not
+    /// re-open inbound. Merging the two would fail open on exactly this input.
+    #[test]
+    fn a_directional_policy_ignores_the_legacy_inbound_field() {
+        let mut policy = directional_ingress_policy(NetworkAction::Deny, NetworkAction::Deny);
+        policy.allow_local_network = true;
+
+        assert_eq!(IngressPlan::for_policy(&policy), denied_ingress());
+    }
+
+    /// `ingress.default: allow` is refused before it reaches the plan, but the
+    /// mapping still carries it so lifting that rejection is a change at the
+    /// rejection rather than a silent no-op here.
+    #[test]
+    fn a_directional_ingress_allow_opens_the_inbound_chain() {
+        let plan = IngressPlan::for_policy(&directional_ingress_policy(
+            NetworkAction::Allow,
+            NetworkAction::Deny,
+        ));
+
+        assert_ne!(plan, denied_ingress());
+        assert!(
+            plan.chain_lines(RuleFamily::V4)
+                .iter()
+                .any(|line| line == "-m state --state NEW -j ACCEPT"),
+            "an allow posture must reach the chain as an ACCEPT"
+        );
+    }
+
+    /// A request that selected the directional shape, as the parser marks it.
+    fn directional_egress_request(default: NetworkAction) -> ExecutionRequest {
+        ExecutionRequest {
+            script_code: "echo hello".into(),
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy {
+                    default,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_directional_egress_deny_closes_both_families() {
+        let plan = EgressPlan::for_request(&directional_egress_request(NetworkAction::Deny))
+            .expect("a directional deny posture is enforceable");
+
+        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    #[test]
+    fn a_directional_egress_allow_opens_both_families() {
+        let plan = EgressPlan::for_request(&directional_egress_request(NetworkAction::Allow))
+            .expect("a directional allow posture is enforceable");
+
+        assert_eq!(v4(&plan), egress(&[], "ACCEPT"));
+        assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
+    }
+
+    /// The two shapes are mutually exclusive, so a legacy host list left
+    /// alongside an authoritative directional section must not be programmed.
+    /// Merging them would reopen exactly what the directional deny closed.
+    #[test]
+    fn a_directional_egress_policy_ignores_the_legacy_host_lists() {
+        let mut req = directional_egress_request(NetworkAction::Deny);
+        req.policy.default_network_policy = NetworkPolicy::Allow;
+        req.policy.allowed_hosts = vec!["10.0.0.0/8".to_string()];
+
+        let plan = EgressPlan::for_request(&req).expect("the directional posture is enforceable");
+
+        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v6(&plan), egress(&[], "DROP"));
+    }
+
+    /// The legacy request keeps reaching the legacy builder through the
+    /// dispatcher, unchanged.
+    #[test]
+    fn a_legacy_request_still_routes_to_the_legacy_builder() {
+        let req = request(NetworkPolicy::Allow, &[], &["192.0.2.0/24"]);
+
+        let dispatched = EgressPlan::for_request(&req).expect("the legacy denylist is enforceable");
+        let direct = EgressPlan::for_policy(&req).expect("the legacy denylist is enforceable");
+
+        assert_eq!(v4(&dispatched), v4(&direct));
+        assert_eq!(v6(&dispatched), v6(&direct));
+    }
+
+    /// Rules are not programmed yet, so they must be refused rather than
+    /// silently dropped -- a dropped deny rule is a fail-open.
+    #[test]
+    fn directional_egress_rules_are_refused_until_they_are_programmed() {
+        let mut req = directional_egress_request(NetworkAction::Deny);
+        req.policy
+            .network_egress
+            .as_mut()
+            .expect("the request carries an egress section")
+            .deny = vec![NetworkRule::default()];
+
+        let error = EgressPlan::for_request(&req).expect_err("unprogrammed rules must be refused");
+
+        assert!(
+            error.contains("allow/deny rules"),
+            "the rejection should name the unsupported field: {error}"
+        );
     }
 
     /// The reported failure: a mapped `blockedHosts` entry under

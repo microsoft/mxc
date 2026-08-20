@@ -177,7 +177,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::FirewallEnforced;
         if firewall_enforced {
-            if let Err(error) = network_rules::EgressPlan::for_policy(request) {
+            if let Err(error) = network_rules::EgressPlan::for_request(request) {
                 return Err(ScriptResponse::error(&error));
             }
         }
@@ -376,7 +376,7 @@ impl BubblewrapScriptRunner {
             // endpoint. There is no hostname to pin because rule addresses are
             // literals and CIDRs only.
             None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
-                let plan = match network_rules::EgressPlan::for_policy(request) {
+                let plan = match network_rules::EgressPlan::for_request(request) {
                     Ok(plan) => plan,
                     Err(error) => {
                         proxy.stop(logger);
