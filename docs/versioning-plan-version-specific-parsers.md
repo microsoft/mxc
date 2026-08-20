@@ -82,10 +82,11 @@ behavior, missing versions, experimental fields on published contracts, and
 > the alternative in this section until the requirement is ratified and the
 > normative parts of this plan are updated.
 >
-> **Update, 2026-08-20.** The revised publication sequence brings this forward:
-> publishing `0.8.0-alpha` requires deciding decision 5 — which experimental
-> fields, if any, the first published contract selects — and question 3, on
-> state-aware shapes, for the same reason. See "Revised publication sequence".
+> **Update, 2026-08-20.** The revised publication sequence brought this
+> forward, and it was decided against: stable `0.8.0-alpha` contains neither
+> experimental nor state-aware fields, answering decision 5 as "none" and
+> question 3 as "no". This section remains a recorded discussion for a future
+> publication. See "Revised publication sequence".
 
 A proposed requirement allows a published config contract (and therefore a
 stable schema artifact) to include explicitly selected experimental fields.
@@ -208,8 +209,10 @@ will be added.
 
 **Superseded by the revised publication sequence below.** `0.8.0-alpha` is
 being published early, so the table above describes the state up to that point
-only: after publication `0.8.0-alpha` is a published contract and `0.9.0-dev`
-becomes the development contract.
+only: after publication `0.8.0-alpha` is a published contract carrying the
+stable-candidate one-shot surface, and `0.9.0-dev` becomes the development
+contract holding experimental and state-aware. The exclusion list immediately
+above therefore applies to `0.8.0-alpha` as well.
 
 ## Revised publication sequence
 
@@ -245,26 +248,39 @@ Generating the stable schema from the contract crate removes the disagreement
 by construction. This is why Phase 6 must land before publication rather than
 merely before Phase 10.
 
-### The scope question this does not answer
+### Published `0.8.0-alpha` scope: stable candidate only
 
-Generating the artifact from the contract guarantees the two agree; it does not
-decide what the contract contains. Whatever `published::v0_8_0_alpha` omits is
-simply not part of `0.8.0-alpha`, and the generated schema will say so.
+**Decided 2026-08-20: neither state-aware nor experimental enters stable
+`0.8.0-alpha`.** The original target-contract rule therefore stands unchanged,
+and design-note decision 5 is answered "none" while its question 3 is answered
+"no". `published::v0_8_0_alpha` is the stable-candidate one-shot surface only:
+no `experimental`, no `phase`, no `sandboxId`, no `correlationVector`, and the
+containment enum narrowed to `process`, `processcontainer` with its
+`appcontainer` alias, `lxc`, `bubblewrap`, and `seatbelt` with its
+`macos_sandbox` alias.
 
-Two consequences need deciding before step 4:
+The directional network fields ported in step 2 are unaffected: `network.egress`,
+`network.ingress`, and `processContainer.network.allowedProxyPeer` are all
+stable-surface fields, so they publish with the rest of the one-shot contract.
 
-- **Experimental.** Six corpus configs declare `0.8.0-alpha` and use
-  `experimental` or `phase` today, out of thirty at that version. A narrow
-  publication re-versions them to `0.9.0-dev`, and does the same to any
-  customer config in the same shape. This is design-note decision 5, which
-  publication now forces.
-- **State-aware.** The plan's Phase 11 rule is that state-aware types never
-  enter a published contract. Applied here, state-aware requests have no
-  published version to declare: they would move from the `0.6.0-alpha` they
-  hard-code today onto the `0.9.0-dev` development contract, which means the
-  state-aware lifecycle ships only against a development version. That may be
-  acceptable while it remains experimental, but it should be chosen rather than
-  discovered.
+The corpus cost is small and entirely predictable. Of the thirty configs
+declaring `0.8.0-alpha` today, twenty-four are stable-candidate only and stay;
+six move to `0.9.0-dev`, and they are the same six documents — every one is a
+WSLC config that uses both the development-only `wslc` containment and an
+`experimental` block:
+
+```text
+wslc_denied_dotdot_alias.json        wslc_most_specific_denied_parent.json
+wslc_denied_masking.json             wslc_port_mapping_multiple.json
+wslc_filesystem_object.json          wslc_port_mapping_tcp.json
+```
+
+No corpus config declares `0.8.0-alpha` together with a `phase`, so excluding
+state-aware costs nothing in the corpus. It does, however, decide where
+state-aware lives: with no published version to declare, state-aware requests
+move from the `0.6.0-alpha` they hard-code today onto `0.9.0-dev`, so the
+lifecycle ships only against a development contract until it is promoted. That
+is the intended consequence of the Phase 11 rule, recorded here as a choice.
 
 ### Version string
 
@@ -290,7 +306,10 @@ coexist.
   conversion-time asymmetry against `0.6` and `0.7` permanent across published
   contracts. Deliberate is fine; accidental is not.
 - Phase 8's "state-aware producers must stop hard-coding `0.6.0-alpha`" moves
-  up: that constant is more obviously wrong once `0.8.0-alpha` is published.
+  up: that constant is more obviously wrong once `0.8.0-alpha` is published,
+  and the scope decision sends state-aware to `0.9.0-dev` rather than to the
+  newly published version. `schemas/schema-version.json`'s `stateAware` field
+  moves with it.
 - Phase 6's branch must be rebased and its artifacts **regenerated** rather
   than replayed, and its duplicate capabilities commit dropped in favor of
   #966.
