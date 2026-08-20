@@ -83,15 +83,29 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
 │   └── mxc-config.schema.0.7.0-alpha.json  (shipped — current stable)
 └── dev/
-    └── mxc-config.schema.0.8.0-dev.json    (current — work in progress)
+    ├── mxc-config.schema.0.8.0-dev.json    (rolling parser — currently authoritative)
+    └── mxc-config.schema.0.8.0-alpha.json  (exact closed contract — future authority)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
 parser simply stops accepting those versions (the supported floor is
 `0.6.0-alpha`). Released schemas are never edited or deleted.
 
-The dev schema file (`mxc-config.schema.X.Y.Z-dev.json`) must define the `experimental`
-section structure so that editors can validate experimental configs.
+The two development schemas coexist during the version-specific parser
+transition:
+
+- `mxc-config.schema.0.8.0-dev.json` is generated from the rolling
+  `wxc_common::wire` model. It remains authoritative for runtime parsing and
+  corpus validation until exact dispatch is enabled.
+- `mxc-config.schema.0.8.0-alpha.json` is generated from the exact
+  `mxc_config_contract::dev` model. It describes all eight closed one-shot and
+  state-aware roots, including recursively closed experimental structures, but
+  does not become authoritative until exact dispatch replaces the rolling
+  parser.
+
+Both files are generated development artifacts rather than released schemas.
+See [Schema Code Generation](schema-codegen.md) for their regeneration commands
+and independent drift gates.
 
 ### Trust boundary vs schema defaults
 
