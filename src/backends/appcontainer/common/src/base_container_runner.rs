@@ -4612,12 +4612,12 @@ mod tests {
         );
     }
 
-    // ---- Validation: unsupported policy fields surface as errors. ----
+    // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use wxc_common::sandbox_process::SandboxBackend;
 
     #[test]
-    fn validation_accepts_denied_paths_when_supported() {
+    fn validate_runner_accepts_denied_paths_when_supported() {
         let _guard = crate::test_env::DenyPathsGuard::supported(true);
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest::default();
@@ -4635,7 +4635,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_denied_paths_when_unsupported() {
+    fn validate_runner_rejects_denied_paths_when_unsupported() {
         let _guard = crate::test_env::DenyPathsGuard::supported(false);
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
@@ -4660,7 +4660,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_allowed_hosts() {
+    fn validate_runner_rejects_allowed_hosts() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest {
             dry_run: true,
@@ -4675,7 +4675,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_blocked_hosts() {
+    fn validate_runner_rejects_blocked_hosts() {
         let runner = BaseContainerRunner::new();
         let mut request = ExecutionRequest {
             dry_run: true,
@@ -4690,10 +4690,10 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_empty_policy() {
+    fn validate_runner_accepts_empty_policy() {
         let runner = BaseContainerRunner::new();
         let request = ExecutionRequest::default();
-        // Validation may still surface the host-API-unavailable error on
+        // validate_runner may still surface the host-API-unavailable error on
         // dev machines where BaseContainer isn't present; we only assert that
         // the policy-field checks above don't fire. Skip when the host doesn't
         // expose the API.
@@ -4846,7 +4846,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_least_privilege_via_legacy_contract() {
+    fn validate_runner_allows_least_privilege_via_legacy_contract() {
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
             dry_run: true,
@@ -4860,7 +4860,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_proxy_via_legacy_contract() {
+    fn validate_runner_allows_proxy_via_legacy_contract() {
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
         let mut request = ExecutionRequest {
             dry_run: true,
@@ -4877,7 +4877,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_capture_denials_on_older_schema() {
+    fn validate_runner_allows_capture_denials_on_older_schema() {
         let factory = fake_capture_factory();
         let support = Arc::new(FakeCaptureSupport {
             api_error: None,
