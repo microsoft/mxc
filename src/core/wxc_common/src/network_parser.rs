@@ -24,6 +24,17 @@ fn has_directional_policy_fields(network: &wire::Network) -> bool {
     network.egress.is_some() || network.ingress.is_some()
 }
 
+fn has_runtime_fields(runtime: &wire::RuntimeConfig) -> bool {
+    runtime.network_proxy.is_some()
+}
+
+fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork) -> bool {
+    network
+        .allowed_proxy_peer
+        .as_ref()
+        .is_some_and(|peer| !peer.trim().is_empty())
+}
+
 fn supports_directional_network(version: &str) -> bool {
     semver::Version::parse(version)
         .map(|version| version.major > 0 || version.minor >= 8)
@@ -140,8 +151,11 @@ fn select_network_format(
         .network
         .as_ref()
         .is_some_and(has_directional_policy_fields);
-    let has_runtime_config = sections.runtime.is_some();
-    let has_process_container_network = sections.process_container.is_some();
+    let has_runtime_config = sections.runtime.as_ref().is_some_and(has_runtime_fields);
+    let has_process_container_network = sections
+        .process_container
+        .as_ref()
+        .is_some_and(has_process_container_network_fields);
     let has_directional =
         has_directional_policy || has_runtime_config || has_process_container_network;
     let supports_directional = supports_directional_network(version);
@@ -442,6 +456,11 @@ fn convert_port(
         wire::NetworkProtocol::Icmp => NetworkProtocol::Icmp,
         wire::NetworkProtocol::Any => NetworkProtocol::Any,
     };
+    if protocol == NetworkProtocol::Icmp && (port.port.is_some() || port.end_port.is_some()) {
+        return Err(WxcError::ConfigParse(format!(
+            "{port_path} cannot specify port or endPort for protocol='icmp'"
+        )));
+    }
     Ok(NetworkPort {
         protocol,
         port: port.port,

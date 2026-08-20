@@ -112,6 +112,8 @@ fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
         proxy: proxy.into_option().map(convert_proxy),
+        egress: None,
+        ingress: None,
     }
 }
 
@@ -191,6 +193,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities: capabilities.into_option(),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
+        network: None,
     }
 }
 
@@ -387,6 +390,7 @@ pub(crate) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
+        runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         experimental: experimental.into_option().map(convert_experimental),
