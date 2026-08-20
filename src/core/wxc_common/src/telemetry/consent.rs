@@ -241,6 +241,10 @@ pub fn get_status() -> ConsentStatus {
     platform::read_status()
 }
 
+pub(crate) fn local_app_data_dir() -> Option<std::path::PathBuf> {
+    platform::local_app_data_dir()
+}
+
 #[cfg(test)]
 pub(crate) fn set_consent(granted: bool, source: &str) -> Result<(), String> {
     platform::with_store_lock(|| platform::write(granted, source))
@@ -705,7 +709,7 @@ mod platform {
             .or_else(crate::telemetry::consent::test_support::inherited_local_app_data_override)
     }
 
-    fn local_app_data_dir() -> Option<PathBuf> {
+    pub(super) fn local_app_data_dir() -> Option<PathBuf> {
         #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
         if let Some(over) = debug_local_app_data_override() {
             return Some(over);
@@ -1185,6 +1189,7 @@ mod platform {
 #[cfg(not(target_os = "windows"))]
 mod platform {
     use super::{ConsentState, ConsentStatus, ConsentStatusReason};
+    use std::path::PathBuf;
 
     pub(super) fn with_store_lock<T>(
         operation: impl FnOnce() -> Result<T, String>,
@@ -1198,6 +1203,10 @@ mod platform {
             effective_state: ConsentState::NotApplicable,
             reason: Some(ConsentStatusReason::NotApplicable),
         }
+    }
+
+    pub(super) fn local_app_data_dir() -> Option<PathBuf> {
+        None
     }
 
     pub(super) fn read_status_unlocked() -> ConsentStatus {
@@ -1234,9 +1243,11 @@ mod platform {
 // modules can safely mutate the process-global consent-store override
 // without racing each other under parallel test execution.
 //
-// This redirects `MXC_TEST_LOCALAPPDATA_OVERRIDE`, a debug-build-only escape
-// hatch (see `platform::debug_local_app_data_override` above) — never the
-// real `LOCALAPPDATA` variable, and never present at all in a release build.
+// This keeps the debug-only override in process-local test state by default,
+// and only stamps `MXC_TEST_LOCALAPPDATA_OVERRIDE` onto an explicit child
+// `Command` when a test asks for inheritance. The real `LOCALAPPDATA` variable
+// is never touched here, and the override path is compiled out of release
+// binaries entirely.
 // ---------------------------------------------------------------------------
 
 #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
@@ -1266,10 +1277,6 @@ pub mod test_support {
     pub struct LocalAppDataGuard {
         _lock: MutexGuard<'static, ()>,
         #[cfg(target_os = "windows")]
-        previous: Option<std::ffi::OsString>,
-        #[cfg(target_os = "windows")]
-        previous_owner: Option<std::ffi::OsString>,
-        #[cfg(target_os = "windows")]
         previous_override: Option<PathBuf>,
     }
 
@@ -1277,24 +1284,15 @@ pub mod test_support {
         #[cfg(target_os = "windows")]
         pub fn set(path: &Path) -> Self {
             let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os(LOCAL_APPDATA_OVERRIDE_ENV);
-            let previous_owner = std::env::var_os(LOCAL_APPDATA_OVERRIDE_OWNER_ENV);
             let previous_override = LOCAL_APP_DATA_OVERRIDE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
-            std::env::set_var(LOCAL_APPDATA_OVERRIDE_ENV, path);
-            std::env::set_var(
-                LOCAL_APPDATA_OVERRIDE_OWNER_ENV,
-                std::process::id().to_string(),
-            );
             *LOCAL_APP_DATA_OVERRIDE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(path.to_path_buf());
             Self {
                 _lock: lock,
-                previous,
-                previous_owner,
                 previous_override,
             }
         }
@@ -1328,20 +1326,20 @@ pub mod test_support {
         Some(path)
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_inherited_override(command: &mut std::process::Command, path: &Path) {
+        command.env(LOCAL_APPDATA_OVERRIDE_ENV, path).env(
+            LOCAL_APPDATA_OVERRIDE_OWNER_ENV,
+            std::process::id().to_string(),
+        );
+    }
+
     #[cfg(target_os = "windows")]
     impl Drop for LocalAppDataGuard {
         fn drop(&mut self) {
             *LOCAL_APP_DATA_OVERRIDE
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = self.previous_override.clone();
-            match &self.previous {
-                Some(v) => std::env::set_var(LOCAL_APPDATA_OVERRIDE_ENV, v),
-                None => std::env::remove_var(LOCAL_APPDATA_OVERRIDE_ENV),
-            }
-            match &self.previous_owner {
-                Some(v) => std::env::set_var(LOCAL_APPDATA_OVERRIDE_OWNER_ENV, v),
-                None => std::env::remove_var(LOCAL_APPDATA_OVERRIDE_OWNER_ENV),
-            }
         }
     }
 }
@@ -1380,6 +1378,41 @@ mod tests {
                 std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(1)),
             }
         }
+    }
+
+    #[test]
+    fn blocking_task_propagates_worker_panic_without_hanging() {
+        struct SignalWaker(std::sync::mpsc::Sender<()>);
+
+        impl std::task::Wake for SignalWaker {
+            fn wake(self: std::sync::Arc<Self>) {
+                let _ = self.0.send(());
+            }
+
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                let _ = self.0.send(());
+            }
+        }
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waker = std::task::Waker::from(std::sync::Arc::new(SignalWaker(sender)));
+        let mut context = std::task::Context::from_waker(&waker);
+        let mut task = std::pin::pin!(BlockingTask::spawn(|| -> () { panic!("worker panic") }));
+
+        let propagated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if std::future::Future::poll(task.as_mut(), &mut context).is_pending() {
+                receiver
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("blocking task did not wake after its worker panicked");
+                let _ = std::future::Future::poll(task.as_mut(), &mut context);
+            }
+        }))
+        .is_err();
+
+        assert!(
+            propagated,
+            "blocking task did not propagate its worker panic"
+        );
     }
 
     #[test]
@@ -2215,24 +2248,9 @@ mod tests {
             // With no debug override set, the real per-user known-folder
             // path must still resolve (it always exists on a real Windows
             // profile), so exercise that fallback without touching the real
-            // consent file itself. Locks ENV_LOCK directly (rather than via
-            // LocalAppDataGuard) since this test removes the override
-            // entirely instead of redirecting it.
-            let _lock = super::super::test_support::ENV_LOCK
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var_os("MXC_TEST_LOCALAPPDATA_OVERRIDE");
-            let previous_owner = std::env::var_os("MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID");
-            std::env::remove_var("MXC_TEST_LOCALAPPDATA_OVERRIDE");
-            std::env::remove_var("MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID");
+            // file itself.
             let resolved =
                 crate::telemetry::consent::platform::known_folder_local_app_data_for_test();
-            if let Some(v) = previous {
-                std::env::set_var("MXC_TEST_LOCALAPPDATA_OVERRIDE", v);
-            }
-            if let Some(v) = previous_owner {
-                std::env::set_var("MXC_TEST_LOCALAPPDATA_OVERRIDE_OWNER_PID", v);
-            }
             assert!(
                 resolved.is_some(),
                 "known-folder API should resolve a real path"
@@ -2244,7 +2262,9 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
 
-            let status = std::process::Command::new(std::env::current_exe().unwrap())
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            super::super::test_support::apply_inherited_override(&mut command, tmp.path());
+            let status = command
                 .arg("child_process_local_app_data_override_probe")
                 .arg("--nocapture")
                 .env("MXC_CHILD_OVERRIDE_PROBE", tmp.path())

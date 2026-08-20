@@ -28,55 +28,79 @@ function fail(msg) {
 const schemaVer = JSON.parse(
   readFileSync(join(repoRoot, "schemas", "schema-version.json"), "utf8")
 );
-const committedPath = join(
+const configSchemaPath = join(
   repoRoot,
   "schemas",
   "dev",
   `mxc-config.schema.${schemaVer.devSchemaFile}.json`
 );
-
-let committed;
-try {
-  committed = readFileSync(committedPath, "utf8");
-} catch (e) {
-  fail(`could not read committed schema ${committedPath}: ${e.message}`);
-}
+const telemetryConsentSchemaPath = join(
+  repoRoot,
+  "schemas",
+  "dev",
+  "mxc-telemetry-consent.schema.1.json"
+);
 
 const tmpDir = mkdtempSync(join(os.tmpdir(), "mxc-schema-gen-"));
-const tmpOut = join(tmpDir, "generated.json");
+const tmpConfigOut = join(tmpDir, "generated-config.json");
+const tmpTelemetryConsentOut = join(tmpDir, "generated-telemetry-consent.json");
 try {
-  // Build + run the generator. Quiet so only our diagnostics surface.
-  execFileSync(
-    "cargo",
-    ["run", "-q", "-p", "mxc_schema_gen", "--", tmpOut],
-    { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
-  );
-  const generated = readFileSync(tmpOut, "utf8");
-
-  // Compare modulo line endings: the schema is committed with LF, but on a
-  // Windows checkout with core.autocrlf=true the working-tree copy has CRLF.
-  // The generator always writes LF, so normalize both sides to avoid a
-  // false-positive "stale" failure that only reproduces on Windows.
   const normalize = (s) => s.replace(/\r\n/g, "\n");
-  if (normalize(generated) !== normalize(committed)) {
-    // Find the first differing line for a helpful pointer.
-    const g = normalize(generated).split("\n");
-    const c = normalize(committed).split("\n");
-    let line = 0;
-    while (line < g.length && line < c.length && g[line] === c[line]) line++;
-    fail(
-      `committed schema is stale at ${committedPath}.\n` +
-        `    First difference at line ${line + 1}:\n` +
-        `      committed:  ${JSON.stringify(c[line])}\n` +
-        `      generated:  ${JSON.stringify(g[line])}\n` +
-        `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
-        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
+
+  function compareGeneratedSchema({
+    committedPath,
+    generatedPath,
+    generatorArgs,
+    regenCommand,
+  }) {
+    let committed;
+    try {
+      committed = readFileSync(committedPath, "utf8");
+    } catch (e) {
+      fail(`could not read committed schema ${committedPath}: ${e.message}`);
+    }
+
+    execFileSync(
+      "cargo",
+      ["run", "-q", "-p", "mxc_schema_gen", "--", ...generatorArgs, generatedPath],
+      { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
     );
+
+    const generated = readFileSync(generatedPath, "utf8");
+    if (normalize(generated) !== normalize(committed)) {
+      const g = normalize(generated).split("\n");
+      const c = normalize(committed).split("\n");
+      let line = 0;
+      while (line < g.length && line < c.length && g[line] === c[line]) line++;
+      fail(
+        `committed schema is stale at ${committedPath}.\n` +
+          `    First difference at line ${line + 1}:\n` +
+          `      committed:  ${JSON.stringify(c[line])}\n` +
+          `      generated:  ${JSON.stringify(g[line])}\n` +
+          `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
+          `      ${regenCommand}`
+      );
+    }
   }
+
+  compareGeneratedSchema({
+    committedPath: configSchemaPath,
+    generatedPath: tmpConfigOut,
+    generatorArgs: [],
+    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
+  });
+
+  compareGeneratedSchema({
+    committedPath: telemetryConsentSchemaPath,
+    generatedPath: tmpTelemetryConsentOut,
+    generatorArgs: ["--telemetry-consent"],
+    regenCommand:
+      "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --telemetry-consent schemas/dev/mxc-telemetry-consent.schema.1.json",
+  });
 } finally {
   rmSync(tmpDir, { recursive: true, force: true });
 }
 
 console.log(
-  `Schema codegen OK: committed dev schema matches the generated output (${schemaVer.devSchemaFile}).`
+  `Schema codegen OK: committed config and telemetry consent schemas match generated output (${schemaVer.devSchemaFile}, telemetry consent v1).`
 );

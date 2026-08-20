@@ -6,7 +6,7 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::load_request_from_json;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::handle_dry_run_exit;
@@ -73,6 +73,83 @@ struct Cli {
     /// the new bits. Requires --setup-hyperlight.
     #[arg(long, requires = "setup_hyperlight")]
     force: bool,
+
+    /// Report the persisted telemetry consent state and exit. MXC only
+    /// ever collects telemetry on Windows, so on Linux this always
+    /// reports "not-applicable" — there is no consent to grant or
+    /// revoke here. See docs/telemetry/telemetry-consent-design.md.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Legacy non-mutating tombstone; directs callers to maintenance JSON.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Legacy companion tombstone for the removed grant/revoke flow.
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
+    telemetry_consent_source: Option<String>,
+}
+
+/// See `wxc::handle_telemetry_consent_flags` for the Windows behavior this
+/// mirrors. On Linux, `wxc_common::telemetry::consent` always reports
+/// `NotApplicable`; legacy state-changing flags return the same non-mutating
+/// maintenance-JSON migration error as every other executor.
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler so
+/// this fast path can't drift from `wxc-exec`/`mxc-exec-mac`. The shared
+/// handler returns the outcome as data; terminating the process is this
+/// binary's job, not the foundation crate's.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) =
+        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        })
+    else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
+    let Some(json) = json else {
+        return false;
+    };
+    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+/// Read the request source (file path / base64 blob) once, returning the
+/// decoded JSON. Reused by the maintenance probe and the normal request
+/// loader so a single source is only read once per invocation — a
+/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
+/// paths that are drained by the first read.
+fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
+    let (input, is_base64) = if let Some(input) = cli.config_base64.as_ref() {
+        (input.clone(), true)
+    } else if let Some(input) = cli.config.as_ref().or(cli.config_path.as_ref()) {
+        (input.clone(), false)
+    } else {
+        return None;
+    };
+    Some(wxc_common::config_parser::decode_request_input(
+        &input, is_base64,
+    ))
 }
 
 fn log_request(request: &ExecutionRequest, logger: &mut Logger) {
@@ -113,6 +190,40 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 }
 
 fn main() {
+    let cli = Cli::parse();
+
+    // --telemetry-consent-{status,grant,revoke}: report/administer the
+    // (always not-applicable on Linux) consent state and exit. Runs before
+    // signal_cleanup::install():
+    // this is a read-only/local-file fast path that never spawns a
+    // container, so it must not be gated on — or fail because of — signal
+    // handler installation, matching `wxc-exec`/`mxc-exec-mac`, where the
+    // consent fast path also runs unconditionally before any other setup.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+    // Decode the request source (file path / base64) once, up front, so the
+    // maintenance probe and the normal request loader below share the same
+    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
+    // process-substitution paths that are drained by the first read.
+    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
+        decode_config_input_once(&cli);
+    let request_hint = decoded_config
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
+    if matches!(
+        request_hint.as_ref().map(|hint| hint.kind()),
+        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
+    ) && handle_telemetry_consent_input(
+        decoded_config
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(String::as_str),
+    ) {
+        return;
+    }
+
     // Install before spawning any other threads so the signal mask propagates.
     // Failure here is fatal: install() either succeeds with the watchdog
     // running, or restores the original signal mask and returns Err. We
@@ -122,8 +233,6 @@ fn main() {
         eprintln!("Error: failed to install signal cleanup handler: {}", e);
         process::exit(1);
     }
-
-    let cli = Cli::parse();
 
     // --setup-hyperlight: eagerly warm up the snapshot and exit. Runs
     // before config parsing so the user doesn't need a JSON file on
@@ -154,18 +263,26 @@ fn main() {
         }
     }
 
-    // Determine config input
-    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
-        (b64.clone(), true)
-    } else if let Some(ref path) = cli.config {
-        (path.clone(), false)
-    } else if let Some(ref path) = cli.config_path {
-        (path.clone(), false)
-    } else if !cli.delete {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
-    } else {
-        (String::new(), false)
+    // Determine config input. In delete mode the config is optional; every
+    // other path requires it. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the
+    // decode error). If it's absent, either accept the empty state for
+    // delete mode or report the missing-config error.
+    let config_json: Option<String> = match decoded_config {
+        Some(Ok(json)) => Some(json),
+        Some(Err(error)) => {
+            eprintln!("Request error\n{error}");
+            process::exit(1);
+        }
+        None => {
+            if !cli.delete {
+                eprintln!(
+                    "Error: No config provided. Use a positional path, --config, or --config-base64"
+                );
+                process::exit(1);
+            }
+            None
+        }
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -194,8 +311,22 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
+    // Non-delete paths always have a config JSON at this point (or exited
+    // above with the missing-config error).
+    let config_json = config_json.expect("config_json is Some on non-delete paths");
+
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
+    let parsed_request = if let Some(hint) = request_hint.as_ref() {
+        wxc_common::config_parser::load_request_from_json_with_hint_and_options(
+            &config_json,
+            &mut logger,
+            wxc_common::config_parser::LoadOptions::default(),
+            hint,
+        )
+    } else {
+        load_request_from_json(&config_json, &mut logger)
+    };
+    let mut request = match parsed_request {
         Ok(r) => r,
         Err(_) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -207,17 +338,12 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -260,7 +386,7 @@ fn main() {
 
     display_script_results(&response, &mut logger);
 
-    // ── Telemetry emit (experimental) ───────────────────────────────
+    // ── Telemetry emit ──────────────────────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,

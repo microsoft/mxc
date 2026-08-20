@@ -114,8 +114,21 @@ mod provider {
             return true;
         }
 
-        // SAFETY: MXC_PROVIDER is a process-lifetime static. MXC is an
-        // executable (not a DLL), so unload ordering is not a concern.
+        // SAFETY: MXC_PROVIDER is a process-lifetime static declared inside
+        // this module (via `include!("provider_def.rs")`), so its storage
+        // outlives every ETW callback the tracelogging runtime installs
+        // against it. This function is however now called from library
+        // contexts too (`mxc_engine::spawn` is compiled into the `mxc_ffi`
+        // cdylib and the `mxc-sdk` library, both of which may be dynamically
+        // loaded by a host). To keep the "callbacks always point at mapped
+        // code" invariant, every `init` here is refcounted and paired with a
+        // `shutdown` in the wrapper that returned by `mxc_engine::spawn`
+        // (see the `TelemetryProcess` `Drop` contract in `mxc_engine`), so
+        // the ETW registration is released before the caller can dlclose /
+        // FreeLibrary the containing module. Callers that unload the library
+        // while a spawned handle is still live violate this precondition
+        // (documented on `mxc_engine::spawn`) and can leave ETW holding
+        // callbacks into unmapped memory.
         let status = unsafe { MXC_PROVIDER.register() };
         if status != 0 {
             // Registration failed; leave the reference count at zero so the wrapper
@@ -282,6 +295,9 @@ mod provider {
 
 #[cfg(not(target_os = "windows"))]
 mod provider {
+    /// Non-Windows builds never route to the Microsoft telemetry pipeline.
+    pub const IS_UTC_ROUTED: bool = false;
+
     pub fn init(_version: &str, _channel: &str) -> bool {
         false
     }
@@ -588,18 +604,21 @@ mod provider_codegen_tests {
         let def = generate_provider_def(None);
         assert!(def.contains("\"Microsoft.MXC\""));
         assert!(!def.contains("group_id"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn empty_guid_yields_plain_provider() {
         let def = generate_provider_def(Some(""));
         assert!(!def.contains("group_id"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = false"));
     }
 
     #[test]
     fn valid_guid_adds_group_id() {
         let def = generate_provider_def(Some("7f10def4-a258-5fea-510e-2c3bb976687f"));
         assert!(def.contains("group_id(\"7f10def4-a258-5fea-510e-2c3bb976687f\")"));
+        assert!(def.contains("IS_UTC_ROUTED: bool = true"));
     }
 
     #[test]

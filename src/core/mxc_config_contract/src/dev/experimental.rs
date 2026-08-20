@@ -13,15 +13,6 @@ pub struct TestFeature {
     pub message: OptionalField<String>,
 }
 
-/// One-shot telemetry override.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Telemetry {
-    /// Whether telemetry is enabled.
-    #[serde(default)]
-    pub enabled: OptionalField<bool>,
-}
-
 /// Compatibility settings accepted for one-shot Windows Sandbox requests.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -103,7 +94,4 @@ pub struct OneShotExperimental {
     /// Optional one-shot WSLC backend settings.
     #[serde(default)]
     pub wslc: OptionalField<OneShotWslc>,
-    /// Optional telemetry override.
-    #[serde(default)]
-    pub telemetry: OptionalField<Telemetry>,
 }

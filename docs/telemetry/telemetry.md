@@ -24,14 +24,11 @@ FFI is required.
 └──────────────────────────────────────────────────────┘
 ```
 
-## Why the Rust `tracelogging` Crate (Not WIL C++ Shim)
+## TraceLogging implementation
 
-An earlier design used a WIL C++ shim compiled via the `cc` crate. PR review
-feedback correctly noted that the WIL dependency added C++ compilation, NuGet
-download, FFI unsafety, and blocked non-Windows contributors from building the
-crate. The Rust `tracelogging` crate provides the core ETW primitives needed,
-and the small set of WIL features MXC actually uses can be replicated with
-Rust constants and `write_event!` struct fields.
+The Rust `tracelogging` crate provides MXC's required ETW primitives without a
+C++ build, NuGet dependency, or FFI boundary. MXC supplies the remaining
+provider metadata through Rust constants and `write_event!` struct fields.
 
 ### Feature comparison
 
@@ -120,7 +117,6 @@ Emitted on execution errors.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `mxc.sandbox_kind` | string | Containment kind requested by the caller (`process`, `vm`, or a concrete backend name) |
 | `mxc.backend` | string | Containment backend name |
 | `mxc.error_type` | string | Error category (`config_error`, `policy_error`, `process_error`, `timeout`, `init_error`, `internal_error`, `cancelled`, `unknown`) |
 | `mxc.exit_code` | int32 | Process exit code |
@@ -205,6 +201,8 @@ MXC's optional diagnostic events contain:
 - State-aware lifecycle phase
 - `UTCReplace_AppSessionGuid`, which asks the telemetry pipeline to supply a
   random per-session app identifier
+- An MXC-internal lifecycle correlation identifier. SDK callers neither supply
+  nor receive it.
 
 MXC does not emit commands, file paths, credentials, customer content, or
 free-form error text. The consent notice's phrase “other customer content”

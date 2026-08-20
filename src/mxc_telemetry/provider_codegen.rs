@@ -60,11 +60,13 @@ fn generate_provider_def(group_guid: Option<&str>) -> String {
             format!(
                 "tracelogging::define_provider!(\
                  MXC_PROVIDER, \"Microsoft.MXC\", \
-                 group_id(\"{canonical}\"));\n"
+                 group_id(\"{canonical}\"));\n\
+                 pub const IS_UTC_ROUTED: bool = true;\n"
             )
         }
         _ => "tracelogging::define_provider!(\
-              MXC_PROVIDER, \"Microsoft.MXC\");\n"
+              MXC_PROVIDER, \"Microsoft.MXC\");\n\
+              pub const IS_UTC_ROUTED: bool = false;\n"
             .to_string(),
     }
 }

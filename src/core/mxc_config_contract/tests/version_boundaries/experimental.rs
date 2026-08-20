@@ -9,8 +9,8 @@ fn experimental_test_is_introduced_in_v08() {
 }
 
 #[test]
-fn experimental_telemetry_is_introduced_in_v08() {
-    assert_v08_introduces(r#""experimental": {"telemetry": {}}"#);
+fn telemetry_is_introduced_in_v08() {
+    assert_v08_introduces(r#""telemetry": {}"#);
 }
 
 #[test]

@@ -58,3 +58,7 @@ isolation_session = [
 ]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs"]
+
+[dev-dependencies]
+wxc_common = { workspace = true, features = ["test-support"] }
+tempfile.workspace = true

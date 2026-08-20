@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-telemetry-consent.schema.1.json",
+  "title": "MXC Telemetry Consent Maintenance Request",
+  "description": "Telemetry-consent maintenance request.\n\nThis is a separate contract from [`MxcConfig`], even though executors use the same JSON input loader for both. Its explicit `command` discriminator lets the loader route maintenance without widening the execution schema.",
+  "additionalProperties": false,
+  "definitions": {
+    "TelemetryConsentAction": {
+      "description": "Telemetry-consent maintenance action.",
+      "oneOf": [
+        {
+          "description": "Present the canonical prompt when consent may be requested.",
+          "enum": [
+            "request"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Idempotently persist denied consent.",
+          "enum": [
+            "withdraw"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Read status without mutation.",
+          "enum": [
+            "status"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "TelemetryConsentCommand": {
+      "description": "Fixed telemetry-consent maintenance command discriminator.",
+      "enum": [
+        "telemetryConsent"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema reference for editor validation.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "action": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/TelemetryConsentAction"
+        }
+      ],
+      "description": "Consent operation to perform."
+    },
+    "command": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/TelemetryConsentCommand"
+        }
+      ],
+      "description": "Fixed maintenance discriminator. Must be `\"telemetryConsent\"`."
+    },
+    "locale": {
+      "description": "Preferred BCP 47 locale for the canonical prompt. Unsupported locales fall back to `en-US`. Used only by `request`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "action",
+    "command"
+  ],
+  "type": "object"
+}

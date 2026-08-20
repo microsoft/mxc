@@ -280,9 +280,7 @@ export interface PortMapping {
   protocol?: 'tcp';
 }
 
-/**
- * Telemetry configuration for experimental TraceLogging ETW support.
- */
+/** Telemetry configuration for TraceLogging ETW support. */
 export interface TelemetryConfig {
   /**
    * Explicit telemetry override. `true` = force on, `false` = force off,
@@ -323,12 +321,12 @@ export interface ContainerConfig {
   filesystem?: FilesystemConfig;
   /** Network access configuration */
   network?: NetworkConfig;
+  /** Telemetry configuration */
+  telemetry?: TelemetryConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
-    /** Telemetry configuration for experimental TraceLogging ETW support */
-    telemetry?: TelemetryConfig;
   };
   /** macOS Seatbelt sandbox configuration (macOS only) */
   seatbelt?: SeatbeltConfig;

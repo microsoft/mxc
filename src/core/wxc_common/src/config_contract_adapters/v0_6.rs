@@ -224,7 +224,7 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         version: Some(convert_version(version).to_owned()),
         phase: None,
         sandbox_id: None,
-        correlation_vector: None,
+        telemetry: None,
         container_id: container_id.into_option(),
         containment: containment.into_option().map(convert_containment),
         process: Some(convert_process(process)),
@@ -506,7 +506,6 @@ mod tests {
         assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
-        assert!(wire.correlation_vector.is_none());
         assert!(wire.container_id.is_none());
         assert!(wire.containment.is_none());
 
@@ -539,7 +538,6 @@ mod tests {
         assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
-        assert!(wire.correlation_vector.is_none());
         assert_eq!(wire.container_id.as_deref(), Some("container-id"));
         assert!(matches!(
             wire.containment,
@@ -642,7 +640,6 @@ mod tests {
         assert_eq!(wire.version, Some("0.6.0-alpha".to_string()));
         assert!(wire.phase.is_none());
         assert!(wire.sandbox_id.is_none());
-        assert!(wire.correlation_vector.is_none());
         assert_eq!(wire.container_id.as_deref(), Some("container-id"));
         assert!(matches!(
             wire.containment,

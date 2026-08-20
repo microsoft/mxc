@@ -385,7 +385,6 @@ fn minimal_request_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(wire.containment.is_none());
 
@@ -403,6 +402,7 @@ fn minimal_request_maps_expected_wire_fields() {
     assert!(wire.network.is_none());
     assert!(wire.ui.is_none());
     assert!(wire.seatbelt.is_none());
+    assert!(wire.telemetry.is_none());
     assert!(wire.experimental.is_none());
 }
 
@@ -417,7 +417,6 @@ fn process_container_request_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert_eq!(wire.container_id.as_deref(), Some("container-id"));
     assert!(matches!(
         wire.containment,
@@ -519,7 +518,6 @@ fn lxc_request_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert_eq!(wire.container_id.as_deref(), Some("container-id"));
     assert!(matches!(
         wire.containment,
@@ -591,7 +589,6 @@ fn seatbelt_request_maps_expected_wire_fields() {
     assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
-    assert!(wire.correlation_vector.is_none());
     assert!(wire.container_id.is_none());
     assert!(matches!(
         wire.containment,

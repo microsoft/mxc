@@ -5,7 +5,6 @@
 mod audit;
 #[cfg(target_os = "windows")]
 use std::fmt::Write;
-use std::fs;
 use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
@@ -13,9 +12,7 @@ use std::time::Instant;
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
-use wxc_common::config_parser::{
-    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
-};
+use wxc_common::config_parser::{LoadOptions, ParseError};
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
@@ -107,6 +104,29 @@ struct Cli {
     /// Run the fallback detector and emit JSON, without spawning a sandbox.
     #[arg(long)]
     probe: bool,
+
+    /// Print the current persisted telemetry consent state as one-line JSON
+    /// and exit, without spawning a sandbox. The payload is the same typed
+    /// response as JSON maintenance action `status`. Windows-only: on
+    /// other platforms every field reports `not-applicable`/`false` and
+    /// nothing touches disk, since MXC does not collect telemetry there. See
+    /// `docs/telemetry/telemetry-consent-design.md`.
+    #[arg(long = "telemetry-consent-status")]
+    telemetry_consent_status: bool,
+
+    /// Legacy non-mutating tombstone. Returns a migration error directing the
+    /// caller to the typed JSON consent maintenance envelope.
+    #[arg(long = "telemetry-consent-grant")]
+    telemetry_consent_grant: bool,
+
+    /// Legacy non-mutating tombstone. Returns a migration error directing the
+    /// caller to JSON action `withdraw`.
+    #[arg(long = "telemetry-consent-revoke")]
+    telemetry_consent_revoke: bool,
+
+    /// Legacy companion tombstone for the removed grant/revoke flow.
+    #[arg(long = "telemetry-consent-source", allow_hyphen_values = true)]
+    telemetry_consent_source: Option<String>,
 
     /// Windows Sandbox: tear down a running WSB VM that mxc cannot prove it
     /// launched, instead of refusing — clears a host wedged by an orphan left
@@ -208,6 +228,63 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Handles the `--telemetry-consent-{status,grant,revoke}` fast paths.
+///
+/// Returns `true` if one of the flags was handled (and the caller should
+/// exit immediately), `false` if none were passed and normal execution
+/// should proceed. Never spawns a sandbox, never touches config parsing, and
+/// runs before COM/WinRT init — mirroring the `--probe` fast path.
+///
+/// Delegates to the shared `wxc_common::telemetry::consent_cli` handler
+/// (identical across all three executors) so this fast path can't drift
+/// between `wxc-exec`, `lxc-exec`, and `mxc-exec-mac`. The shared handler
+/// returns the outcome as data; terminating the process is this binary's
+/// job, not the foundation crate's. See
+/// `docs/telemetry/telemetry-consent-design.md`.
+fn handle_telemetry_consent_flags(cli: &Cli) -> bool {
+    let Some(outcome) =
+        telemetry::consent_cli::handle_consent_flags(&telemetry::consent_cli::ConsentCliFlags {
+            status: cli.telemetry_consent_status,
+            grant: cli.telemetry_consent_grant,
+            revoke: cli.telemetry_consent_revoke,
+            source: cli.telemetry_consent_source.as_deref(),
+        })
+    else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+fn handle_telemetry_consent_input(json: Option<&str>) -> bool {
+    let Some(json) = json else {
+        return false;
+    };
+    let Some(outcome) = telemetry::consent_cli::handle_maintenance_input_json(json) else {
+        return false;
+    };
+    let code = outcome.emit();
+    if code != 0 {
+        std::process::exit(code);
+    }
+    true
+}
+
+/// Read the request source (file path / base64 blob) once, returning the
+/// decoded JSON. Reused by the maintenance probe, `--probe`, and the normal
+/// request loader so a single source is only read once per invocation — a
+/// correctness fix for named pipes, `/dev/stdin`, and process-substitution
+/// paths that are drained by the first read.
+fn decode_config_input_once(cli: &Cli) -> Option<Result<String, wxc_common::error::WxcError>> {
+    let (input, is_base64) = config_input(cli)?;
+    Some(wxc_common::config_parser::decode_request_input(
+        &input, is_base64,
+    ))
+}
+
 fn command_override_from_cli(
     cli: &Cli,
     context: CommandLineContext,
@@ -251,74 +328,6 @@ fn apply_command_override(
     }
 }
 
-/// The plan for producing this phase's correlation vector, derived
-/// from the phase and the relayed value. Returned by [`plan_correlation_vector`]
-/// so the seed-vs-spin decision is unit-testable without touching the RNG/clock;
-/// the caller executes the plan against the (nondeterministic) operators.
-#[derive(Debug, PartialEq, Eq)]
-enum CvPlan<'a> {
-    /// Mint a fresh vector. Used for `provision`, and for any non-provision phase
-    /// whose relayed value is missing, empty, or not relayable (malformed /
-    /// hostile) — so garbage never even reaches the `spin` operator.
-    Seed,
-    /// Spin the relayed value to derive this phase's child vector. Only planned
-    /// for a value [`is_relayable`](telemetry::correlation_vector::is_relayable)
-    /// vouches for, so `spin` here always builds on a real parent rather than
-    /// silently reseeding.
-    Spin(&'a str),
-}
-
-/// Plans the Microsoft Correlation Vector (MS-CV) action for a state-aware phase.
-///
-/// Provision always seeds a fresh random base. Every later phase spins the
-/// relayed `incoming_cv` so sibling phases get distinct vectors that still share
-/// the lifecycle prefix — but only when the relayed value is actually relayable
-/// (a valid mutable or frozen vector). A missing, empty, or malformed relayed
-/// value is planned as [`CvPlan::Seed`] so the `Spin` arm never stands in for a
-/// reseed; the decision stays a pure function of `(is_provision, incoming_cv)`
-/// with no RNG, so it is deterministically testable.
-fn plan_correlation_vector(is_provision: bool, incoming_cv: Option<&str>) -> CvPlan<'_> {
-    match incoming_cv {
-        Some(cv) if !is_provision && telemetry::correlation_vector::is_relayable(cv) => {
-            CvPlan::Spin(cv)
-        }
-        _ => CvPlan::Seed,
-    }
-}
-
-/// Executes the pure [`plan_correlation_vector`] plan against the (nondeterministic)
-/// MS-CV operators, returning this phase's correlation vector. Empty when
-/// telemetry is inactive so an inactive provider does no RNG/clock work and
-/// provision output is unchanged.
-fn compute_phase_correlation(
-    telemetry_active: bool,
-    is_provision: bool,
-    incoming_cv: Option<&str>,
-) -> String {
-    if !telemetry_active {
-        return String::new();
-    }
-    match plan_correlation_vector(is_provision, incoming_cv) {
-        CvPlan::Seed => telemetry::correlation_vector::seed(),
-        CvPlan::Spin(cv) => telemetry::correlation_vector::spin(cv),
-    }
-}
-
-/// Injects the freshly-seeded correlation vector into a provision result
-/// envelope (`{ "result": { ..., "correlationVector": "<cV>" } }`) so the client
-/// can relay it into every later phase of the lifecycle. No-op when the outcome
-/// is not a result envelope (exec-completed / error paths carry no cV).
-fn inject_correlation_vector(outcome: &mut Result<DispatchOutcome, MxcError>, cv: &str) {
-    if let Ok(DispatchOutcome::Envelope(value)) = outcome {
-        if let Some(result) = value.get_mut("result").and_then(|r| r.as_object_mut()) {
-            result.insert(
-                "correlationVector".to_string(),
-                serde_json::Value::String(cv.to_string()),
-            );
-        }
-    }
-}
-
 /// On a state-aware dispatch failure, record the error only on the auxiliary
 /// diagnostic sinks (`--log-file` and the diagnostic pipe) via
 /// [`Logger::log_diagnostic_line`]. It is deliberately kept out of the primary
@@ -335,57 +344,44 @@ fn log_state_aware_dispatch_error(logger: &mut Logger, error: &MxcError) {
 /// envelope to stdout and exits 1. Diagnostic logger output goes to stderr
 /// regardless of mode (per design §7.3 stream protocol — stdout reserved
 /// for the response envelope).
-fn run_state_aware_main(
-    parsed: ParsedStateAwareRequest,
-    dry_run: bool,
-    experimental: bool,
-    logger: &mut Logger,
-) -> ! {
+fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: &mut Logger) -> ! {
     // Resolve attribution (phase + backend) and telemetry enablement BEFORE
-    // dispatch consumes `parsed`. State-aware telemetry is gated on
-    // `--experimental` exactly like the one-shot path, and reads the same typed
-    // `experimental.telemetry` field — the state-aware parser populates it while
-    // keeping the per-backend `experimental_raw` block for dispatch. A malformed
-    // telemetry block is rejected at parse time (as a state-aware envelope), so
-    // no client-error handling is needed here.
+    // dispatch consumes `parsed`. Telemetry is stable and independent of the
+    // `--experimental` gate used by experimental containment backends.
     let phase = parsed.phase.as_str();
-    // Whether this invocation is the provision phase. Provision seeds a fresh
-    // random correlation-vector base and returns it in the result envelope;
-    // every later phase relays that base back and spins it. We deliberately
-    // ignore any client-supplied `correlationVector` on provision so a lifecycle
-    // can never be seeded with a stale or foreign vector.
+    // Whether this invocation is the provision phase: its `sandbox_id` doesn't
+    // exist yet, so it always seeds a fresh base rather than deriving one.
     let is_provision = phase == "provision";
-    // The relayed correlation vector for non-provision phases (the base seeded at
-    // provision). Captured before `dispatch` consumes `parsed`. `None` for
-    // provision (which seeds its own below).
-    let incoming_cv = if is_provision {
+    // `sandbox_id` for non-provision phases, from which the lifecycle's shared
+    // correlation base is derived internally. Captured before `dispatch`
+    // consumes `parsed`. `None` for provision.
+    let sandbox_id = if is_provision {
         None
     } else {
-        parsed.correlation_vector.clone()
+        parsed.sandbox_id.clone()
     };
     let resolved_backend = resolve_backend(&parsed).ok();
     let backend = resolved_backend
         .as_ref()
         .map(|b| b.wire_name())
         .unwrap_or("unknown");
-    let telemetry_active = if experimental {
-        parsed
-            .request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let telemetry_active = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, logger))
+        .unwrap_or(false);
 
-    // Compute this phase's Microsoft Correlation Vector (MS-CV), executing the
-    // pure seed-vs-spin plan against the operators. Only computed when telemetry
-    // is active so an inactive provider does no work and provision output is
-    // unchanged.
-    let correlation =
-        compute_phase_correlation(telemetry_active, is_provision, incoming_cv.as_deref());
+    // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
+    // MXC — no caller supplies or relays one. `provision` seeds a fresh
+    // vector (persisted post-dispatch below, once its `sandbox_id` exists);
+    // every later phase recalls that persisted lifecycle root and spins a
+    // child off it. Empty when telemetry is inactive.
+    let correlation = telemetry::correlation_state::pre_dispatch_vector(
+        telemetry_active,
+        is_provision,
+        sandbox_id.as_deref(),
+    );
 
     // Attribute out-of-band emit paths (the console-control handler installed in
     // `main`, and the panic hook installed just below) to the resolved backend
@@ -405,15 +401,27 @@ fn run_state_aware_main(
     }
 
     let started = Instant::now();
-    let mut outcome = mxc_engine::run_state_aware(parsed, dry_run);
+    let outcome = mxc_engine::run_state_aware(parsed, dry_run);
     let elapsed = started.elapsed();
 
-    // For provision, return the freshly-seeded correlation vector to the client
-    // by injecting it into the result envelope so it can be relayed into later
-    // phases. Gated on telemetry so provision output is unchanged when telemetry
-    // is off.
-    if is_provision && telemetry_active {
-        inject_correlation_vector(&mut outcome, &correlation);
+    // Persist (provision) or forget (deprovision) this lifecycle's
+    // correlation root now that the outcome — and, for provision, the
+    // freshly minted `sandbox_id` — is known.
+    if is_provision {
+        telemetry::correlation_state::on_provision_outcome(
+            telemetry_active,
+            &correlation,
+            &outcome,
+        );
+    } else if phase == "deprovision" {
+        if let Some(id) = sandbox_id.as_deref() {
+            telemetry::correlation_state::on_deprovision_outcome(
+                telemetry_active,
+                id,
+                dry_run,
+                &outcome,
+            );
+        }
     }
 
     // Emit lifecycle telemetry (and shut the provider down) before flushing the
@@ -422,7 +430,6 @@ fn run_state_aware_main(
         telemetry_active,
         telemetry::TelemetryContext {
             backend,
-            sandbox_kind: backend,
             phase,
             correlation_vector: &correlation,
         },
@@ -711,6 +718,40 @@ fn install_dacl_ctrl_handler() {
 fn main() {
     let cli = Cli::parse().normalize_named_config_command();
 
+    // --telemetry-consent-{status,grant,revoke}: administer the persisted
+    // consent flag and exit. Runs BEFORE `force_reclaim` env propagation and
+    // `recover_orphaned_state()` below: this is a read-only/local-file fast path with a 5-second
+    // client-side timeout (Node's consent getter), so it must not be gated
+    // behind unrelated recovery work that scans state files and may restore
+    // host DACLs — that could both time out the query (suppressing the
+    // prompt) and let a plain status read unexpectedly mutate filesystem
+    // ACLs. Matches the Linux/macOS executors, where this fast path also
+    // runs unconditionally immediately after CLI parsing.
+    if handle_telemetry_consent_flags(&cli) {
+        return;
+    }
+    // Decode the request source (file path / base64) once, up front, so the
+    // maintenance probe and the normal request loader below share the same
+    // decoded JSON — necessary for named pipes, `/dev/stdin`, and
+    // process-substitution paths that are drained by the first read.
+    let decoded_config: Option<Result<String, wxc_common::error::WxcError>> =
+        decode_config_input_once(&cli);
+    let request_hint = decoded_config
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|json| wxc_common::config_parser::parse_request_hint_from_json(json).ok());
+    if matches!(
+        request_hint.as_ref().map(|hint| hint.kind()),
+        Some(wxc_common::config_parser::RequestKind::TelemetryConsent)
+    ) && handle_telemetry_consent_input(
+        decoded_config
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(String::as_str),
+    ) {
+        return;
+    }
+
     // Propagate --force-reclaim via the environment so it reaches both the
     // in-process one-shot reconcile and the detached daemon. Set before any
     // backend dispatch or daemon spawn.
@@ -756,16 +797,25 @@ fn main() {
     // (which probe doesn't need; deferring them shaves cold-start cost
     // off the SDK warm path).
     if cli.probe {
-        let policy = if let Some((data, is_b64)) = config_input(&cli) {
+        let policy = if let Some(decoded) = decoded_config.as_ref() {
             // Parse using the existing pipeline but route logger output to
             // an in-memory buffer that we discard — the probe must not
             // emit anything other than its JSON line on stdout.
             let mut probe_logger = Logger::new(Mode::Buffer);
-            match load_request(&data, &mut probe_logger, is_b64) {
-                Ok(r) => r.policy,
+            match decoded {
+                Ok(json) => {
+                    match wxc_common::config_parser::load_request_from_json(json, &mut probe_logger)
+                    {
+                        Ok(r) => r.policy,
+                        Err(_) => {
+                            eprintln!("Error: failed to load probe config");
+                            eprint!("{}", probe_logger.get_buffer());
+                            process::exit(1);
+                        }
+                    }
+                }
                 Err(_) => {
                     eprintln!("Error: failed to load probe config");
-                    eprint!("{}", probe_logger.get_buffer());
                     process::exit(1);
                 }
             }
@@ -903,18 +953,27 @@ fn main() {
     // --probe is handled at the top of `main` (before COM init) for
     // SDK first-call latency. See note there.
 
-    // Determine config input and whether it's base64
-    let (config_data, is_base64) = if let Some(ref b64) = cli.config_base64 {
-        (b64.clone(), true)
-    } else if let Some(ref path) = cli.config {
-        (path.clone(), false)
-    } else if let Some(ref path) = cli.config_path {
-        (path.clone(), false)
-    } else if !cli.delete {
-        eprintln!("Error: No config provided. Use a positional path, --config, or --config-base64");
-        process::exit(1);
-    } else {
-        (String::new(), false)
+    // Determine config input. In delete mode the config is optional; every
+    // other path requires it. `decoded_config` above already read the source
+    // once — if it's populated, unpack the decoded JSON (or surface the
+    // decode error). If it's absent, either accept the empty state for
+    // delete mode or report the missing-config error.
+    let config_json: Option<String> = match decoded_config {
+        Some(Ok(json)) => Some(json),
+        Some(Err(error)) => {
+            eprintln!("Request error");
+            eprintln!("{error}");
+            process::exit(1);
+        }
+        None => {
+            if !cli.delete {
+                eprintln!(
+                    "Error: No config provided. Use a positional path, --config, or --config-base64"
+                );
+                process::exit(1);
+            }
+            None
+        }
     };
 
     let mut logger = Logger::new(if cli.debug {
@@ -943,16 +1002,34 @@ fn main() {
         process::exit(if success { 0 } else { 1 });
     }
 
+    // Non-delete paths always have a config JSON at this point (or exited
+    // above with the missing-config error).
+    let config_json = config_json.expect("config_json is Some on non-delete paths");
+
     // Load request — discriminates state-aware (top-level `phase` field) from
     // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
     // and pre-discrimination failures keep the existing diagnostic-on-stderr
     // convention.
     let has_command_override = has_cli_command(&cli);
     let load_opts = LoadOptions {
-        is_base64,
+        is_base64: false,
         allow_missing_command: has_command_override,
     };
-    let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
+    let parsed_request = if let Some(hint) = request_hint.as_ref() {
+        wxc_common::config_parser::load_mxc_request_from_json_with_hint_and_options(
+            &config_json,
+            &mut logger,
+            load_opts,
+            hint,
+        )
+    } else {
+        wxc_common::config_parser::load_mxc_request_from_json_with_options(
+            &config_json,
+            &mut logger,
+            load_opts,
+        )
+    };
+    let request = match parsed_request {
         Ok(MxcRequest::OneShot(req)) => req,
         Ok(MxcRequest::StateAware(mut parsed)) => {
             let context =
@@ -992,7 +1069,7 @@ fn main() {
             // `--experimental` on the CLI.
             parsed.request.experimental_enabled = cli.experimental;
             parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
+            run_state_aware_main(parsed, cli.dry_run, &mut logger)
         }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
@@ -1010,17 +1087,12 @@ fn main() {
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;
 
-    // ── Telemetry init (experimental) ───────────────────────────────
-    let telemetry_active = if request.experimental_enabled {
-        request
-            .experimental
-            .telemetry
-            .as_ref()
-            .map(|c| telemetry::init(c, &mut logger))
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    // ── Telemetry init ──────────────────────────────────────────────
+    let telemetry_active = request
+        .telemetry
+        .as_ref()
+        .map(|c| telemetry::init(c, &mut logger))
+        .unwrap_or(false);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
@@ -1154,18 +1226,13 @@ fn main() {
             );
         }
 
-        // Log the raw input JSON config before any transformation.
-        let raw_json = if is_base64 {
-            wxc_common::encoding::base64_decode(&config_data)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-        } else {
-            fs::read_to_string(&config_data).ok()
-        };
-        if let Some(json) = raw_json {
-            let _ = writeln!(logger, "SECTION: JSON Config");
-            let _ = writeln!(logger, "{}", json.trim());
-        }
+        // Log the raw input JSON config before any transformation. The input
+        // was already decoded exactly once at the top of `main` (see
+        // `decode_config_input_once`), so reuse the pre-decoded string
+        // instead of re-reading the source (a named pipe / `/dev/stdin` /
+        // process-substitution path can only be read once).
+        let _ = writeln!(logger, "SECTION: JSON Config");
+        let _ = writeln!(logger, "{}", config_json.trim());
     }
 
     let _ = writeln!(logger, "SECTION: Request simplified");
@@ -1267,19 +1334,18 @@ fn main() {
         eprintln!("{warning}");
     }
 
-    if cli.dry_run {
-        handle_dry_run_exit(&response, &mut logger);
-    }
-
-    display_script_results(&response, &mut logger);
-
-    // ── Telemetry emit (experimental) ───────────────────────────────
     telemetry::emit_completion(
         telemetry_active,
         &request.containment,
         &response,
         run_elapsed,
     );
+
+    if cli.dry_run {
+        handle_dry_run_exit(&response, &mut logger);
+    }
+
+    display_script_results(&response, &mut logger);
 
     // Close diagnostic pipe.
     logger.close_diagnostics();
@@ -1317,10 +1383,12 @@ mod tests {
     use super::*;
 
     use clap::{CommandFactory, Parser};
+    use wxc_common::config_parser::load_mxc_request_with_options;
     use wxc_common::encoding::base64_encode;
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;
     use wxc_common::state_aware_request::MxcRequest;
+    use wxc_common::telemetry::correlation_state::test_support::StoreDirGuard;
 
     fn parse_cli(argv: &[&str]) -> Cli {
         Cli::try_parse_from(argv)
@@ -1713,7 +1781,6 @@ mod tests {
             phase: Phase::Start,
             containment: None,
             sandbox_id: Some("iso:wxc-1234".into()),
-            correlation_vector: None,
             experimental_raw: None,
             source_text: None,
         };
@@ -1773,95 +1840,38 @@ mod tests {
     }
 
     #[test]
-    fn plan_correlation_vector_provision_seeds_fresh_vector() {
-        // Provision ignores any relayed value and always plans a fresh seed.
-        assert_eq!(
-            plan_correlation_vector(true, Some("BBBBBBBBBBBBBBBBBBBBBB.5")),
-            CvPlan::Seed
-        );
-        assert_eq!(plan_correlation_vector(true, None), CvPlan::Seed);
+    fn pre_dispatch_vector_is_empty_when_telemetry_inactive() {
+        // Inactive telemetry does no RNG/clock work regardless of phase.
+        assert!(telemetry::correlation_state::pre_dispatch_vector(false, true, None).is_empty());
+        assert!(telemetry::correlation_state::pre_dispatch_vector(
+            false,
+            false,
+            Some("wsb:12345678")
+        )
+        .is_empty());
     }
 
     #[test]
-    fn plan_correlation_vector_phase_spins_relayed_base() {
-        // A relayable relayed value is spun to derive this phase's child vector.
-        let base = "AAAAAAAAAAAAAAAAAAAAAA.0";
-        assert_eq!(
-            plan_correlation_vector(false, Some(base)),
-            CvPlan::Spin(base)
-        );
-        // A valid frozen relayed value is also relayable (spin passes it through).
-        let frozen = "AAAAAAAAAAAAAAAAAAAAAA.0!";
-        assert_eq!(
-            plan_correlation_vector(false, Some(frozen)),
-            CvPlan::Spin(frozen)
-        );
-    }
+    fn provision_seeds_and_later_phase_recalls_the_persisted_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _guard = StoreDirGuard::set(tmp.path());
+        let sandbox_id = "wsb:12345678";
 
-    #[test]
-    fn plan_correlation_vector_phase_reseeds_for_missing_empty_or_malformed() {
-        // Missing / empty / non-relayable relayed values plan a fresh `Seed`, so
-        // the `Spin` arm never stands in for a reseed (garbage never reaches the
-        // `spin` operator).
-        for incoming in [None, Some(""), Some("garbage"), Some("short.0")] {
-            assert_eq!(
-                plan_correlation_vector(false, incoming),
-                CvPlan::Seed,
-                "non-relayable relay {incoming:?} must plan Seed"
-            );
-        }
-    }
-
-    #[test]
-    fn compute_phase_correlation_is_empty_when_telemetry_inactive() {
-        // Inactive telemetry does no RNG/clock work regardless of phase/relay.
-        assert!(compute_phase_correlation(false, true, None).is_empty());
-        assert!(
-            compute_phase_correlation(false, false, Some("AAAAAAAAAAAAAAAAAAAAAA.0")).is_empty()
-        );
-    }
-
-    #[test]
-    fn compute_phase_correlation_spins_relayable_and_reseeds_garbage() {
         // Active provision seeds a fresh valid vector.
-        let provisioned = compute_phase_correlation(true, true, None);
+        let provisioned = telemetry::correlation_state::pre_dispatch_vector(true, true, None);
         assert!(telemetry::correlation_vector::is_relayable(&provisioned));
-        // Active non-provision spins a relayable relay onto the shared prefix.
-        let base = "AAAAAAAAAAAAAAAAAAAAAA.0";
-        let spun = compute_phase_correlation(true, false, Some(base));
-        assert!(spun.starts_with(&format!("{base}.")), "{spun:?}");
-        // Active non-provision with garbage reseeds to a fresh, unrelated vector.
-        let reseeded = compute_phase_correlation(true, false, Some("garbage"));
-        assert!(telemetry::correlation_vector::is_relayable(&reseeded));
-        assert!(!reseeded.starts_with("garbage"));
-    }
 
-    #[test]
-    fn inject_correlation_vector_sets_field_on_envelope() {
-        let mut outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
-            serde_json::json!({ "result": { "sandboxId": "iso:wxc-abc" } }),
+        // Persisting it (as `run_state_aware_main` does post-dispatch) lets a
+        // later phase recall it and spin a distinct child off the same base.
+        let outcome: Result<DispatchOutcome, MxcError> = Ok(DispatchOutcome::Envelope(
+            serde_json::json!({ "result": { "sandboxId": sandbox_id } }),
         ));
-        inject_correlation_vector(&mut outcome, "AAAAAAAAAAAAAAAAAAAAAA.0");
-        match outcome {
-            Ok(DispatchOutcome::Envelope(v)) => assert_eq!(
-                v["result"]["correlationVector"],
-                serde_json::json!("AAAAAAAAAAAAAAAAAAAAAA.0")
-            ),
-            _ => panic!("expected envelope"),
-        }
-    }
+        telemetry::correlation_state::on_provision_outcome(true, &provisioned, &outcome);
 
-    #[test]
-    fn inject_correlation_vector_noop_on_non_envelope() {
-        // Exec-completed / error outcomes carry no result envelope: injection is
-        // a no-op and must not panic.
-        let mut exit: Result<DispatchOutcome, MxcError> =
-            Ok(DispatchOutcome::ExecCompleted { exit_code: 0 });
-        inject_correlation_vector(&mut exit, "AAAAAAAAAAAAAAAAAAAAAA.0");
-        assert!(matches!(
-            exit,
-            Ok(DispatchOutcome::ExecCompleted { exit_code: 0 })
-        ));
+        let base_prefix = provisioned.split('.').next().unwrap();
+        let spun = telemetry::correlation_state::pre_dispatch_vector(true, false, Some(sandbox_id));
+        assert!(spun.starts_with(&format!("{base_prefix}.")), "{spun:?}");
+        assert_ne!(spun, provisioned);
     }
 
     #[test]
