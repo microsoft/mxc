@@ -81,6 +81,8 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
+            ApproversEmail: $(ApproversEmail)
+            OwnersEmail: $(OwnersEmail)
 
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
@@ -98,6 +100,8 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
+            ApproversEmail: $(ApproversEmail)
+            OwnersEmail: $(OwnersEmail)
 
       - job: aggregate_isosession_artifacts
         displayName: Aggregate IsoSession release outputs
