@@ -54,6 +54,7 @@ use wxc_common::sandbox_process::{
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
+use wxc_common::validator::validate_network_policy_support;
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
@@ -1529,6 +1530,13 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+        if request.policy.allowed_proxy_peer.is_some() {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer requires BaseContainer support",
+            ));
+        }
+
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(

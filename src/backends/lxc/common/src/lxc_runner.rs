@@ -14,6 +14,7 @@ use wxc_common::models::{
     ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
 };
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
@@ -650,6 +651,11 @@ impl LxcScriptRunner {
 }
 
 impl ScriptRunner for LxcScriptRunner {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
+    }
+
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         // Run with panic catching for safety
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

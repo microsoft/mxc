@@ -11,6 +11,7 @@ use std::io::IsTerminal;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::IsolationSessionManager;
 use super::policy::validate_provision_policy;
@@ -56,7 +57,9 @@ impl ScriptRunner for IsolationSessionRunner {
         // backend configuration, so there is nothing backend-specific to
         // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
-        validate_provision_policy(request).map_err(ScriptResponse::from)
+        validate_provision_policy(request).map_err(ScriptResponse::from)?;
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {

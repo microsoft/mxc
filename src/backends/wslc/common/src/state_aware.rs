@@ -22,6 +22,7 @@ use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult,
     StartResult, StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 use wxc_common::wire::WslcProvisionPhase;
 
 use crate::container_steps::OutStream;
@@ -228,6 +229,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         request: &ExecutionRequest,
         _config: Option<&WslcProvisionPhase>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_provision_policy(request)
     }
 
