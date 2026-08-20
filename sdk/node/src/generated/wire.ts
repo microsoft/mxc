@@ -207,13 +207,44 @@ export interface Network {
    */
   defaultPolicy?: NetworkPolicy | null;
   /**
+   * Outbound network policy.
+   */
+  egress?: NetworkEgress | null;
+  /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
+   * Inbound and host-loopback network policy.
+   */
+  ingress?: NetworkIngress | null;
+  /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * Allow or deny network action.
+ */
+export type NetworkAction = "allow" | "deny";
+
+/**
+ * Outbound network policy.
+ */
+export interface NetworkEgress {
+  /**
+   * Explicit allow rules.
+   */
+  allow?: NetworkRule[] | null;
+  /**
+   * Action used when no explicit rule matches. Defaults to `deny`.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Explicit deny rules. Deny rules take precedence over allow rules.
+   */
+  deny?: NetworkRule[] | null;
 }
 
 /**
@@ -222,9 +253,74 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * Inbound and host-loopback network policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Default action for LAN/private-network inbound traffic.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Bidirectional host-loopback connectivity action.
+   */
+  hostLoopback?: NetworkAction | null;
+}
+
+/**
+ * CIDR network peer.
+ */
+export interface NetworkPeer {
+  /**
+   * IPv4 or IPv6 CIDR.
+   */
+  cidr: string;
+  /**
+   * CIDRs excluded from this peer.
+   */
+  except?: string[] | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * Protocol and destination-port selector.
+ */
+export interface NetworkPort {
+  /**
+   * Inclusive end of a destination-port range. Requires `port`.
+   */
+  endPort?: number | null;
+  /**
+   * Destination port. Omission matches every port.
+   */
+  port?: number | null;
+  /**
+   * Transport protocol. Defaults to `any`.
+   */
+  protocol?: NetworkProtocol | null;
+}
+
+/**
+ * Transport protocol selector.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
+
+/**
+ * Outbound network rule.
+ */
+export interface NetworkRule {
+  /**
+   * Destination protocols and ports. Omission matches all.
+   */
+  ports?: NetworkPort[] | null;
+  /**
+   * Destination CIDRs. Omission matches both IP families.
+   */
+  to?: NetworkPeer[] | null;
+}
 
 /**
  * State-aware lifecycle phase.
@@ -293,9 +389,23 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
+   * ProcessContainer-specific network configuration.
+   */
+  network?: ProcessContainerNetwork | null;
+  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
+}
+
+/**
+ * ProcessContainer-specific network configuration.
+ */
+export interface ProcessContainerNetwork {
+  /**
+   * Installed package family name or AppContainer profile allowed to host the configured loopback proxy.
+   */
+  allowedProxyPeer?: string | null;
 }
 
 /**
@@ -314,6 +424,16 @@ export interface Proxy {
    * Proxy URL (parsed into host:port).
    */
   url?: string | null;
+}
+
+/**
+ * Runtime values supplied alongside, but separate from, sandbox policy.
+ */
+export interface RuntimeConfig {
+  /**
+   * HTTP/S loopback proxy URL.
+   */
+  networkProxy?: string | null;
 }
 
 /**
@@ -535,6 +655,10 @@ export interface MXCConfiguration {
    * ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`.
    */
   processContainer?: ProcessContainer | null;
+  /**
+   * Runtime values supplied alongside, but separate from, sandbox policy.
+   */
+  runtimeConfig?: RuntimeConfig | null;
   /**
    * Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.
    */

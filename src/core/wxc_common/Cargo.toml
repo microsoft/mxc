@@ -17,6 +17,7 @@ serde_path_to_error = { workspace = true }
 unicode-general-category = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
+cidr = { workspace = true }
 url = { workspace = true }
 getrandom = { workspace = true }
 semver = "1"
