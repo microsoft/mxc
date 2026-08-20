@@ -2206,7 +2206,7 @@ mod tests {
             .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
     }
 
-    // ---- Validation: unsupported policy fields surface as errors. ----
+    // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use super::{
         create_process_failure, AppContainerScriptRunner, FilesystemMode,
@@ -2290,7 +2290,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_denied_paths_in_bfs_mode() {
+    fn validate_runner_rejects_denied_paths_in_bfs_mode() {
         let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs);
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
@@ -2306,7 +2306,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_denied_paths_in_dacl_mode() {
+    fn validate_runner_accepts_denied_paths_in_dacl_mode() {
         let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Dacl);
         let mut request = ExecutionRequest::default();
         request.policy.denied_paths = vec!["C:\\secret".into()];
@@ -2318,7 +2318,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_dispatcher_enforced_denied_paths_in_bfs_mode() {
+    fn validate_runner_accepts_dispatcher_enforced_denied_paths_in_bfs_mode() {
         let runner = AppContainerScriptRunner::with_filesystem_mode(FilesystemMode::Bfs)
             .with_external_denied_paths();
         let mut request = ExecutionRequest::default();
@@ -2469,7 +2469,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_allowed_hosts() {
+    fn validate_runner_rejects_allowed_hosts() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.allowed_hosts = vec!["example.com".into()];
@@ -2481,7 +2481,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_blocked_hosts() {
+    fn validate_runner_rejects_blocked_hosts() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.blocked_hosts = vec!["bad.example.com".into()];
@@ -2493,7 +2493,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_identity_scoped_proxy() {
+    fn validate_runner_rejects_identity_scoped_proxy() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.network_proxy = wxc_common::models::ProxyConfig {
@@ -2512,14 +2512,14 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_empty_policy() {
+    fn validate_runner_accepts_empty_policy() {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
     }
 
     #[test]
-    fn validation_rejects_capture_denials_on_appcontainer_fallback() {
+    fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();
         request.policy.capture_denials = Some(Default::default());
@@ -2535,7 +2535,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_capture_denials_with_guarded_factory() {
+    fn validate_runner_accepts_capture_denials_with_guarded_factory() {
         let runner = AppContainerScriptRunner::new()
             .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
         let mut request = ExecutionRequest::default();
@@ -2549,7 +2549,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_etl_retention_with_guarded_capture() {
+    fn validate_runner_rejects_etl_retention_with_guarded_capture() {
         let runner = AppContainerScriptRunner::new()
             .with_guarded_capture_factory(Arc::new(FakeGuardedCaptureFactory));
         let mut request = ExecutionRequest::default();
@@ -2570,7 +2570,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_allows_guarded_etl_when_provider_supports_transfer() {
+    fn validate_runner_allows_guarded_etl_when_provider_supports_transfer() {
         struct RetainingGuardedCaptureFactory;
         impl GuardedCaptureFactory for RetainingGuardedCaptureFactory {
             fn allows_trace_transfer(&self) -> bool {
