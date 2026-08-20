@@ -14,7 +14,8 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, NetworkEnforcementMode, NetworkPolicy, ProxyAddress, ProxyHostPin,
+    ContainerPolicy, NetworkCidr, NetworkEgressPolicy, NetworkEnforcementMode, NetworkPeer,
+    NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
 };
 
 /// One destination the container is allowed to reach when the policy routes
@@ -61,15 +62,61 @@ enum RuleAction {
 /// first-match-wins within a chain, which makes an entry's position its
 /// precedence. Deny-precedence is therefore a property each lowering function
 /// establishes, and the emitter only has to preserve the order it is handed.
-///
-/// Borrowing rather than owning keeps the lowering allocation-free per entry
-/// and lets the emitter's diagnostics name the operator's original string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EgressEntry<'a> {
-    /// Hostname, IP literal, or CIDR, exactly as the operator wrote it.
-    /// Interpreted by [`NetworkIptablesManager::resolve_host`].
-    destination: &'a str,
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EgressEntry {
+    /// Hostname, IP literal, or CIDR. Interpreted by
+    /// [`NetworkIptablesManager::resolve_host`]. Owned because a 0.8 peer
+    /// arrives as a parsed [`NetworkCidr`] with no string to borrow.
+    destination: String,
     action: RuleAction,
+    matching: RuleMatch,
+}
+
+/// The protocol and port match a single emitted rule carries.
+///
+/// Only matches one iptables rule can express are representable. A `ports`
+/// selector naming protocol `any` alongside a port has no `-p all --dport`
+/// form, and the lowering expands it into a TCP match and a UDP match rather
+/// than admitting a state the emitter would have to reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleMatch {
+    /// Every protocol and every port. What a 0.8 rule with no `ports`
+    /// selector matches, and the only match a legacy host-list entry has.
+    AnyTraffic,
+    /// ICMP, which carries no port. Rendered `icmp` under `iptables` and
+    /// `icmpv6` under `ip6tables`: the same selector has a different protocol
+    /// name per family, and naming it `icmp` on the IPv6 command is rejected
+    /// rather than silently ignored.
+    Icmp,
+    /// TCP or UDP, optionally narrowed to an inclusive destination port range.
+    Transport {
+        protocol: TransportProtocol,
+        ports: Option<PortRange>,
+    },
+}
+
+/// The two protocols that carry a destination port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransportProtocol {
+    Tcp,
+    Udp,
+}
+
+impl TransportProtocol {
+    fn as_arg(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+/// An inclusive destination port range. A single port is a range whose ends
+/// are equal, which keeps one representation for both schema forms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PortRange {
+    start: u16,
+    end: u16,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1183,6 +1230,7 @@ impl NetworkIptablesManager {
         chain_name: &str,
         destinations: &ResolvedDestinations,
         action: &RuleAction,
+        matching: RuleMatch,
     ) -> FirewallRuleArgs {
         let mut args = FirewallRuleArgs::default();
         for destination in &destinations.ipv4 {
@@ -1190,6 +1238,8 @@ impl NetworkIptablesManager {
                 chain_name,
                 destination,
                 action,
+                matching,
+                IpFamily::V4,
             ));
         }
         for destination in &destinations.ipv6 {
@@ -1197,7 +1247,40 @@ impl NetworkIptablesManager {
                 chain_name,
                 destination,
                 action,
+                matching,
+                IpFamily::V6,
             ));
+        }
+        args
+    }
+
+    /// The `-p`/`--dport` arguments a match contributes, in the order
+    /// `iptables` expects them.
+    ///
+    /// The family decides the ICMP protocol name. `ip6tables` rejects
+    /// `-p icmp` outright rather than treating it as ICMPv6, which would
+    /// otherwise turn an ICMP rule into a failed command on the v6 chain.
+    fn build_match_args(matching: RuleMatch, family: IpFamily) -> Vec<String> {
+        let (protocol, ports) = match matching {
+            RuleMatch::AnyTraffic => return Vec::new(),
+            RuleMatch::Icmp => (
+                match family {
+                    IpFamily::V4 => "icmp",
+                    IpFamily::V6 => "icmpv6",
+                },
+                None,
+            ),
+            RuleMatch::Transport { protocol, ports } => (protocol.as_arg(), ports),
+        };
+
+        let mut args = vec!["-p".to_string(), protocol.to_string()];
+        if let Some(range) = ports {
+            args.push("--dport".to_string());
+            args.push(if range.start == range.end {
+                range.start.to_string()
+            } else {
+                format!("{}:{}", range.start, range.end)
+            });
         }
         args
     }
@@ -1206,15 +1289,19 @@ impl NetworkIptablesManager {
         chain_name: &str,
         destination: &str,
         action: &RuleAction,
+        matching: RuleMatch,
+        family: IpFamily,
     ) -> Vec<String> {
-        vec![
+        let mut args = vec![
             "-A".to_string(),
             chain_name.to_string(),
             "-d".to_string(),
             destination.to_string(),
-            "-j".to_string(),
-            Self::rule_action_arg(action).to_string(),
-        ]
+        ];
+        args.extend(Self::build_match_args(matching, family));
+        args.push("-j".to_string());
+        args.push(Self::rule_action_arg(action).to_string());
+        args
     }
 
     /// Build the allow/deny rule args for a single host by resolving it once.
@@ -1224,7 +1311,12 @@ impl NetworkIptablesManager {
     #[cfg(test)]
     fn build_host_rule_args(chain_name: &str, host: &str, action: &RuleAction) -> FirewallRuleArgs {
         let destinations = Self::resolve_host(host);
-        Self::build_resolved_destination_rule_args(chain_name, &destinations, action)
+        Self::build_resolved_destination_rule_args(
+            chain_name,
+            &destinations,
+            action,
+            RuleMatch::AnyTraffic,
+        )
     }
 
     /// Build the allow/deny rule args for a container policy.
@@ -1248,6 +1340,25 @@ impl NetworkIptablesManager {
         )
     }
 
+    /// Lower whichever network schema the policy was written in into the
+    /// entries the chain emits, in the order they must be emitted.
+    ///
+    /// The two schema shapes are alternatives, never a union.
+    /// `network_mode_specified` is set by the parser only when the author
+    /// actually wrote an `egress` or `ingress` section, which is the same
+    /// predicate `validate_network_policy_support` gates on. Selecting on
+    /// `network_egress.is_some()` instead would be a fail-closed trap: the
+    /// parser hands every 0.8 config a defaulted `NetworkEgressPolicy` even
+    /// when it carries no `network` block at all, and `NetworkAction::Deny`
+    /// is that default, which would cut outbound traffic for every existing
+    /// 0.8 LXC config that never mentioned a directional posture.
+    fn lower_egress(policy: &ContainerPolicy) -> Vec<EgressEntry> {
+        match policy.network_egress.as_ref() {
+            Some(egress) if policy.network_mode_specified => Self::lower_directional_egress(egress),
+            _ => Self::lower_legacy_hosts(policy),
+        }
+    }
+
     /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the entries
     /// the chain emits, in the order they must be emitted.
     ///
@@ -1257,19 +1368,216 @@ impl NetworkIptablesManager {
     /// DROP. There is no separate reconciliation pass anywhere in this
     /// backend. Exchanging the two halves reverses the security semantics of
     /// every policy whose lists overlap and produces no other symptom.
-    fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry<'_>> {
+    fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry> {
         policy
             .blocked_hosts
             .iter()
-            .map(|host| EgressEntry {
-                destination: host.as_str(),
-                action: RuleAction::Deny,
+            .map(|host| (host, RuleAction::Deny))
+            .chain(
+                policy
+                    .allowed_hosts
+                    .iter()
+                    .map(|host| (host, RuleAction::Allow)),
+            )
+            .map(|(host, action)| EgressEntry {
+                destination: host.clone(),
+                action,
+                // A legacy entry names a destination and nothing else, so it
+                // matches every protocol and port reaching that destination.
+                matching: RuleMatch::AnyTraffic,
             })
-            .chain(policy.allowed_hosts.iter().map(|host| EgressEntry {
-                destination: host.as_str(),
-                action: RuleAction::Allow,
-            }))
             .collect()
+    }
+
+    /// Lower a 0.8 `network.egress` section into the entries the chain emits.
+    ///
+    /// `deny` rules precede `allow` rules for the same reason the legacy
+    /// lowering puts blocks first: the chain is first-match-wins and holds no
+    /// reconciliation pass, so a destination named in both lists is DROPped
+    /// only while the deny is emitted first. The schema states the two lists
+    /// independently and fixes no order between them, which makes
+    /// establishing that order this function's job.
+    fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
+        let mut entries = Vec::new();
+        for rule in &egress.deny {
+            Self::lower_rule(rule, RuleAction::Deny, &mut entries);
+        }
+        for rule in &egress.allow {
+            Self::lower_rule(rule, RuleAction::Allow, &mut entries);
+        }
+        entries
+    }
+
+    /// Expand one 0.8 rule into one entry per (peer, port selector) pair.
+    ///
+    /// The expansion happens here rather than in the emitter because a rule
+    /// names a set of destinations and a set of port selectors, while an
+    /// iptables rule names exactly one of each.
+    ///
+    /// An omitted `to` selects every destination, matching the schema's
+    /// documented wildcard behavior for an absent field. The parser rejects
+    /// an explicitly empty array, so an empty `to` here can only be the
+    /// omitted form.
+    fn lower_rule(rule: &NetworkRule, action: RuleAction, entries: &mut Vec<EgressEntry>) {
+        let matches = Self::lower_port_selectors(&rule.ports);
+        let wildcard_peers;
+        let peers = if rule.to.is_empty() {
+            wildcard_peers = Self::every_destination_peers();
+            &wildcard_peers[..]
+        } else {
+            &rule.to[..]
+        };
+
+        for peer in peers {
+            for matching in &matches {
+                // An `except` range narrows the peer that follows it, and the
+                // chain is first-match-wins, so the carve-out must be emitted
+                // before the rule it narrows or it can never be reached.
+                //
+                // Only an allow rule gets carve-outs. Inside a deny rule the
+                // peer's own DROP already covers every excepted address, so a
+                // carve-out DROP would be a rule that cannot change any
+                // packet's fate while still costing an `iptables` invocation
+                // on the container-start path. `warn_on_deny_exclusions`
+                // reports what that leaves unhonored.
+                if matches!(action, RuleAction::Allow) {
+                    for excluded in &peer.except {
+                        entries.push(EgressEntry {
+                            destination: Self::cidr_destination(excluded),
+                            action: RuleAction::Deny,
+                            matching: *matching,
+                        });
+                    }
+                }
+                entries.push(EgressEntry {
+                    destination: Self::cidr_destination(&peer.cidr),
+                    action,
+                    matching: *matching,
+                });
+            }
+        }
+    }
+
+    /// The peer list standing in for an omitted `to`: every address in both
+    /// families. Two entries rather than one because a v4 chain and a v6
+    /// chain are programmed separately and neither wildcard covers the other.
+    fn every_destination_peers() -> Vec<NetworkPeer> {
+        vec![
+            NetworkPeer {
+                cidr: NetworkCidr {
+                    address: IpAddr::from([0u8, 0, 0, 0]),
+                    prefix_length: 0,
+                },
+                except: Vec::new(),
+            },
+            NetworkPeer {
+                cidr: NetworkCidr {
+                    address: IpAddr::from([0u16; 8]),
+                    prefix_length: 0,
+                },
+                except: Vec::new(),
+            },
+        ]
+    }
+
+    /// Render a parsed CIDR back into the destination string `resolve_host`
+    /// reads. `resolve_host` passes a validated CIDR through untouched, so a
+    /// 0.8 peer and a legacy CIDR entry reach the emitter by the same path.
+    fn cidr_destination(cidr: &NetworkCidr) -> String {
+        format!("{}/{}", cidr.address, cidr.prefix_length)
+    }
+
+    /// Lower a rule's `ports` array into the per-rule matches it selects.
+    ///
+    /// An empty array is the omitted form -- the parser rejects an explicit
+    /// empty array -- and selects every protocol and port.
+    fn lower_port_selectors(ports: &[NetworkPort]) -> Vec<RuleMatch> {
+        if ports.is_empty() {
+            return vec![RuleMatch::AnyTraffic];
+        }
+        ports.iter().flat_map(Self::lower_port_selector).collect()
+    }
+
+    /// Lower one `ports` selector into the matches a single iptables rule can
+    /// express.
+    ///
+    /// Protocol `any` with a port is the case that yields two matches.
+    /// `-p all` accepts no `--dport`, and the port has to survive, so the
+    /// selector becomes one TCP match and one UDP match. ICMP is excluded
+    /// from that pair deliberately: it carries no port, so a selector naming
+    /// a port cannot have meant it.
+    fn lower_port_selector(port: &NetworkPort) -> Vec<RuleMatch> {
+        let ports = port.port.map(|start| PortRange {
+            start,
+            // A selector with no `endPort` names a single port, which is the
+            // range whose ends are equal.
+            end: port.end_port.unwrap_or(start),
+        });
+
+        match port.protocol {
+            // ICMP has no ports. A port alongside it is dropped rather than
+            // emitted, since `-p icmp --dport` is not a legal match.
+            NetworkProtocol::Icmp => vec![RuleMatch::Icmp],
+            NetworkProtocol::Tcp => vec![RuleMatch::Transport {
+                protocol: TransportProtocol::Tcp,
+                ports,
+            }],
+            NetworkProtocol::Udp => vec![RuleMatch::Transport {
+                protocol: TransportProtocol::Udp,
+                ports,
+            }],
+            NetworkProtocol::Any => match ports {
+                None => vec![RuleMatch::AnyTraffic],
+                Some(_) => vec![
+                    RuleMatch::Transport {
+                        protocol: TransportProtocol::Tcp,
+                        ports,
+                    },
+                    RuleMatch::Transport {
+                        protocol: TransportProtocol::Udp,
+                        ports,
+                    },
+                ],
+            },
+        }
+    }
+
+    /// Warn for every `except` range inside a `deny` rule, which this backend
+    /// leaves denied rather than carving out.
+    ///
+    /// There is no lowering that means "this rule does not cover these
+    /// addresses". A chain rule either matches or is skipped, and emitting
+    /// ACCEPT would promote the excluded range from *not denied by this rule*
+    /// to *allowed outright*, widening access past what the operator wrote.
+    /// Leaving the peer's DROP to cover the range is the fail-closed reading,
+    /// and this warning is what keeps it from being a silent one.
+    fn warn_on_deny_exclusions(policy: &ContainerPolicy, logger: &mut Logger) {
+        if !policy.network_mode_specified {
+            return;
+        }
+        let Some(egress) = policy.network_egress.as_ref() else {
+            return;
+        };
+
+        let excluded: Vec<String> = egress
+            .deny
+            .iter()
+            .flat_map(|rule| rule.to.iter())
+            .flat_map(|peer| peer.except.iter())
+            .map(Self::cidr_destination)
+            .collect();
+
+        if excluded.is_empty() {
+            return;
+        }
+
+        logger.log_line(&format!(
+            "Warning: network.egress.deny carries except range(s) {}. This backend keeps \
+             them denied: a first-match-wins chain has no rule meaning 'this deny does not \
+             cover these addresses', and accepting them would widen access beyond the \
+             policy. Move the range to network.egress.allow to permit it.",
+            excluded.join(", ")
+        ));
     }
 
     /// Resolve every lowered entry exactly once and build the rule args from
@@ -1303,11 +1611,11 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        for EgressEntry {
-            destination: host,
-            action,
-        } in Self::lower_legacy_hosts(policy)
-        {
+        Self::warn_on_deny_exclusions(policy, logger);
+        let entries = Self::lower_egress(policy);
+        for entry in &entries {
+            let host = entry.destination.as_str();
+            let action = entry.action;
             let destinations = Self::resolve_host(host);
             if destinations.is_empty() {
                 if default_permits && matches!(action, RuleAction::Deny) {
@@ -1324,6 +1632,12 @@ impl NetworkIptablesManager {
                 }
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
             } else if matches!(action, RuleAction::Allow)
+                // A catch-all is what defeats an unwritten deny, and only an
+                // entry matching every protocol and port can do that. An
+                // allow of `0.0.0.0/0` on one port accepts a single port
+                // rather than whatever the unresolvable deny named, so
+                // counting it here would reject ordinary policies.
+                && matches!(entry.matching, RuleMatch::AnyTraffic)
                 && destinations
                     .ipv4
                     .iter()
@@ -1332,8 +1646,12 @@ impl NetworkIptablesManager {
             {
                 catch_all_allows.push(host);
             }
-            let rule_args =
-                Self::build_resolved_destination_rule_args(chain_name, &destinations, &action);
+            let rule_args = Self::build_resolved_destination_rule_args(
+                chain_name,
+                &destinations,
+                &action,
+                entry.matching,
+            );
             // Log each destination rule that will be programmed, derived from
             // the built args rather than from `destinations`, so that removing
             // destination-rule emission also removes these lines. This is the
@@ -3962,6 +4280,8 @@ mod tests {
             chain_name,
             destination,
             &RuleAction::Deny,
+            RuleMatch::AnyTraffic,
+            IpFamily::V4,
         );
 
         assert_eq!(
@@ -4000,6 +4320,7 @@ mod tests {
             "MXC-resolved",
             &destinations,
             &RuleAction::Allow,
+            RuleMatch::AnyTraffic,
         );
 
         assert_eq!(
