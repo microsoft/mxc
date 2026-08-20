@@ -11,7 +11,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
+use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -373,12 +373,77 @@ fn reject_slirp_reserved(resolved: Ipv4Addr, host: &str) -> Result<(), String> {
 /// [`tests::gateway_constants_agree`].
 const SLIRP_NETWORK_OCTETS: [u8; 3] = [10, 0, 2];
 
-/// Resolve `host` to the address the egress chain will open.
+/// Bound on the host lookup performed by [`resolve_ipv4`].
+///
+/// Sized so a resolver whose first nameserver is dead still answers: glibc
+/// defaults to a 5s timeout with 2 attempts per server, so a single failed
+/// server costs ~10s before the next is tried. A black-holed resolver would
+/// otherwise run to ~30s or more across three servers.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Thread name for the lookup [`resolve_ipv4`] bounds.
+const RESOLVE_TIMEOUT_LABEL: &str = "mxc-proxy-resolve";
+
+/// Run `work` on its own thread and wait at most `timeout` for its answer.
+///
+/// Used for calls that cannot be cancelled: on expiry the thread is abandoned
+/// and its result discarded, which bounds the caller's wait even though the
+/// work itself runs to completion. `label` names the thread for diagnostics.
+fn with_deadline<T: Send + 'static>(
+    label: &str,
+    timeout: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<Result<T, mpsc::RecvTimeoutError>, std::io::Error> {
+    let (sender, receiver) = mpsc::channel();
+    thread::Builder::new()
+        .name(label.to_string())
+        .spawn(move || {
+            // Abandoned on expiry: the receiver is gone, so this send fails
+            // and the answer is discarded rather than blocking the thread.
+            let _ = sender.send(work());
+        })?;
+
+    Ok(receiver.recv_timeout(timeout))
+}
+
+/// Resolve `host` to the address the egress chain will open, without waiting
+/// on the resolver indefinitely.
+///
+/// This runs during setup, before the sandbox starts, so it is outside the
+/// script timeout: an unbounded lookup would stall a run that never began.
+/// `getaddrinfo` cannot be cancelled, so the lookup is moved to a thread and
+/// abandoned once the bound expires -- the wait is bounded even though the
+/// query itself keeps running until the resolver gives up.
+fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+    let query = host.to_string();
+    let waited = with_deadline(RESOLVE_TIMEOUT_LABEL, RESOLVE_TIMEOUT, move || {
+        lookup_ipv4(&query, port)
+    })
+    .map_err(|error| {
+        format!("Bubblewrap: could not start the lookup of proxy host '{host}': {error}")
+    })?;
+
+    match waited {
+        Ok(resolved) => resolved,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "Bubblewrap: resolving proxy host '{host}' exceeded {}s. The proxy endpoint is \
+             resolved on the host because DNS is closed inside the sandbox, so an unresponsive \
+             host resolver blocks the sandbox from starting. Check the host's DNS configuration, \
+             or give the proxy as an IPv4 address to skip resolution.",
+            RESOLVE_TIMEOUT.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
+            "Bubblewrap: the lookup of proxy host '{host}' ended without an answer."
+        )),
+    }
+}
+
+/// The blocking lookup behind [`resolve_ipv4`].
 ///
 /// Only the first IPv4 answer is used, and it is the same one the sandbox is
 /// pinned to. Opening the rest would widen the chain to addresses the sandbox
 /// can no longer select: with DNS closed, the pin is its only resolution path.
-fn resolve_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
+fn lookup_ipv4(host: &str, port: u16) -> Result<Ipv4Addr, String> {
     let resolved: Vec<IpAddr> = (host, port)
         .to_socket_addrs()
         .map_err(|error| {
@@ -1323,6 +1388,44 @@ fn terminate_child(child: &mut Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reported concern: a hostname proxy resolves through the host's
+    /// resolver during setup, before the script timeout applies, so an
+    /// unresponsive resolver would stall a run that never started.
+    #[test]
+    fn work_that_outlives_its_deadline_is_abandoned() {
+        let started = Instant::now();
+        let waited = with_deadline("mxc-test-deadline", Duration::from_millis(50), || {
+            thread::sleep(Duration::from_secs(30));
+            "an answer that arrives too late"
+        })
+        .expect("the worker thread starts");
+
+        assert!(
+            matches!(waited, Err(mpsc::RecvTimeoutError::Timeout)),
+            "the wait must end on the deadline rather than on the work"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the caller waited {:?}, so the deadline did not bound it",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn work_that_finishes_within_its_deadline_returns_its_answer() {
+        let waited = with_deadline("mxc-test-deadline", Duration::from_secs(30), || 7)
+            .expect("the worker thread starts");
+
+        assert_eq!(waited, Ok(7));
+    }
+
+    /// The bound is only useful if it is longer than a working resolver's
+    /// slow path; see [`RESOLVE_TIMEOUT`].
+    #[test]
+    fn the_resolver_bound_survives_one_dead_nameserver() {
+        assert!(RESOLVE_TIMEOUT > Duration::from_secs(10));
+    }
 
     #[test]
     fn gateway_constants_agree() {
