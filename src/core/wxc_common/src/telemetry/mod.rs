@@ -840,6 +840,34 @@ pub fn emit_sdk_state_aware_with_kind(
     });
 }
 
+/// Emit a confirmed SDK streaming-handle cancellation and release the
+/// invocation's provider reference.
+///
+/// This is separate from generic completion mapping because an explicit,
+/// successful [`SandboxProcess::kill`](crate::sandbox_process::SandboxProcess::kill)
+/// is a cancellation, not an initialization or process failure.
+pub fn emit_sdk_cancellation_with_kind(
+    active: bool,
+    requested_sandbox_kind: Option<&'static str>,
+    ctx: TelemetryContext<'_>,
+    elapsed: Duration,
+) {
+    emit_sdk_with_release(active, |auth| {
+        let _auth = auth;
+        log_execution(&ExecutionEvent {
+            backend: ctx.backend,
+            sandbox_kind: sandbox_kind_for(ctx.backend, requested_sandbox_kind),
+            exit_code: CANCELLED_EXIT_CODE,
+            outcome: "failure",
+            duration_ms: elapsed.as_millis() as u64,
+            failure_reason: Some(FailureReason::Cancelled),
+            phase: ctx.phase,
+            correlation_vector: ctx.correlation_vector,
+        });
+        log_error(ctx, FailureReason::Cancelled, CANCELLED_EXIT_CODE);
+    });
+}
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::consent::test_support::LocalAppDataGuard;
@@ -1686,6 +1714,64 @@ mod tests {
         assert_eq!(executions[1].sandbox_kind, "vm");
         assert_eq!(executions[0].correlation_vector, "corr-process");
         assert_eq!(executions[1].correlation_vector, "corr-vm");
+
+        reset_for_test();
+    }
+
+    #[test]
+    fn sdk_cancellation_uses_cancelled_reason_and_request_context() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
+
+        emit_sdk_cancellation_with_kind(
+            true,
+            Some("process"),
+            TelemetryContext {
+                backend: "appcontainer",
+                phase: "",
+                correlation_vector: "",
+            },
+            Duration::from_millis(9),
+        );
+        emit_sdk_cancellation_with_kind(
+            true,
+            Some("vm"),
+            TelemetryContext {
+                backend: "windows_sandbox",
+                phase: "exec",
+                correlation_vector: "corr-cancelled",
+            },
+            Duration::from_millis(17),
+        );
+
+        let executions = events::test_sink::take_executions();
+        assert_eq!(executions.len(), 2);
+        assert_eq!(executions[0].backend, "appcontainer");
+        assert_eq!(executions[0].sandbox_kind, "process");
+        assert_eq!(executions[0].duration_ms, 9);
+        assert_eq!(executions[0].phase, "");
+        assert_eq!(executions[0].correlation_vector, "");
+        assert_eq!(executions[1].backend, "windows_sandbox");
+        assert_eq!(executions[1].sandbox_kind, "vm");
+        assert_eq!(executions[1].exit_code, CANCELLED_EXIT_CODE);
+        assert_eq!(executions[1].outcome, "failure");
+        assert_eq!(executions[1].duration_ms, 17);
+        assert_eq!(executions[1].failure_reason, Some(FailureReason::Cancelled));
+        assert_eq!(executions[1].phase, "exec");
+        assert_eq!(executions[1].correlation_vector, "corr-cancelled");
+
+        let errors = events::test_sink::take_errors();
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].error_type, FailureReason::Cancelled);
+        assert_eq!(errors[0].exit_code, CANCELLED_EXIT_CODE);
+        assert_eq!(errors[0].phase, "");
+        assert_eq!(errors[0].correlation_vector, "");
+        assert_eq!(errors[1].error_type, FailureReason::Cancelled);
+        assert_eq!(errors[1].exit_code, CANCELLED_EXIT_CODE);
+        assert_eq!(errors[1].phase, "exec");
+        assert_eq!(errors[1].correlation_vector, "corr-cancelled");
 
         reset_for_test();
     }

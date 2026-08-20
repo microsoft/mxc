@@ -144,7 +144,9 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
 /// * [`SandboxProcess::try_wait`] — same, on the poll that observes the exit
 ///   or an error branch (a `Pending` poll leaves the invariant to a later
 ///   `wait` / `kill` / `Drop`).
-/// * [`SandboxProcess::kill`] — synthesised cancellation event.
+/// * [`SandboxProcess::kill`] — cancellation event after the wrapped process
+///   confirms the kill succeeded. A failed kill leaves the slot active for a
+///   later `wait` / successful `try_wait`.
 /// * [`Drop`] — synthesised process-error event, so a wrapper dropped without
 ///   `wait` never releases the provider without accounting for the run.
 ///
@@ -274,10 +276,6 @@ impl TelemetryProcess {
             return;
         }
         let (raw_kind, message) = match kind {
-            SyntheticTerminal::Killed => (
-                std::io::ErrorKind::Interrupted,
-                "sandbox handle was killed before completion",
-            ),
             SyntheticTerminal::Dropped => (
                 std::io::ErrorKind::Other,
                 "sandbox handle was dropped before completion",
@@ -292,14 +290,51 @@ impl TelemetryProcess {
         // BackendError → FailureReason::ProcessError (state-aware).
         self.emit(&Err(std::io::Error::new(raw_kind, message)));
     }
+
+    /// Emit the terminal event for a confirmed explicit kill.
+    fn emit_cancellation(&mut self) {
+        if !self.active {
+            return;
+        }
+        match &self.mode {
+            TelemetryMode::OneShot {
+                containment,
+                requested_sandbox_kind,
+            } => telemetry::emit_sdk_cancellation_with_kind(
+                true,
+                *requested_sandbox_kind,
+                telemetry::TelemetryContext {
+                    backend: containment.wire_name(),
+                    phase: "",
+                    correlation_vector: "",
+                },
+                self.started.elapsed(),
+            ),
+            TelemetryMode::StateAware {
+                backend,
+                phase,
+                correlation_vector,
+                requested_sandbox_kind,
+            } => telemetry::emit_sdk_cancellation_with_kind(
+                true,
+                *requested_sandbox_kind,
+                telemetry::TelemetryContext {
+                    backend,
+                    phase,
+                    correlation_vector,
+                },
+                self.started.elapsed(),
+            ),
+        }
+        self.active = false;
+    }
 }
 
-/// The three synthetic-terminal callsites, so [`TelemetryProcess::emit_synthetic`]
+/// Synthetic terminal callsites for which no real completion result is
+/// available, so [`TelemetryProcess::emit_synthetic`]
 /// can attribute the event to the exit path that produced it.
 #[derive(Debug, Clone, Copy)]
 enum SyntheticTerminal {
-    /// `SandboxProcess::kill` was called.
-    Killed,
     /// The wrapper was dropped without a preceding `wait` / successful `try_wait`.
     Dropped,
     /// `SandboxProcess::try_wait` observed an underlying error.
@@ -358,12 +393,12 @@ impl SandboxProcess for TelemetryProcess {
     }
 
     fn kill(&mut self) -> std::io::Result<()> {
-        // Forward the kill first so its I/O outcome is what we return; then
-        // emit the synthesised cancellation event before the provider
-        // reference is released. `emit_synthetic` is idempotent, so a
-        // subsequent `wait` on the (now-killed) child is a no-op.
+        // A failed kill does not prove termination, so retain the exactly-once
+        // slot for a later wait/try_wait that can report the real outcome.
         let result = self.inner.kill();
-        self.emit_synthetic(SyntheticTerminal::Killed);
+        if result.is_ok() {
+            self.emit_cancellation();
+        }
         result
     }
 
@@ -469,6 +504,7 @@ mod telemetry_process_tests {
     struct StubProcess {
         try_wait_result: TryWaitResult,
         wait_result: std::io::Result<i32>,
+        kill_fails: bool,
     }
 
     impl SandboxProcess for StubProcess {
@@ -497,7 +533,11 @@ mod telemetry_process_tests {
         }
 
         fn kill(&mut self) -> std::io::Result<()> {
-            Ok(())
+            if self.kill_fails {
+                Err(std::io::Error::other("kill failed"))
+            } else {
+                Ok(())
+            }
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
@@ -509,10 +549,18 @@ mod telemetry_process_tests {
     }
 
     fn wrapped(try_wait_result: TryWaitResult) -> TelemetryProcess {
+        wrapped_with_kill_failure(try_wait_result, false)
+    }
+
+    fn wrapped_with_kill_failure(
+        try_wait_result: TryWaitResult,
+        kill_fails: bool,
+    ) -> TelemetryProcess {
         TelemetryProcess {
             inner: Box::new(StubProcess {
                 try_wait_result,
                 wait_result: Ok(0),
+                kill_fails,
             }),
             active: true,
             mode: TelemetryMode::StateAware {
@@ -554,6 +602,16 @@ mod telemetry_process_tests {
         assert_eq!(process.try_wait().unwrap(), None);
         assert!(process.active);
         process.emit_synthetic(SyntheticTerminal::Dropped);
+        assert!(!process.active);
+    }
+
+    #[test]
+    fn failed_kill_leaves_the_exactly_once_slot_active() {
+        let mut process = wrapped_with_kill_failure(TryWaitResult::Running, true);
+
+        assert!(process.kill().is_err());
+        assert!(process.active);
+        assert_eq!(process.wait().unwrap(), 0);
         assert!(!process.active);
     }
 }
