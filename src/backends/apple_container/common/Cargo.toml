@@ -1,0 +1,13 @@
+[package]
+name = "apple_container_common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Typed Apple Container management primitives for the MXC macOS backend."
+
+[dependencies]
+getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+wxc_common = { workspace = true }

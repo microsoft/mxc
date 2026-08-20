@@ -104,6 +104,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "apple_container_common"
+version = "0.7.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "wxc_common",
+]
+
+[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1526,6 +1537,7 @@ name = "mxc_engine"
 version = "0.7.0"
 dependencies = [
  "appcontainer_common",
+ "apple_container_common",
  "bwrap_common",
  "hyperlight_common",
  "isolation_session_bindings",
