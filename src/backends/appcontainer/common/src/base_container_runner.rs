@@ -1600,24 +1600,14 @@ impl BaseContainerRunner {
             }
         } else {
             // Start with clean default env, then merge user-provided vars on top.
-            let mut entries =
+            let entries =
                 crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
                     ScriptResponse::error(&format!(
                         "failed to create the default environment for the sandboxed child: {error}"
                     ))
                 })?;
-            for entry in &request.env {
-                if let Some((key, value)) = entry.split_once('=') {
-                    if let Some(existing) = entries
-                        .iter_mut()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(key))
-                    {
-                        existing.1 = value.to_string();
-                    } else {
-                        entries.push((key.to_string(), value.to_string()));
-                    }
-                }
-            }
+            let entries =
+                crate::appcontainer_runner::merge_env_entries(entries, &request.env, None);
             Some(crate::appcontainer_runner::encode_env_block(&entries))
         };
 

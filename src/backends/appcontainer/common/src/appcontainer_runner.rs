@@ -175,28 +175,6 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
     entries
 }
 
-/// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
-/// proxy env vars (stripping any pre-existing proxy vars first).
-fn build_explicit_entries(
-    env_vars: &[String],
-    proxy_address: Option<&wxc_common::models::ProxyAddress>,
-) -> Vec<(String, String)> {
-    let mut entries: Vec<(String, String)> = env_vars
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .split_once('=')
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-        })
-        .collect();
-
-    if let Some(addr) = proxy_address {
-        inject_proxy_vars(&mut entries, addr);
-    }
-
-    entries
-}
-
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
 fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
@@ -208,6 +186,42 @@ fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::mod
     let proxy_url = addr.to_url();
     entries.push(("HTTP_PROXY".to_string(), proxy_url.clone()));
     entries.push(("HTTPS_PROXY".to_string(), proxy_url));
+}
+
+/// Merge user-provided `KEY=VALUE` strings on top of a base environment,
+/// then scrub and inject proxy vars if a proxy is configured.
+///
+/// The merge is case-insensitive: a user entry whose key matches an
+/// existing base entry (ignoring ASCII case) overrides it. Keys not
+/// present in the base are appended.
+///
+/// When `proxy_address` is `Some`, all proxy var names (`HTTP_PROXY`,
+/// `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`) are removed from the merged
+/// result before the configured proxy is injected as `HTTP_PROXY` +
+/// `HTTPS_PROXY`. This ensures proxy vars from the default environment
+/// (e.g. from the user's Windows registry) cannot bypass or ignore the
+/// configured proxy.
+pub(crate) fn merge_env_entries(
+    mut base: Vec<(String, String)>,
+    user_env: &[String],
+    proxy_address: Option<&wxc_common::models::ProxyAddress>,
+) -> Vec<(String, String)> {
+    for entry in user_env {
+        if let Some((key, value)) = entry.split_once('=') {
+            if key.is_empty() {
+                continue;
+            }
+            if let Some(existing) = base.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(key)) {
+                existing.1 = value.to_string();
+            } else {
+                base.push((key.to_string(), value.to_string()));
+            }
+        }
+    }
+    if let Some(addr) = proxy_address {
+        inject_proxy_vars(&mut base, addr);
+    }
+    base
 }
 
 /// Owned capability SID derived from a capability name. Frees the underlying
@@ -1038,25 +1052,14 @@ impl AppContainerScriptRunner {
         //      override defaults). This ensures system-critical variables are
         //      always present — without them CreateProcessW returns
         //      ERROR_BAD_ENVIRONMENT (0x800700CB) in AppContainer mode.
-        //   3. Inject proxy vars if configured.
+        //   3. Scrub proxy vars from every source and inject the configured
+        //      proxy, so registry-inherited proxy vars cannot bypass it.
         let env_block: Vec<u16> = {
-            let mut entries = create_default_env_entries()?;
-            if !request.env.is_empty() {
-                let explicit = build_explicit_entries(&request.env, None);
-                for (key, value) in explicit {
-                    if let Some(existing) = entries
-                        .iter_mut()
-                        .find(|(k, _)| k.eq_ignore_ascii_case(&key))
-                    {
-                        existing.1 = value;
-                    } else {
-                        entries.push((key, value));
-                    }
-                }
-            }
-            if let Some(addr) = self.proxy_address.as_ref() {
-                inject_proxy_vars(&mut entries, addr);
-            }
+            let entries = merge_env_entries(
+                create_default_env_entries()?,
+                &request.env,
+                self.proxy_address.as_ref(),
+            );
             encode_env_block(&entries)
         };
 
@@ -2147,32 +2150,97 @@ mod tests {
     }
 
     #[test]
-    fn build_explicit_entries_no_proxy() {
-        let env = vec!["FOO=bar".to_string(), "BAZ=qux".to_string()];
-        let entries = super::build_explicit_entries(&env, None);
+    fn merge_env_entries_empty_user_env_preserves_defaults() {
+        let base = vec![
+            ("SystemRoot".to_string(), "C:\\Windows".to_string()),
+            ("USERPROFILE".to_string(), "C:\\Users\\test".to_string()),
+        ];
+        let entries = super::merge_env_entries(base, &[], None);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ("FOO".to_string(), "bar".to_string()));
-        assert_eq!(entries[1], ("BAZ".to_string(), "qux".to_string()));
+        assert_eq!(
+            entries[0],
+            ("SystemRoot".to_string(), "C:\\Windows".to_string())
+        );
+        assert_eq!(
+            entries[1],
+            ("USERPROFILE".to_string(), "C:\\Users\\test".to_string())
+        );
     }
 
     #[test]
-    fn build_explicit_entries_strips_and_injects_proxy() {
-        let env = vec![
-            "FOO=bar".to_string(),
-            "HTTP_PROXY=old".to_string(),
-            "https_proxy=old2".to_string(),
-            "NO_PROXY=localhost".to_string(),
+    fn merge_env_entries_overrides_case_insensitively() {
+        let base = vec![
+            ("SystemRoot".to_string(), "C:\\Windows".to_string()),
+            ("PATH".to_string(), "C:\\Windows\\system32".to_string()),
         ];
-        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
-        let entries = super::build_explicit_entries(&env, Some(&proxy));
+        let user = vec!["systemroot=C:\\Custom".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+        // systemroot (lowercase) overrides SystemRoot (mixed case).
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ("SystemRoot".to_string(), "C:\\Custom".to_string())
+        );
+        // Non-overridden keys remain untouched.
+        assert_eq!(
+            entries[1],
+            ("PATH".to_string(), "C:\\Windows\\system32".to_string())
+        );
+    }
 
-        // Original proxy vars should be stripped.
-        assert!(!entries
+    #[test]
+    fn merge_env_entries_appends_new_keys() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec!["MY_VAR=hello".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ("SystemRoot".to_string(), "C:\\Windows".to_string())
+        );
+        assert_eq!(entries[1], ("MY_VAR".to_string(), "hello".to_string()));
+    }
+
+    #[test]
+    fn merge_env_entries_last_user_value_wins() {
+        let base = vec![("FOO".to_string(), "default".to_string())];
+        let user = vec!["FOO=first".to_string(), "FOO=second".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], ("FOO".to_string(), "second".to_string()));
+    }
+
+    #[test]
+    fn merge_env_entries_scrubs_proxy_vars_from_base() {
+        let base = vec![
+            ("SystemRoot".to_string(), "C:\\Windows".to_string()),
+            ("NO_PROXY".to_string(), "*.corp.local".to_string()),
+            ("ALL_PROXY".to_string(), "socks://old:1080".to_string()),
+        ];
+        let user = vec!["FOO=bar".to_string()];
+        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::merge_env_entries(base, &user, Some(&proxy));
+
+        // System-critical vars preserved.
+        assert!(entries
             .iter()
-            .any(|(k, _)| k == "http_proxy" || k == "https_proxy" || k == "NO_PROXY"));
-        // FOO should remain.
+            .any(|(k, v)| k == "SystemRoot" && v == "C:\\Windows"));
+        // User vars merged.
         assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
-        // Injected proxy vars should be present.
+        // NO_PROXY and ALL_PROXY from the default env are gone.
+        assert!(
+            !entries
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("NO_PROXY")),
+            "NO_PROXY from base must be scrubbed: {entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("ALL_PROXY")),
+            "ALL_PROXY from base must be scrubbed: {entries:?}"
+        );
+        // Configured proxy injected.
         let proxy_url = proxy.to_url();
         assert!(entries
             .iter()
@@ -2180,6 +2248,167 @@ mod tests {
         assert!(entries
             .iter()
             .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
+    }
+
+    #[test]
+    fn merge_env_entries_scrubs_proxy_vars_from_user() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec![
+            "HTTP_PROXY=http://user-proxy:3128".to_string(),
+            "FOO=bar".to_string(),
+        ];
+        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::merge_env_entries(base, &user, Some(&proxy));
+
+        // FOO preserved.
+        assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+        // User's HTTP_PROXY replaced by the configured proxy.
+        let proxy_url = proxy.to_url();
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        // The user's proxy value is gone.
+        assert!(
+            !entries.iter().any(|(_, v)| v.contains("user-proxy")),
+            "user-supplied proxy value must be replaced: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn merge_env_entries_scrubs_proxy_vars_from_all_sources() {
+        let base = vec![
+            ("NO_PROXY".to_string(), "base-value".to_string()),
+            ("HTTP_PROXY".to_string(), "http://base:3128".to_string()),
+        ];
+        let user = vec!["HTTPS_PROXY=http://user:3128".to_string()];
+        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::merge_env_entries(base, &user, Some(&proxy));
+
+        // Only the configured proxy survives.
+        let proxy_url = proxy.to_url();
+        assert_eq!(entries.len(), 2);
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
+        // Neither the base nor the user proxy values survive.
+        assert!(
+            !entries
+                .iter()
+                .any(|(_, v)| v.contains("base") || v.contains("user")),
+            "foreign proxy values must be scrubbed: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn merge_env_entries_no_proxy_passes_through() {
+        let base = vec![
+            ("SystemRoot".to_string(), "C:\\Windows".to_string()),
+            ("HTTP_PROXY".to_string(), "http://registry:3128".to_string()),
+        ];
+        let user = vec!["FOO=bar".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+
+        // When no proxy is configured, proxy vars from the default env are
+        // not stripped (consistent with the empty-env path).
+        assert_eq!(entries.len(), 3);
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == "http://registry:3128"));
+        assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+    }
+
+    #[test]
+    fn merge_env_entries_skips_malformed_entries() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec!["MALFORMED".to_string(), "FOO=bar".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ("SystemRoot".to_string(), "C:\\Windows".to_string())
+        );
+        assert_eq!(entries[1], ("FOO".to_string(), "bar".to_string()));
+    }
+
+    #[test]
+    fn merge_env_entries_empty_base_with_proxy() {
+        let base: Vec<(String, String)> = vec![];
+        let user = vec![
+            "FOO=bar".to_string(),
+            "HTTP_PROXY=http://user:3128".to_string(),
+        ];
+        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::merge_env_entries(base, &user, Some(&proxy));
+
+        // User's proxy is scrubbed; configured proxy injected.
+        let proxy_url = proxy.to_url();
+        assert!(entries.iter().any(|(k, v)| k == "FOO" && v == "bar"));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
+        assert!(
+            !entries.iter().any(|(_, v)| v.contains("user:3128")),
+            "user-supplied proxy must be scrubbed: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn merge_env_entries_case_insensitive_duplicate_user_keys_last_wins() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec!["FOO=first".to_string(), "fOo=second".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+
+        // Both user entries match each other case-insensitively; the later
+        // entry wins and the first entry's key casing is retained.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0],
+            ("SystemRoot".to_string(), "C:\\Windows".to_string())
+        );
+        assert_eq!(entries[1], ("FOO".to_string(), "second".to_string()));
+    }
+
+    #[test]
+    fn merge_env_entries_scrubs_lowercase_proxy_var_from_user() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec!["no_proxy=.corp.internal".to_string()];
+        let proxy = wxc_common::models::ProxyAddress::new("127.0.0.1".to_string(), 8080);
+        let entries = super::merge_env_entries(base, &user, Some(&proxy));
+
+        // Case-insensitive scrubbing applies to user entries as well as base ones.
+        assert!(
+            !entries
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("NO_PROXY")),
+            "lowercase no_proxy from user entries must be scrubbed: {entries:?}"
+        );
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "SystemRoot" && v == "C:\\Windows"));
+        let proxy_url = proxy.to_url();
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTP_PROXY" && v == &proxy_url));
+        assert!(entries
+            .iter()
+            .any(|(k, v)| k == "HTTPS_PROXY" && v == &proxy_url));
+    }
+
+    #[test]
+    fn merge_env_entries_skips_empty_key_entries() {
+        let base = vec![("SystemRoot".to_string(), "C:\\Windows".to_string())];
+        let user = vec!["=C:=C:\\stray".to_string(), "FOO=bar".to_string()];
+        let entries = super::merge_env_entries(base, &user, None);
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|(k, _)| !k.is_empty()));
+        assert_eq!(entries[1], ("FOO".to_string(), "bar".to_string()));
     }
 
     // ---- validate_runner: unsupported policy fields surface as errors. ----
