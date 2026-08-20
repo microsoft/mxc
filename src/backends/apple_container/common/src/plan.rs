@@ -172,8 +172,10 @@ fn require_absolute(path: &Path, field: &'static str) -> Result<(), PlanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
     use crate::resource::ResourceKind;
 
+    #[cfg(target_os = "macos")]
     fn token() -> OwnershipToken {
         OwnershipToken::parse("0123456789abcdef0123456789abcdef").unwrap()
     }
