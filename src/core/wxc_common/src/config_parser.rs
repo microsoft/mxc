@@ -637,6 +637,15 @@ fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     }
 }
 
+fn state_aware_containment_from_id(sandbox_id: &str) -> Option<wire::Containment> {
+    match sandbox_id.split_once(':')?.0 {
+        "wslc" => Some(wire::Containment::Wslc),
+        "wsb" => Some(wire::Containment::WindowsSandbox),
+        "iso" => Some(wire::Containment::IsolationSession),
+        _ => None,
+    }
+}
+
 /// Validates a caller-specified `processContainer.captureDenials.outputPath`: it
 /// must be an absolute path whose parent directory already exists (the runner
 /// writes the JSON denials output file there after the workload exits). The
@@ -1478,6 +1487,7 @@ fn convert_wire_state_aware(
 
     let sandbox_id = cfg.sandbox_id.clone();
     let correlation_vector = cfg.correlation_vector.clone();
+    let network_supplied = cfg.network.is_some();
 
     // State-aware requests carry only cross-cutting fields (process /
     // filesystem / network / ui) plus the experimental backend block. One-shot-
@@ -1517,9 +1527,18 @@ fn convert_wire_state_aware(
     cfg.process_container = None;
     cfg.lxc = None;
     cfg.lifecycle = None;
+    if phase != Phase::Provision {
+        cfg.containment = sandbox_id
+            .as_deref()
+            .and_then(state_aware_containment_from_id);
+    }
 
     let require_process = phase == Phase::Exec;
     let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    if phase != Phase::Provision && !network_supplied {
+        request.policy.network_egress = None;
+        request.policy.network_ingress = None;
+    }
 
     // Populate the typed `experimental.telemetry` field from the raw block that
     // was peeled off above. The rest of `experimental` is typed per-backend at
@@ -1852,6 +1871,62 @@ mod tests {
                 r
             );
         }
+    }
+
+    #[test]
+    fn state_aware_pre_v08_rejects_null_directional_sections() {
+        for extra in [
+            r#""network": {"egress": null}"#,
+            r#""runtimeConfig": null"#,
+            r#""processContainer": {"network": null}"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.7.0-alpha",
+                    "phase": "start",
+                    "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+                    {extra}
+                }}"#
+            );
+            assert!(matches!(load_mxc(&json), Err(ParseError::StateAware(_))));
+        }
+    }
+
+    #[test]
+    fn state_aware_v08_omitted_network_remains_absent_after_parsing() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "start",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef"
+        }"#;
+        let parsed = match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        };
+
+        assert!(parsed.request.policy.network_egress.is_none());
+        assert!(parsed.request.policy.network_ingress.is_none());
+        assert!(!parsed.request.policy.network_specified);
+        assert!(!parsed.request.policy.network_mode_specified);
+    }
+
+    #[test]
+    fn state_aware_v08_runtime_proxy_uses_sandbox_backend_context() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8888"},
+            "process": {"commandLine": "echo hi"}
+        }"#;
+        let parsed = match load_mxc(json).unwrap() {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware request"),
+        };
+
+        assert_eq!(parsed.request.containment, ContainmentBackend::Wslc);
+        assert!(parsed.request.policy.runtime_network_proxy_specified);
+        assert!(parsed.request.policy.network_proxy.is_enabled());
     }
 
     /// Parse a provision request and return the resolved cross-cutting policy.
@@ -2206,6 +2281,30 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn load_request_from_value_preserves_null_sensitive_version_gating() {
+        for config in [
+            serde_json::json!({
+                "version": "0.7.0-alpha",
+                "process": {"commandLine": "echo hi"},
+                "network": {"egress": null}
+            }),
+            serde_json::json!({
+                "version": "0.7.0-alpha",
+                "process": {"commandLine": "echo hi"},
+                "runtimeConfig": null
+            }),
+            serde_json::json!({
+                "version": "0.7.0-alpha",
+                "process": {"commandLine": "echo hi"},
+                "processContainer": {"network": null}
+            }),
+        ] {
+            let mut logger = test_logger();
+            assert!(load_request_from_value(config, &mut logger, false).is_err());
+        }
     }
 
     #[test]
@@ -5197,6 +5296,77 @@ mod tests {
     }
 
     #[test]
+    fn schema_v08_rejects_runtime_proxy_with_direct_rules() {
+        for rules in [
+            r#""allow": [{"to": [{"cidr": "192.0.2.0/24"}]}]"#,
+            r#""deny": [{"to": [{"cidr": "192.0.2.0/24"}]}]"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.8.0-alpha",
+                    "containment": "bubblewrap",
+                    "process": {{"commandLine": "echo hi"}},
+                    "network": {{
+                        "egress": {{"default": "deny", {rules}}},
+                        "ingress": {{"default": "deny", "hostLoopback": "deny"}}
+                    }},
+                    "runtimeConfig": {{"networkProxy": "http://127.0.0.1:8080"}}
+                }}"#
+            );
+            let error = match load_mxc(&json) {
+                Err(ParseError::OneShot(error)) => error.to_string(),
+                other => panic!("expected one-shot rejection, got: {other:?}"),
+            };
+            assert!(error.contains("no direct allow or deny rules"));
+        }
+    }
+
+    #[test]
+    fn schema_v08_rejects_invalid_processcontainer_proxy_postures() {
+        for (peer, ingress, expected) in [
+            (
+                "",
+                r#"{"default": "deny", "hostLoopback": "allow"}"#,
+                "network.ingress.default='allow'",
+            ),
+            (
+                r#""allowedProxyPeer": "Contoso.Proxy_123""#,
+                r#"{"default": "allow", "hostLoopback": "allow"}"#,
+                "identity-scoped ProcessContainer proxy",
+            ),
+            (
+                "",
+                r#"{"default": "allow", "hostLoopback": "deny"}"#,
+                "without allowedProxyPeer",
+            ),
+        ] {
+            let process_container = if peer.is_empty() {
+                String::new()
+            } else {
+                format!(r#","processContainer": {{"network": {{{peer}}}}}"#)
+            };
+            let json = format!(
+                r#"{{
+                    "version": "0.8.0-alpha",
+                    "containment": "processcontainer",
+                    "process": {{"commandLine": "echo hi"}},
+                    "network": {{
+                        "egress": {{"default": "deny"}},
+                        "ingress": {ingress}
+                    }},
+                    "runtimeConfig": {{"networkProxy": "http://127.0.0.1:8080"}}
+                    {process_container}
+                }}"#
+            );
+            let error = match load_mxc(&json) {
+                Err(ParseError::OneShot(error)) => error.to_string(),
+                other => panic!("expected one-shot rejection, got: {other:?}"),
+            };
+            assert!(error.contains(expected), "got: {error}");
+        }
+    }
+
+    #[test]
     fn schema_v08_rejects_proxy_peer_without_runtime_proxy() {
         let json = r#"{
             "version": "0.8.0-alpha",
@@ -5414,6 +5584,33 @@ mod tests {
             other => panic!("expected one-shot rejection, got: {other:?}"),
         };
         assert!(error.contains("port must be between 1 and 65535"));
+    }
+
+    #[test]
+    fn schema_v08_rejects_invalid_end_port_forms() {
+        for (port, expected) in [
+            (
+                r#"{"protocol": "tcp", "port": 1, "endPort": 0}"#,
+                "between 1 and 65535",
+            ),
+            (r#"{"protocol": "tcp", "endPort": 443}"#, "requires port"),
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.8.0-alpha",
+                    "process": {{"commandLine": "echo hi"}},
+                    "network": {{
+                        "egress": {{"allow": [{{"ports": [{port}]}}]}}
+                    }}
+                }}"#
+            );
+            let error = match load_mxc(&json) {
+                Err(ParseError::OneShot(error)) => error.to_string(),
+                other => panic!("expected one-shot rejection, got: {other:?}"),
+            };
+            assert!(error.contains("network.egress.allow[0].ports[0].endPort"));
+            assert!(error.contains(expected), "got: {error}");
+        }
     }
 
     #[test]

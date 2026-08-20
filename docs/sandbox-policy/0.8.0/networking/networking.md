@@ -5,6 +5,11 @@ described in this document. Schema 0.7 and earlier retain their legacy network
 configuration shape. During the additive transition, schema 0.8 requests may
 use either shape, but cannot mix them.
 
+This change defines and parses the schema 0.8 contract. A backend must also
+declare validation support and implement enforcement before accepting a
+directional policy; unsupported backends reject it in the stacked validation
+work.
+
 ## Overview
 
 The MXC network configuration describes what network access a sandboxed workload has. The schema is shared across all container types (process containers, WSLc, LXC, Bubblewrap, Seatbelt). Enforcement varies by backend and platform.
@@ -174,6 +179,10 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 
 ```json
 {
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
   "runtimeConfig": { // runtime data passed to MXC (not policy)
     // http(s)://localhost:<port>, http(s)://127.0.0.1:<port>, or http(s)://[::1]:<port>
     "networkProxy": "http://127.0.0.1:8080"
@@ -181,10 +190,13 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 }
 ```
 
-The omitted `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, cooperating HTTP(S)
-clients are configured to use the proxy; clients that ignore the proxy settings are blocked from direct egress.
-Without runtime proxy configuration, the deny defaults form model 3. Backend-specific proxy reachability requirements
-are documented below.
+The example shows the identity-less ProcessContainer posture: private-network
+ingress is enabled so host loopback can reach the proxy, while direct egress
+remains deny-by-default. When `runtimeConfig.networkProxy` is present,
+cooperating HTTP(S) clients are configured to use the proxy; clients that ignore
+the proxy settings are blocked from direct egress. Without runtime proxy
+configuration, the deny defaults form model 3. Backend-specific proxy
+reachability requirements are documented below.
 
 This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on
 Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps
