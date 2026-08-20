@@ -1548,7 +1548,7 @@ impl SandboxBackend for AppContainerScriptRunner {
         validate_network_policy_support(request, self.network_policy_support())?;
         if request.policy.allowed_proxy_peer.is_some() {
             return Err(ScriptResponse::error(
-                "processContainer.network.allowedProxyPeer requires BaseContainer support",
+                "processContainer.network.allowedProxyPeer requires a BaseContainer path",
             ));
         }
 
