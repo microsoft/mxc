@@ -2005,14 +2005,29 @@ impl NetworkIptablesManager {
         Ok(())
     }
 
-    /// Whether the given enforcement mode is served by the iptables firewall
-    /// backend. Pure and side-effect-free so the gate can be exercised without
-    /// invoking the host firewall.
-    fn enforcement_mode_uses_firewall(mode: &NetworkEnforcementMode) -> bool {
+    /// Whether `policy` asks for the iptables chains at all.
+    ///
+    /// A 0.7 config requests them through `network.enforcementMode`. A 0.8
+    /// config has no such field to set: the parser rejects `enforcementMode`
+    /// alongside `egress`/`ingress`, so every directional policy carries the
+    /// `Capabilities` default and would skip the very chain its own `egress`
+    /// section describes. Under 0.8 the directional sections *are* the firewall
+    /// request, which is what the second arm says.
+    ///
+    /// The arm is keyed on [`Self::stated_egress`] rather than on
+    /// `network_mode_specified`, which the legacy parser also sets: a 0.7
+    /// policy using `blockedHosts` under the default `capabilities` mode
+    /// installs no rules today, and reading that flag here would silently start
+    /// enforcing it. `network_egress` is written only by the directional
+    /// parser, so 0.7 keeps the mode-only answer by construction.
+    ///
+    /// Pure and side-effect-free so the gate can be exercised without invoking
+    /// the host firewall.
+    pub(crate) fn policy_uses_firewall(policy: &ContainerPolicy) -> bool {
         matches!(
-            mode,
+            policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        )
+        ) || Self::stated_egress(policy).is_some()
     }
 
     /// Apply network firewall rules based on the container policy.
@@ -2034,7 +2049,7 @@ impl NetworkIptablesManager {
         logger: &mut Logger,
     ) -> Result<bool, String> {
         // Skip if network enforcement doesn't use firewall.
-        if !Self::enforcement_mode_uses_firewall(&policy.network_enforcement_mode) {
+        if !Self::policy_uses_firewall(policy) {
             // ...unless the policy also carries a proxy, in which case skipping
             // is the dangerous outcome rather than the safe one. The runner
             // injects HTTP(S)_PROXY from the same policy regardless of what
@@ -4537,12 +4552,57 @@ mod tests {
     #[test]
     fn every_enforcement_mode_takes_the_contractual_firewall_gate() {
         for (mode, uses_firewall) in enforcement_modes_with_firewall_contract() {
+            let label = format!("{mode:?}");
+            let policy = ContainerPolicy {
+                network_enforcement_mode: mode,
+                ..Default::default()
+            };
             assert_eq!(
-                NetworkIptablesManager::enforcement_mode_uses_firewall(&mode),
+                NetworkIptablesManager::policy_uses_firewall(&policy),
                 uses_firewall,
-                "{mode:?} firewall-gate predicate mismatch"
+                "{label} firewall-gate predicate mismatch"
             );
         }
+    }
+
+    // A 0.8 config cannot carry `enforcementMode` -- the parser rejects it
+    // beside `egress` -- so it always arrives with the `Capabilities` default.
+    // Reading the mode alone would skip the chain the `egress` section just
+    // asked for, leaving the policy unenforced while the run reported success.
+    #[test]
+    fn a_stated_directional_egress_posture_requests_the_firewall_under_the_capabilities_default() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+            network_mode_specified: true,
+            network_egress: Some(NetworkEgressPolicy::default()),
+            ..Default::default()
+        };
+
+        assert!(
+            NetworkIptablesManager::policy_uses_firewall(&policy),
+            "a stated 0.8 egress posture must request the firewall even though \
+             enforcementMode is absent from the 0.8 schema and defaults to capabilities"
+        );
+    }
+
+    // The legacy parser also sets `network_mode_specified`, so keying the gate
+    // on that flag would start enforcing 0.7 policies that install no rules
+    // today. `network_egress` is written only by the directional parser.
+    #[test]
+    fn a_legacy_policy_under_capabilities_still_skips_the_firewall() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+            network_mode_specified: true,
+            blocked_hosts: vec!["example.com".to_string()],
+            network_egress: None,
+            ..Default::default()
+        };
+
+        assert!(
+            !NetworkIptablesManager::policy_uses_firewall(&policy),
+            "a 0.7 policy under the capabilities mode must keep skipping the firewall; \
+             enforcing it here would change 0.7 behavior"
+        );
     }
 
     // The JSON parser rejects proxy-under-capabilities, but it is not the only

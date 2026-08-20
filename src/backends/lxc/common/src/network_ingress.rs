@@ -57,7 +57,7 @@
 use std::process::Command;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
+use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::network_iptables::{
     ingress_chain_name_for, HostIpv6State, Ip6tablesStatus, NetworkIptablesManager,
@@ -495,6 +495,44 @@ impl IngressManager {
         }
     }
 
+    /// The 0.8 inbound posture, but only when the config actually stated one.
+    ///
+    /// The directional parser writes `network_ingress` for *every* 0.8 config,
+    /// filling in `NetworkIngressPolicy::default()` even when the config
+    /// carries no `network` block at all, so `is_some()` alone does not mean
+    /// the operator asked for anything. `network_mode_specified` is what
+    /// separates a stated posture from that fill-in.
+    fn stated_ingress(policy: &ContainerPolicy) -> Option<&NetworkIngressPolicy> {
+        policy
+            .network_ingress
+            .as_ref()
+            .filter(|_| policy.network_mode_specified)
+    }
+
+    /// The policy field asking for permissive inbound, if any, named as the
+    /// operator wrote it.
+    ///
+    /// 0.7 states this in `allowLocalNetwork`; 0.8 splits it across
+    /// `network.ingress.default` and `network.ingress.hostLoopback`. LXC's
+    /// inbound chain is a single posture, so either 0.8 control asking for
+    /// `allow` is the same permissive request — the split is lossless here only
+    /// because both `allow` values are refused and both `deny` values are
+    /// served by the one default-deny chain. Returning the field name rather
+    /// than a bare `bool` keeps the refusal pointing at the line to change.
+    fn permissive_inbound_field(policy: &ContainerPolicy) -> Option<&'static str> {
+        if let Some(ingress) = Self::stated_ingress(policy) {
+            if ingress.default == NetworkAction::Allow {
+                return Some("network.ingress.default");
+            }
+            if ingress.host_loopback == NetworkAction::Allow {
+                return Some("network.ingress.hostLoopback");
+            }
+            return None;
+        }
+
+        policy.allow_local_network.then_some("allowLocalNetwork")
+    }
+
     /// Apply the inbound firewall rules for `policy`.
     ///
     /// Delegates argv construction to the pure [`Self::build_ingress_rules`]
@@ -506,37 +544,36 @@ impl IngressManager {
         logger: &mut Logger,
     ) -> Result<bool, String> {
         // Skip if network enforcement doesn't use a firewall.
-        let use_firewall = matches!(
-            policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
-        if !use_firewall {
+        if !NetworkIptablesManager::policy_uses_firewall(policy) {
             logger.log_line(
                 "Network enforcement mode does not use firewall, skipping ingress chain.",
             );
             return Ok(true);
         }
 
-        // Permissive host-loopback inbound (`allowLocalNetwork: true`) is not
-        // yet implementable safely. Scoping it to host loopback needs a schema
-        // field that does not exist yet (`loopbackPorts`) plus an MXC-owned
-        // host-loopback forwarder (work item AB#63505947). The only rule we
-        // could emit today is an unscoped `--state NEW -j ACCEPT`, which opens
-        // the container to new inbound connections from every interface and
-        // source — LAN and WAN included, not just host loopback. Refuse with a
-        // clear error rather than silently installing that over-broad accept.
+        // Permissive inbound is not yet implementable safely, whichever schema
+        // asked for it. Scoping it to host loopback needs a schema field that
+        // does not exist yet (`loopbackPorts`) plus an MXC-owned host-loopback
+        // forwarder (work item AB#63505947). The only rule we could emit today
+        // is an unscoped `--state NEW -j ACCEPT`, which opens the container to
+        // new inbound connections from every interface and source — LAN and WAN
+        // included, not just host loopback. Refuse with a clear error rather
+        // than silently installing that over-broad accept.
+        //
+        // Refusing also keeps the support declaration honest: LXC claims the
+        // 0.8 ingress bits because it enforces their `deny` values, and a bit
+        // claimed is a promise to either enforce the field or reject it.
         // Unconditional: we always have a real container netns to hook (the PID
         // is mandatory), so there is no inert path that could safely emit it.
-        if policy.allow_local_network {
-            return Err(
-                "allowLocalNetwork (permissive host-loopback inbound) is not yet implemented \
-                 for the LXC firewall path. Scoping inbound to host loopback requires a \
-                 loopbackPorts policy field and an MXC-owned host-loopback forwarder that do \
-                 not exist yet; the only rule available today would accept new inbound \
-                 connections from every interface and source (LAN and WAN), which is broader \
-                 than requested. Refusing rather than installing an over-broad accept."
-                    .to_string(),
-            );
+        if let Some(field) = Self::permissive_inbound_field(policy) {
+            return Err(format!(
+                "{field} (permissive host-loopback inbound) is not yet implemented for the \
+                 LXC firewall path. Scoping inbound to host loopback requires a loopbackPorts \
+                 policy field and an MXC-owned host-loopback forwarder that do not exist yet; \
+                 the only rule available today would accept new inbound connections from every \
+                 interface and source (LAN and WAN), which is broader than requested. Refusing \
+                 rather than installing an over-broad accept."
+            ));
         }
 
         logger.log_line(&format!(
@@ -1189,7 +1226,99 @@ mod permissive_spec_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::NetworkPolicy;
+    use wxc_common::models::{
+        NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
+    };
+
+    /// The 0.8 ingress posture as the parser delivers it.
+    fn directional_ingress(
+        default: NetworkAction,
+        host_loopback: NetworkAction,
+    ) -> ContainerPolicy {
+        ContainerPolicy {
+            network_mode_specified: true,
+            network_ingress: Some(NetworkIngressPolicy {
+                default,
+                host_loopback,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_deny_deny_directional_ingress_asks_for_nothing_permissive() {
+        assert_eq!(
+            IngressManager::permissive_inbound_field(&directional_ingress(
+                NetworkAction::Deny,
+                NetworkAction::Deny
+            )),
+            None,
+            "the GA ingress defaults are what the existing default-deny chain already \
+             enforces, so they must not be refused"
+        );
+    }
+
+    #[test]
+    fn a_permissive_directional_ingress_default_is_named_in_the_refusal() {
+        assert_eq!(
+            IngressManager::permissive_inbound_field(&directional_ingress(
+                NetworkAction::Allow,
+                NetworkAction::Deny
+            )),
+            Some("network.ingress.default"),
+            "an unenforceable value must be refused by the name the operator wrote"
+        );
+    }
+
+    #[test]
+    fn a_permissive_directional_host_loopback_is_named_in_the_refusal() {
+        assert_eq!(
+            IngressManager::permissive_inbound_field(&directional_ingress(
+                NetworkAction::Deny,
+                NetworkAction::Allow
+            )),
+            Some("network.ingress.hostLoopback"),
+            "an unenforceable value must be refused by the name the operator wrote"
+        );
+    }
+
+    // A 0.8 config never writes the legacy toggle, and a 0.7 config never
+    // carries an ingress section, so neither schema can be reported under the
+    // other's field name.
+    #[test]
+    fn a_legacy_permissive_request_is_still_named_allow_local_network() {
+        let policy = ContainerPolicy {
+            allow_local_network: true,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            IngressManager::permissive_inbound_field(&policy),
+            Some("allowLocalNetwork"),
+            "the 0.7 refusal must keep naming the 0.7 field"
+        );
+    }
+
+    // The parser writes an ingress section for every 0.8 config, including one
+    // with no `network` block at all. Reading it without the stated-posture
+    // filter would treat that fill-in as an operator request.
+    #[test]
+    fn an_unstated_directional_ingress_is_not_read_as_a_request() {
+        let policy = ContainerPolicy {
+            network_mode_specified: false,
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                host_loopback: NetworkAction::Allow,
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            IngressManager::permissive_inbound_field(&policy),
+            None,
+            "a section the parser filled in is not a posture the operator stated"
+        );
+    }
 
     /// A `ContainerPolicy` with the two fields these tests vary; everything
     /// else defaults.
