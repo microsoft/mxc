@@ -234,6 +234,15 @@ of the rule (see #955). The terminal verdict of the unmatched family still
 follows `defaultPolicy`, so a v4-only allowlist under `block` does not leave
 IPv6 open.
 
+An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
+Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
+naming it would never match and a `blockedHosts` entry under `defaultPolicy:
+allow` would fail open. A mapped CIDR is translated the same way — the mapped
+range is the last 32 bits of `::ffff:0:0/96`, so a `/96 + n` prefix becomes a
+v4 `/n`. A prefix shorter than `/96` also covers addresses outside that range,
+which do travel as IPv6, so it stays on `ip6tables`. The LXC backend normalizes
+identically, so the same policy means the same thing on both.
+
 An explicit `blockedHosts` entry outranks any `allowedHosts` entry that covers
 it, including a broader CIDR: denies are installed ahead of allows in a
 first-match chain.

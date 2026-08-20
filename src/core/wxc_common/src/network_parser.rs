@@ -244,6 +244,7 @@ fn apply_legacy_network(
     }
     if let Some(allow) = network.allow_local_network {
         policy.allow_local_network = allow;
+        policy.allow_local_network_specified = true;
     }
     if let Some(hosts) = network.allowed_hosts {
         policy.allowed_hosts = hosts;

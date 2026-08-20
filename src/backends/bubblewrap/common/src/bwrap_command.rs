@@ -245,8 +245,16 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
 /// Keys off proxy *enablement* rather than a resolved address because
 /// `builtinTestServer` has no address until the proxy starts, which is after
 /// validation.
+///
+/// An unset `allowLocalNetwork` is never rejected. The field defaults to
+/// `false`, so rejecting on the value alone would fail every 0.8 request that
+/// shares the host namespace without asking for inbound policy at all. The
+/// warning path keeps the looser check: it only logs.
 pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    if !request.policy.allow_local_network && !request.policy.allow_local_network_specified {
         return None;
     }
     let mode =
@@ -840,6 +848,7 @@ mod tests {
         let mut r = base_request();
         r.schema_version = "0.8.0-alpha".into();
         r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network_specified = true;
         let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
         assert!(msg.contains("allowLocalNetwork=false"));
         // The text is reused verbatim as an error, so it must carry no severity.

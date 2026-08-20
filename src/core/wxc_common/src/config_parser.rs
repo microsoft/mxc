@@ -1229,8 +1229,14 @@ fn convert_wire_config(
                 !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty(),
                 &schema_version,
             );
+            // Only an explicit `false` is rejected: the field defaults to
+            // `false`, so gating on the value alone would reject every request
+            // that never mentioned it. `true` needs no such guard — it cannot
+            // arise from the default.
             let msg = match (policy.allow_local_network, private_netns) {
-                (false, false) => Some(BWRAP_LOCAL_NETWORK_SHARED_NS),
+                (false, false) if policy.allow_local_network_specified => {
+                    Some(BWRAP_LOCAL_NETWORK_SHARED_NS)
+                }
                 (true, true) => Some(BWRAP_LOCAL_NETWORK_PRIVATE_NS),
                 _ => None,
             };
@@ -4290,6 +4296,26 @@ mod tests {
             matches!(&err, WxcError::ConfigParse(m) if m.contains("allowLocalNetwork=false")),
             "expected a parse-time rejection: {err:?}"
         );
+    }
+
+    #[test]
+    fn bubblewrap_accepts_an_omitted_allow_local_network_at_0_8() {
+        // The field defaults to false, so rejecting on the value alone would
+        // reject every 0.8 request that shares the host namespace without
+        // mentioning inbound policy -- the twin test above supplies it.
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "bubblewrap",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true)
+            .expect("an omitted allowLocalNetwork must not be rejected");
+        assert!(!req.policy.allow_local_network);
+        assert!(!req.policy.allow_local_network_specified);
     }
 
     #[test]

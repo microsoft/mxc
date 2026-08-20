@@ -28,7 +28,7 @@
 //! accepted one cannot carry anything but digits, dots, colons and a slash.
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use wxc_common::models::{ExecutionRequest, NetworkPolicy};
 
@@ -104,25 +104,30 @@ impl RuleAddress {
                 family: RuleFamily::V4,
                 text: ip.to_string(),
             }),
-            Ok(IpAddr::V6(ip)) => Ok(Self {
-                family: RuleFamily::V6,
-                text: ip.to_string(),
-            }),
+            Ok(IpAddr::V6(ip)) => match ip.to_ipv4_mapped() {
+                Some(v4) => Ok(Self {
+                    family: RuleFamily::V4,
+                    text: v4.to_string(),
+                }),
+                None => Ok(Self {
+                    family: RuleFamily::V6,
+                    text: ip.to_string(),
+                }),
+            },
             Err(_) => Err(name_rejected(trimmed)),
         }
     }
 
     /// Validate `address/prefix`, keeping the prefix within its family's width.
     fn parse_cidr(entry: &str, address: &str, prefix: &str) -> Result<Self, String> {
-        let (family, canonical) = match address.parse::<IpAddr>() {
-            Ok(IpAddr::V4(ip)) => (RuleFamily::V4, ip.to_string()),
-            Ok(IpAddr::V6(ip)) => (RuleFamily::V6, ip.to_string()),
+        let parsed = match address.parse::<IpAddr>() {
+            Ok(ip) => ip,
             Err(_) => return Err(name_rejected(entry)),
         };
 
-        let width = match family {
-            RuleFamily::V4 => 32,
-            RuleFamily::V6 => 128,
+        let width = match parsed {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
         };
         let bits: u8 = prefix.parse().map_err(|_| {
             format!(
@@ -137,11 +142,35 @@ impl RuleAddress {
             ));
         }
 
+        // The prefix is validated against the family the caller wrote, so a
+        // mapped block is only rewritten once its own notation checks out.
+        let (family, canonical, bits) = match parsed {
+            IpAddr::V4(ip) => (RuleFamily::V4, ip.to_string(), bits),
+            IpAddr::V6(ip) => match mapped_v4_block(ip, bits) {
+                Some((v4, v4_bits)) => (RuleFamily::V4, v4.to_string(), v4_bits),
+                None => (RuleFamily::V6, ip.to_string(), bits),
+            },
+        };
+
         Ok(Self {
             family,
             text: format!("{canonical}/{bits}"),
         })
     }
+}
+
+/// An IPv4-mapped CIDR as its IPv4 equivalent, when it has one.
+///
+/// Linux puts a genuine IPv4 packet on the wire for a mapped destination, so an
+/// `ip6tables` rule naming one never matches: under `defaultPolicy: allow` a
+/// mapped `blockedHosts` entry would otherwise fail open. The LXC backend
+/// normalizes the same way, so a policy means the same thing on both.
+///
+/// The mapped range is the last 32 bits of `::ffff:0:0/96`, so an IPv6 prefix
+/// of `96 + n` is exactly an IPv4 prefix of `n`. A shorter prefix also covers
+/// addresses outside that range, which do travel as IPv6, so it stays IPv6.
+fn mapped_v4_block(ip: Ipv6Addr, bits: u8) -> Option<(Ipv4Addr, u8)> {
+    Some((ip.to_ipv4_mapped()?, bits.checked_sub(96)?))
 }
 
 /// The message for an address that is neither a literal nor a CIDR.
@@ -332,6 +361,60 @@ mod tests {
     }
 
     #[test]
+    fn an_ipv4_mapped_literal_is_programmed_as_ipv4() {
+        // Linux emits a genuine IPv4 packet for a mapped destination, so an
+        // ip6tables rule naming one never matches: under defaultPolicy 'allow'
+        // a mapped blockedHosts entry would fail open.
+        let address = RuleAddress::parse("::ffff:203.0.113.5").expect("a mapped literal is valid");
+        assert_eq!(address.family, RuleFamily::V4);
+        assert_eq!(address.text, "203.0.113.5");
+    }
+
+    #[test]
+    fn an_ipv4_mapped_cidr_is_translated_to_its_ipv4_prefix() {
+        // The mapped range is the last 32 bits of ::ffff:0:0/96, so a v6
+        // prefix of 96 + n is exactly a v4 prefix of n.
+        let address = RuleAddress::parse("::ffff:192.0.2.0/120").expect("a mapped CIDR is valid");
+        assert_eq!(address.family, RuleFamily::V4);
+        assert_eq!(address.text, "192.0.2.0/24");
+
+        let host = RuleAddress::parse("::ffff:198.51.100.42/128").expect("a mapped /128 is valid");
+        assert_eq!(host.family, RuleFamily::V4);
+        assert_eq!(host.text, "198.51.100.42/32");
+    }
+
+    #[test]
+    fn a_prefix_shorter_than_the_mapped_range_stays_ipv6() {
+        // A /95 also covers addresses outside ::ffff:0:0/96, which do travel as
+        // IPv6, so it cannot be rewritten to a single IPv4 block.
+        let address = RuleAddress::parse("::ffff:0:0/95").expect("a v6 CIDR is valid");
+        assert_eq!(address.family, RuleFamily::V6);
+        // Rust renders a mapped address in mixed notation, which ip6tables
+        // accepts; only the family matters for which table it lands in.
+        assert_eq!(address.text, "::ffff:0.0.0.0/95");
+    }
+
+    #[test]
+    fn a_mapped_prefix_is_validated_against_the_notation_the_caller_wrote() {
+        // The caller wrote v6, so the width they are held to is 128 — the
+        // rewrite happens only once their own notation checks out.
+        let error = RuleAddress::parse("::ffff:192.0.2.0/129")
+            .expect_err("a prefix past the v6 width is malformed");
+        assert!(
+            error.contains("wider than its address family allows"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_non_mapped_v6_address_is_left_on_ipv6() {
+        // NAT64 traffic really is emitted as IPv6, so it belongs in ip6tables.
+        let address = RuleAddress::parse("64:ff9b::/96").expect("a NAT64 block is valid");
+        assert_eq!(address.family, RuleFamily::V6);
+        assert_eq!(address.text, "64:ff9b::/96");
+    }
+
+    #[test]
     fn a_cidr_block_keeps_its_prefix() {
         let address = RuleAddress::parse("10.0.0.0/8").expect("a CIDR is a valid rule address");
         assert_eq!(address.family, RuleFamily::V4);
@@ -421,6 +504,20 @@ mod tests {
         assert_eq!(plan.render(), "4 DROP 192.0.2.0/24 - -\n");
         assert_eq!(plan.v4_terminal(), RuleVerdict::Accept);
         assert_eq!(plan.v6_terminal(), RuleVerdict::Accept);
+    }
+
+    /// The reported failure: a mapped `blockedHosts` entry under
+    /// `defaultPolicy: allow`. Classified as IPv6 it would be programmed into
+    /// `ip6tables`, where it never matches the IPv4 packet Linux actually
+    /// emits, and the v4 chain's terminal ACCEPT would let the traffic through.
+    #[test]
+    fn a_mapped_denylist_entry_is_programmed_on_the_family_that_carries_it() {
+        let plan =
+            EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &["::ffff:192.0.2.5"]))
+                .expect("a mapped denylist entry is enforceable");
+
+        assert_eq!(plan.render(), "4 DROP 192.0.2.5 - -\n");
+        assert_eq!(plan.v4_terminal(), RuleVerdict::Accept);
     }
 
     /// D4: an explicit deny overrides a broader allow, which in an ordered
