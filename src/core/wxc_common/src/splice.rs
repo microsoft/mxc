@@ -6,8 +6,7 @@ use serde_json::{json, Value};
 pub(crate) struct Spliced {
     pub json: String,
     /// True when the document already carried a non-empty `process.commandLine`.
-    /// Drives the "Overriding policy process.commandLine" log, which today fires
-    /// only when `apply_command_override` finds a non-empty `script_code`.
+    /// Drives the "Overriding policy process.commandLine" log.
     pub replaced_existing: bool,
 }
 
@@ -131,8 +130,7 @@ mod tests {
             MxcRequest::StateAware(_) => panic!("expected a one-shot request"),
         };
 
-        // The spliced document is a complete request in its own right: it needs
-        // no `allow_missing_command` relaxation to load.
+        // The spliced document is a complete request in its own right.
         assert_eq!(request.script_code, over);
         assert_eq!(request.working_directory, "C:\\workspace");
     }
