@@ -1152,6 +1152,29 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // Seatbelt, legacy shape only (network_egress absent — the directional
+        // shape's equivalent combination is already rejected unconditionally by
+        // validate_directional_proxy_policy in network_parser.rs): a proxy under
+        // defaultPolicy='allow' is a config-authoring mistake, not something
+        // Seatbelt can degrade gracefully from. Outbound is already allow-all
+        // without the proxy, so the proxy adds no enforcement and the caller's
+        // apparent intent (route traffic through the proxy) is silently ignored.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.network_egress.is_none()
+            && policy.network_proxy.is_enabled()
+            && policy.default_network_policy == NetworkPolicy::Allow
+        {
+            let msg = "Seatbelt: network.proxy cannot be combined with \
+                       defaultPolicy='allow'. Outbound network is already unrestricted \
+                       under 'allow', so the proxy would have no enforcement effect and \
+                       any intent to route traffic through it would be silently ignored. \
+                       Use defaultPolicy='block' with a loopback proxy (or \
+                       'network.proxy.builtinTestServer: true') to actually enforce \
+                       proxy-only egress.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
         // LXC is the inverse of the two guards above: it *does* have a
         // privileged packet-filter layer, and that layer is the only thing that
         // makes the proxy an exception rather than a suggestion. Under the
@@ -4154,6 +4177,31 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.builtin_test_server);
+    }
+
+    #[test]
+    fn proxy_with_seatbelt_and_default_allow_is_rejected() {
+        // Outbound is already unrestricted under 'allow' — a proxy adds no
+        // enforcement, so the combination is a config-authoring mistake.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "proxy": {"builtinTestServer": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("defaultPolicy='allow'"),
+            "unexpected error message: {}",
+            msg
+        );
     }
 
     #[test]

@@ -29,7 +29,7 @@ use std::fmt::Write as _;
 
 use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
 use wxc_common::models::{
-    ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkPolicy, ProxyAddress,
+    ClipboardPolicy, ContainerPolicy, ExecutionRequest, NetworkAction, NetworkPolicy, ProxyAddress,
 };
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy
@@ -279,7 +279,7 @@ fn write_network_rules(
     proxy_address: Option<&ProxyAddress>,
 ) {
     let policy = &request.policy;
-    let allow_outbound = matches!(policy.default_network_policy, NetworkPolicy::Allow);
+    let allow_outbound = effective_egress_allow(policy);
     let has_allowed_hosts = !policy.allowed_hosts.is_empty();
 
     // blocked_hosts is rejected at the runner level before reaching the
@@ -308,7 +308,30 @@ fn write_network_rules(
         }
     }
 
-    write_local_network_rules(out, policy.allow_local_network);
+    write_local_network_rules(out, effective_allow_local_network(policy));
+}
+
+/// Resolves the effective outbound-allow posture, preferring the schema-0.8
+/// directional `network.egress.default` when present (the domain's legacy
+/// `default_network_policy` field stays at its `Block` default under the
+/// directional shape — see `network_parser::apply_directional_network`) and
+/// falling back to the legacy field otherwise.
+fn effective_egress_allow(policy: &ContainerPolicy) -> bool {
+    match policy.network_egress.as_ref() {
+        Some(egress) => egress.default == NetworkAction::Allow,
+        None => matches!(policy.default_network_policy, NetworkPolicy::Allow),
+    }
+}
+
+/// Resolves the effective `allowLocalNetwork` posture. Seatbelt maps
+/// `network.ingress.default` (not `hostLoopback`, which `validate()` requires
+/// to match `default` — Seatbelt has no independent host-loopback posture) to
+/// its existing `(allow network-inbound (local ip))` rule.
+fn effective_allow_local_network(policy: &ContainerPolicy) -> bool {
+    match policy.network_ingress.as_ref() {
+        Some(ingress) => ingress.default == NetworkAction::Allow,
+        None => policy.allow_local_network,
+    }
 }
 
 fn write_outbound_allow_rules(out: &mut String) {
@@ -901,6 +924,75 @@ mod tests {
         let p = build_profile(&r).unwrap();
         assert!(p.contains("(allow network-inbound (local ip))"));
         assert!(!p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn directional_egress_deny_emits_no_allow_network() {
+        // Schema-0.8 directional shape: network_egress.default is consulted
+        // instead of the legacy default_network_policy field (which stays at
+        // its Block default under this shape and must not be read directly).
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Allow; // must be ignored
+        r.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("(allow network-outbound"));
+        assert!(p.contains("network: default-deny"));
+    }
+
+    #[test]
+    fn directional_egress_allow_emits_open_network_outbound() {
+        let mut r = req();
+        r.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-outbound)"));
+    }
+
+    #[test]
+    fn directional_ingress_default_allow_emits_inbound_rule() {
+        // Seatbelt maps ingress.default (not hostLoopback) to the existing
+        // allowLocalNetwork behavior — see network_parser and validate().
+        let mut r = req();
+        r.policy.allow_local_network = false; // must be ignored
+        r.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("(allow network-inbound (local ip))"));
+    }
+
+    #[test]
+    fn directional_ingress_default_deny_omits_inbound_rule() {
+        let mut r = req();
+        r.policy.allow_local_network = true; // must be ignored
+        r.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Deny,
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("network-inbound"));
+    }
+
+    #[test]
+    fn directional_deny_with_loopback_proxy_scopes_outbound_to_proxy_port() {
+        // Same proxy-reachability behavior as the legacy shape must be
+        // preserved when the directional shape selects deny + loopback proxy
+        // (the only combination the GA schema allows with a runtime proxy).
+        let mut r = req();
+        r.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        let addr = ProxyAddress::new("127.0.0.1".into(), 56159);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:56159\"))"));
+        assert!(!p.contains("(allow network-outbound)\n"));
     }
 
     #[test]

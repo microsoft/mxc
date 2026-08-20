@@ -37,7 +37,9 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::{validate_common, validate_network_policy_support};
+use wxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
 
 use crate::profile_builder::build_profile_with_proxy;
 
@@ -105,6 +107,18 @@ impl SeatbeltScriptRunner {
 }
 
 impl SandboxBackend for SeatbeltScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        // Seatbelt enforces a single outbound default (no CIDR/port/protocol
+        // rules — `EGRESS_RULES` is intentionally omitted), a single inbound
+        // default mapped to the existing `allowLocalNetwork` behavior, and the
+        // loopback-scoped runtime proxy. It has no per-peer proxy identity
+        // concept (`PROXY_PEER_IDENTITY` is a ProcessContainer-only feature).
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
         // Seatbelt cannot filter network by hostname — reject blockedHosts
@@ -116,6 +130,23 @@ impl SandboxBackend for SeatbeltScriptRunner {
                  defaultPolicy: \"block\" to deny all network."
                     .to_string(),
             ));
+        }
+
+        // Seatbelt has no private loopback, so it cannot enforce an
+        // independent `hostLoopback` posture: `ingress.default` alone drives
+        // the `(allow network-inbound (local ip))` rule. Reject configs where
+        // `hostLoopback` diverges from `default` instead of silently applying
+        // one and ignoring the other.
+        if let Some(ingress) = request.policy.network_ingress.as_ref() {
+            if ingress.host_loopback != ingress.default {
+                return Err(error_response(
+                    "macOS Seatbelt has no private loopback and cannot enforce an \
+                     independent network.ingress.hostLoopback posture. Set \
+                     'hostLoopback' equal to 'default', or omit 'hostLoopback' to \
+                     inherit 'default'."
+                        .to_string(),
+                ));
+            }
         }
 
         Ok(())
@@ -841,6 +872,46 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    #[test]
+    fn declares_directional_network_policy_support() {
+        let runner = SeatbeltScriptRunner::new();
+        let support = runner.network_policy_support();
+        assert!(support.contains(NetworkPolicySupport::EGRESS_DEFAULT));
+        assert!(support.contains(NetworkPolicySupport::INGRESS_DEFAULT));
+        assert!(support.contains(NetworkPolicySupport::HOST_LOOPBACK));
+        assert!(support.contains(NetworkPolicySupport::RUNTIME_PROXY));
+        // No CIDR/port/protocol rule engine and no ProcessContainer-only
+        // per-peer proxy identity concept.
+        assert!(!support.contains(NetworkPolicySupport::EGRESS_RULES));
+        assert!(!support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
+    }
+
+    #[test]
+    fn rejects_mismatched_ingress_default_and_host_loopback() {
+        let mut request = base_request();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let runner = SeatbeltScriptRunner::new();
+        let response = runner.validate(&request).unwrap_err();
+        assert!(response.error_message.contains("hostLoopback"));
+        assert!(response.error_message.contains("independent"));
+    }
+
+    #[test]
+    fn accepts_matching_ingress_default_and_host_loopback() {
+        let mut request = base_request();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let runner = SeatbeltScriptRunner::new();
+        assert!(runner.validate(&request).is_ok());
     }
 
     /// Look up the last value set for `key` in a resolved env list.
