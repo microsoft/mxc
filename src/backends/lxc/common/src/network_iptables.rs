@@ -14,8 +14,9 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, NetworkCidr, NetworkEgressPolicy, NetworkEnforcementMode, NetworkPeer,
-    NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
+    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkEnforcementMode,
+    NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
+    ProxyHostPin,
 };
 
 /// One destination the container is allowed to reach when the policy routes
@@ -1340,22 +1341,54 @@ impl NetworkIptablesManager {
         )
     }
 
+    /// The 0.8 `network.egress` section, but only when the author actually
+    /// stated a directional posture.
+    ///
+    /// This is the single place that decides which schema governs the chain,
+    /// and the filter on `network_mode_specified` is what makes it correct.
+    /// The parser hands every 0.8 config a defaulted `NetworkEgressPolicy`
+    /// even when the config carries no `network` block at all, and
+    /// `NetworkAction::Deny` is that default, so reading
+    /// `network_egress.is_some()` alone would cut outbound traffic for every
+    /// existing 0.8 LXC config that never asked for a directional posture.
+    /// `network_mode_specified` is set only when an `egress` or `ingress`
+    /// section was written, and `validate_network_policy_support` gates on
+    /// the same field.
+    fn stated_egress(policy: &ContainerPolicy) -> Option<&NetworkEgressPolicy> {
+        policy
+            .network_egress
+            .as_ref()
+            .filter(|_| policy.network_mode_specified)
+    }
+
+    /// The default policy the chain's closing rule must express.
+    ///
+    /// A 0.8 config states its outbound default in `network.egress.default`
+    /// and never writes the legacy `network.defaultPolicy`, which the parser
+    /// leaves at its `Block` default. Reading the legacy field alone closes
+    /// every 0.8 chain with DROP, discarding an `egress.default: allow` the
+    /// operator asked for. The legacy field still decides for a policy that
+    /// stated no directional posture.
+    fn effective_default_policy(policy: &ContainerPolicy) -> NetworkPolicy {
+        match Self::stated_egress(policy) {
+            Some(egress) => match egress.default {
+                NetworkAction::Allow => NetworkPolicy::Allow,
+                NetworkAction::Deny => NetworkPolicy::Block,
+            },
+            None => policy.default_network_policy.clone(),
+        }
+    }
+
     /// Lower whichever network schema the policy was written in into the
     /// entries the chain emits, in the order they must be emitted.
     ///
-    /// The two schema shapes are alternatives, never a union.
-    /// `network_mode_specified` is set by the parser only when the author
-    /// actually wrote an `egress` or `ingress` section, which is the same
-    /// predicate `validate_network_policy_support` gates on. Selecting on
-    /// `network_egress.is_some()` instead would be a fail-closed trap: the
-    /// parser hands every 0.8 config a defaulted `NetworkEgressPolicy` even
-    /// when it carries no `network` block at all, and `NetworkAction::Deny`
-    /// is that default, which would cut outbound traffic for every existing
-    /// 0.8 LXC config that never mentioned a directional posture.
+    /// The two schema shapes are alternatives, never a union: the parser
+    /// rejects a config mixing them, and the directional path never writes
+    /// the legacy host lists.
     fn lower_egress(policy: &ContainerPolicy) -> Vec<EgressEntry> {
-        match policy.network_egress.as_ref() {
-            Some(egress) if policy.network_mode_specified => Self::lower_directional_egress(egress),
-            _ => Self::lower_legacy_hosts(policy),
+        match Self::stated_egress(policy) {
+            Some(egress) => Self::lower_directional_egress(egress),
+            None => Self::lower_legacy_hosts(policy),
         }
     }
 
@@ -1552,10 +1585,7 @@ impl NetworkIptablesManager {
     /// Leaving the peer's DROP to cover the range is the fail-closed reading,
     /// and this warning is what keeps it from being a silent one.
     fn warn_on_deny_exclusions(policy: &ContainerPolicy, logger: &mut Logger) {
-        if !policy.network_mode_specified {
-            return;
-        }
-        let Some(egress) = policy.network_egress.as_ref() else {
+        let Some(egress) = Self::stated_egress(policy) else {
             return;
         };
 
@@ -2265,7 +2295,7 @@ impl NetworkIptablesManager {
         // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
-            policy.default_network_policy.clone(),
+            Self::effective_default_policy(policy),
             proxy_mode,
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
