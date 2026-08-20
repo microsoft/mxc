@@ -130,7 +130,8 @@ fn build_request_rejects_empty_version() {
         capture_denials: None,
     };
 
-    let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
+    let err = build_request(&policy, "echo hello", None)
+        .expect_err("an empty policy version must be rejected");
     assert_eq!(err.code, mxc_sdk::ErrorCode::MalformedRequest);
 }
 
@@ -153,7 +154,7 @@ fn build_request_host_rules_require_outbound() {
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
     // ProcessContainer requires it. Either way this must not panic.
-    let result = build_request(&policy, None);
+    let result = build_request(&policy, "echo hello", None);
     if cfg!(any(target_os = "linux", target_os = "macos")) {
         assert!(
             result.is_ok(),
@@ -184,8 +185,8 @@ fn build_request_then_run_seatbelt() {
         capture_denials: None,
     };
 
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script("echo built-from-policy");
+    let request = build_request(&policy, "echo built-from-policy", None)
+        .expect("build_request should succeed");
 
     let mut proc = spawn_sandbox(request).expect("spawn should succeed");
     let mut out = String::new();
