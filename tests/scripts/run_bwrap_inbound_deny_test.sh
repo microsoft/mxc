@@ -22,6 +22,9 @@
 #      payload text; only a live run can show the payload reached the right
 #      namespace and was accepted by the kernel.
 #   2. Unsolicited inbound is dropped as packets, not merely as policy.
+#   3. A schema 0.7 run gets no private namespace and therefore no chain at
+#      all. The chain is 0.8-only, so without this a regression in the schema
+#      gate would change GHCP's 0.6/0.7 behavior unnoticed.
 #
 # The instrument for (2) is a veth pair injected into the sandbox's namespace
 # by this script. That is a test fixture the product never creates, so this
@@ -79,13 +82,23 @@ command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
 
 WORK_DIR="$(mktemp -d)"
 RUN_PID=""
-VETH_HOST="mxcprobe0"
+# Interface names are host-global and this runs as root, so both ends are named
+# per invocation. A fixed name lets two runs collide, and -- because the trap is
+# armed before the link exists -- lets a failed `ip link add` delete whatever
+# already held the name. The peer needs this too: it sits on the host until it
+# is moved into the namespace.
+VETH_HOST="mxcph$$"
+VETH_PEER="mxcpp$$"
+VETH_CREATED=0
+HOST_NETNS="$(readlink /proc/self/ns/net)"
 
 cleanup() {
     # The namespace-side peer dies with the namespace, so only the host side
     # needs removing -- and it must be removed even on failure, or a leftover
     # interface makes the next run's `ip link add` fail for the wrong reason.
-    ip link del "$VETH_HOST" 2>/dev/null || true
+    if [ "$VETH_CREATED" = 1 ]; then
+        ip link del "$VETH_HOST" 2>/dev/null || true
+    fi
     if [ -n "$RUN_PID" ]; then
         kill "$RUN_PID" 2>/dev/null || true
         wait "$RUN_PID" 2>/dev/null || true
@@ -94,16 +107,71 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# Which log `fail` dumps; the legacy case points it at its own.
+CURRENT_OUT="$WORK_DIR/run.out"
+
 fail() {
     echo "----- sandbox output -----"
-    cat "$WORK_DIR/run.out" 2>/dev/null || true
+    cat "$CURRENT_OUT" 2>/dev/null || true
     echo "--------------------------"
     echo "FAIL: $1"
     exit 1
 }
 
-# The workload idles so the host has a live namespace to inspect. It reports
-# its namespace first, because everything below is addressed to that namespace.
+# ---------------------------------------------------------------------------
+# 0. Pre-0.8: no private namespace, so no chain at all
+# ---------------------------------------------------------------------------
+#
+# Runs first, before the 0.8 case builds any state. The same policy at 0.7 takes
+# the legacy host-firewall path GHCP depends on: rules land in the host's tables
+# and the sandbox stays in the host namespace. The ingress chain is rendered
+# only by the private-namespace supervisor, so it must be absent.
+
+LEGACY_CONFIG="$WORK_DIR/bubblewrap_inbound_legacy.json"
+cat >"$LEGACY_CONFIG" <<'CONFIG_JSON'
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-Bubblewrap-Inbound-Legacy",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LEGACY_INBOUND_OK'"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "firewall",
+    "allowedHosts": ["10.0.2.2/32"]
+  }
+}
+CONFIG_JSON
+
+echo "Running Bubblewrap inbound test: pre-0.8 installs no ingress chain..."
+CURRENT_OUT="$WORK_DIR/legacy.out"
+LEGACY_RC=0
+"$LXC_EXEC" --experimental --allow-testing-features "$LEGACY_CONFIG" >"$CURRENT_OUT" 2>&1 || LEGACY_RC=$?
+[ "$LEGACY_RC" -eq 0 ] \
+    || fail "the schema 0.7 config did not run (exit $LEGACY_RC); legacy behavior must be unchanged."
+grep -q "LEGACY_INBOUND_OK" "$CURRENT_OUT" \
+    || fail "the schema 0.7 workload did not run to completion."
+
+LEGACY_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' "$CURRENT_OUT" | head -n 1)"
+[ -n "$LEGACY_NETNS" ] || fail "the schema 0.7 sandbox never reported its network namespace."
+[ "$LEGACY_NETNS" = "$HOST_NETNS" ] \
+    || fail "schema 0.7 put the sandbox in a private namespace ($LEGACY_NETNS); pre-0.8 must stay on the host network."
+
+# The sandbox shares the host namespace, so the host's tables are the sandbox's
+# tables: absence here is absence everywhere the chain could have landed.
+if iptables -S "$INGRESS_CHAIN" >/dev/null 2>&1; then
+    fail "$INGRESS_CHAIN exists after a schema 0.7 run; the ingress chain must be 0.8-only."
+fi
+
+echo "PASS: schema 0.7 stays on the host network with no $INGRESS_CHAIN chain"
+CURRENT_OUT="$WORK_DIR/run.out"
+
+# ---------------------------------------------------------------------------
+# The 0.8 case. The workload idles so the host has a live namespace to inspect.
+# It reports its namespace first, because everything below is addressed to that
+# namespace.
+# ---------------------------------------------------------------------------
 CONFIG="$WORK_DIR/bubblewrap_inbound_deny.json"
 cat >"$CONFIG" <<'CONFIG_JSON'
 {
@@ -136,7 +204,6 @@ for _ in $(seq 1 200); do
 done
 [ -n "$SANDBOX_NETNS" ] || fail "the sandbox never reported its network namespace."
 
-HOST_NETNS="$(readlink /proc/self/ns/net)"
 if [ "$SANDBOX_NETNS" = "$HOST_NETNS" ]; then
     fail "the sandbox shares the host's network namespace, so there is no private chain to test."
 fi
@@ -200,14 +267,15 @@ drop_packets() {
 DROPS_BEFORE="$(drop_packets)"
 [ -n "$DROPS_BEFORE" ] || fail "could not read the NEW-state DROP counter."
 
-ip link add "$VETH_HOST" type veth peer name mxcprobe1 \
+ip link add "$VETH_HOST" type veth peer name "$VETH_PEER" \
     || fail "could not create the probe veth pair."
-ip link set mxcprobe1 netns "$SANDBOX_PID" \
+VETH_CREATED=1
+ip link set "$VETH_PEER" netns "$SANDBOX_PID" \
     || fail "could not move the probe interface into the sandbox namespace."
 ip addr add 10.77.77.1/24 dev "$VETH_HOST"
 ip link set "$VETH_HOST" up
-in_sandbox_net ip addr add 10.77.77.2/24 dev mxcprobe1
-in_sandbox_net ip link set mxcprobe1 up
+in_sandbox_net ip addr add 10.77.77.2/24 dev "$VETH_PEER"
+in_sandbox_net ip link set "$VETH_PEER" up
 
 # Nothing listens on the target port, and that is fine: INPUT is traversed
 # before any socket lookup, so the drop happens either way. Deliberately not
