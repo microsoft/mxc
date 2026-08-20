@@ -877,12 +877,12 @@ mod tests {
 
         assert_eq!(
             v4(&plan),
-            format!("{}-A C -d 192.0.2.5 -j DROP\n{}", head(), tail("ACCEPT")),
+            egress(&["-d 192.0.2.5 -j DROP"], "ACCEPT"),
             "the mapped entry must be programmed on the family that carries it"
         );
         assert_eq!(
             v6(&plan),
-            format!("{}{}", head(), tail("ACCEPT")),
+            egress(&[], "ACCEPT"),
             "programming it in ip6tables would never match, so the deny would fail open"
         );
     }
