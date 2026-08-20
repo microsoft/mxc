@@ -201,6 +201,10 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 
+Omit `to` or `ports` to select their wildcard behavior. When either field is
+present, its array must contain at least one selector; an explicit empty array
+is rejected rather than broadened into a wildcard.
+
 `icmp` expands by destination address family. A rule containing IPv4 and IPv6 peers produces both ICMPv4 and ICMPv6
 filters; a rule without `to` also produces both.
 
