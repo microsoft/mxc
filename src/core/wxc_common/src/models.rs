@@ -785,6 +785,31 @@ impl ContainerPolicy {
             &self.blocked_hosts,
         )
     }
+
+    /// True when this policy describes anything the egress firewall has to
+    /// carry, in either schema.
+    ///
+    /// Deliberately keyed on what the policy *says* rather than on
+    /// `network.enforcementMode`. The mode is a request for enforcement and
+    /// this is the question of whether enforcement is owed, and answering the
+    /// second with the first lets a policy that restricts egress start with an
+    /// open chain because it never named a mode. A caller may get more
+    /// enforcement than the mode asked for, never less.
+    ///
+    /// The directional arm is what admits schema 0.8, which has no mode to
+    /// name: the parser rejects `enforcementMode` beside `egress`/`ingress`,
+    /// so every directional policy carries the `Capabilities` default. The arm
+    /// is written out rather than left to the `Block` arm to cover it, because
+    /// `Block` covers it only by being the parser's default for a field 0.8
+    /// never writes — an `egress.default: allow` config would stop being
+    /// enforced the day that default changed.
+    pub fn requires_firewall(&self) -> bool {
+        self.default_network_policy == NetworkPolicy::Block
+            || !self.allowed_hosts.is_empty()
+            || !self.blocked_hosts.is_empty()
+            || self.network_proxy.is_enabled()
+            || self.network_egress.is_some()
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).

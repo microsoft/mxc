@@ -543,10 +543,12 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // Skip if network enforcement doesn't use a firewall.
-        if !NetworkIptablesManager::policy_uses_firewall(policy) {
+        // `enforcementMode` is deliberately not consulted here; a caller may get
+        // more enforcement than the mode asked for, never less.
+        if !policy.requires_firewall() {
             logger.log_line(
-                "Network enforcement mode does not use firewall, skipping ingress chain.",
+                "Network policy requires no egress firewall (permissive default, no host \
+                 lists, no proxy, no directional posture); skipping ingress chain.",
             );
             return Ok(true);
         }

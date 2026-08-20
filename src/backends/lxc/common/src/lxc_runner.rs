@@ -234,12 +234,10 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the config uses network features (firewall rules
-        // or allowed/blocked hosts), or when the container must reach a proxy.
-        let needs_network = NetworkIptablesManager::policy_uses_firewall(&request.policy)
-            || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.network_proxy.is_enabled();
+        // Wait for network only when the policy has something for the firewall
+        // to carry, or when the container must reach a proxy. Both questions
+        // are `requires_firewall`.
+        let needs_network = request.policy.requires_firewall();
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -281,13 +279,12 @@ impl LxcScriptRunner {
         // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
         // container's own iptables INPUT chain, reached with `nsenter`.
         //
-        // A firewall enforcement mode means the caller asked for the inbound
-        // deny chain, as does a stated 0.8 directional posture — which cannot
-        // name an enforcement mode at all. LXC enforces it inside the
-        // container's own netns, so it is useless without the init PID that
-        // lets us enter that netns — and the ingress manager cannot even be
-        // constructed without one.
-        let use_firewall = NetworkIptablesManager::policy_uses_firewall(&request.policy);
+        // A policy with anything for the firewall to carry means the caller is
+        // owed the inbound deny chain, whichever schema stated it. LXC enforces
+        // it inside the container's own netns, so it is useless without the
+        // init PID that lets us enter that netns — and the ingress manager
+        // cannot even be constructed without one.
+        let use_firewall = request.policy.requires_firewall();
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).

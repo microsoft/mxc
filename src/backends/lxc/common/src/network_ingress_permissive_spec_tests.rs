@@ -21,7 +21,7 @@
 
 use super::*;
 use wxc_common::logger::Mode;
-use wxc_common::models::NetworkEnforcementMode;
+use wxc_common::models::{NetworkEnforcementMode, NetworkPolicy};
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -213,17 +213,17 @@ fn default_deny_with_netns_is_not_the_permissive_refusal() {
     }
 }
 
-/// allow_local_network=true + NetworkEnforcementMode::Capabilities.
+/// allow_local_network=true on a policy with nothing to enforce.
 ///
-/// Capabilities mode returns early before the firewall path is entered; the
+/// The firewall gate returns early before the firewall path is entered, so the
 /// permissive guard is never reached.  This catches anyone who hoists the guard
-/// above the enforcement-mode gate, which would break every capabilities-mode
-/// config.
+/// above the gate, which would break every config that has no rules to install.
 #[test]
-fn permissive_inbound_capabilities_mode_is_not_refused() {
+fn permissive_inbound_with_nothing_to_enforce_is_not_refused() {
     let policy = ContainerPolicy {
         allow_local_network: true,
         network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+        default_network_policy: NetworkPolicy::Allow,
         ..Default::default()
     };
     let mut mgr = IngressManager::new("test-container-perm-caps", UNOCCUPIABLE_NETNS_PID);
@@ -231,10 +231,10 @@ fn permissive_inbound_capabilities_mode_is_not_refused() {
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
-    // Capabilities mode returns Ok(true) before the firewall path.
+    // A policy with nothing to enforce returns Ok(true) before the firewall path.
     assert!(
         result.is_ok(),
-        "allow_local_network=true, mode=Capabilities: expected early Ok, got {:?}",
+        "allow_local_network=true with nothing to enforce: expected early Ok, got {:?}",
         result
     );
 }

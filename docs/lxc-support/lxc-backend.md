@@ -111,7 +111,7 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Which configurations reach the firewall depends on the schema shape in use.  A legacy `network` block — `defaultPolicy` with `allowedHosts` and `blockedHosts` — installs rules only when `enforcementMode` is `firewall` or `both`; under the default `capabilities` mode those fields are parsed and never take effect.  A schema 0.8 `network.egress` block always installs rules.  That shape has no `enforcementMode` to set — the schema rejects `enforcementMode` written beside `egress` — and gating it on the mode would leave every 0.8 policy unenforced while reporting success.
+Which configurations reach the firewall depends on what the policy restricts, never on `enforcementMode`.  A policy is owed the firewall when its default is `block`, when it names any `allowedHosts` or `blockedHosts`, when it enables a proxy, or when it states a schema 0.8 `egress` posture — `ContainerPolicy::requires_firewall`.  A caller may get more enforcement than the mode asked for, never less.  Reading the mode instead let a restrictive policy start with an open chain: schema 0.8 has no `enforcementMode` to set, since the schema rejects it written beside `egress`, so every 0.8 policy carried the default `capabilities` and would have gone unenforced while reporting success.  Only a policy that restricts nothing at all is skipped.
 
 Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
@@ -265,11 +265,11 @@ Inbound filtering is a separate chain from the egress chains above, and it lives
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
-The rows below describe every run that reaches the firewall: the `firewall` and `both` enforcement modes under a legacy block, and every schema 0.8 config. The ingress path takes the same gate as the egress chains. A legacy config left at the default `capabilities` mode installs nothing at all, which leaves inbound unfiltered and accepts `allowLocalNetwork: true` rather than refusing it. Inbound default-deny is a property of the runs that reach the firewall, not of every LXC run.
+The rows below describe every run that reaches the firewall, which is every policy with something to enforce, in either schema. The ingress path takes the same gate as the egress chains. A policy that restricts nothing installs nothing at all, which leaves inbound unfiltered and accepts `allowLocalNetwork: true` rather than refusing it. Inbound default-deny is a property of the runs that reach the firewall, not of every LXC run.
 
 Schema 0.8 states the same posture with `ingress.default` and `ingress.hostLoopback`. LXC has one inbound chain rather than two independent controls, and the mapping is lossless for the values it implements: `deny` on either field is served by the default-deny chain, and `allow` on either is refused by the not-yet-implemented error below. The field named in that error is whichever one the operator actually wrote.
 
-| Policy (legacy `networkEnforcementMode`: `firewall` or `both`; or any schema 0.8 config) | Implementation |
+| Policy (any config with something to enforce, in either schema) | Implementation |
 |--------|---------------|
 | `allowLocalNetwork: false` (default), or `ingress.default`/`ingress.hostLoopback` of `deny` | Container `INPUT` chain drops new inbound connections |
 | `allowLocalNetwork: true`, or `ingress.default`/`ingress.hostLoopback` of `allow` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
