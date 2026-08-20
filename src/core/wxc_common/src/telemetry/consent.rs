@@ -727,6 +727,8 @@ mod platform {
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Foundation::GENERIC_WRITE;
+        use windows::Win32::Storage::FileSystem::{DELETE, FILE_FLAG_DELETE_ON_CLOSE};
 
         let path = consent_file_path().ok_or_else(|| {
             "could not resolve %LocalAppData%; cannot lock telemetry consent".to_string()
@@ -742,7 +744,8 @@ mod platform {
             options
                 .write(true)
                 .create_new(true)
-                .custom_flags(windows::Win32::Storage::FileSystem::FILE_FLAG_DELETE_ON_CLOSE.0);
+                .access_mode(GENERIC_WRITE.0 | DELETE.0)
+                .custom_flags(FILE_FLAG_DELETE_ON_CLOSE.0);
             match options.open(&lock_path) {
                 Ok(file) => break file,
                 Err(error)
@@ -1505,6 +1508,24 @@ mod tests {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
             assert_eq!(get_consent(), ConsentState::Undetermined);
+        }
+
+        #[test]
+        fn store_lock_is_deleted_when_released() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let lock_path = tmp.path().join("mxc").join("telemetry-consent.lock");
+
+            platform::with_store_lock(|| {
+                assert!(lock_path.exists(), "lock file must exist while held");
+                Ok(())
+            })
+            .expect("acquire store lock");
+
+            assert!(
+                !lock_path.exists(),
+                "delete-on-close must remove the released lock"
+            );
         }
 
         #[test]
