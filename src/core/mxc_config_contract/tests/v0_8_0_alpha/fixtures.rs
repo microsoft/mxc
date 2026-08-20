@@ -70,6 +70,18 @@ const INVALID_FIXTURES: &[(&str, &str)] = &[
         "seatbelt unknown field",
         include_str!("fixtures/invalid/seatbelt_unknown_field.json"),
     ),
+    (
+        "comma-delimited ProcessContainer capability",
+        include_str!("fixtures/invalid/capability_with_comma.json"),
+    ),
+    (
+        "reserved learning-mode logging capability",
+        include_str!("fixtures/invalid/capability_learning_mode_logging_reserved.json"),
+    ),
+    (
+        "reserved permissive learning-mode capability",
+        include_str!("fixtures/invalid/capability_permissive_learning_mode_reserved.json"),
+    ),
 ];
 
 #[test]
