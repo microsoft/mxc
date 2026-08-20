@@ -1407,7 +1407,7 @@ impl BaseContainerRunner {
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
         );
         use_caps_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
+            && request.policy.allows_network_egress()
             && !request
                 .policy
                 .capabilities
@@ -4279,6 +4279,25 @@ mod tests {
     fn build_process_security_environment_spec_preserves_allow_egress() {
         let mut request = ExecutionRequest::default();
         request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("PSEC must carry an explicit egress default");
+
+        assert_eq!(egress.default_action(), psec_layout::FilterAction::allow);
+        assert_eq!(spec.capabilities(), Some("internetClient"));
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_preserves_directional_allow_egress() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
 
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
