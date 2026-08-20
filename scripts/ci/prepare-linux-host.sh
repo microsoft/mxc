@@ -41,20 +41,21 @@ install_epel() {
 }
 
 install_bubblewrap() {
-    if command -v bwrap >/dev/null 2>&1; then
+    if command -v bwrap >/dev/null 2>&1 &&
+        command -v slirp4netns >/dev/null 2>&1; then
         return
     fi
     if command -v apt-get >/dev/null 2>&1; then
         apt_update
-        sudo apt-get install -y --no-install-recommends bubblewrap
+        sudo apt-get install -y --no-install-recommends bubblewrap slirp4netns
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y bubblewrap
+        sudo dnf install -y bubblewrap slirp4netns
     elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y bubblewrap
+        sudo yum install -y bubblewrap slirp4netns
     elif command -v microdnf >/dev/null 2>&1; then
-        sudo microdnf install -y bubblewrap
+        sudo microdnf install -y bubblewrap slirp4netns
     else
-        echo "No supported package manager found to install bubblewrap." >&2
+        echo "No supported package manager found to install Bubblewrap prerequisites." >&2
         exit 1
     fi
 }
@@ -186,6 +187,7 @@ case "$backend" in
     bubblewrap)
         install_bubblewrap
         command -v bwrap
+        command -v slirp4netns
         # disabled AppArmor restrictions on unprivileged user namespaces, which bubblewrap needs to create a new namespace.
         # should only be used on ephemeral CI runners, not on persistent hosts.
         if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then

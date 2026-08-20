@@ -338,8 +338,13 @@
         "os": "windows-prerelease-process-container",
         "backends": [
           "process-t1",
-          "isolation-session",
           "wslc"
+        ]
+      },
+      {
+        "os": "windows-prerelease-isolation-session",
+        "backends": [
+          "isolation-session"
         ]
       },
       {
@@ -393,13 +398,6 @@
       }
     ],
     "weekly": [],
-    "enabled": [
-      {
-        "os": "windows-prerelease-isolation-session",
-        "backends": [
-          "isolation-session"
-        ]
-      }
-    ]
+    "enabled": []
   }
 }
