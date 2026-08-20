@@ -336,12 +336,47 @@ default):
 |---------|-------------------------------------------------|-------------------------|
 | Linux   | Bubblewrap                                      | `Containment::Process`  |
 | macOS   | Seatbelt                                        | `Containment::Process`  |
+| macOS   | Apple Container (config only)                   | `Containment::AppleContainer` |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`     |
 
-Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC)
+Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC,
+Apple Container)
 returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the
 standalone executor binaries for those.
+
+### Apple Container (experimental config surface)
+
+Apple Container requests require schema version `0.8.0-alpha`, an OCI image,
+and experimental opt-in:
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment, AppleContainerSection, Containment, SandboxPolicy,
+};
+
+let policy = SandboxPolicy {
+    version: "0.8.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+    capture_denials: None,
+};
+let apple = AppleContainerSection {
+    image: "docker.io/library/alpine:3.23".to_string(),
+    cpu_count: Some(2),
+    memory_mb: Some(1024),
+};
+let mut request =
+    build_request_with_containment(&policy, &Containment::AppleContainer(apple), None)?;
+request.set_script("echo hello").set_experimental(true);
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+This increment builds and validates the request only. Both [`run`] and
+[`spawn_sandbox`] return [`ErrorCode::UnsupportedContainment`] before creating
+resources.
 
 ### WSLC (experimental)
 

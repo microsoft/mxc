@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use super::primitives::NonEmptyString;
 use super::primitives::OptionalField;
-use std::num::NonZeroU16;
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 /// Placeholder feature used to exercise experimental configuration plumbing.
 #[derive(Debug, serde::Deserialize)]
@@ -90,6 +91,20 @@ pub struct OneShotWslc {
     pub port_mappings: OptionalField<Vec<PortMapping>>,
 }
 
+/// One-shot Apple Container backend settings.
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OneShotAppleContainer {
+    /// OCI image reference. The image must provide `/bin/sh`.
+    pub image: NonEmptyString,
+    /// Requested virtual CPU count.
+    #[serde(default)]
+    pub cpu_count: OptionalField<NonZeroU32>,
+    /// Requested memory limit in megabytes.
+    #[serde(default)]
+    pub memory_mb: OptionalField<NonZeroU64>,
+}
+
 /// Experimental settings.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -103,6 +118,9 @@ pub struct OneShotExperimental {
     /// Optional one-shot WSLC backend settings.
     #[serde(default)]
     pub wslc: OptionalField<OneShotWslc>,
+    /// Optional one-shot Apple Container backend settings.
+    #[serde(rename = "apple_container", default)]
+    pub apple_container: OptionalField<OneShotAppleContainer>,
     /// Optional telemetry override.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,

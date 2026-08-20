@@ -23,8 +23,9 @@
 //!
 //! Backend selection is per-host: the Windows body drives the ProcessContainer
 //! fallback tiers plus the Windows experimental backends; the Linux body
-//! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body always
-//! resolves to Seatbelt.
+//! mirrors `lxc-exec` (Bubblewrap / LXC / experimental); the macOS body retains
+//! its Seatbelt fallback except for explicit Apple Container requests, which
+//! must never run under a weaker backend.
 
 use wxc_common::logger::Logger;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
@@ -199,6 +200,7 @@ fn resolve_runner_inner_windows(
         ContainmentBackend::Seatbelt => Err(MxcError::unsupported_containment(
             "Seatbelt backend is only available on macOS (use mxc-exec-mac)",
         )),
+        ContainmentBackend::AppleContainer => reject_unimplemented_apple_container(request),
         ContainmentBackend::Vm => Err(MxcError::unsupported_containment(
             "VM backend not yet implemented",
         )),
@@ -287,6 +289,7 @@ fn resolve_runner_inner(
                     "MicroVM is an experimental feature. Use --experimental flag.",
                 ));
             }
+
             #[cfg(feature = "microvm")]
             {
                 Ok(ResolvedRunner::without_guard(Box::new(
@@ -310,6 +313,7 @@ fn resolve_runner_inner(
                 &request.lifecycle,
             ),
         ))),
+        ContainmentBackend::AppleContainer => reject_unimplemented_apple_container(request),
         ref other => {
             logger.log_line(&format!(
                 "Note: containment {other:?} unsupported on lxc-exec; falling back to LXC."
@@ -326,8 +330,9 @@ fn resolve_runner_inner(
 }
 
 // ---------------------------------------------------------------------------
-// macOS: always Seatbelt (the SDK selects it on darwin; be lenient and log a
-// note if the request asked for something else).
+// macOS: retain the existing Seatbelt fallback while Apple Container is
+// recognized but deliberately unavailable until its management/runtime
+// increments land.
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "macos")]
@@ -337,12 +342,71 @@ fn resolve_runner_inner(
 ) -> Result<ResolvedRunner, MxcError> {
     use wxc_common::sandbox_process::Runner;
 
+    if request.containment == ContainmentBackend::AppleContainer {
+        return reject_unimplemented_apple_container(request);
+    }
     if request.containment != ContainmentBackend::Seatbelt {
         logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
     }
     Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
         seatbelt_common::seatbelt_runner::SeatbeltScriptRunner::new(),
     ))))
+}
+
+fn reject_unimplemented_apple_container(
+    request: &ExecutionRequest,
+) -> Result<ResolvedRunner, MxcError> {
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "Apple Container is an experimental feature. Use --experimental flag.",
+        ));
+    }
+
+    Err(MxcError::unsupported_containment(
+        "Apple Container configuration is recognized, but runtime execution is not implemented",
+    ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    use super::*;
+    use wxc_common::logger::Mode;
+    use wxc_common::mxc_error::MxcErrorCode;
+
+    #[test]
+    fn apple_container_requires_experimental_opt_in() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::AppleContainer,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("Apple Container must require experimental opt-in"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("--experimental"));
+    }
+
+    #[test]
+    fn apple_container_does_not_fall_back_to_seatbelt() {
+        let request = ExecutionRequest {
+            containment: ContainmentBackend::AppleContainer,
+            experimental_enabled: true,
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let error = match resolve_runner_inner(&request, &mut logger) {
+            Ok(_) => panic!("Apple Container must not fall back to Seatbelt"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
+        assert!(error.message.contains("not implemented"));
+    }
 }
 
 // ---------------------------------------------------------------------------

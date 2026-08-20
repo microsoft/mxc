@@ -24,6 +24,7 @@ fn convert_containment(value: contract::OneShotContainment) -> wire::Containment
         contract::OneShotContainment::Hyperlight => wire::Containment::Hyperlight,
         contract::OneShotContainment::Wslc => wire::Containment::Wslc,
         contract::OneShotContainment::IsolationSession => wire::Containment::IsolationSession,
+        contract::OneShotContainment::AppleContainer => wire::Containment::AppleContainer,
     }
 }
 
@@ -327,6 +328,19 @@ fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
     }
 }
 
+fn convert_apple_container(value: contract::OneShotAppleContainer) -> wire::AppleContainer {
+    let contract::OneShotAppleContainer {
+        image,
+        cpu_count,
+        memory_mb,
+    } = value;
+    wire::AppleContainer {
+        image: image.into_inner(),
+        cpu_count: cpu_count.into_option().map(|value| value.get()),
+        memory_mb: memory_mb.into_option().map(|value| value.get()),
+    }
+}
+
 fn convert_telemetry(value: contract::Telemetry) -> wire::Telemetry {
     let contract::Telemetry { enabled } = value;
     wire::Telemetry {
@@ -339,12 +353,14 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
         test,
         windows_sandbox,
         wslc,
+        apple_container,
         telemetry,
     } = value;
     wire::Experimental {
         test: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         wslc: wslc.into_option().map(convert_wslc),
+        apple_container: apple_container.into_option().map(convert_apple_container),
         isolation_session: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),

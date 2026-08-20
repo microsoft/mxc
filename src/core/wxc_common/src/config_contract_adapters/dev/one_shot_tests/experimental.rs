@@ -64,6 +64,21 @@ const WSLC_REQUEST_JSON: &str = r#"{
     }
 }"#;
 
+const APPLE_CONTAINER_REQUEST_JSON: &str = r#"{
+    "version": "0.8.0-alpha",
+    "containment": "apple_container",
+    "process": {
+        "commandLine": "echo hello"
+    },
+    "experimental": {
+        "apple_container": {
+            "image": "docker.io/library/alpine:3.23",
+            "cpuCount": 2,
+            "memoryMb": 1024
+        }
+    }
+}"#;
+
 #[test]
 fn windows_sandbox_maps_expected_wire_fields() {
     let wire = adapt(WINDOWS_SANDBOX_REQUEST_JSON);
@@ -161,6 +176,25 @@ fn wslc_maps_expected_wire_fields() {
 }
 
 #[test]
+fn apple_container_maps_expected_wire_fields() {
+    let wire = adapt(APPLE_CONTAINER_REQUEST_JSON);
+
+    assert!(matches!(
+        wire.containment,
+        Some(super::wire::Containment::AppleContainer)
+    ));
+
+    let experimental = wire.experimental.expect("experimental should be populated");
+    let apple_container = experimental
+        .apple_container
+        .expect("apple_container should be populated");
+
+    assert_eq!(apple_container.image, "docker.io/library/alpine:3.23");
+    assert_eq!(apple_container.cpu_count, Some(2));
+    assert_eq!(apple_container.memory_mb, Some(1024));
+}
+
+#[test]
 fn windows_sandbox_matches_current_wire_deserialization() {
     assert_matches_current_wire_deserialization(WINDOWS_SANDBOX_REQUEST_JSON);
 }
@@ -168,6 +202,11 @@ fn windows_sandbox_matches_current_wire_deserialization() {
 #[test]
 fn wslc_matches_current_wire_deserialization() {
     assert_matches_current_wire_deserialization(WSLC_REQUEST_JSON);
+}
+
+#[test]
+fn apple_container_matches_current_wire_deserialization() {
+    assert_matches_current_wire_deserialization(APPLE_CONTAINER_REQUEST_JSON);
 }
 
 #[test]
@@ -204,6 +243,10 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
     DevelopmentContainmentCase {
         input: "isolation_session",
         expected: "isolation_session",
+    },
+    DevelopmentContainmentCase {
+        input: "apple_container",
+        expected: "apple_container",
     },
 ];
 

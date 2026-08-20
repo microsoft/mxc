@@ -101,13 +101,14 @@ export type ContainmentBackend =
   | 'hyperlight'
   | 'seatbelt'
   | 'isolation_session'
-  | 'bubblewrap';
+  | 'bubblewrap'
+  | 'apple_container';
 
 /**
  * Containment values (abstract intent or concrete backend) that require
  * the `--experimental` flag.
  */
-export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session'];
+export const ExperimentalBackends: readonly (ContainmentType | ContainmentBackend)[] = ['microvm', 'windows_sandbox', 'hyperlight', 'wslc', 'isolation_session', 'apple_container'];
 
 /**
  * Clipboard access policy levels
@@ -264,6 +265,18 @@ export interface WslcConfig {
 }
 
 /**
+ * Apple Container backend configuration.
+ */
+export interface AppleContainerConfig {
+  /** OCI image reference. The image must provide `/bin/sh`. */
+  image: string;
+  /** Requested virtual CPU count. Omit to let Apple Container choose. */
+  cpuCount?: number;
+  /** Requested memory limit in megabytes. Omit to let Apple Container choose. */
+  memoryMb?: number;
+}
+
+/**
  * Port mapping for host↔container port forwarding.
  */
 export interface PortMapping {
@@ -327,6 +340,8 @@ export interface ContainerConfig {
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
     wslc?: WslcConfig;
+    /** Apple Container configuration for macOS */
+    apple_container?: AppleContainerConfig;
     /** Telemetry configuration for experimental TraceLogging ETW support */
     telemetry?: TelemetryConfig;
   };

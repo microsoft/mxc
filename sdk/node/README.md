@@ -63,7 +63,7 @@ child.on('close', (code) => console.log('exit:', code));
 
 Pick `0.7.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.8.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`, `apple_container`), the `experimental.*` block, and state-aware lifecycle live in `0.8.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
@@ -73,9 +73,9 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
-| macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
+| macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | `apple_container` (config only) | — |
 
-The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
+The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`, `apple_container`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
@@ -201,6 +201,7 @@ console.log(result.stdout);
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
+| `apple_container` | (concrete only) | macOS ARM64 | Experimental, config only | — |
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -209,6 +210,21 @@ const config = createConfigFromPolicy(policy, 'vm'); // → windows_sandbox on W
 config.process!.commandLine = 'cmd /c whoami';
 const pty = spawnSandboxFromConfig(config, { experimental: true });
 ```
+
+Apple Container has a dedicated builder because it requires an OCI image and
+schema version `0.8.0-alpha`:
+
+```typescript
+const config = createAppleContainerConfig(
+  { version: '0.8.0-alpha' },
+  { image: 'docker.io/library/alpine:3.23', cpuCount: 2, memoryMb: 1024 },
+);
+config.process!.commandLine = 'echo hello';
+```
+
+This increment exposes and validates the configuration contract only.
+`spawnSandboxFromConfig(config, { experimental: true })` currently fails with
+`unsupported_containment` before creating Apple Container resources.
 
 Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 

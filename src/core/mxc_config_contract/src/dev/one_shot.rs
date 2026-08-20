@@ -39,6 +39,8 @@ pub enum Containment {
     Wslc => ["wslc"],
     /// Select the Windows IsolationSession backend.
     IsolationSession => ["isolation_session"],
+    /// Select the Apple Container backend.
+    AppleContainer => ["apple_container"],
 }
 }
 

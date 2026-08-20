@@ -111,8 +111,8 @@ mod primitives;
 mod stable;
 
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
-    TransportProtocol,
+    OneShotAppleContainer, OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping,
+    Telemetry, TestFeature, TransportProtocol,
 };
 pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, NetworkProxy};
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};

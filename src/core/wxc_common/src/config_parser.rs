@@ -8,10 +8,10 @@ use crate::encoding::base64_decode;
 use crate::error::WxcError;
 use crate::logger::Logger;
 use crate::models::{
-    CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
-    ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig, TelemetryConfig,
-    TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
+    AppleContainerConfig, CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy,
+    ContainmentBackend, ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig,
+    NetworkEnforcementMode, NetworkPolicy, PortMapping, ProxyAddress, ProxyConfig, SeatbeltConfig,
+    TelemetryConfig, TestFeatureConfig, UiPolicy, WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
@@ -288,11 +288,18 @@ const SUPPORTED_VERSION: &str = ">=0.6, <=0.8";
 #[cfg(test)]
 const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 
+const CURRENT_APPLE_CONTAINER_SCHEMA_VERSION: &str = "0.8.0-alpha";
+
 /// Known `experimental.<backend>` keys. Used by validation code to flag
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &[
+    "windows_sandbox",
+    "wslc",
+    "isolation_session",
+    "apple_container",
+];
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -578,6 +585,9 @@ fn present_backend_sections(cfg: &wire::MxcConfig) -> Vec<&'static str> {
         if experimental.wslc.is_some() {
             push(ContainmentBackend::Wslc);
         }
+        if experimental.apple_container.is_some() {
+            push(ContainmentBackend::AppleContainer);
+        }
         if experimental.isolation_session.is_some() {
             push(ContainmentBackend::IsolationSession);
         }
@@ -841,6 +851,18 @@ fn convert_wire_config(
     let containment = map_wire_containment(cfg.containment.as_ref());
 
     validate_single_backend_section(containment.clone(), &present_backend_sections)?;
+    if containment == ContainmentBackend::AppleContainer {
+        if schema_version != CURRENT_APPLE_CONTAINER_SCHEMA_VERSION {
+            return Err(WxcError::ConfigParse(format!(
+                "Apple Container requires config version '{CURRENT_APPLE_CONTAINER_SCHEMA_VERSION}'"
+            )));
+        }
+        if !present_backend_sections.contains(&"experimental.apple_container") {
+            return Err(WxcError::ConfigParse(
+                "Apple Container requires the 'experimental.apple_container' section".to_string(),
+            ));
+        }
+    }
 
     // LXC configuration
     let lxc_config = match cfg.lxc {
@@ -1420,6 +1442,30 @@ fn convert_wire_config(
         } else {
             None
         };
+        let apple_container = if let Some(ac) = raw_exp.apple_container {
+            if ac.image.trim().is_empty() {
+                return Err(WxcError::ConfigParse(
+                    "experimental.apple_container.image must not be empty".to_string(),
+                ));
+            }
+            if ac.cpu_count == Some(0) {
+                return Err(WxcError::ConfigParse(
+                    "experimental.apple_container.cpuCount must be greater than zero".to_string(),
+                ));
+            }
+            if ac.memory_mb == Some(0) {
+                return Err(WxcError::ConfigParse(
+                    "experimental.apple_container.memoryMb must be greater than zero".to_string(),
+                ));
+            }
+            Some(AppleContainerConfig {
+                image: ac.image,
+                cpu_count: ac.cpu_count,
+                memory_mb: ac.memory_mb,
+            })
+        } else {
+            None
+        };
         if raw_exp.seatbelt.is_some() {
             let msg = "'experimental.seatbelt' has moved to the stable section; \
                        use top-level 'seatbelt' instead."
@@ -1433,6 +1479,7 @@ fn convert_wire_config(
             test,
             windows_sandbox,
             wslc,
+            apple_container,
             telemetry,
         }
     } else {
@@ -5655,6 +5702,82 @@ mod tests {
             msg.contains("experimental.wslc") || msg.contains("isolation_session"),
             "expected the conflicting section to be named, got: {msg}"
         );
+    }
+
+    #[test]
+    fn apple_container_config_maps_to_domain_model() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "apple_container",
+            "process": {"commandLine": "echo hi"},
+            "experimental": {
+                "apple_container": {
+                    "image": "docker.io/library/alpine:3.23",
+                    "cpuCount": 2,
+                    "memoryMb": 1024
+                }
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let request = load_request(&encoded, &mut logger, true).unwrap();
+
+        assert_eq!(request.containment, ContainmentBackend::AppleContainer);
+        let config = request
+            .experimental
+            .apple_container
+            .expect("Apple Container config should be present");
+        assert_eq!(config.image, "docker.io/library/alpine:3.23");
+        assert_eq!(config.cpu_count, Some(2));
+        assert_eq!(config.memory_mb, Some(1024));
+    }
+
+    #[test]
+    fn apple_container_requires_version_and_backend_section() {
+        for json in [
+            r#"{
+                "containment": "apple_container",
+                "process": {"commandLine": "echo hi"},
+                "experimental": {"apple_container": {"image": "alpine:3.23"}}
+            }"#,
+            r#"{
+                "version": "0.7.0-alpha",
+                "containment": "apple_container",
+                "process": {"commandLine": "echo hi"},
+                "experimental": {"apple_container": {"image": "alpine:3.23"}}
+            }"#,
+            r#"{
+                "version": "0.8.0-alpha",
+                "containment": "apple_container",
+                "process": {"commandLine": "echo hi"}
+            }"#,
+        ] {
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            assert!(load_request(&encoded, &mut logger, true).is_err());
+        }
+    }
+
+    #[test]
+    fn apple_container_rejects_empty_image_and_zero_resources() {
+        for fields in [
+            r#""image": """#,
+            r#""image": "alpine:3.23", "cpuCount": 0"#,
+            r#""image": "alpine:3.23", "memoryMb": 0"#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "version": "0.8.0-alpha",
+                    "containment": "apple_container",
+                    "process": {{"commandLine": "echo hi"}},
+                    "experimental": {{"apple_container": {{{fields}}}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+            assert!(load_request(&encoded, &mut logger, true).is_err());
+        }
     }
 
     #[test]
