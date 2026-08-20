@@ -111,7 +111,7 @@ mod primitives;
 mod stable;
 
 pub use experimental::{
-    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
+    OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, TestFeature,
     TransportProtocol,
 };
 pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, NetworkProxy};
@@ -119,6 +119,6 @@ pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest}
 pub use primitives::{NonEmptyString, OptionalField, True};
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
-    Process, ProcessContainer, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt, Ui,
-    UiClipboard,
+    Process, ProcessContainer, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt,
+    Telemetry, Ui, UiClipboard,
 };
