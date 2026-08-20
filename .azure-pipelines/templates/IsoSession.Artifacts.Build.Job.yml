@@ -467,7 +467,7 @@ jobs:
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
       clientid: ${{ parameters.ESRPInfo.clientId }}
       intent: PackageDistribution
-      contenttype: msi
+      contenttype: binaries
       contentsource: Folder
       folderlocation: $(releaseContentDirectory)
       owners: ${{ parameters.ESRPInfo.OwnersEmail }}
