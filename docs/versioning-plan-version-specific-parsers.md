@@ -1905,6 +1905,62 @@ confirmed them.
 - The parser, the corpus gate, `schemas/schema-version.json`, the published
   contracts, and all runtime behavior are unchanged.
 
+
+### Phase 6 review finding: contract value-rule gaps
+
+An adversarial review of the Phase 6 branch raised, at Medium severity on the
+security axis, that the exact contract accepts `processContainer.capabilities`
+entries the rolling parser rejects: entries containing a comma, which is
+BaseContainer's wire delimiter, and the reserved `learningModeLogging` and
+`permissiveLearningMode` names, which relax deny-by-default containment. All
+three contracts type the field as a bare `Vec<String>`.
+
+**The finding is correct. Its stated severity rests on a premise that does not
+hold.** The review reasoned that "the guard would disappear when exact dispatch
+replaces [the rolling parser] unless the validation is carried forward". That
+is true only if `convert_wire_config` stops running. It does not: the exact
+path is contract to `dev::adapt_request` to `wire::MxcConfig` to the same
+`convert_wire_config`, and Phase 9 removes the version-insensitive
+*deserialization*, not the wire-to-domain conversion. The capability rules
+therefore survive the cutover by construction rather than by anyone remembering
+to port them.
+
+That reclassifies the finding from a latent security regression to an instance
+of the structural-versus-semantic split ratified in Phase 7 decision 1: the
+contract is the structural authority, and `convert_wire_config` remains the
+semantic authority for value rules and cross-field interplay.
+
+**A separate regression, which the review did not name, is worth fixing on its
+own.** The rolling schema documents the rule in the field's `description`:
+
+> Each array entry must contain exactly one capability name; commas are
+> rejected because BaseContainer uses commas as its wire delimiter.
+> `learningModeLogging` and `permissiveLearningMode` are reserved and rejected
+> here; use `learningMode`, `--audit`, or the dedicated denial capture
+> configuration instead.
+
+The exact schema reduces this to "Optional AppContainer capability names."
+Neither artifact *enforces* the rule, so enforcement parity is unchanged, but
+the rolling one told the author and the exact one does not. The contract's doc
+comments were written fresh rather than carried over from the wire model, and
+the loss propagates into both the generated schema and the TypeScript oracle.
+
+Remediation, in order:
+
+1. Port the descriptive prose from `wxc_common::wire` into the contract doc
+   comments, and audit the other fields for the same loss. Zero risk, restores
+   authoring guidance in both generated artifacts, and requires no design
+   decision.
+2. Decide whether to model the rule as a validating newtype on the development
+   contract. Two constraints the review does not mention: the published `0.6`
+   and `0.7` contracts are immutable, so the fix cannot be applied uniformly
+   across versions; and it places the rule in two implementations, so it needs
+   a shared constant and a parity test, or it will drift — the failure mode
+   this plan exists to prevent.
+3. Treat the finding as a class rather than an instance, and cover it in
+   Phase 7.4 by running the harness over the corpus's invalid documents. See
+   the "exact looser than rolling" direction recorded there.
+
 ### Phase 6 risks
 
 | Risk | Mitigation |
@@ -2260,7 +2316,9 @@ no other gate reports. Second, the repository has 11 pre-existing broken
 intra-doc links, so compare against a baseline rather than requiring zero.
 
 Phases 7.2 through 7.5 remain. Work is paused pending parser-parity remediation
-on the Phase 5 stack.
+on the Phase 5 stack, prompted by the Phase 6 review finding recorded above:
+the exact contracts accept `processContainer.capabilities` values the rolling
+parser rejects. See "Phase 6 review finding: contract value-rule gaps".
 
 ### Phase 7 step breakdown
 
@@ -2473,7 +2531,13 @@ command-splice path from Phase 7.1, immutable post-provision policy, telemetry,
 required envelope fields, and source-position diagnostics.
 
 Differences are not failures; unclassified differences are. Record each one in
-a table with its input, both behaviors, and the reason. Expect at least:
+a table with its input, both behaviors, and the reason.
+
+Differences come in two directions, and they are not equally safe.
+
+**Exact stricter than rolling** — the expected direction, and the point of the
+work. Each is an intentional tightening to classify and, where it affects the
+corpus, to migrate in Phase 8:
 
 - a `0.6.0-alpha` document carrying `experimental`, which the rolling parser
   accepts and the exact contract rejects as an unknown field
@@ -2485,10 +2549,31 @@ a table with its input, both behaviors, and the reason. Expect at least:
   absent and the contract's `OptionalField` rejects
 - an unknown field inside an experimental backend payload, which the backend
   config type ignores and the closed contract rejects
+- a stray `sandboxId` on a provision request, which the rolling parser lifts
+  regardless of phase and the provision roots reject
+- `{"process": {"commandLine": 42}}` combined with a CLI command override,
+  which the rolling parser rejects and the splice makes parseable by
+  overwriting the field
 - curated policy diagnostics replaced by structural Serde errors, most visibly
   the IsolationSession `filesystem` and `ui` rejections, whose current messages
   explain *why* the backend cannot honor the policy
 - any corpus document that is valid under one root and invalid under another
+
+**Exact looser than rolling** — the dangerous direction, and the one the
+harness exists to find. The contract accepts a document that `convert_wire_config`
+rejects on a value rule the contract does not express. The Phase 6 review found
+the first instance:
+
+- `processContainer.capabilities` entries containing a comma, or naming the
+  reserved `learningModeLogging` / `permissiveLearningMode` capabilities. The
+  contract types all three versions as a bare `Vec<String>`; the rolling parser
+  rejects both, case-insensitively for the reserved names
+
+This class is not confined to that field. `convert_wire_config` also enforces
+filesystem path rules, proxy and enforcement-mode combinations, backend-section
+constraints, and `captureDenials` output-path validation, none of which any
+contract expresses. Run the harness over the corpus's **invalid** documents,
+not only the valid ones, and assert that both paths reject the same inputs.
 
 Suggested commit boundary: `Add rolling-versus-exact parser equivalence tests`.
 
