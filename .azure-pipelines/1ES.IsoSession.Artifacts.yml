@@ -46,17 +46,18 @@ parameters:
   displayName: Azure Artifacts NuGet v3 feed URL for the final SDK package
   type: string
   default: https://pkgs.dev.azure.com/microsoft/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
-- name: ApproversEmail
-  displayName: ESRP approver email addresses
-  type: string
-  default: ''
-- name: OwnersEmail
-  displayName: ESRP owner email addresses
-  type: string
-  default: ''
-
-variables:
-- group: MXC-ESRP-Signing
+- name: ESRPInfo
+  displayName: ESRP release configuration
+  type: object
+  default:
+    serviceName: 'MXC-ESRP-Auth'
+    tenantId: '975f013f-7f24-47e8-a7d3-abc4752bf346'
+    azureKeyVaultName: 'KV-MXC-ESRP-Release-West'
+    authCertName: 'mxc-esrp-auth-cert'
+    signCertName: '37eb2314-6120-4418-93a3-fc4006e6d18a'
+    clientId: '37eb2314-6120-4418-93a3-fc4006e6d18a'
+    ApproversEmail: 'anisk@microsoft.com, sodas@microsoft.com, jwhites@microsoft.com'
+    OwnersEmail: 'bbonaby@microsoft.com, sodas@microsoft.com, jwhites@microsoft.com'
 
 extends:
   template: v1/1ES.Official.PipelineTemplate.yml@1ESPipelineTemplates
@@ -82,15 +83,7 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.x64DropNameOverride }}
-          ESRPInfo:
-            serviceName: $(serviceName)
-            tenantId: $(tenantId)
-            azureKeyVaultName: $(azureKeyVaultName)
-            authCertName: $(authCertName)
-            signCertName: $(signCertName)
-            clientId: $(clientId)
-            ApproversEmail: ${{ parameters.ApproversEmail }}
-            OwnersEmail: ${{ parameters.OwnersEmail }}
+          ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
@@ -101,15 +94,7 @@ extends:
           patch: ${{ parameters.patch }}
           osBranch: ${{ parameters.osBranch }}
           dropNameOverride: ${{ parameters.arm64DropNameOverride }}
-          ESRPInfo:
-            serviceName: $(serviceName)
-            tenantId: $(tenantId)
-            azureKeyVaultName: $(azureKeyVaultName)
-            authCertName: $(authCertName)
-            signCertName: $(signCertName)
-            clientId: $(clientId)
-            ApproversEmail: ${{ parameters.ApproversEmail }}
-            OwnersEmail: ${{ parameters.OwnersEmail }}
+          ESRPInfo: ${{ parameters.ESRPInfo }}
 
       - job: aggregate_isosession_artifacts
         displayName: Aggregate IsoSession release outputs
