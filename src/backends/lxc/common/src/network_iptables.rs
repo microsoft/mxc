@@ -2829,6 +2829,12 @@ mod deny_precedence_spec;
 #[path = "network_iptables_proxy_spec.rs"]
 mod proxy_spec;
 
+/// Black-box specification for schema 0.8 `network.egress` lowering, kept in
+/// its own file for the same reason as `veth_spec`.
+#[cfg(test)]
+#[path = "network_iptables_ga_egress_spec.rs"]
+mod ga_egress_spec;
+
 #[cfg(test)]
 mod test_firewall {
     use std::cell::RefCell;
