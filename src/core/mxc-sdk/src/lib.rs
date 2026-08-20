@@ -136,6 +136,8 @@
 
 mod sandbox;
 
+pub mod telemetry;
+
 pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
