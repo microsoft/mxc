@@ -730,6 +730,11 @@ pub struct ContainerPolicy {
     /// proxy-only exec request. Parse-derived, never on the wire.
     #[serde(skip)]
     pub network_mode_specified: bool,
+    /// Whether `runtimeConfig.networkProxy` was supplied. Distinguishes the
+    /// schema 0.8 runtime field from the legacy `network.proxy` shape after
+    /// both have been normalized into `network_proxy`.
+    #[serde(skip)]
+    pub runtime_network_proxy_specified: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
     /// Whether the caller supplied a `ui` block on the wire (any field
@@ -772,14 +777,6 @@ pub fn needs_host_filtering(
 }
 
 impl ContainerPolicy {
-    /// Returns whether the effective outbound default allows network access.
-    pub fn allows_network_egress(&self) -> bool {
-        self.network_egress.as_ref().map_or(
-            self.default_network_policy == NetworkPolicy::Allow,
-            |egress| egress.default == NetworkAction::Allow,
-        )
-    }
-
     /// True when this policy's host lists require per-host egress filtering.
     pub fn needs_host_filtering(&self) -> bool {
         needs_host_filtering(

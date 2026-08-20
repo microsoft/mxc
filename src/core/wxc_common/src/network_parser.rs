@@ -319,6 +319,7 @@ fn apply_directional_network(
     }
 
     if let Some(url) = runtime.and_then(|runtime| runtime.network_proxy) {
+        policy.runtime_network_proxy_specified = true;
         // Runtime proxy is a 0.8 wire field normalized into the existing
         // backend-facing proxy configuration.
         let proxy = convert_wire_proxy_at(
