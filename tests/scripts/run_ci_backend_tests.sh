@@ -52,7 +52,18 @@ case "$backend" in
                  "default-deny test; it cannot be verified unprivileged." >&2
             exit 2
         fi
-        sudo -n bash "$script_root/run_bwrap_inbound_deny_test.sh"
+        # A skip here means a prerequisite is missing on the runner, not that
+        # the assertion passed. Translate it into an explicit failure so the
+        # inbound guarantee can never be reported as verified without running.
+        inbound_status=0
+        sudo -n bash "$script_root/run_bwrap_inbound_deny_test.sh" || inbound_status=$?
+        if [[ $inbound_status -eq 77 ]]; then
+            echo "The Bubblewrap inbound default-deny test skipped for a missing prerequisite;" \
+                 "prepare-linux-host.sh should have installed slirp4netns, nsenter, iptables," \
+                 "and iproute2. Failing rather than reporting an unverified guarantee." >&2
+            exit 1
+        fi
+        exit "$inbound_status"
         ;;
     lxc)
         test -x "$binary_directory/lxc-exec"
