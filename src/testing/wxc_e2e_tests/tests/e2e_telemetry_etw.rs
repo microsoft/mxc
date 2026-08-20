@@ -252,7 +252,13 @@ fn assert_events_recorded(dump: &str) {
     );
     // Field-level checks, so the test fails if the event is emitted but its
     // payload has been gutted.
-    for field in ["mxc.sandbox_kind", "mxc.outcome", "PartA_PrivTags"] {
+    for field in [
+        "mxc.sandbox_kind",
+        "mxc.outcome",
+        "PartA_PrivacyProduct",
+        "PartA_PrivacyDataCategory",
+        "PartA_PrivTags",
+    ] {
         assert!(
             dump.contains(field),
             "recorded MXC event is missing the {field} field"
