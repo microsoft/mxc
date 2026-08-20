@@ -20,9 +20,10 @@ fn empty_response(status: StatusCode) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
-/// Start the test proxy. Binds to port 0 (OS-assigned) and returns the actual port.
-pub async fn start() -> u16 {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
+/// Start the test proxy on the requested loopback port. Zero asks the OS to
+/// assign an available port.
+pub async fn start(port: u16) -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap_or_else(|err| {
             eprintln!("Test proxy failed to bind: {}", err);

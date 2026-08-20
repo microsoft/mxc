@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 desktop2 rescap">
+  <Identity Name="Microsoft.MXC.TestProxy.AppContainer"
+    Publisher="CN=Microsoft MXC Test Proxy" Version="1.0.0.0"
+    ProcessorArchitecture="$architecture$" />
+  <Properties>
+    <DisplayName>MXC AppContainer Test Proxy</DisplayName>
+    <PublisherDisplayName>Microsoft MXC Test Proxy</PublisherDisplayName>
+    <Logo>Assets\Logo150.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0"
+      MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+  <Extensions>
+    <desktop2:Extension Category="windows.firewallRules">
+      <desktop2:FirewallRules Executable="wxc-test-proxy.exe">
+        <desktop2:Rule Direction="in" IPProtocol="TCP" Profile="all"
+          LocalPortMin="8080" LocalPortMax="8080" />
+      </desktop2:FirewallRules>
+    </desktop2:Extension>
+  </Extensions>
+  <Applications>
+    <Application Id="Proxy" Executable="wxc-test-proxy.exe"
+      uap10:RuntimeBehavior="packagedClassicApp" uap10:TrustLevel="appContainer">
+      <uap:VisualElements DisplayName="MXC AppContainer Test Proxy"
+        Description="Testing-only HTTP proxy" BackgroundColor="transparent"
+        Square150x150Logo="Assets\Logo150.png" Square44x44Logo="Assets\Logo44.png"
+        AppListEntry="none" />
+    </Application>
+  </Applications>
+</Package>
