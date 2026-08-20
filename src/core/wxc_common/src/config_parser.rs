@@ -5224,6 +5224,7 @@ mod tests {
         let json = r#"{
             "version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"},
+            "containment": "processcontainer",
             "network": {"defaultPolicy": "allow"},
             "runtimeConfig": {},
             "processContainer": {"network": {}}
