@@ -29,17 +29,16 @@ requiring root privileges or a container runtime.
   below that floor.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
   plus `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
-  `ip6tables-restore` for the egress rules. These are
-  needed by **both** 0.8 modes that build a private network namespace — proxy
-  mode (`network.proxy`) and firewall enforcement
-  (`enforcementMode: "firewall"`), which share the same slirp-backed namespace
-  and the same dependency probe. None are required when neither applies: a
-  policy with no `network.proxy` and no 0.8 firewall enforcement, or a 0.6/0.7
-  policy using the legacy proxy and host-rule behavior.
+  `ip6tables-restore` for the in-namespace egress and ingress rules, and the
+  `nf_conntrack` kernel module loaded for the inbound chain's connection-state
+  match (unprivileged Bubblewrap cannot load it on demand).
 
-  The inbound chain's connection-state match additionally needs the
-  `nf_conntrack` kernel module already loaded — unprivileged Bubblewrap cannot
-  load it on demand.
+  This covers **both** 0.8 modes that get a private network namespace —
+  `network.proxy` (proxy-only egress) *and* `network.enforcementMode:
+  "firewall"` with host lists — because `validate` runs the same dependency
+  probe for each, and both render the same two chains. None are required when
+  the request resolves to neither mode (no proxy and no enforced host lists),
+  or when a 0.6/0.7 policy uses the legacy proxy behavior.
 
   > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
   > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6

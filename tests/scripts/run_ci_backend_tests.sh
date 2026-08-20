@@ -41,6 +41,18 @@ case "$backend" in
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
         bash "$script_root/run_bwrap_all_tests.sh"
+        # The inbound chain test needs real host CAP_NET_ADMIN to read the
+        # sandbox's network namespace and inject a peer into it, so the non-root
+        # suite above can only report it as skipped. Invoking it separately here
+        # is what makes that security assertion actually run in CI; it must not
+        # be folded into the suite, which asserts the sandbox drops capabilities
+        # and therefore cannot itself run as root.
+        if ! sudo -n true 2>/dev/null; then
+            echo "Bubblewrap CI requires passwordless sudo to run the inbound" \
+                 "default-deny test; it cannot be verified unprivileged." >&2
+            exit 2
+        fi
+        sudo -n bash "$script_root/run_bwrap_inbound_deny_test.sh"
         ;;
     lxc)
         test -x "$binary_directory/lxc-exec"

@@ -413,17 +413,22 @@ Model 2 permits only the proxy endpoint.
 > `CAP_NET_ADMIN` filters on `OUTPUT` inside it (see the D2 note above). Rule
 > addresses must be IP literals or CIDRs per D3; a hostname is rejected.
 > Model 2 is enforced by the same chain, which opens only the proxy endpoint.
-> An `INPUT` chain applies the deny posture for `ingress.default` in the same
-> transaction, accepting loopback and reply traffic and dropping new inbound
-> connections. It requires `nf_conntrack`; the sandbox fails to launch without
-> it rather than running unenforced.
+> An `INPUT` chain applies the inbound deny posture in the same transaction,
+> accepting loopback and reply traffic and dropping new inbound connections. It
+> requires `nf_conntrack`; the sandbox fails to launch without it rather than
+> running unenforced.
 >
-> Not yet covered: `ingress.hostLoopback` and an `ingress.default` of `allow`
-> are parsed but not enforced — the `allow` posture is rejected at 0.8 rather
-> than honored. Inbound denial does not currently depend on the `INPUT` chain:
-> no port forwarding is configured, so nothing outside the sandbox
-> can reach in regardless. Schema 0.6/0.7 keeps the previous warn-and-continue
-> behavior.
+> Not yet covered: the `ingress` section does not exist in the schema yet —
+> neither `ingress.default` nor `ingress.hostLoopback` is accepted, so a config
+> carrying them is rejected as an unknown field. The inbound posture is instead
+> derived from the existing `network.allowLocalNetwork`, and at 0.8 that field
+> is rejected outright when it is `true` on a private-namespace mode (there is
+> no inbound-only primitive to honor it with). Deny is therefore the only
+> reachable posture today; wiring `ingress` is what will make `allow`
+> expressible. Inbound denial also does not currently depend on the `INPUT`
+> chain in practice: no port forwarding is configured, so nothing outside the
+> sandbox can reach in regardless. Schema 0.6/0.7 keeps the previous
+> warn-and-continue behavior.
 > LXC is unaffected: it has a veth and runs privileged, and enforces as
 > described.
 

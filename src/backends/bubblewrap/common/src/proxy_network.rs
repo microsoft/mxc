@@ -640,7 +640,9 @@ impl ProxyNetworkNamespace {
                 render_filter_payloads(plan, ingress, family, EGRESS_CHAIN, INGRESS_CHAIN);
             transactions += payloads.len();
             for (index, payload) in payloads.iter().enumerate() {
-                let path = state_dir.path().join(payload_file_name(family, index));
+                let path = state_dir
+                    .path()
+                    .join(payload_file_name(family, index, payloads.len()));
                 std::fs::write(&path, payload).map_err(|error| {
                     format!("Bubblewrap: failed to write network rules to {path:?}: {error}")
                 })?;
@@ -2465,7 +2467,7 @@ mod tests {
                 "the script has no glob {glob} for the payloads the renderer writes"
             );
             assert!(
-                payload_file_name(family, 0).starts_with(family.payload_prefix()),
+                payload_file_name(family, 0, 1).starts_with(family.payload_prefix()),
                 "the renderer stopped using the prefix the glob matches"
             );
         }
@@ -2950,13 +2952,14 @@ exec sleep 30
         fs::create_dir_all(&bin).expect("bin dir");
         fs::create_dir_all(&state).expect("state dir");
         for family in [RuleFamily::V4, RuleFamily::V6] {
-            for (index, payload) in
-                render_filter_payloads(plan, ingress, family, TEST_CHAIN, TEST_INGRESS_CHAIN)
-                    .iter()
-                    .enumerate()
-            {
-                fs::write(state.join(payload_file_name(family, index)), payload)
-                    .expect("rules payload");
+            let payloads =
+                render_filter_payloads(plan, ingress, family, TEST_CHAIN, TEST_INGRESS_CHAIN);
+            for (index, payload) in payloads.iter().enumerate() {
+                fs::write(
+                    state.join(payload_file_name(family, index, payloads.len())),
+                    payload,
+                )
+                .expect("rules payload");
             }
         }
         install_stub(&bin.join("nsenter"), FAKE_NSENTER);

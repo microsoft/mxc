@@ -54,13 +54,36 @@ impl RuleFamily {
     }
 }
 
-/// Basename of the `index`-th restore payload for `family`.
+/// Minimum index width, so the common single-digit case still sorts and the
+/// names stay stable for the sizes every real policy produces.
+const PAYLOAD_INDEX_MIN_WIDTH: usize = 3;
+
+/// Basename of the `index`-th of `total` restore payloads for `family`.
 ///
 /// The supervisor applies these with a shell glob, which expands in lexical
 /// order, so the index is zero-padded to keep lexical order equal to apply
-/// order. Rule order *is* the policy, so a mis-sort would silently change it.
-pub(crate) fn payload_file_name(family: RuleFamily, index: usize) -> String {
-    format!("{}{index:03}", family.payload_prefix())
+/// order. Rule order *is* the policy, and the hooks ride in the final payload,
+/// so a mis-sort would both reorder first-match rules and land the hooks over a
+/// half-built chain -- a brief fail-open.
+///
+/// The width is derived from `total` rather than fixed because the host lists
+/// are unbounded: any constant width is a silent correctness cliff one entry
+/// past it (`rules.v4.1000` sorts before `rules.v4.101`). Deriving it means
+/// lexical order equals numeric order for every count.
+pub(crate) fn payload_file_name(family: RuleFamily, index: usize, total: usize) -> String {
+    let width = decimal_width(total.saturating_sub(1)).max(PAYLOAD_INDEX_MIN_WIDTH);
+    format!("{}{index:0width$}", family.payload_prefix())
+}
+
+/// Number of decimal digits needed to write `value`.
+fn decimal_width(value: usize) -> usize {
+    let mut width = 1;
+    let mut remaining = value;
+    while remaining >= 10 {
+        remaining /= 10;
+        width += 1;
+    }
+    width
 }
 
 /// What the packet filter does with a match.
@@ -557,6 +580,34 @@ pub(crate) fn render_filter_payloads(
 mod tests {
     use super::*;
     use wxc_common::models::ContainerPolicy;
+
+    /// The supervisor applies payloads in shell-glob (lexical) order, so lexical
+    /// order must equal numeric order for *every* count. A fixed 3-digit width
+    /// broke this one payload past 999 -- `rules.v4.1000` sorts before
+    /// `rules.v4.101` -- which would reorder first-match rules and apply the
+    /// hook-bearing final payload over a half-built chain.
+    #[test]
+    fn payload_names_sort_in_apply_order_past_a_digit_boundary() {
+        for total in [1, 2, 10, 999, 1000, 1001, 10_000] {
+            let names: Vec<String> = (0..total)
+                .map(|index| payload_file_name(RuleFamily::V4, index, total))
+                .collect();
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(
+                names, sorted,
+                "payload names for total={total} do not sort into apply order"
+            );
+        }
+    }
+
+    /// The common case keeps the names it has always had, so the doc and the
+    /// script's glob stay accurate.
+    #[test]
+    fn small_payload_counts_keep_three_digit_names() {
+        assert_eq!(payload_file_name(RuleFamily::V4, 0, 1), "rules.v4.000");
+        assert_eq!(payload_file_name(RuleFamily::V6, 7, 12), "rules.v6.007");
+    }
 
     fn request(default: NetworkPolicy, allowed: &[&str], blocked: &[&str]) -> ExecutionRequest {
         ExecutionRequest {
