@@ -37,14 +37,14 @@
     },
     {
       "id": "windows-prerelease-isolation-session",
-      "displayName": "Windows Pre-release Isolation Session",
+      "displayName": "Windows Prerelease Isolation Session",
       "family": "windows",
       "prerelease": true,
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-win-prerelease-isolationsesh-x64",
           "backends": [
             "process-t1",
             "process-t3",
@@ -393,6 +393,13 @@
       }
     ],
     "weekly": [],
-    "enabled": []
+    "enabled": [
+      {
+        "os": "windows-prerelease-isolation-session",
+        "backends": [
+          "isolation-session"
+        ]
+      }
+    ]
   }
 }
