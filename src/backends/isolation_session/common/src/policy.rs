@@ -70,7 +70,11 @@ pub(super) fn validate_post_provision_policy(
     if request.policy.network_proxy.is_enabled() {
         return Err(IsolationSessionError::Policy(ERR_PROXY_POLICY.to_string()));
     }
-    if request.policy.network_specified || request.policy.network_mode_specified {
+    if request.policy.network_specified
+        || request.policy.network_mode_specified
+        || request.policy.network_egress.is_some()
+        || request.policy.network_ingress.is_some()
+    {
         return Err(IsolationSessionError::Policy(
             ERR_NETWORK_IMMUTABLE.to_string(),
         ));
@@ -137,7 +141,9 @@ fn validate_provision_network_policy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, ProxyAddress, ProxyConfig, UiPolicy};
+    use wxc_common::models::{
+        ContainerPolicy, NetworkEgressPolicy, ProxyAddress, ProxyConfig, UiPolicy,
+    };
     use wxc_common::mxc_error::MxcErrorCode;
 
     fn assert_policy_err_contains(err: IsolationSessionError, expected: &str) {
@@ -593,6 +599,21 @@ mod tests {
         // No network supplied → inherit what provision established.
         let request = ExecutionRequest::default();
         assert!(validate_post_provision_policy(&request).is_ok());
+    }
+
+    #[test]
+    fn post_provision_policy_rejects_raw_directional_policy() {
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_policy_err_contains(
+            validate_post_provision_policy(&request).unwrap_err(),
+            ERR_NETWORK_IMMUTABLE,
+        );
     }
 
     #[test]

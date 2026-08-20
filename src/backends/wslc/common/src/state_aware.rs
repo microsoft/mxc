@@ -526,12 +526,11 @@ mod tests {
     }
 
     #[test]
-    fn post_provision_hooks_reject_directional_network_fields() {
+    fn post_provision_hooks_reject_raw_directional_network_fields() {
         let runner = WslcStateAwareRunner::new();
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_egress: Some(NetworkEgressPolicy::default()),
-                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()

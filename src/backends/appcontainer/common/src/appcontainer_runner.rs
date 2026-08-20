@@ -1531,11 +1531,6 @@ impl AppContainerScriptRunner {
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
-        if request.policy.allowed_proxy_peer.is_some() {
-            return Err(ScriptResponse::error(
-                "processContainer.network.allowedProxyPeer requires BaseContainer support",
-            ));
-        }
 
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.

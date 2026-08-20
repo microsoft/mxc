@@ -2201,11 +2201,6 @@ struct BaseChild {
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
-        if request.policy.allowed_proxy_peer.is_some() {
-            return Err(ScriptResponse::error(
-                "processContainer.network.allowedProxyPeer is not implemented",
-            ));
-        }
 
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
