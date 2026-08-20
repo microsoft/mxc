@@ -76,6 +76,8 @@ pub(super) fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
         proxy: proxy.into_option().map(convert_proxy),
+        egress: None,
+        ingress: None,
     }
 }
 
