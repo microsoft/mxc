@@ -5357,6 +5357,25 @@ mod tests {
     }
 
     #[test]
+    fn schema_v08_rejects_explicitly_empty_rule_selectors() {
+        for (selector, expected_path) in [("\"to\": []", ".to"), ("\"ports\": []", ".ports")] {
+            let json = format!(
+                r#"{{
+                    "version": "0.8.0-alpha",
+                    "process": {{"commandLine": "echo hi"}},
+                    "network": {{"egress": {{"allow": [{{{selector}}}]}}}}
+                }}"#
+            );
+            let error = match load_mxc(&json) {
+                Err(ParseError::OneShot(error)) => error.to_string(),
+                other => panic!("expected one-shot rejection, got: {other:?}"),
+            };
+            assert!(error.contains(expected_path), "got: {error}");
+            assert!(error.contains("must contain at least one"), "got: {error}");
+        }
+    }
+
+    #[test]
     fn schema_v08_invalid_cidr_error_has_path_and_reason() {
         let json = r#"{
             "version": "0.8.0-alpha",

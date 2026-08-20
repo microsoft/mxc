@@ -268,9 +268,9 @@ export interface NetworkPortConfig {
 
 /** Outbound network rule. */
 export interface NetworkRuleConfig {
-  /** Destination CIDRs. Omission matches both IP families. */
+  /** Destination CIDRs. Omission matches both IP families; an explicit array must be non-empty. */
   to?: NetworkPeerConfig[];
-  /** Destination protocols and ports. Omission matches all. */
+  /** Destination protocols and ports. Omission matches all; an explicit array must be non-empty. */
   ports?: NetworkPortConfig[];
 }
 

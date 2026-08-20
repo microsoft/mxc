@@ -403,6 +403,17 @@ fn convert_rule(
     rule_index: usize,
 ) -> Result<NetworkRule, WxcError> {
     let rule_path = format!("{path}[{rule_index}]");
+    if rule.to.as_ref().is_some_and(Vec::is_empty) {
+        return Err(WxcError::ConfigParse(format!(
+            "{rule_path}.to must contain at least one destination when specified"
+        )));
+    }
+    if rule.ports.as_ref().is_some_and(Vec::is_empty) {
+        return Err(WxcError::ConfigParse(format!(
+            "{rule_path}.ports must contain at least one selector when specified"
+        )));
+    }
+
     let to = rule
         .to
         .unwrap_or_default()
