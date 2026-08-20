@@ -81,6 +81,11 @@ behavior, missing versions, experimental fields on published contracts, and
 > assumption that published contracts exclude `experimental`. Do not implement
 > the alternative in this section until the requirement is ratified and the
 > normative parts of this plan are updated.
+>
+> **Update, 2026-08-20.** The revised publication sequence brings this forward:
+> publishing `0.8.0-alpha` requires deciding decision 5 — which experimental
+> fields, if any, the first published contract selects — and question 3, on
+> state-aware shapes, for the same reason. See "Revised publication sequence".
 
 A proposed requirement allows a published config contract (and therefore a
 stable schema artifact) to include explicitly selected experimental fields.
@@ -200,6 +205,101 @@ Published request types do not contain:
 The existing `schemas/stable/mxc-config.schema.0.5.0-alpha.json` experimental
 section remains an unsupported historical artifact. No `0.5` runtime contract
 will be added.
+
+**Superseded by the revised publication sequence below.** `0.8.0-alpha` is
+being published early, so the table above describes the state up to that point
+only: after publication `0.8.0-alpha` is a published contract and `0.9.0-dev`
+becomes the development contract.
+
+## Revised publication sequence
+
+Agreed 2026-08-20, after PR #961 shipped directional networking on the rolling
+model ahead of this work. It replaces the implicit ordering in Phases 8 through
+11, which assumed publication happened last.
+
+The order is:
+
+1. PRs #961 and #962 land: directional networking and its backend validation,
+   on the rolling wire model, version-gated to `0.8`.
+2. Port the same fields into `mxc_config_contract::dev` and its adapters —
+   `network.egress`, `network.ingress`, and
+   `processContainer.network.allowedProxyPeer`. **This is a prerequisite, not
+   an option:** publishing a `0.8.0-alpha` contract that cannot express a
+   feature the same version ships to customers would be incoherent.
+3. Land Phase 6, so the generated artifacts derive from the contract crate.
+4. Publish `0.8.0-alpha` from the contract crate, forking the published module,
+   the frozen adapter, and (when it exists) the per-version policy builder.
+5. Move the remaining development work to `0.9.0-dev`.
+
+### Why the stable schema is generated from the contract
+
+The old stack's freeze generator would publish the rolling schema, which has no
+root `required` array at all, declares `phase`, `sandboxId`, and
+`correlationVector` at the root, and leaves `experimental` open. The exact
+`0.8.0-alpha` contract is closed, multi-root, and requires
+`process.commandLine`. Publishing both would ship two artifacts, days apart,
+that disagree about what `0.8.0-alpha` accepts — the `0.6`/`0.7` "bootstrap
+tightening" repeated deliberately rather than inherited.
+
+Generating the stable schema from the contract crate removes the disagreement
+by construction. This is why Phase 6 must land before publication rather than
+merely before Phase 10.
+
+### The scope question this does not answer
+
+Generating the artifact from the contract guarantees the two agree; it does not
+decide what the contract contains. Whatever `published::v0_8_0_alpha` omits is
+simply not part of `0.8.0-alpha`, and the generated schema will say so.
+
+Two consequences need deciding before step 4:
+
+- **Experimental.** Six corpus configs declare `0.8.0-alpha` and use
+  `experimental` or `phase` today, out of thirty at that version. A narrow
+  publication re-versions them to `0.9.0-dev`, and does the same to any
+  customer config in the same shape. This is design-note decision 5, which
+  publication now forces.
+- **State-aware.** The plan's Phase 11 rule is that state-aware types never
+  enter a published contract. Applied here, state-aware requests have no
+  published version to declare: they would move from the `0.6.0-alpha` they
+  hard-code today onto the `0.9.0-dev` development contract, which means the
+  state-aware lifecycle ships only against a development version. That may be
+  acceptable while it remains experimental, but it should be chosen rather than
+  discovered.
+
+### Version string
+
+Freeze the literal `0.8.0-alpha`. Thirty corpus configs, #961's documentation,
+and its tests already declare it; minting a separate `0.8.0` re-versions all of
+them and strands the directional-networking examples. Settle the suffix
+convention at the same time: `schemas/schema-version.json` currently carries
+`maxSupported: 0.8.0-alpha` alongside `devSchemaFile: 0.8.0-dev` for the same
+line, which stops being harmless once a published and a development line
+coexist.
+
+### Knock-ons to schedule
+
+- `schemas/schema-version.json`: `stableLatest` to `0.8.0-alpha`,
+  `maxSupported` and `devSchemaFile` to the `0.9` line, then
+  `check-schema-versions.js` drags the Rust and SDK constants.
+- The contract registry: flip `V0_8_0Alpha` to `Published` and add the `0.9`
+  development arm by hand; Phase 11 replaces that with generated metadata later.
+- The three-way fork of Phase 11, minus the `mxc_engine::policy` builder, which
+  does not exist until Phase 7.3. The builder fork is deferred, not skipped.
+- PR #966, if it lands before the freeze, puts `ProcessContainerCapability`
+  into the published `0.8.0-alpha` contract and makes the parse-time versus
+  conversion-time asymmetry against `0.6` and `0.7` permanent across published
+  contracts. Deliberate is fine; accidental is not.
+- Phase 8's "state-aware producers must stop hard-coding `0.6.0-alpha`" moves
+  up: that constant is more obviously wrong once `0.8.0-alpha` is published.
+- Phase 6's branch must be rebased and its artifacts **regenerated** rather
+  than replayed, and its duplicate capabilities commit dropped in favor of
+  #966.
+- Phase 10 largely dissolves. #961 and #962 do the network work on the rolling
+  model and publication freezes it; what remains is the IsolationSession
+  acknowledgment redesign on `0.9` and the published-version translation.
+- Phase 9's blocker is resolved by this sequence: the exact path gains
+  directional networking through step 2, so enabling exact dispatch no longer
+  regresses a shipped feature.
 
 ## Intended parse flow
 
