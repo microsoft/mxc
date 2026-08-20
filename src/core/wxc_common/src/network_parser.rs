@@ -70,7 +70,7 @@ pub(crate) fn host_is_loopback(host: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
+fn convert_wire_proxy_at(proxy: wire::Proxy, path: &str) -> Result<ProxyConfig, WxcError> {
     let wire::Proxy {
         builtin_test_server,
         localhost,
@@ -80,14 +80,14 @@ pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcE
 
     if let Some(builtin) = builtin_test_server {
         if !builtin {
-            return Err(WxcError::ConfigParse(
-                "network.proxy.builtinTestServer must be true when present".to_string(),
-            ));
+            return Err(WxcError::ConfigParse(format!(
+                "{path}.builtinTestServer must be true when present"
+            )));
         }
         if localhost.is_some() || url.is_some() {
-            return Err(WxcError::ConfigParse(
-                "When builtinTestServer is true, no other proxy options may be set".to_string(),
-            ));
+            return Err(WxcError::ConfigParse(format!(
+                "When {path}.builtinTestServer is true, no other proxy options may be set"
+            )));
         }
         return Ok(ProxyConfig {
             address: Some(proxy_addr),
@@ -97,9 +97,9 @@ pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcE
 
     if let Some(port) = localhost {
         if port == 0 {
-            return Err(WxcError::ConfigParse(
-                "network.proxy.localhost must be a port between 1 and 65535".to_string(),
-            ));
+            return Err(WxcError::ConfigParse(format!(
+                "{path}.localhost must be a port between 1 and 65535"
+            )));
         }
         proxy_addr.port = port;
         return Ok(ProxyConfig {
@@ -111,24 +111,24 @@ pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcE
     if let Some(url_str) = url {
         let redacted = crate::proxy_env::redact_proxy_url(&url_str);
         let parsed = url::Url::parse(&url_str)
-            .map_err(|e| WxcError::ConfigParse(format!("network.proxy.url is invalid: {e}")))?;
+            .map_err(|e| WxcError::ConfigParse(format!("{path} is invalid: {e}")))?;
         let scheme = parsed.scheme();
         if scheme != "http" && scheme != "https" {
             return Err(WxcError::ConfigParse(format!(
-                "network.proxy.url must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
+                "{path} must use the 'http' or 'https' scheme (got '{scheme}'): {redacted}"
             )));
         }
         let host = parsed
             .host_str()
             .ok_or_else(|| {
                 WxcError::ConfigParse(format!(
-                    "network.proxy.url must include a host (e.g., http://localhost:8080), got: {redacted}"
+                    "{path} must include a host (e.g., http://localhost:8080), got: {redacted}"
                 ))
             })?
             .to_string();
         let port = parsed.port().ok_or_else(|| {
             WxcError::ConfigParse(format!(
-                "network.proxy.url must include a port (e.g., http://localhost:8080), got: {redacted}"
+                "{path} must include a port (e.g., http://localhost:8080), got: {redacted}"
             ))
         })?;
         return Ok(ProxyConfig {
@@ -137,9 +137,13 @@ pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcE
         });
     }
 
-    Err(WxcError::ConfigParse(
-        "network.proxy must specify builtinTestServer, localhost, or url".to_string(),
-    ))
+    Err(WxcError::ConfigParse(format!(
+        "{path} must specify builtinTestServer, localhost, or url"
+    )))
+}
+
+pub(crate) fn convert_wire_proxy(proxy: wire::Proxy) -> Result<ProxyConfig, WxcError> {
+    convert_wire_proxy_at(proxy, "network.proxy")
 }
 
 fn select_network_format(
@@ -313,11 +317,14 @@ fn apply_directional_network(
     if let Some(url) = runtime.and_then(|runtime| runtime.network_proxy) {
         // Runtime proxy is a 0.8 wire field normalized into the existing
         // backend-facing proxy configuration.
-        let proxy = convert_wire_proxy(wire::Proxy {
-            localhost: None,
-            builtin_test_server: None,
-            url: Some(url),
-        })?;
+        let proxy = convert_wire_proxy_at(
+            wire::Proxy {
+                localhost: None,
+                builtin_test_server: None,
+                url: Some(url),
+            },
+            "runtimeConfig.networkProxy",
+        )?;
         let host = proxy
             .address
             .as_ref()
