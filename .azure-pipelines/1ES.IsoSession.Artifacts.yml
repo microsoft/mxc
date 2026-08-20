@@ -46,6 +46,14 @@ parameters:
   displayName: Azure Artifacts NuGet v3 feed URL for the final SDK package
   type: string
   default: https://pkgs.dev.azure.com/microsoft/Dart/_packaging/Mxc-Azure-Feed/nuget/v3/index.json
+- name: ApproversEmail
+  displayName: ESRP approver email addresses
+  type: string
+  default: ''
+- name: OwnersEmail
+  displayName: ESRP owner email addresses
+  type: string
+  default: ''
 
 variables:
 - group: MXC-ESRP-Signing
@@ -81,8 +89,8 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
-            ApproversEmail: $(ApproversEmail)
-            OwnersEmail: $(OwnersEmail)
+            ApproversEmail: ${{ parameters.ApproversEmail }}
+            OwnersEmail: ${{ parameters.OwnersEmail }}
 
       - template: /.azure-pipelines/templates/IsoSession.Artifacts.Build.Job.yml@self
         parameters:
@@ -100,8 +108,8 @@ extends:
             authCertName: $(authCertName)
             signCertName: $(signCertName)
             clientId: $(clientId)
-            ApproversEmail: $(ApproversEmail)
-            OwnersEmail: $(OwnersEmail)
+            ApproversEmail: ${{ parameters.ApproversEmail }}
+            OwnersEmail: ${{ parameters.OwnersEmail }}
 
       - job: aggregate_isosession_artifacts
         displayName: Aggregate IsoSession release outputs
