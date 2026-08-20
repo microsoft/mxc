@@ -447,10 +447,14 @@ request fails if its private namespace cannot be configured.
    (see [Inbound](#inbound-is-closed-by-the-namespace-and-by-a-chain)).
    Each family's whole table — both chains, their rules in
    order, the terminal verdicts and the `OUTPUT` / `INPUT` hooks — is applied
-   in a single
-   `iptables-restore` transaction, so the cost of a policy does not grow with
-   the caller's host lists and a hook is never live over a half-built chain.
-   The workload is released only after both transactions are
+   with `iptables-restore` rather than rule by rule, so the cost of a policy
+   does not grow with the caller's host lists. One restore is one bounded
+   netlink transaction, so a table too large for it is split across numbered
+   payload files against a byte budget and applied in order (`-n`, so each
+   later transaction appends). Both built-in hooks ride in the *last*
+   transaction of a family, so a hook is never live over a half-built chain
+   and a partial apply leaves the policy unhooked rather than half-enforced.
+   The workload is released only after every transaction is
    applied, so it can never run with egress open. A failure to program any
    rule aborts the supervisor rather than starting an unenforced sandbox.
 

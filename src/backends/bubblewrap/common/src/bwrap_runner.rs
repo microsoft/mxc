@@ -359,7 +359,7 @@ impl BubblewrapScriptRunner {
                 let egress = resolved.egress();
                 match proxy_network::ProxyNetworkNamespace::start(
                     &egress.plan(),
-                    &network_rules::IngressPlan::for_request(request),
+                    &network_rules::IngressPlan::for_policy(&request.policy),
                     egress.pin(),
                     logger,
                 ) {
@@ -384,7 +384,7 @@ impl BubblewrapScriptRunner {
                 };
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,
-                    &network_rules::IngressPlan::for_request(request),
+                    &network_rules::IngressPlan::for_policy(&request.policy),
                     None,
                     logger,
                 ) {
@@ -1270,6 +1270,27 @@ mod tests {
         let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
         assert!(
             err.error_message.contains("allowLocalNetwork=false"),
+            "unexpected error: {}",
+            err.error_message
+        );
+    }
+
+    #[test]
+    fn validate_rejects_local_network_under_a_private_netns_at_0_8() {
+        // The other half of the local-network contract, and the one the
+        // ingress chain depends on: IngressPlan maps allowLocalNetwork=true to
+        // an inbound NEW ACCEPT, which is only unreachable because validate
+        // refuses the combination. Without this test, relaxing the rejection
+        // would silently open inbound rather than fail a build.
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        req.policy.allowed_hosts = vec!["10.0.2.2/32".into()];
+        req.policy.allow_local_network = true;
+
+        let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+        assert!(
+            err.error_message.contains("allowLocalNetwork=true"),
             "unexpected error: {}",
             err.error_message
         );

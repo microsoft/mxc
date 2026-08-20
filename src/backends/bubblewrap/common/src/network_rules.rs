@@ -30,13 +30,37 @@
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use wxc_common::models::{ExecutionRequest, NetworkPolicy};
+use wxc_common::models::{ContainerPolicy, ExecutionRequest, NetworkPolicy};
 
 /// Which `iptables` binary carries a rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleFamily {
     V4,
     V6,
+}
+
+/// Prefix the supervisor globs to find a family's restore payloads. The script
+/// carries a copy of these, pinned by a test, because a shell glob cannot be
+/// passed as an argument without losing the expansion.
+pub(crate) const PAYLOAD_PREFIX_V4: &str = "rules.v4.";
+pub(crate) const PAYLOAD_PREFIX_V6: &str = "rules.v6.";
+
+impl RuleFamily {
+    pub(crate) fn payload_prefix(self) -> &'static str {
+        match self {
+            RuleFamily::V4 => PAYLOAD_PREFIX_V4,
+            RuleFamily::V6 => PAYLOAD_PREFIX_V6,
+        }
+    }
+}
+
+/// Basename of the `index`-th restore payload for `family`.
+///
+/// The supervisor applies these with a shell glob, which expands in lexical
+/// order, so the index is zero-padded to keep lexical order equal to apply
+/// order. Rule order *is* the policy, so a mis-sort would silently change it.
+pub(crate) fn payload_file_name(family: RuleFamily, index: usize) -> String {
+    format!("{}{index:03}", family.payload_prefix())
 }
 
 /// What the packet filter does with a match.
@@ -261,10 +285,21 @@ pub(crate) struct EgressPlan {
     v6_terminal: RuleVerdict,
 }
 
-/// `iptables-restore` invocations the supervisor makes: one per family,
-/// whatever the policy contains. The whole table arrives in a single
-/// transaction, so this no longer grows with the rule count.
-pub(crate) const RESTORE_INVOCATIONS: u32 = 2;
+/// Byte budget for one `iptables-restore` transaction.
+///
+/// `nf_tables` applies a restore as a single netlink transaction with a bounded
+/// message size. Exceeding it fails the *whole* table with `sendmsg() failed:
+/// Message too long` and installs nothing, so an unbounded transaction would
+/// turn a large host list into a sandbox that cannot launch. Measured on
+/// `iptables v1.8.10` the ceiling sits near 20 KiB of payload text, and lower
+/// per rule for rules carrying more match expressions -- each expression costs
+/// more on the kernel side than in text, so the limit is a byte ceiling rather
+/// than a rule count. This budget stays well under the smallest observed
+/// failure so it holds whatever shape the caller's rules take.
+const RESTORE_PAYLOAD_BUDGET: usize = 8 * 1024;
+
+/// Terminator every `iptables-restore` transaction ends with.
+const COMMIT: &str = "COMMIT\n";
 
 impl EgressPlan {
     /// The proxy-only posture: one endpoint reachable, everything else dropped.
@@ -368,7 +403,7 @@ pub(crate) struct IngressPlan {
 }
 
 impl IngressPlan {
-    /// The posture the request asks for.
+    /// The posture the policy asks for.
     ///
     /// Only the deny posture is reachable on the private-namespace path today:
     /// `allowLocalNetwork: true` is refused before this point at schema 0.8+
@@ -377,9 +412,9 @@ impl IngressPlan {
     /// legacy schema cannot express. The mapping is written out in full anyway
     /// so the policy lives in one readable place and lifting that rejection is
     /// a change at the rejection, not here.
-    pub(crate) fn for_request(request: &ExecutionRequest) -> Self {
+    pub(crate) fn for_policy(policy: &ContainerPolicy) -> Self {
         Self {
-            new_inbound: if request.policy.allow_local_network {
+            new_inbound: if policy.allow_local_network {
                 RuleVerdict::Accept
             } else {
                 RuleVerdict::Drop
@@ -393,6 +428,12 @@ impl IngressPlan {
     /// applies to *every* inbound packet, and a reply to sandbox-initiated
     /// egress arrives inbound. Without it this chain would break all
     /// networking rather than restrict it.
+    ///
+    /// `RELATED` is broader than it needs to be, and is safe only because
+    /// nothing forwards traffic into the sandbox today: a loaded connection
+    /// tracking ALG helper can mark an unsolicited inbound flow `RELATED` and
+    /// so bypass the `NEW` verdict. Narrow this to `ESTABLISHED` when host port
+    /// forwarding lands and there is an inbound path for that to matter on.
     ///
     /// The terminal verdict is `DROP` regardless of `defaultPolicy`, which
     /// governs egress only -- an open outbound posture must not open inbound.
@@ -422,22 +463,31 @@ struct ChainSection {
     lines: Vec<String>,
 }
 
-/// The `iptables-restore` payload installing both directions for one family.
+/// The `iptables-restore` payloads installing both directions for one family,
+/// in the order they must be applied.
 ///
-/// Everything travels in a single transaction: chain creation, both bodies and
-/// both hooks. That keeps the cost of a policy independent of the caller's host
-/// lists, and means a hook is never live over a partially built chain. If any
-/// line is unsupported by the host kernel -- the `state` match without
-/// `nf_conntrack`, say -- the whole transaction is rejected and nothing is
-/// applied, which is what makes an unsupported host fail closed at launch
-/// rather than run unenforced.
-pub(crate) fn render_filter_payload(
+/// A policy is split across as many transactions as its size requires, because
+/// a single restore is one bounded netlink transaction (see
+/// [`RESTORE_PAYLOAD_BUDGET`]). Splitting is what keeps a large host list from
+/// failing the whole table, and it preserves the two properties that matter:
+///
+/// * **A hook is never live over a partially built chain.** Both `-A OUTPUT` /
+///   `-A INPUT` hooks travel in the *final* transaction, so the built-in chains
+///   are redirected only once every rule is already installed. Until then the
+///   custom chains exist but nothing jumps to them.
+/// * **An unsupported rule still fails closed.** A line the host kernel cannot
+///   apply -- the `state` match without `nf_conntrack`, say -- rejects its whole
+///   transaction, the supervisor aborts, and the workload is never released.
+///
+/// Later transactions rely on `iptables-restore -n`, which appends rather than
+/// flushing, so only the first declares the chains.
+pub(crate) fn render_filter_payloads(
     egress: &EgressPlan,
     ingress: &IngressPlan,
     family: RuleFamily,
     egress_chain: &'static str,
     ingress_chain: &'static str,
-) -> String {
+) -> Vec<String> {
     let sections = [
         ChainSection {
             chain: egress_chain,
@@ -451,22 +501,56 @@ pub(crate) fn render_filter_payload(
         },
     ];
 
-    let mut out = String::from("*filter\n");
-    for section in &sections {
-        out.push_str(&format!(":{} - [0:0]\n", section.chain));
-    }
-    for section in &sections {
-        for line in &section.lines {
-            out.push_str(&format!("-A {} {line}\n", section.chain));
+    let declarations: String = sections
+        .iter()
+        .map(|section| format!(":{} - [0:0]\n", section.chain))
+        .collect();
+    let hooks: String = sections
+        .iter()
+        .map(|section| format!("-A {} -j {}\n", section.hook, section.chain))
+        .collect();
+    let body: Vec<String> = sections
+        .iter()
+        .flat_map(|section| {
+            section
+                .lines
+                .iter()
+                .map(move |line| format!("-A {} {line}\n", section.chain))
+        })
+        .collect();
+
+    // The first transaction carries the chain declarations, so it starts with
+    // less room than the rest.
+    let mut payloads: Vec<String> = Vec::new();
+    let mut current = format!("*filter\n{declarations}");
+    let mut lines_in_current = 0usize;
+    for line in body {
+        // A transaction always takes at least one line, so a single line larger
+        // than the budget still gets applied rather than looping forever. No
+        // rule this renderer emits comes close, but the invariant is what makes
+        // the loop total.
+        if lines_in_current > 0
+            && current.len() + line.len() + COMMIT.len() > RESTORE_PAYLOAD_BUDGET
+        {
+            current.push_str(COMMIT);
+            payloads.push(std::mem::replace(&mut current, String::from("*filter\n")));
+            lines_in_current = 0;
         }
+        current.push_str(&line);
+        lines_in_current += 1;
     }
-    // Hooks last, so the built-in chains are only redirected once every custom
-    // chain in this transaction is complete.
-    for section in &sections {
-        out.push_str(&format!("-A {} -j {}\n", section.hook, section.chain));
+
+    // Hooks close out the last transaction, unless they would push it over
+    // budget, in which case they get one of their own. Either way they are last.
+    if lines_in_current > 0 && current.len() + hooks.len() + COMMIT.len() > RESTORE_PAYLOAD_BUDGET {
+        current.push_str(COMMIT);
+        payloads.push(std::mem::replace(&mut current, String::from("*filter\n")));
     }
-    out.push_str("COMMIT\n");
-    out
+    current.push_str(&hooks);
+    current.push_str(COMMIT);
+    payloads.push(current);
+
+    payloads
 }
 
 #[cfg(test)]
@@ -671,12 +755,19 @@ mod tests {
     const EGRESS: &str = "EG";
     const INGRESS: &str = "IN";
 
+    /// Every transaction for one family, concatenated. Tests that care about
+    /// chain contents read through this; tests that care about the split read
+    /// the payload vector directly.
     fn payload(plan: &EgressPlan, family: RuleFamily) -> String {
-        render_filter_payload(plan, &denied_ingress(), family, EGRESS, INGRESS)
+        payloads(plan, family).concat()
+    }
+
+    fn payloads(plan: &EgressPlan, family: RuleFamily) -> Vec<String> {
+        render_filter_payloads(plan, &denied_ingress(), family, EGRESS, INGRESS)
     }
 
     fn denied_ingress() -> IngressPlan {
-        IngressPlan::for_request(&ExecutionRequest::default())
+        IngressPlan::for_policy(&ContainerPolicy::default())
     }
 
     /// The rules appended to `chain`, in order, stripped of the `-A <chain>`
@@ -879,7 +970,8 @@ mod tests {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &[]))
             .expect("a bare allow policy is enforceable");
         let rendered =
-            render_filter_payload(&plan, &denied_ingress(), RuleFamily::V4, EGRESS, INGRESS);
+            render_filter_payloads(&plan, &denied_ingress(), RuleFamily::V4, EGRESS, INGRESS)
+                .concat();
 
         assert_eq!(chain_body(&rendered, EGRESS).last().unwrap(), "-j ACCEPT");
         assert_eq!(chain_body(&rendered, INGRESS).last().unwrap(), "-j DROP");
@@ -892,13 +984,14 @@ mod tests {
         let mut request = ExecutionRequest::default();
         request.policy.allow_local_network = true;
         let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
-        let rendered = render_filter_payload(
+        let rendered = render_filter_payloads(
             &plan,
-            &IngressPlan::for_request(&request),
+            &IngressPlan::for_policy(&request.policy),
             RuleFamily::V4,
             EGRESS,
             INGRESS,
-        );
+        )
+        .concat();
         let body = chain_body(&rendered, INGRESS);
 
         assert!(
