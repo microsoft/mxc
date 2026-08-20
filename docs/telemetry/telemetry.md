@@ -41,11 +41,35 @@ Rust constants and `write_event!` struct fields.
 | **Sampling keywords** | `MICROSOFT_KEYWORD_MEASURES` named constant | Raw `u64` in `keyword(...)` | `const MICROSOFT_KEYWORD_MEASURES: u64 = 0x0000_4000_0000_0000` |
 | **Common event fields** | `_GENERIC_PARTB_FIELDS_ENABLED` pattern | `struct("Name", { ... })` in `write_event!` | `struct("COMMON_MXC_PARAMS", { Version, Channel, IsDebugging, UTCReplace_AppSessionGuid })` |
 | **Provider lifecycle** | `IMPLEMENT_TRACELOGGING_CLASS` singleton | `define_provider!` static + `register()`/`unregister()` | `OnceLock<ProviderState>` for version/channel, manual lifecycle |
+| **Privacy Product** | Common Schema Part A product | `u16(...)` field | `PartA_PrivacyProduct = 11` (`MXC (Microsoft Execution Containers)`) on all events |
+| **Privacy Data Category** | Common Schema Part A data category | `u16(...)` field | `PartA_PrivacyDataCategory = 1` (`Client Diagnostic Data`) on all events |
 | **Privacy Data Tags** | `TelemetryPrivacyDataTag(PDT_*)` | `u64("PartA_PrivTags", &val)` field | `PDT_PRODUCT_AND_SERVICE_USAGE` on all events |
 | **Activity tracking** | `DEFINE_TELEMETRY_ACTIVITY` | Manual `Opcode` | Not needed for current events |
 
 The remaining gap (activity tracking) is not needed for current events.
 If needed later, it can be added incrementally.
+
+## Common Event Fields (Part A)
+
+Every MXC telemetry event carries the WinExt-required Common Schema privacy
+metadata:
+
+| Field | Type | Value |
+|-------|------|-------|
+| `PartA_PrivacyProduct` | uint16 | `11` — `MXC (Microsoft Execution Containers)` |
+| `PartA_PrivacyDataCategory` | uint16 | `1` — `Client Diagnostic Data` |
+| `PartA_PrivTags` | uint64 | `Product and Service Usage Data` |
+
+Product `11` is privacy-approved and registered in the WinExt product list.
+The OS/Common Schema catalog update is tracked by UTC bug `63666074`. MXC's
+events use the sampled `MICROSOFT_KEYWORD_MEASURES` keyword and explicit
+product consent, so they are optional diagnostic data rather than required
+(CORE) or critical-optional events. If the sampling level, event purpose, or
+collected fields change, the privacy tag and approval classification must be
+re-evaluated.
+
+The WinExt provider-group identifier remains a secure build input. It must not
+be copied into source, tests, documentation, or commit messages.
 
 ## Common Event Fields (Part C)
 

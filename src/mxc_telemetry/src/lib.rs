@@ -44,6 +44,13 @@ mod provider {
     /// Applied via a `PartA_PrivTags` field per the `TelemetryPrivacyDataTag` pattern.
     pub(crate) const PDT_PRODUCT_AND_SERVICE_USAGE: u64 = 0x0000_0000_0200_0000;
 
+    /// Privacy-approved WinExt product identifier for
+    /// MXC (Microsoft Execution Containers).
+    pub(crate) const PRIVACY_PRODUCT_MXC: u16 = 11;
+
+    /// WinExt permits only Client Diagnostic Data.
+    pub(crate) const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;
+
     /// Cached provider state, set once at init and read on every event.
     struct ProviderState {
         version: String,
@@ -176,6 +183,11 @@ mod provider {
             // MXC.Error (Warning) and any future provider malfunction.
             level(Informational),
             keyword(MICROSOFT_KEYWORD_MEASURES),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
@@ -239,6 +251,11 @@ mod provider {
             // reserved for genuine provider/telemetry malfunctions.
             level(Warning),
             keyword(MICROSOFT_KEYWORD_MEASURES),
+            u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
+            u16(
+                "PartA_PrivacyDataCategory",
+                &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,
+            ),
             u64("PartA_PrivTags", &PDT_PRODUCT_AND_SERVICE_USAGE),
             struct("COMMON_MXC_PARAMS", {
                 str8("Version", &state.version),
@@ -340,6 +357,43 @@ mod tests {
         assert!(
             error_section.contains("str8(\"mxc.sandbox_kind\", sandbox_kind)"),
             "MXC.Error must emit mxc.sandbox_kind"
+        );
+    }
+
+    #[test]
+    fn winext_part_a_fields_preserve_privacy_contract() {
+        let source = include_str!("lib.rs");
+        let provider_source = source
+            .split("// Tests")
+            .next()
+            .expect("provider source precedes tests");
+
+        assert!(provider_source.contains("const PRIVACY_PRODUCT_MXC: u16 = 11;"));
+        assert!(provider_source
+            .contains("const PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA: u16 = 1;"));
+        assert_eq!(
+            provider_source
+                .matches("u16(\"PartA_PrivacyProduct\", &PRIVACY_PRODUCT_MXC)")
+                .count(),
+            2,
+            "every MXC event must carry privacy product 11"
+        );
+        assert_eq!(
+            provider_source
+                .matches(
+                    "\"PartA_PrivacyDataCategory\",\n                \
+                     &PRIVACY_DATA_CATEGORY_CLIENT_DIAGNOSTIC_DATA,"
+                )
+                .count(),
+            2,
+            "every MXC event must carry Client Diagnostic Data category 1"
+        );
+        assert_eq!(
+            provider_source
+                .matches("u64(\"PartA_PrivTags\", &PDT_PRODUCT_AND_SERVICE_USAGE)")
+                .count(),
+            2,
+            "every MXC event must retain its approved privacy tag"
         );
     }
 
