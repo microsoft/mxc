@@ -85,7 +85,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap slirp4netns iptables
           # Ubuntu 24.04 runners restrict unprivileged user namespaces via
           # AppArmor, which blocks `bwrap --unshare-user`. Relax it so the
           # sandbox can start (no-op on kernels without this knob).
@@ -118,6 +118,17 @@ jobs:
         working-directory: src
         run: cargo build --locked --release --target ${{ matrix.target }}
              -p unix_test_proxy
+
+      # Exercises the real binary against the real dependencies: launches the
+      # slirp4netns supervisor, joins its user namespace, and asserts the
+      # sandbox lands in a private network namespace. Needs unix-test-proxy
+      # (builtinTestServer) alongside lxc-exec, which the two build steps
+      # above place in the same target directory.
+      - name: Test Bubblewrap proxy networking (end-to-end)
+        working-directory: ${{ github.workspace }}
+        env:
+          LXC_EXEC: ${{ github.workspace }}/src/target/${{ matrix.target }}/release/lxc-exec
+        run: bash tests/scripts/run_bwrap_network_proxy_test.sh
 
       - name: Upload binaries
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -19,6 +19,64 @@ production configs and the dev schema when working on experimental features:
 "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json"
 ```
 
+### Schema 0.8 networking
+
+Schema 0.8 uses explicit egress and ingress policy and moves the loopback proxy
+endpoint into runtime configuration:
+
+```json
+{
+    "version": "0.8.0-alpha",
+    "network": {
+        "egress": {
+            "default": "deny",
+            "allow": [{
+                "to": [{ "cidr": "140.82.112.0/20" }],
+                "ports": [{ "protocol": "tcp", "port": 443 }]
+            }]
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    }
+}
+```
+
+Direct egress rules and `runtimeConfig.networkProxy` select different
+connectivity models and cannot be combined. A ProcessContainer proxy requires
+`ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
+keep `hostLoopback: "deny"`; identity-less host proxies omit
+`allowedProxyPeer` and require `hostLoopback: "allow"`.
+
+```json
+{
+    "version": "0.8.0-alpha",
+    "containment": "processcontainer",
+    "network": {
+        "egress": { "default": "deny" },
+        "ingress": {
+            "default": "allow",
+            "hostLoopback": "deny"
+        }
+    },
+    "runtimeConfig": {
+        "networkProxy": "http://127.0.0.1:8080"
+    },
+    "processContainer": {
+        "network": {
+            "allowedProxyPeer": "Contoso.Proxy_123"
+        }
+    }
+}
+```
+
+The legacy `defaultPolicy`, `enforcementMode`, `allowLocalNetwork`,
+`allowedHosts`, `blockedHosts`, and `network.proxy` fields remain supported by
+schema 0.6 and 0.7. During the additive schema 0.8 transition, requests may
+continue to use those legacy fields or use the directional fields above, but
+cannot mix both formats in one request.
+
 ### Full Schema
 
 ```json
@@ -124,7 +182,7 @@ production configs and the dev schema when working on experimental features:
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
             "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
         },
-        "telemetry": {                // Telemetry (experimental, Windows only)
+        "telemetry": {                // Telemetry (Windows only)
             "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
         }
     }
@@ -134,17 +192,12 @@ production configs and the dev schema when working on experimental features:
 > **State-aware fields.** The `phase` top-level field is the **state-aware
 > discriminator**: a request that includes it is parsed as a state-aware
 > lifecycle request (see below), *not* the one-shot config above. The `sandboxId`
-> and `correlationVector` top-level fields are state-aware-only — a one-shot
-> request carrying either is rejected with a parse error. `correlationVector` is
-> the Microsoft Correlation Vector (MS-CV) seeded at `provision` and relayed by
-> the client onto later phases (emitted under the TraceLogging `__TlgCV__` field
-> when experimental telemetry is enabled). The client relays the value verbatim;
-> the executor validates it on each non-`provision` phase and *spins* a fresh
-> child element off a mutable base, passes an already-frozen vector through
-> unchanged, and reseeds a new base if the relayed value is missing or malformed.
-> See
+> top-level field is state-aware-only — a one-shot request carrying `sandboxId`
+> is rejected with a parse error. Callers cannot supply `correlationVector`;
+> it is rejected as an unknown field because lifecycle correlation is internal
+> to MXC and is not part of the request or response contract. See
 > [`docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md`](state-aware-lifecycle/mxc-state-aware-sandbox-api.md)
-> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md#correlating-a-lifecycle).
+> and [`docs/telemetry/telemetry.md`](telemetry/telemetry.md).
 
 ### Working Directory
 

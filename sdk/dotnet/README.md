@@ -1,6 +1,6 @@
 # Microsoft.Mxc.Sdk (C# SDK)
 
-A .NET binding for [MXC](../README.md) (Microsoft eXecution Container),
+A .NET binding for [MXC](../../README.md) (Microsoft eXecution Container),
 implemented in C#. It runs a command inside a sandbox described by a
 `SandboxPolicy`, capturing the output — by P/Invoking the native `mxc_ffi`
 library, which wraps the Rust engine.
@@ -36,6 +36,24 @@ catch (MxcException ex)
 }
 ```
 
+When the failure came from an underlying platform API, `MxcException` also
+carries which call failed and why: `Operation` names the call and `NativeCode`
+carries its status (e.g. `0x80070490`), with `Remediation` holding an
+actionable hint whenever the failure has one. `Operation` and `NativeCode` are
+`null` for failures raised before any API call. `ToString()` appends the
+operation and status, so logging the exception alone keeps the diagnosis:
+
+```csharp
+catch (MxcException ex) when (ex.Operation is not null)
+{
+    Console.Error.WriteLine($"{ex.Operation} failed with {ex.NativeCode}: {ex.Message}");
+    if (ex.Remediation is not null)
+    {
+        Console.Error.WriteLine($"  try: {ex.Remediation}");
+    }
+}
+```
+
 `MxcSandbox.RunAsync(policy, command)` offloads the blocking native call to the
 thread pool. `MxcSandbox.NativeVersion` returns the loaded `mxc_ffi` version.
 Optional feature outputs are returned through `RunResult.OutputMetadata`; for
@@ -44,13 +62,60 @@ generated JSON document and carries its summary. When ETL retention is enabled,
 `OutputMetadata.CaptureDenials.EtlPath` identifies the retained trace. If
 capture finalization fails after retaining the trace,
 `OutputMetadata.CaptureDenialsError` carries both the failure and its path.
-After deleting a retained ETL, also remove its now-empty per-run parent
-directory.
+Delete every reported ETL file after use. Do not delete its parent directory
+unless your application independently owns or positively recognizes that
+directory; it may be a shared location such as the system temporary directory
+or the configured output directory.
 
 `RunResult.Warnings` carries security warnings raised during the run — notably
 when `permissiveLearningMode` disabled deny-by-default. MXC never writes these
 to the host's stderr, so inspecting `Warnings` is the only way to learn that
 containment was relaxed.
+
+### Denial capture (Windows)
+
+Set `SandboxPolicy.CaptureDenials` to record Windows ProcessContainer accesses
+that the policy does not grant:
+
+```csharp
+var policy = new SandboxPolicy
+{
+    Version = "0.8.0-alpha",
+    CaptureDenials = new CaptureDenialsPolicy
+    {
+        // Block is the safe default: deny the access and record it.
+        // Allow records what would have been denied but relaxes containment.
+        Mode = CaptureDenialsMode.Block,
+        // Optional absolute destination. MXC inserts a per-run ID into the stem.
+        OutputPath = @"C:\logs\denials.json",
+        // Retained ETLs can contain sensitive paths and identifiers.
+        RetainEtl = false,
+    },
+};
+
+RunResult result = MxcSandbox.Run(policy, "cmd /c type C:\\blocked.txt");
+if (result.OutputMetadata?.CaptureDenials is { } capture)
+{
+    Console.WriteLine($"denials: {capture.OutputPath}");
+    Console.WriteLine($"unique denials: {capture.TotalDenials}");
+}
+
+foreach (string warning in result.Warnings)
+{
+    Console.Error.WriteLine(warning);
+}
+```
+
+`OutputPath`'s parent directory must already exist. When it is omitted, MXC
+uses a run-unique file in the system temporary directory. Delete every reported
+ETL file after use, including an ETL reported through
+`CaptureDenialsError.EtlPath`; do not delete its parent directory unless your
+application independently owns or positively recognizes that directory.
+`CaptureDenialsMode.Allow` intentionally weakens deny-by-default containment;
+always inspect `RunResult.Warnings`. Streaming processes currently do not
+expose warnings, so use `Run` or `RunAsync` when warning inspection is required.
+Linux and macOS accept the policy for cross-platform parity but do not act on
+it.
 
 ### Streaming
 
@@ -90,6 +155,30 @@ failure, `MxcSandboxProcess.OutputMetadata` exposes the same structured feature
 outputs as `RunResult.OutputMetadata`. Disposing without waiting deletes an
 internal ETL even when retention was requested.
 
+## Telemetry consent
+
+MXC telemetry is Windows-only and remains off until both of these are true:
+1. the user has explicitly granted MXC-owned consent, and
+2. the caller opts this invocation in via telemetry settings.
+
+Telemetry remains off by default unless the caller opts in with `SandboxPolicy.TelemetryEnabled = true` (or the equivalent phase-level `TelemetryEnabled` setting for state-aware requests) and applicable Windows consent/policy gates permit collection.
+
+Any .NET consent surface should stay UI-agnostic, present the canonical
+resource verbatim through a host callback, persist only explicit yes/no
+decisions, treat dismissal and failures as non-grants, and follow the rules in
+[`docs/telemetry/telemetry-consent-design.md`](../../docs/telemetry/telemetry-consent-design.md)
+and its
+[SDK presenter requirements](../../docs/telemetry/telemetry-consent-design.md#sdk-presenter-requirements).
+
+### Administrative policy
+
+An IT administrator can still block MXC telemetry device-wide via MXC's own
+registry policy setting. See
+[`docs/telemetry/telemetry-administrative-policy.md`](../../docs/telemetry/telemetry-administrative-policy.md)
+for the stable registry contract and interaction rules. Any eventual .NET
+policy/consent query must fail closed rather than upgrading an unreadable
+device state into collection.
+
 ## Projects
 
 - **`Microsoft.Mxc.Sdk`** — the class library (public API + generated P/Invoke).
@@ -97,6 +186,8 @@ internal ETL even when retention was requested.
 - **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`).
 
 Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
+
+Run native telemetry-consent integration tests in the **Debug** configuration.
 
 ## Native library loading
 

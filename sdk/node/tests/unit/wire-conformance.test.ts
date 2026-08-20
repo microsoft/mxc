@@ -49,6 +49,12 @@ import type {
   LifecycleConfig,
   FilesystemConfig,
   NetworkConfig,
+  NetworkEgressConfig,
+  NetworkIngressConfig,
+  NetworkPeerConfig,
+  NetworkPortConfig,
+  NetworkRuleConfig,
+  RuntimeConfig,
   UiConfig,
   ProcessContainerConfig,
   BaseProcessUiConfig,
@@ -67,6 +73,12 @@ import type {
   Lifecycle as WireLifecycle,
   Filesystem as WireFilesystem,
   Network as WireNetwork,
+  NetworkEgress as WireNetworkEgress,
+  NetworkIngress as WireNetworkIngress,
+  NetworkPeer as WireNetworkPeer,
+  NetworkPort as WireNetworkPort,
+  NetworkRule as WireNetworkRule,
+  RuntimeConfig as WireRuntimeConfig,
   Ui as WireUi,
   ProcessContainer as WireProcessContainer,
   BaseProcessUi as WireBaseProcessUi,
@@ -79,6 +91,8 @@ import type {
   Containment as WireContainment,
   NetworkPolicy as WireNetworkPolicy,
   NetworkEnforcement as WireNetworkEnforcement,
+  NetworkAction as WireNetworkAction,
+  NetworkProtocol as WireNetworkProtocol,
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
@@ -114,6 +128,18 @@ type _NetDefaultPolicy = AssertTrue<
 type _NetEnforcement = AssertTrue<
   Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
 >;
+type _NetworkEgressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkEgressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressHostLoopback = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['hostLoopback']>, WireNetworkAction>
+>;
+type _NetworkPortProtocol = AssertTrue<
+  Equivalent<NonNullable<NetworkPortConfig['protocol']>, WireNetworkProtocol>
+>;
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
@@ -129,6 +155,12 @@ type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
 type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
 type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
 type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkEgressVals = AssertTrue<Assignable<NetworkEgressConfig, WireNetworkEgress>>;
+type _NetworkIngressVals = AssertTrue<Assignable<NetworkIngressConfig, WireNetworkIngress>>;
+type _NetworkPeerVals = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
+type _NetworkPortVals = AssertTrue<Assignable<NetworkPortConfig, WireNetworkPort>>;
+type _NetworkRuleVals = AssertTrue<Assignable<NetworkRuleConfig, WireNetworkRule>>;
+type _RuntimeConfigVals = AssertTrue<Assignable<RuntimeConfig, WireRuntimeConfig>>;
 type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
@@ -162,7 +194,9 @@ type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, Wire
 
 // `NetworkConfig.removeRulesOnExit` is deprecated (use `lifecycle.preservePolicy`)
 // and not a wire `network` field.
-type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>>;
+type _NetworkKeys = AssertTrue<
+  Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>
+>;
 
 // `ProcessContainerConfig.name` is the deprecated AppContainer profile name
 // (superseded by top-level `containerId`); not a wire `processContainer` field.
@@ -192,11 +226,13 @@ type _RootKeys = AssertTrue<Equivalent<OnlyInPublic<ContainerConfig, WireMxcConf
 type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProcess>, never>>;
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
-// `network.egress`/`network.ingress` are the schema-0.8 outbound/inbound
-// policy shape; the one-shot `NetworkConfig` does not expose them yet.
-type _NetworkWireKeys = AssertTrue<
-  Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, 'egress' | 'ingress'>
->;
+type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+type _NetworkEgressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkEgressConfig, WireNetworkEgress>, never>>;
+type _NetworkIngressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkIngressConfig, WireNetworkIngress>, never>>;
+type _NetworkPeerWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPeerConfig, WireNetworkPeer>, never>>;
+type _NetworkPortWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPortConfig, WireNetworkPort>, never>>;
+type _NetworkRuleWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkRuleConfig, WireNetworkRule>, never>>;
+type _RuntimeConfigWireKeys = AssertTrue<Equivalent<OnlyInWire<RuntimeConfig, WireRuntimeConfig>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 // `wslc.provision` is the state-aware-only nested provision-phase config; the
@@ -218,22 +254,25 @@ type _SeatbeltWireKeys = AssertTrue<
 
 // Root: the SDK's `ContainerConfig` intentionally omits the schema-metadata keys
 // (`$schema`, `_comment`), the state-aware-only keys (`phase`, `sandboxId`,
-// `correlationVector` — see `state-aware-types.ts`), `fallback` (AppContainer
-// DACL-mutation policy not surfaced through the one-shot policy API), and
-// `runtimeConfig` (the schema-0.8 `networkProxy` runtime-data block, currently
-// not yet exposed through the one-shot policy API). Any OTHER new root wire field fails.
+// `correlationVector` — see `state-aware-types.ts`), and `fallback` (AppContainer
+// DACL-mutation policy not surfaced through the one-shot policy API). Any OTHER
+// new root wire field fails.
 type _RootWireKeys = AssertTrue<
   Equivalent<
     OnlyInWire<ContainerConfig, WireMxcConfig>,
-    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback' | 'runtimeConfig'
+    '$schema' | '_comment' | 'phase' | 'sandboxId' | 'correlationVector' | 'fallback'
   >
 >;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
   _Clipboard, _Containment,
-  _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
+  _NetDefaultPolicy, _NetEnforcement,
+  _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
+  _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
+  _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
+  _NetworkRuleVals, _RuntimeConfigVals,
   _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _PortMappingVals,
   _SeatbeltVals, _LxcVals,
   _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
@@ -241,6 +280,8 @@ export type WireConformanceAssertions = [
   _SeatbeltKeys, _LxcKeys,
   _RootVals, _RootKeys,
   _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
+  _NetworkEgressWireKeys, _NetworkIngressWireKeys, _NetworkPeerWireKeys,
+  _NetworkPortWireKeys, _NetworkRuleWireKeys, _RuntimeConfigWireKeys,
   _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _PortMappingWireKeys,
   _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
 ];

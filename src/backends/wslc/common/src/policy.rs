@@ -126,7 +126,10 @@ fn reject_host_filtering(request: &ExecutionRequest) -> Result<(), MxcError> {
 /// block by value) is rejected too. The cooperative proxy is a separate
 /// exec-time concern handled by the callers.
 fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if request.policy.network_mode_specified {
+    if request.policy.network_mode_specified
+        || request.policy.network_egress.is_some()
+        || request.policy.network_ingress.is_some()
+    {
         return Err(MxcError::policy_validation(ERR_NETWORK_IMMUTABLE));
     }
     Ok(())

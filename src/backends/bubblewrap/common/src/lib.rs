@@ -17,3 +17,5 @@ pub mod bwrap_command;
 #[cfg(target_os = "linux")]
 pub mod bwrap_runner;
 pub mod bwrap_version;
+#[cfg(target_os = "linux")]
+mod proxy_network;

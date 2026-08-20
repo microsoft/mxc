@@ -99,8 +99,8 @@ jobs:
       - ${{ if eq(target.os, 'linux') }}:
         - script: |
             sudo apt-get update -qq
-            sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap
-          displayName: Install LXC and Bubblewrap
+            sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns
+          displayName: Install LXC, Bubblewrap, and slirp4netns
 
         - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)

@@ -222,6 +222,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "url",
  "wxc_common",
 ]
 
@@ -296,6 +297,12 @@ dependencies = [
  "num-traits",
  "windows-link",
 ]
+
+[[package]]
+name = "cidr"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
 
 [[package]]
 name = "clap"
@@ -3171,6 +3178,7 @@ name = "wxc_common"
 version = "0.7.0"
 dependencies = [
  "base64",
+ "cidr",
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",

@@ -10,6 +10,11 @@
  * mode. Learning-mode capability names are reserved and must not be supplied
  * directly in `processContainer.capabilities`.
  *
+ * Schema `0.8.0-alpha` config-based requests may use directional
+ * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
+ * `processContainer.network.allowedProxyPeer`. These fields cannot be mixed
+ * with the legacy network fields produced by `createConfigFromPolicy`.
+ *
  * @example
  * ```typescript
  * import { spawnSandbox, spawnSandboxWithPty, SandboxPolicy, getPlatformSupport } from '@microsoft/mxc-sdk';
@@ -39,6 +44,15 @@ export {
   ContainmentBackend,
   ExperimentalBackends,
   ContainerConfig,
+  ProcessContainerConfig,
+  NetworkAction,
+  NetworkProtocol,
+  NetworkPeerConfig,
+  NetworkPortConfig,
+  NetworkRuleConfig,
+  NetworkEgressConfig,
+  NetworkIngressConfig,
+  RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
 } from './types.js';

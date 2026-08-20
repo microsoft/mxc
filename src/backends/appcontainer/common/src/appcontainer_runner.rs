@@ -6,8 +6,8 @@ use std::ptr;
 use std::sync::Arc;
 
 use windows::Win32::Foundation::{
-    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ALREADY_EXISTS, HANDLE,
-    HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, GetLastError, LocalFree, SetHandleInformation, ERROR_ACCESS_DISABLED_BY_POLICY,
+    ERROR_ALREADY_EXISTS, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
@@ -37,6 +37,7 @@ use crate::guarded_capture::{
     GuardedCaptureSession, GuardedStop,
 };
 use crate::job_object::UiJobObject;
+use crate::launch_diagnostics::diagnose_create_process_failure;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
@@ -53,6 +54,7 @@ use wxc_common::sandbox_process::{
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
+use wxc_common::validator::validate_network_policy_support;
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
@@ -69,6 +71,28 @@ const PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT: u32 = 1;
 
 /// Proxy-related env var names to strip/override when building the child env block.
 const PROXY_VAR_NAMES: &[&str] = &["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY"];
+
+fn create_process_failure(
+    err: &windows_core::Error,
+    command_line: &str,
+    readonly_paths: &[String],
+    working_directory: &str,
+) -> WxcError {
+    let message = if err.code() == ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult() {
+        diagnose_create_process_failure(
+            ERROR_ACCESS_DISABLED_BY_POLICY.0,
+            command_line,
+            readonly_paths,
+        )
+        .message
+    } else {
+        format!("CreateProcessW failed: {err}")
+    };
+
+    WxcError::Process(format!(
+        "{message} (working directory: {working_directory})"
+    ))
+}
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -1066,11 +1090,12 @@ impl AppContainerScriptRunner {
             )
         }
         .map_err(|err| {
-            WxcError::Process(format!(
-                "CreateProcessW failed: {} (working directory: {})",
-                err,
-                working_directory.describe()
-            ))
+            create_process_failure(
+                &err,
+                &request.script_code,
+                &request.policy.readonly_paths,
+                &working_directory.describe(),
+            )
         })?;
 
         logger.log_line(&format!(
@@ -1505,6 +1530,8 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(
@@ -2147,11 +2174,13 @@ mod tests {
     // ---- validate_runner: unsupported policy fields surface as errors. ----
 
     use super::{
-        AppContainerScriptRunner, FilesystemMode, CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
+        create_process_failure, AppContainerScriptRunner, FilesystemMode,
+        CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG,
     };
     use crate::guarded_capture::{GuardedCaptureFactory, GuardedCaptureSession};
     use learning_mode_core::AnalysisResult;
     use std::sync::Arc;
+    use windows::Win32::Foundation::{ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED};
     use wxc_common::models::{ExecutionRequest, FailurePhase};
     use wxc_common::sandbox_process::SandboxBackend;
 
@@ -2193,6 +2222,36 @@ mod tests {
             }
             Ok(Box::new(FakeSession))
         }
+    }
+
+    #[test]
+    fn appcontainer_policy_block_uses_launch_diagnostic() {
+        let err = windows_core::Error::from_hresult(ERROR_ACCESS_DISABLED_BY_POLICY.to_hresult());
+        let mapped = create_process_failure(
+            &err,
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile"#,
+            &[],
+            r"C:\work",
+        );
+        let message = mapped.to_string();
+
+        assert!(message.contains("IT-managed policy rule"));
+        assert!(message.contains("1260"));
+        assert!(message.contains("system administrator"));
+        assert!(message.contains(r"working directory: C:\work"));
+        assert!(!message.contains("readonlyPaths"));
+    }
+
+    #[test]
+    fn appcontainer_other_win32_error_preserves_create_process_message() {
+        let err = windows_core::Error::from_hresult(ERROR_CALL_NOT_IMPLEMENTED.to_hresult());
+        let mapped = create_process_failure(&err, "cmd.exe", &[], r"C:\work");
+        let message = mapped.to_string();
+
+        assert!(message.contains("CreateProcessW failed"));
+        assert!(message.contains(r"working directory: C:\work"));
+        assert!(!message.contains("BaseContainer"));
+        assert!(!message.contains("Experimental_CreateProcessInSandbox"));
     }
 
     #[test]

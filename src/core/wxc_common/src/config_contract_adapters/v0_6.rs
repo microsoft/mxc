@@ -105,7 +105,6 @@ fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
         proxy: proxy.into_option().map(convert_proxy),
-        // The 0.6 contract predates the schema-0.8 egress/ingress shape.
         egress: None,
         ingress: None,
     }
@@ -165,6 +164,7 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities: capabilities.into_option(),
         capture_denials: None,
         ui: ui.into_option().map(convert_process_container_ui),
+        network: None,
     }
 }
 
@@ -239,10 +239,9 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
+        runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: None,
-        // The 0.6 contract predates schema-0.8 `runtimeConfig`.
-        runtime_config: None,
         experimental: None,
     }
 }

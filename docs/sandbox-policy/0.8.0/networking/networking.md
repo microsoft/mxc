@@ -1,8 +1,14 @@
 # MXC Network Configuration, GA
 
-The `network.egress` and `network.ingress` sections described in this document
-are planned for schema 0.8.0 but are not yet accepted by the current parser.
-Schema 0.7 and earlier retain their legacy network configuration shape.
+Schema 0.8.0 accepts the `network.egress` and `network.ingress` sections
+described in this document. Schema 0.7 and earlier retain their legacy network
+configuration shape. During the additive transition, schema 0.8 requests may
+use either shape, but cannot mix them.
+
+This change defines and parses the schema 0.8 contract. A backend must also
+declare validation support and implement enforcement before accepting a
+directional policy; unsupported backends reject it in the stacked validation
+work.
 
 ## Overview
 
@@ -140,7 +146,7 @@ On backends with private loopback, traffic between processes in the same
 sandbox is not governed by outbound IP/CIDR rules or host-to-container inbound
 policy.
 
-## Proposed Schema
+## Schema
 
 ### Connectivity model 1 and 3
 
@@ -173,6 +179,10 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 
 ```json
 {
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "allow", "hostLoopback": "allow" }
+  },
   "runtimeConfig": { // runtime data passed to MXC (not policy)
     // http(s)://localhost:<port>, http(s)://127.0.0.1:<port>, or http(s)://[::1]:<port>
     "networkProxy": "http://127.0.0.1:8080"
@@ -180,10 +190,13 @@ No direct internet, loopback proxy only (more restrictive). Proxy
 }
 ```
 
-The omitted `network` block uses deny defaults. When `runtimeConfig.networkProxy` is present, cooperating HTTP(S)
-clients are configured to use the proxy; clients that ignore the proxy settings are blocked from direct egress.
-Without runtime proxy configuration, the deny defaults form model 3. Backend-specific proxy reachability requirements
-are documented below.
+The example shows the identity-less ProcessContainer posture: private-network
+ingress is enabled so host loopback can reach the proxy, while direct egress
+remains deny-by-default. When `runtimeConfig.networkProxy` is present,
+cooperating HTTP(S) clients are configured to use the proxy; clients that ignore
+the proxy settings are blocked from direct egress. Without runtime proxy
+configuration, the deny defaults form model 3. Backend-specific proxy
+reachability requirements are documented below.
 
 This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on
 Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps
@@ -199,6 +212,10 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 | `ports[].protocol` | tcp / udp / icmp / any | `any` matches all protocols. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
+
+Omit `to` or `ports` to select their wildcard behavior. When either field is
+present, its array must contain at least one selector; an explicit empty array
+is rejected rather than broadened into a wildcard.
 
 `icmp` expands by destination address family. A rule containing IPv4 and IPv6 peers produces both ICMPv4 and ICMPv6
 filters; a rule without `to` also produces both.
@@ -412,9 +429,9 @@ Model 2 permits only the proxy endpoint.
 - **Windows Sandbox:** Guest-side firewall only, with hardcoded rules. In GA for development/testing scenarios where network isolation is not critical.
 - **Isolation Session:** No network filtering or denial is possible — outbound is open and a process inside can listen
   on a localhost-reachable port. Schema 0.7 requires the unrestricted-network acknowledgment
-  (`network.defaultPolicy=allow` + `network.allowLocalNetwork=true`). Schema 0.8 has the same behavior and accepts only
-  the equivalent unrestricted posture: `egress.default=allow`, `ingress.default=allow`, and
-  `ingress.hostLoopback=allow`, with no egress rules or runtime proxy. Every other network/proxy policy is rejected.
+  (`network.defaultPolicy=allow` + `network.allowLocalNetwork=true`). The directional schema 0.8 acknowledgment is
+  reserved for the backend migration work; until that lands, callers must continue using the legacy unrestricted
+  acknowledgment. Other network/proxy policy is rejected.
   In GA for process isolation only (identity, lifecycle).
 - **Hyperlight, Nanvix:** Not in this GA scope doc. Additional follow up is needed to confirm their capabilities and whether they align with this doc.
 

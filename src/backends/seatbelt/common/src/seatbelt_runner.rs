@@ -37,7 +37,7 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::validate_common;
+use wxc_common::validator::{validate_common, validate_network_policy_support};
 
 use crate::profile_builder::build_profile_with_proxy;
 
@@ -106,6 +106,7 @@ impl SeatbeltScriptRunner {
 
 impl SandboxBackend for SeatbeltScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
         // Seatbelt cannot filter network by hostname — reject blockedHosts
         // rather than silently allowing traffic the user expects to be denied.
         if !request.policy.blocked_hosts.is_empty() {

@@ -48,6 +48,9 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
+        # A skip here means a prerequisite disappeared on a runner provisioned
+        # to execute this suite, so turn it into a failure rather than a
+        # vacuously green gate.
         MXC_LXC_TESTS_REQUIRE_EXECUTION=1 bash "$script_root/run_lxc_all_tests.sh"
         ;;
     seatbelt)

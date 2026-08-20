@@ -53,6 +53,51 @@ Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
 
+## Diagnosing a failure
+
+Every fallible **entry point** — [`build_request`],
+[`build_request_with_containment`], [`run`], [`spawn_sandbox`],
+[`exec_sandbox`], [`run_state_aware_json`] — returns an [`Error`] carrying a
+closed [`ErrorCode`] and a message, plus, when the failure came from an
+underlying platform API, the call that failed and its status.
+
+The live [`Sandbox`] handle is the deliberate exception: `wait`, `try_wait`,
+`wait_with_output` and `kill` return [`std::io::Result`], mirroring
+[`std::process::Child`]. An `Err` from those is an actual OS wait or signal
+failure — a timeout is [`WaitOutcome::TimedOut`], not an error.
+
+```rust,no_run
+# fn report(error: mxc_sdk::Error) {
+if let Some(operation) = &error.operation {
+    eprintln!("{operation} failed with {:?}", error.native_code);
+}
+if let Some(hint) = &error.remediation {
+    eprintln!("  try: {hint}");
+}
+# }
+```
+
+[`Error::operation`] and [`Error::native_code`] are **absent** for a failure
+raised before any API call was reached — a malformed policy, say — so their
+presence tells you which side of the boundary the failure came from. An API that
+names the call it failed in without supplying a status is a normal, tested
+shape. [`Error::remediation`] is present whenever the failure has an actionable
+hint.
+
+[`Error`] is `#[non_exhaustive]` — read its fields freely, but build one with
+[`Error::new`] rather than by literal, so a field added later costs you nothing.
+
+`Display` appends the operation — and the status when there is one — to the
+message, so a consumer that only logs the error does not silently lose them:
+
+```text
+backend_error: The provision was not found. [IsoSessionOps.StopSessionAsync 0x80070490]
+```
+
+The same three fields cross the C ABI (`mxc_ffi`) and surface on the C# SDK's
+`MxcException` as `Operation` / `NativeCode` / `Remediation`, so a diagnosis
+made here reads the same from every binding.
+
 ## Discovering host backends
 
 Two read-only probes answer "what can I run here?" — for two different
@@ -240,32 +285,47 @@ backend the library supports.
 Beyond the one-shot `run` / `spawn_sandbox` paths, the SDK exposes the
 state-aware sandbox lifecycle from a wire-format request JSON string:
 
-- `run_state_aware_json(request_json, dry_run)` drives the **envelope phases** —
-  `provision`, `start`, `stop`, `deprovision` (and a dry run of any phase) — and
-  returns the response-envelope JSON string.
-- `exec_sandbox(request_json)` runs the `exec` phase as a **live streaming**
-  `Sandbox` (the same handle `spawn_sandbox` returns).
+- `run_state_aware_json(request_json, dry_run, experimental)` drives the
+  **envelope phases** — `provision`, `start`, `stop`, `deprovision` (and a dry
+  run of any phase) — and returns the response-envelope JSON string.
+- `exec_sandbox(request_json, experimental)` runs the `exec` phase as a **live
+  streaming** `Sandbox` (the same handle `spawn_sandbox` returns).
+
+Every state-aware backend is experimental, so `experimental` is the in-process
+equivalent of the executor's `--experimental` flag: without it the request is
+refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
+API parameter, not a field in the request JSON.
+
+The example below is illustrative: it selects IsolationSession, which needs
+`mxc_engine/isolation_session`, and this crate does not forward that feature
+today — so it returns `ErrorCode::UnsupportedPhase` as written.
 
 ```rust,no_run
 use mxc_sdk::{run_state_aware_json, exec_sandbox};
 
-// Envelope phase: provision returns { "result": { "sandboxId": ... } }.
+// Provision. IsolationSession accepts only the canonical unrestricted-network
+// acknowledgment; an absent policy defaults to `block`, which it refuses.
 let provisioned = run_state_aware_json(
-    r#"{"phase":"provision","containment":"isolation_session"}"#,
-    false,
+    r#"{"phase":"provision","containment":"isolation_session",
+        "network":{"defaultPolicy":"allow","allowLocalNetwork":true}}"#,
+    false, // dry_run
+    true,  // experimental
 )?;
 
 // Exec phase: a live streaming handle.
 let mut proc = exec_sandbox(
     r#"{"phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
+    true, // experimental
 )?;
 let _ = proc.wait();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-The only in-tree state-aware backend, IsolationSession, is Windows-only and
-experimental (it needs its OS-side service); on a host/build without it these
-return an `Error` with `ErrorCode::UnsupportedPhase`.
+Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
+Windows Sandbox — all Windows-only, and only IsolationSession serves a streaming
+`exec` in-process. Branch on the error code: a backend whose feature is not
+compiled in answers `ErrorCode::BackendUnavailable`, and one with no arm on the
+path you called answers `ErrorCode::UnsupportedPhase`.
 
 ## Supported backends
 

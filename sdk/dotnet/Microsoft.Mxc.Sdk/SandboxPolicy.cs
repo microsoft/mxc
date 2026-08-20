@@ -28,9 +28,65 @@ public sealed class SandboxPolicy
     [JsonPropertyName("ui")]
     public UiPolicy? Ui { get; set; }
 
+    /// <summary>
+    /// Windows ProcessContainer denial capture. Its presence enables capture;
+    /// Linux and macOS backends ignore it.
+    /// </summary>
+    [JsonPropertyName("captureDenials")]
+    public CaptureDenialsPolicy? CaptureDenials { get; set; }
+
     /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
     [JsonPropertyName("timeoutMs")]
     public uint? TimeoutMs { get; set; }
+}
+
+/// <summary>
+/// How <c>captureDenials</c> handles each ungranted access check while recording it.
+/// </summary>
+public enum CaptureDenialsMode
+{
+    /// <summary>
+    /// Keep the access denied and record the denial, preserving deny-by-default containment.
+    /// </summary>
+    Block,
+
+    /// <summary>
+    /// Allow and record the access. This relaxes containment for the run and emits a warning.
+    /// <see cref="MxcSandbox.Run(SandboxPolicy, string)"/> and
+    /// <see cref="MxcSandbox.RunAsync(SandboxPolicy, string, CancellationToken)"/> expose that
+    /// warning; streaming processes returned by
+    /// <see cref="MxcSandbox.Spawn(SandboxPolicy, string)"/> currently do not.
+    /// </summary>
+    Allow,
+}
+
+/// <summary>
+/// Windows ProcessContainer denial-capture settings. The presence of this section enables
+/// capture and reports the resulting document through <see cref="SandboxOutputMetadata"/>.
+/// </summary>
+public sealed class CaptureDenialsPolicy
+{
+    /// <summary>How ungranted access checks are handled while recording them.</summary>
+    [JsonPropertyName("mode")]
+    public CaptureDenialsMode Mode { get; set; } = CaptureDenialsMode.Block;
+
+    /// <summary>
+    /// Optional absolute path for the JSON denials document. The parent directory must exist.
+    /// MXC inserts a per-run identifier into the file stem and reports the actual path through
+    /// output metadata. When omitted, MXC uses a run-unique file in the system temporary
+    /// directory.
+    /// </summary>
+    [JsonPropertyName("outputPath")]
+    public string? OutputPath { get; set; }
+
+    /// <summary>
+    /// Preserve the sealed ETL trace and report its path through output metadata. Retained traces
+    /// can contain sensitive paths and identifiers; callers must delete the reported trace after
+    /// use. Do not delete its parent directory unless the caller independently owns or positively
+    /// recognizes that directory.
+    /// </summary>
+    [JsonPropertyName("retainEtl")]
+    public bool RetainEtl { get; set; }
 }
 
 /// <summary>Filesystem section of a <see cref="SandboxPolicy"/>.</summary>

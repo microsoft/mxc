@@ -303,14 +303,13 @@ pub trait StatefulSandboxBackend {
     ///   that blocks on exit and a terminator that kills, and does not touch the
     ///   host console. Under `Executor` it relays internally and returns null
     ///   handles.
-    /// - **Windows Sandbox** and **WSLc** relay internally and return null
-    ///   handles whatever the caller asked for. Under `Library` the streaming
-    ///   adapter now **refuses** such a handle rather than wrapping it, so an
-    ///   in-process caller gets a typed error naming the reason instead of a
-    ///   process with no streams — treat those two as executor-path only.
+    /// - **Windows Sandbox** and **WSLc** honor `Executor` only. They relay
+    ///   internally and return null handles; a `Library` request is refused
+    ///   without running the workload.
     ///
     /// Reaching any of this from an in-process caller additionally requires the
-    /// experimental opt-in, which the state-aware entry points do not yet expose.
+    /// experimental opt-in, which the state-aware entry points expose as an
+    /// `experimental` parameter.
     ///
     /// # Backends that cannot serve `Library`
     ///

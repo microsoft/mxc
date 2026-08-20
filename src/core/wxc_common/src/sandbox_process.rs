@@ -20,6 +20,7 @@ use std::io::{Read, Write};
 use crate::logger::Logger;
 use crate::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use crate::script_runner::ScriptRunner;
+use crate::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 /// A handle to a running sandboxed process.
 ///
@@ -360,9 +361,20 @@ pub enum StdioMode {
 /// calls this directly with [`StdioMode::Pipes`]; the CLI executor binaries
 /// reach it through the [`Runner`] bridge.
 pub trait SandboxBackend {
-    /// Backend-specific validation, run before [`spawn`](SandboxBackend::spawn)
-    /// and on dry-run. Override to reject unsupported policies; default accepts.
-    fn validate(&self, _request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    /// Declares optional network policy features this backend fully enforces.
+    ///
+    /// Return a named feature constant or compose constants with `|`. Use
+    /// [`NetworkPolicySupport::ALL`] only when every feature is enforced.
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        NetworkPolicySupport::LEGACY
+    }
+
+    /// Validates shared network support and backend-specific constraints.
+    ///
+    /// Override to add backend-specific checks. Implementations must first call
+    /// `validate_network_policy_support(request, self.network_policy_support())`.
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
         Ok(())
     }
 

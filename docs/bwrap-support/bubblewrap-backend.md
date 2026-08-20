@@ -27,6 +27,39 @@ requiring root privileges or a container runtime.
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
   below that floor.
+- **Schema 0.8 proxy mode only:** `slirp4netns` installed and on PATH, plus
+  `nsenter`, `iptables`, and `ip6tables` for the proxy-only egress rules. None
+  are required when `network.proxy` is omitted or when a 0.6/0.7 policy uses
+  the legacy proxy behavior.
+  ```bash
+  # Debian/Ubuntu
+  sudo apt install slirp4netns util-linux iptables
+
+  # Fedora/RHEL
+  sudo dnf install slirp4netns util-linux iptables
+
+  # Alpine
+  apk add slirp4netns util-linux iptables
+  ```
+  `iptables` must resolve to the **`nf_tables` backend** (the default on
+  Debian 10+, Ubuntu 20.10+, RHEL 8+, and Alpine). The legacy backend opens
+  `/run/xtables.lock` before touching any table, and the rules are installed by
+  an unprivileged supervisor that keeps the caller's uid — so on a stock host,
+  where `/run` is root-owned, it cannot take that lock. `validate` refuses such
+  a host with a message naming the backend, rather than letting the supervisor
+  die at the first rule. If a host is pinned to legacy, switch it:
+  ```bash
+  sudo update-alternatives --set iptables /usr/sbin/iptables-nft
+  sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-nft
+  ```
+  (A legacy backend is still accepted where the lock *is* writable — for
+  example when running as root — since it works there.)
+  Proxy mode fails explicitly if any of these is unavailable; it never falls
+  back to sharing the host network namespace or to running without egress
+  rules. The host must also provide the util-linux `unshare` command with
+  `--map-current-user` and `--keep-caps`. No root is needed: `iptables` runs
+  against the sandbox's own network namespace, where the supervisor holds
+  `CAP_NET_ADMIN`.
 - User namespaces must be enabled:
   ```bash
   # Check: should print "1"
@@ -219,7 +252,7 @@ namespace choice alone decides the outcome:
 
 | `allowLocalNetwork` | Namespace | Result |
 |---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` (default) | private (`--unshare-net`, including 0.8 proxy mode) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
 | `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
@@ -244,39 +277,73 @@ Standard `process` fields work as expected:
 }
 ```
 
-## Network proxy (cooperative, unprivileged)
+## Network proxy (private namespace, unprivileged)
 
 Bubblewrap supports an **unprivileged, cooperative network proxy** that
 enforces `allowedHosts` / `blockedHosts` at the proxy layer instead of via
-iptables. This is the **recommended** way to do per-host filtering on
-Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
+host-level iptables. The workload runs in a private network namespace and
+reaches the proxy through rootless `slirp4netns` routing. This requires no root
+privileges.
+
+This private-network behavior applies to schema **0.8 and later**. Policies
+using schema 0.6 or 0.7 retain the existing shared-host-network proxy behavior
+for compatibility and do not require `slirp4netns`. An absent schema version is
+also treated as legacy. The runner never silently falls back: a 0.8 proxy
+request fails if its private namespace cannot be configured.
 
 ### How it works
 
+0. Before anything is launched, `validate` probes the host tools this mode
+   depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
+   `--keep-caps`), `nsenter`, `iptables`, and `ip6tables` — so a host that is
+   missing one fails immediately with a message naming it, rather than partway
+   through supervisor startup. For `iptables`/`ip6tables` presence is not
+   enough: the probe also reads the backend from the version banner and refuses
+   a legacy backend whose `/run/xtables.lock` this user cannot open, because
+   the unprivileged supervisor would otherwise die at the first rule. Each
+   probe is bounded by a short timeout: a
+   wedged binary is reported as hung and named, instead of stalling every
+   proxy-mode execution on the host indefinitely. A successful probe is cached
+   for the life of the process; failures are not, so installing the missing
+   tool takes effect without a restart.
 1. When `network.proxy` is set, the runner launches an unprivileged HTTP
    proxy on loopback (`127.0.0.1:N`). For tests, the bundled
    `unix-test-proxy` binary is used (`builtinTestServer: true`,
    testing-only and gated behind `--allow-testing-features`); in production callers
    supply their own proxy via `localhost: <port>` or `url: <url>`.
-2. The sandbox is then started **without** `--unshare-net` so the sandbox
-   shares the host network namespace and can reach the loopback proxy.
-3. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+2. The runner creates a same-UID user-namespace supervisor, starts Bubblewrap
+   with `--unshare-net`, and keeps the workload behind a startup barrier.
+3. The supervisor attaches `slirp4netns` to Bubblewrap's private network
+   namespace. Host-loopback proxy endpoints are presented to the sandbox
+   through slirp's `10.0.2.2` host gateway. Once slirp is up, the supervisor
+   programs a default-DROP `MXC_EGRESS` chain into that namespace via
+   `nsenter`, permitting only loopback and the proxy endpoint (IPv6 gets a
+   DROP-only chain). The workload is released only after every rule is
+   installed, so it can never run with egress open. A failure to program any
+   rule aborts the supervisor rather than starting an unenforced sandbox.
+
+   Bubblewrap joins the supervisor's user namespace (`--userns`) rather than
+   creating its own, so the sandbox lives in the namespace that owns the
+   rule-bearing network namespace. This relies on Bubblewrap dropping
+   capabilities in the sandboxed process — the runner passes no `--cap-add` —
+   which is what prevents the workload from holding the `CAP_NET_ADMIN` needed
+   to flush the chain.
+4. The command builder sets `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
    `FTP_PROXY`, and their lowercase variants inside the sandbox via
    `bwrap --setenv` (caller-supplied values for these keys, including
-   `NO_PROXY` / `no_proxy`, are stripped before injection). The runner deliberately
-   does **not** set `NO_PROXY`: since the sandbox shares the host netns,
-   a `NO_PROXY=localhost,127.0.0.1` entry would let cooperating clients
-   bypass the proxy for host-loopback destinations, defeating
-   `allowedHosts` / `blockedHosts` enforcement for those targets.
-4. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
+   `NO_PROXY` / `no_proxy`, are stripped before injection). The runner
+   deliberately does **not** set `NO_PROXY`, because exempt destinations would
+   bypass the configured proxy policy.
+5. Cooperative tools (curl, wget, Python `requests`, Node `https`, etc.)
    honor the env vars and traffic flows through the proxy, which applies
-   the `allowedHosts` / `blockedHosts` lists.
+   the `allowedHosts` / `blockedHosts` lists. Non-cooperating clients are not
+   merely unrouted — their traffic is dropped by the egress chain.
 
 ### Example: builtin test proxy with allowlist
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.8.0-alpha",
   "platform": "linux",
   "containment": "bubblewrap",
   "process": {
@@ -294,7 +361,7 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
 
 ```json
 {
-  "version": "0.6.0-alpha",
+  "version": "0.8.0-alpha",
   "containment": "bubblewrap",
   "process": { "commandLine": "curl -fsSL https://example.com" },
   "network": {
@@ -303,22 +370,68 @@ Bubblewrap because it requires **no root and no `CAP_NET_ADMIN`**.
 }
 ```
 
+> Both examples declare `0.8.0-alpha` deliberately: the private-namespace and
+> egress-enforcement behavior described above is selected by the schema version,
+> so the same config on `0.6`/`0.7` runs the legacy shared-host-network proxy
+> path instead.
+
 ### Caveats
 
-- **Cooperative model**: the runner enforces by injecting
-  `HTTP_PROXY` / `HTTPS_PROXY` into the sandbox environment, so only
-  well-behaved clients that honor those vars are routed through the
-  proxy. Tools that bypass them (raw sockets, custom HTTP clients,
-  statically-linked binaries that ignore the env) are **not enforced**.
-  This applies to **both** the builtin test proxy and external (BYO)
-  proxy modes — the limitation is in the env-var injection mechanism,
-  not in the proxy itself; a BYO proxy can do whatever it likes for
-  cooperating clients. For strict whole-network isolation, omit
-  `network.proxy` so the runner can apply `--unshare-net` instead.
+- **Host loopback moves to the gateway address (breaking change in 0.8+
+  proxy mode)**: the sandbox gets its own network namespace, so inside it
+  `127.0.0.1` now means *the sandbox itself*, not the host. A config that
+  reaches a host-local service by loopback address — a database on
+  `127.0.0.1:5432`, a metadata endpoint, a second proxy — silently stops
+  connecting to the host and starts connecting to nothing. Under the schema
+  0.6/0.7 legacy proxy path the sandbox shared the **host's own network
+  namespace**, so `127.0.0.1` did reach the host; that is the behavior
+  changing here.
+
+  The configured proxy remains reachable, but at slirp's gateway address
+  `10.0.2.2` instead — which is exactly how the runner rewrites a
+  `localhost` proxy endpoint so the sandbox can still find it. Other
+  host-local services do **not** come along: slirp itself runs without
+  `--disable-host-loopback`, so the gateway can in principle carry traffic to
+  any host-loopback port, but the egress chain admits only the single
+  `10.0.2.2:<proxy-port>` destination and drops the rest. The host-loopback
+  surface is therefore the proxy endpoint alone.
+- **The supervisor's user namespace is visible to the sandbox**: in proxy
+  mode `bwrap` joins the supervisor's user namespace via `--userns` rather
+  than creating its own, and the namespace descriptor stays open in the
+  workload — `bwrap` keeps it across its own `fork`/`exec` and offers no flag
+  to close it. Re-entering the namespace with `setns` requires
+  `CAP_SYS_ADMIN`, which the sandbox cannot hold: `bwrap` empties the
+  capability bounding set before `exec`, so the workload runs with
+  `CapBnd`/`CapEff`/`CapPrm` all zero. The end-to-end test suite asserts
+  those are zero, because that assumption is what makes the exposed
+  descriptor inert.
+- **Cooperative routing, enforced egress (schema 0.8+)**: the runner injects
+  `HTTP_PROXY` / `HTTPS_PROXY` so cooperating clients route through the proxy,
+  and additionally programs a default-DROP egress chain inside the sandbox's
+  private network namespace. Clients that ignore the env vars (raw sockets,
+  custom HTTP clients) can no longer reach the network directly: only loopback
+  and the proxy endpoint are permitted. DNS is deliberately **not** opened —
+  the proxy resolves on the workload's behalf — so the proxy endpoint must be
+  an IPv4 literal. IPv6 egress is denied outright.
+
+  Consequently the only accepted host-local proxy endpoints are `localhost`,
+  `127.0.0.0/8` and the wildcards `0.0.0.0` / `::`, each rewritten to
+  `10.0.2.2`. `::1` is **rejected at validation time**: a proxy bound only to
+  the IPv6 loopback cannot accept the IPv4 connection slirp's gateway
+  produces, so translating it would hand the sandbox an address nothing
+  answers on. Bind such a proxy to `127.0.0.1` or to a dual-stack wildcard
+  instead.
+  On schema **0.6/0.7** the legacy behavior applies: the sandbox shares the
+  host network namespace, no egress rules are installed, and only the
+  cooperative env-var routing is in effect — a client that ignores
+  `HTTP_PROXY`/`HTTPS_PROXY` reaches the network directly. For strict
+  whole-network isolation on those versions, omit `network.proxy` so the
+  runner can apply `--unshare-net` instead.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`
-  or `"both"` is rejected at config-parse time because iptables-based
-  enforcement requires root and would defeat the proxy's privilege story.
+  or `"both"` is rejected at config-parse time. (The rejection message cites a
+  root requirement that proxy mode has since disproved; see the firewall
+  section.)
 - **External proxy delegates policy**: when `network.proxy` uses
   `localhost: <port>` or `url: <url>` (not `builtinTestServer`), the
   external proxy is responsible for any host filtering. The runner does
@@ -356,10 +469,10 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec |
-| Network isolation | iptables + veth | `--unshare-net` or iptables |
-| Dependencies | `lxc-*` tools, templates | Single `bwrap` binary |
-| Lifecycle | Create/destroy containers | Process dies on exit |
+| Startup | Create → Start → Attach | Single `bwrap` exec; proxy mode adds a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
+| Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
+| Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
 - Quick sandboxing without root access

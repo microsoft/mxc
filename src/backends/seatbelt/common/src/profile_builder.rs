@@ -60,7 +60,7 @@ pub fn build_profile_with_proxy(
     // Minimum allow rules so a child process can actually run. These are
     // the same things Apple's own built-in profiles (e.g. no-internet)
     // include: dyld + system libraries, mach-lookup of the basic agents,
-    // sysctl reads, and signaling self.
+    // sysctl reads, and signaling processes in the same sandbox.
     out.push_str(BASELINE_ALLOW);
 
     // Filesystem — read-only system paths every process needs.
@@ -93,7 +93,7 @@ const BASELINE_ALLOW: &str = "\
 ;; --- baseline (required for any process to start) ---
 (allow process-fork)
 (allow process-exec)
-(allow signal (target self))
+(allow signal (target same-sandbox))
 (allow sysctl-read)
 (allow file-read-metadata)
 (allow mach-lookup
@@ -696,6 +696,7 @@ mod tests {
         assert!(p.contains("(deny default)"));
         assert!(p.contains("(allow process-fork)"));
         assert!(p.contains("(allow process-exec)"));
+        assert!(p.contains("(allow signal (target same-sandbox))"));
         assert!(p.contains("/usr/lib"));
         assert!(p.contains("/System"));
         assert!(p.contains("(subpath \"/bin\")"));

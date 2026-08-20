@@ -67,11 +67,19 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
+**Schema 0.8 directional networking:** Config-based requests may use
+`network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
+`processContainer.network.allowedProxyPeer`. Do not mix those fields with the
+legacy `network.defaultPolicy`, `network.enforcementMode`,
+`network.allowLocalNetwork`, host-list, or `network.proxy` fields.
+`createConfigFromPolicy` continues to produce the legacy network shape; build a
+`ContainerConfig` directly when using the schema 0.8 directional shape.
+
 **Platforms:**
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
 | macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
@@ -241,16 +249,15 @@ import {
 } from '@microsoft/mxc-sdk';
 
 // Every call takes a single options object (3rd arg). Experimental backends
-// must pass `experimental: true`; relay `correlationVector` on every phase
-// after provision so telemetry shares one base prefix.
+// must pass `experimental: true`.
 // isolation_session provision requires the unrestricted-network acknowledgment:
 // the container's network cannot be filtered or denied, so you must opt in.
-const { sandboxId, correlationVector } = await provisionSandbox(
+const { sandboxId } = await provisionSandbox(
   'isolation_session',
   { network: { defaultPolicy: 'allow', allowLocalNetwork: true } },
   { experimental: true },
 );
-const opts = { experimental: true, correlationVector };
+const opts = { experimental: true };
 
 await startSandbox(sandboxId, undefined, opts);
 
@@ -260,8 +267,6 @@ const r2 = await execInSandboxAsync(sandboxId, { process: { commandLine: 'whoami
 await stopSandbox(sandboxId, undefined, opts);
 await deprovisionSandbox(sandboxId, undefined, opts);
 ```
-
-> **Correlating telemetry across phases:** when experimental telemetry is enabled, `provisionSandbox` returns a `correlationVector` (a Microsoft Correlation Vector). Relay it verbatim as `options.correlationVector` on every later phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The client relays the value unchanged; the executor validates it on each phase and derives that phase's own vector from it (spinning a fresh child element off a mutable base, or reseeding if it is missing or malformed). It is `undefined` when telemetry is off, and safe to omit otherwise.
 
 `windows_sandbox` follows the same shape (substitute the containment string and provide `filesystem.readwritePaths` / `readonlyPaths` at provision if needed). See [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) for the per-phase config matrix.
 
@@ -285,7 +290,7 @@ try {
 }
 ```
 
-`operation`, `nativeCode` and `remediation` are optional and travel together: `nativeCode` and `remediation` never appear without `operation`. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
+`operation`, `nativeCode` and `remediation` are optional. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
 
 These three are currently populated only by **IsolationSession state-aware** operations. Windows Sandbox has no semantic error channel to derive them from, and the one-shot surface folds the same detail into `message` instead, so they are uniformly absent there — always treat them as optional.
 
@@ -427,6 +432,26 @@ mxcErrorFromCode(code, message, details?)   → MxcError
 Full TypeScript definitions ship with the package (`dist/index.d.ts`). All exports are named exports from `@microsoft/mxc-sdk`.
 
 </details>
+
+---
+
+## Telemetry Consent
+
+Telemetry is off-by-default unless the caller opts in with top-level `telemetry.enabled: true` and the applicable Windows consent/policy gates permit collection.
+
+Telemetry consent behavior follows
+[`docs/telemetry/telemetry-consent-design.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-consent-design.md):
+the SDK stays UI-agnostic, renders the canonical resource verbatim through a
+host presenter, persists only explicit yes/no decisions, treats dismissal and
+failures as non-grants, and never lets policy or transport failures opt a user
+in.
+
+### Administrative policy
+
+An IT administrator can still block MXC telemetry device-wide via MXC's own
+registry policy setting. See
+[`docs/telemetry/telemetry-administrative-policy.md`](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry-administrative-policy.md)
+for the stable registry contract and interaction rules.
 
 ---
 

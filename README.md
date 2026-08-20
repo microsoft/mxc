@@ -26,7 +26,7 @@ MXC ships a native container wrapper plus a TypeScript SDK — see the [SDK READ
 
 | Platform | Default backend | Other backends | Minimum build |
 | --- | --- | --- | --- |
-| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
+| Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26340.9212 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26340-9212)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc`, `microvm`, `hyperlight` | — |
 | macOS ARM64 / x64 (schema `0.7.0-alpha`+) | `seatbelt` | — | — |
 
@@ -229,13 +229,19 @@ Successful non-dry-run audits require capture metadata, canonical denials JSON, 
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
-## Telemetry (Experimental)
+## Telemetry
 
 MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution` and `MXC.Error`) are emitted to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
-Telemetry is **experimental** and requires:
-1. The `--experimental` CLI flag
-2. `"experimental": { "telemetry": { "enabled": true } }` in the JSON config
+Telemetry requires:
+1. Top-level `"telemetry": { "enabled": true }` in the JSON config
+2. Explicit per-user telemetry consent on Windows
+3. An administrative policy that permits collection, when a policy is configured
+
+The configuration flag is an additional per-run opt-in; it cannot grant consent
+or bypass an administrative block. Telemetry remains off unless every applicable
+gate is open. MXC does not use the Windows Diagnostics & feedback setting as a
+substitute for application consent.
 
 On non-Windows platforms, all telemetry functions are no-ops.
 
@@ -245,12 +251,11 @@ The software may collect information about you and your use of the software and 
 
 #### How to turn telemetry off
 
-Telemetry is **off by default**. MXC emits telemetry only when **both** of the following are set, so no action is required to keep it disabled:
+Telemetry is **off by default**. To keep it off, do not set
+`"telemetry": { "enabled": true }` for the run.
 
-1. The `--experimental` CLI flag is passed, **and**
-2. `"experimental": { "telemetry": { "enabled": true } }` is present in the JSON config.
-
-Omitting either (the default) turns telemetry off entirely. On non-Windows platforms all telemetry functions are no-ops.
+If telemetry is enabled in config, collection still does not occur unless
+Windows user consent is granted and administrative policy allows collection.
 
 #### What official builds send
 
@@ -277,6 +282,8 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |
+| [docs/telemetry/telemetry-consent-design.md](docs/telemetry/telemetry-consent-design.md) | Telemetry consent contract |
+| [docs/telemetry/telemetry-administrative-policy.md](docs/telemetry/telemetry-administrative-policy.md) | Administrative telemetry controls |
 
 ## Contributing
 

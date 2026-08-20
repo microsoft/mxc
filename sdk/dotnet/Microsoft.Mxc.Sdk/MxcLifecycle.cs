@@ -125,16 +125,30 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 NativeSandbox* handle = null;
-                byte* error = null;
-                var status = NativeMethods.mxc_state_aware_exec(requestPtr, &handle, &error);
+                MxcErrorDetail error = default;
+                // `experimental` is 0 deliberately. Two things are missing: the engine's
+                // `isolation_session` feature is not enabled in the library this project
+                // builds, so that backend has no dispatch arm and the request ends at
+                // `unsupported_phase`; and the request shape emitted here predates that
+                // backend's Preview migration. Passing 1 without fixing both trades
+                // `backend_unavailable` for `unsupported_phase`, which
+                // `AssertNoUsableBackend` already tolerates — the tests would stay green
+                // while nothing worked. Change it together with the feature and the shape.
+                var status = NativeMethods.mxc_state_aware_exec(
+                    requestPtr, /*experimental*/ 0, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
-                    var message = PtrToString(error) ?? "unknown error";
-                    if (error is not null)
+                    // See MxcSandbox.Spawn: the release belongs in `finally` so a throw
+                    // during marshalling or exception construction cannot strand the
+                    // detail's strings.
+                    try
                     {
-                        NativeMethods.mxc_string_free(error);
+                        throw NativeError.ToException(status, error, "unknown error");
                     }
-                    throw new MxcException((ErrorCode)status, message);
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
                 }
                 return new MxcSandboxProcess(MxcSandboxHandle.FromRaw(handle));
             }
@@ -245,13 +259,16 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                var status = NativeMethods.mxc_state_aware(requestPtr, /*dry_run*/ 0, &result);
+                // `experimental` is 0 for the reason given in ExecInSandbox: the backend
+                // is not compiled into this build and the request shape is stale, so
+                // opting in would only change which error surfaces.
+                var status = NativeMethods.mxc_state_aware(
+                    requestPtr, /*dry_run*/ 0, /*experimental*/ 0, &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)
                     {
-                        var message = PtrToString(result.error_utf8) ?? "unknown error";
-                        throw new MxcException((ErrorCode)status, message);
+                        throw NativeError.ToException(status, result.error, "unknown error");
                     }
                     var responseJson = PtrToString(result.response_json_utf8) ?? "{}";
                     var root = JsonNode.Parse(responseJson) as JsonObject;

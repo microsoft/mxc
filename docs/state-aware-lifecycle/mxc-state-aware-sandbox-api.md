@@ -395,7 +395,6 @@ type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
 interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
-  correlationVector?: string; // MS-CV to relay onto later phases (telemetry)
 }
 
 interface StartResult<C extends StateAwareContainmentBackend> {
@@ -664,7 +663,6 @@ State-aware-only fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
-| `correlationVector` | string | No. Relayed by the client onto non-`provision` phases; absent on `provision` (seeded by the executor). Rejected as a parse error on one-shot requests. | Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in its result; the client relays it verbatim into later phases so the lifecycle shares a telemetry base prefix (emitted under `__TlgCV__`). Each non-`provision` phase validates the relayed value and *spins* a fresh child element off a mutable base (keeping repeat invocations distinct), passes an already-frozen vector through unchanged, and reseeds a new base if it is absent or malformed. Ignored unless experimental telemetry is enabled. See [telemetry docs](../telemetry/telemetry.md#correlating-a-lifecycle). |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
@@ -773,7 +771,7 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 | Phase | `TResult` shape |
 |---|---|
-| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object; correlationVector?: string }` |
+| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object }` |
 | `start` | `{ metadata?: object }` |
 | `stop` | `{ metadata?: object }` |
 | `deprovision` | `{ metadata?: object }` |
@@ -816,11 +814,10 @@ logic on `code` first.
 
 **Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 
-**Invariant:** `nativeCode` implies `operation`, and `remediation` implies `operation`.
-`operation` marks that an API operation was in flight; the other two refine it, and
-neither ever appears alone. A failure MXC raises before or outside any API call — a
-malformed request or id, a policy rejection, or an internal failure of MXC's own
-machinery — carries only `code` and `message`.
+**Invariant:** `operation` marks that an API operation was in flight. A failure
+MXC raises before or outside any API call — a malformed request or id, a policy
+rejection, or an internal failure of MXC's own machinery — carries only `code`
+and `message`.
 
 **Which fields earn a place here.** A named top-level field is for a **backend-neutral**
 concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows

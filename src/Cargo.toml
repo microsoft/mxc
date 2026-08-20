@@ -67,6 +67,7 @@ appcontainer_common = { path = "backends/appcontainer/common" }
 base64 = "0.22"
 bwrap_common = { path = "backends/bubblewrap/common" }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+cidr = "0.3.2"
 clap = { version = "4", features = ["derive"] }
 flatbuffers = "25"
 getrandom = "0.2"

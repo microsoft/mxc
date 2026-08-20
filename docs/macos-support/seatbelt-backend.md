@@ -29,6 +29,8 @@ provides:
 - **UI isolation** by denying mach-lookup of `com.apple.windowserver`,
   pasteboard, and HID iokit user clients when `ui.disable` /
   `ui.clipboard=none` / `ui.injection=false`.
+- **Process-tree management** by allowing signals only between processes that
+  inherited the same sandbox.
 
 The macOS sandbox is **process-scoped**, not container-scoped: there is no named
 container, no lifecycle, and nothing to clean up. The sandbox lives only

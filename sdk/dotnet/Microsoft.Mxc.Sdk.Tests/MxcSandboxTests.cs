@@ -50,13 +50,15 @@ public class MxcSandboxTests
             TimeoutMs = 5000,
             Filesystem = new FilesystemPolicy { ReadwritePaths = { "/tmp" } },
             Ui = new UiPolicy { AllowWindows = true, Clipboard = ClipboardPolicy.Read },
+            CaptureDenials = new CaptureDenialsPolicy
+            {
+                Mode = CaptureDenialsMode.Allow,
+                OutputPath = @"C:\logs\denials.json",
+                RetainEtl = true,
+            },
         };
 
-        var options = new JsonSerializerOptions
-        {
-            Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
-        };
-        var json = JsonSerializer.Serialize(policy, options);
+        var json = MxcSandbox.SerializePolicy(policy);
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
@@ -65,6 +67,35 @@ public class MxcSandboxTests
         Assert.Equal("/tmp", root.GetProperty("filesystem").GetProperty("readwritePaths")[0].GetString());
         Assert.Equal("read", root.GetProperty("ui").GetProperty("clipboard").GetString());
         Assert.True(root.GetProperty("ui").GetProperty("allowWindows").GetBoolean());
+        var capture = root.GetProperty("captureDenials");
+        Assert.Equal("allow", capture.GetProperty("mode").GetString());
+        Assert.Equal(@"C:\logs\denials.json", capture.GetProperty("outputPath").GetString());
+        Assert.True(capture.GetProperty("retainEtl").GetBoolean());
+    }
+
+    [Fact]
+    public void CaptureDenialsPolicy_DefaultsToBlockAndOmitsOutputPath()
+    {
+        var policy = new SandboxPolicy
+        {
+            Version = "0.8.0-alpha",
+            CaptureDenials = new CaptureDenialsPolicy(),
+        };
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+        var capture = doc.RootElement.GetProperty("captureDenials");
+
+        Assert.Equal("block", capture.GetProperty("mode").GetString());
+        Assert.False(capture.GetProperty("retainEtl").GetBoolean());
+        Assert.False(capture.TryGetProperty("outputPath", out _));
+    }
+
+    [Fact]
+    public void SandboxPolicy_OmitsCaptureDenialsWhenNotConfigured()
+    {
+        var policy = new SandboxPolicy { Version = "0.8.0-alpha" };
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy));
+
+        Assert.False(doc.RootElement.TryGetProperty("captureDenials", out _));
     }
 
     [Fact]

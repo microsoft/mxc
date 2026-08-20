@@ -16,11 +16,6 @@
  *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
  */
 /**
- * Allow/deny toggle used by the schema-0.8 `egress`/`ingress` sections. Distinct from the legacy `NetworkPolicy` (`allow`/`block`) — the 0.8 vocabulary renames `block` to `deny`.
- */
-export type AccessPolicy = "allow" | "deny";
-
-/**
  * BaseProcessContainer UI isolation settings.
  */
 export interface BaseProcessUi {
@@ -74,52 +69,6 @@ export type ClipboardPolicy = "none" | "read" | "write" | "all";
  * Containment backend (abstract intent or concrete backend).
  */
 export type Containment = "process" | "processcontainer" | "vm" | "windows_sandbox" | "lxc" | "microvm" | "hyperlight" | "wslc" | "seatbelt" | "isolation_session" | "bubblewrap";
-
-/**
- * Outbound network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.
- */
-export interface Egress {
-  /**
-   * Explicit outbound allow rules.
-   */
-  allow?: EgressRule[] | null;
-  /**
-   * Default outbound policy when no `allow`/`deny` rule matches.
-   */
-  default?: AccessPolicy | null;
-  /**
-   * Explicit outbound deny rules. A deny match overrides an allow match.
-   */
-  deny?: EgressRule[] | null;
-}
-
-/**
- * A single destination peer expressed as a CIDR.
- */
-export interface EgressPeer {
-  /**
-   * IPv4/IPv6 CIDR, or `0.0.0.0/0` / `::/0` for any. IP/CIDR literals only — DNS names are rejected at validation time.
-   */
-  cidr?: string | null;
-  /**
-   * CIDR exclusions within `cidr` (Kubernetes `ipBlock.except` style).
-   */
-  except?: string[] | null;
-}
-
-/**
- * One outbound allow/deny rule: destinations (`to`) and, optionally, the ports/protocols the rule is scoped to.
- */
-export interface EgressRule {
-  /**
-   * Destination ports/protocols. Omit to match all ports/protocols.
-   */
-  ports?: PortRule[] | null;
-  /**
-   * Destination peers. Omit to match any destination.
-   */
-  to?: EgressPeer[] | null;
-}
 
 /**
  * Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.
@@ -178,20 +127,6 @@ export interface Filesystem {
    * Paths the process can read and write.
    */
   readwritePaths?: string[] | null;
-}
-
-/**
- * Inbound / host-loopback network policy (schema 0.8+). See `docs/sandbox-policy/0.8.0/networking/networking.md`.
- */
-export interface Ingress {
-  /**
-   * Default policy for LAN/private-network inbound traffic, where the backend supports it.
-   */
-  default?: AccessPolicy | null;
-  /**
-   * Host-loopback connectivity, in both directions (container-to-host and host-to-container). Overrides `default` for the host-loopback path.
-   */
-  hostLoopback?: AccessPolicy | null;
 }
 
 /**
@@ -272,21 +207,44 @@ export interface Network {
    */
   defaultPolicy?: NetworkPolicy | null;
   /**
-   * Outbound (egress) policy. Schema 0.8+. This is the replacement for `defaultPolicy`/`enforcementMode`/`allowedHosts`/`blockedHosts`: a config uses either the legacy fields above or `egress`/`ingress` (and `runtimeConfig.networkProxy`), never both.
+   * Outbound network policy.
    */
-  egress?: Egress | null;
+  egress?: NetworkEgress | null;
   /**
    * How the policy is enforced.
    */
   enforcementMode?: NetworkEnforcement | null;
   /**
-   * Inbound / host-loopback policy. Schema 0.8+. The replacement for `allowLocalNetwork`; see `egress` for the mutual-exclusion rule.
+   * Inbound and host-loopback network policy.
    */
-  ingress?: Ingress | null;
+  ingress?: NetworkIngress | null;
   /**
    * Proxy configuration (one of localhost / builtinTestServer / url).
    */
   proxy?: Proxy | null;
+}
+
+/**
+ * Allow or deny network action.
+ */
+export type NetworkAction = "allow" | "deny";
+
+/**
+ * Outbound network policy.
+ */
+export interface NetworkEgress {
+  /**
+   * Explicit allow rules.
+   */
+  allow?: NetworkRule[] | null;
+  /**
+   * Action used when no explicit rule matches. Defaults to `deny`.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Explicit deny rules. Deny rules take precedence over allow rules.
+   */
+  deny?: NetworkRule[] | null;
 }
 
 /**
@@ -295,9 +253,74 @@ export interface Network {
 export type NetworkEnforcement = "capabilities" | "firewall" | "both";
 
 /**
+ * Inbound and host-loopback network policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Default action for LAN/private-network inbound traffic.
+   */
+  default?: NetworkAction | null;
+  /**
+   * Bidirectional host-loopback connectivity action.
+   */
+  hostLoopback?: NetworkAction | null;
+}
+
+/**
+ * CIDR network peer.
+ */
+export interface NetworkPeer {
+  /**
+   * IPv4 or IPv6 CIDR.
+   */
+  cidr: string;
+  /**
+   * CIDRs excluded from this peer.
+   */
+  except?: string[] | null;
+}
+
+/**
  * Default network policy.
  */
 export type NetworkPolicy = "allow" | "block";
+
+/**
+ * Protocol and destination-port selector.
+ */
+export interface NetworkPort {
+  /**
+   * Inclusive end of a destination-port range. Requires `port`.
+   */
+  endPort?: number | null;
+  /**
+   * Destination port. Omission matches every port.
+   */
+  port?: number | null;
+  /**
+   * Transport protocol. Defaults to `any`.
+   */
+  protocol?: NetworkProtocol | null;
+}
+
+/**
+ * Transport protocol selector.
+ */
+export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
+
+/**
+ * Outbound network rule.
+ */
+export interface NetworkRule {
+  /**
+   * Destination protocols and ports. Omission matches all.
+   */
+  ports?: NetworkPort[] | null;
+  /**
+   * Destination CIDRs. Omission matches both IP families.
+   */
+  to?: NetworkPeer[] | null;
+}
 
 /**
  * State-aware lifecycle phase.
@@ -321,24 +344,6 @@ export interface PortMapping {
    */
   windowsPort: number;
   [k: string]: unknown;
-}
-
-/**
- * A destination port/protocol rule.
- */
-export interface PortRule {
-  /**
-   * End of a port range (Kubernetes `endPort` style); requires `port`.
-   */
-  endPort?: number | null;
-  /**
-   * Destination port. Omit `ports` entirely to match all ports/protocols.
-   */
-  port?: number | null;
-  /**
-   * Protocol to match. `any` matches all protocols.
-   */
-  protocol?: Protocol | null;
 }
 
 /**
@@ -384,15 +389,24 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean | null;
   /**
+   * ProcessContainer-specific network configuration.
+   */
+  network?: ProcessContainerNetwork | null;
+  /**
    * BaseProcessContainer UI settings (Windows).
    */
   ui?: BaseProcessUi | null;
 }
 
 /**
- * Transport protocol for a `PortRule`.
+ * ProcessContainer-specific network configuration.
  */
-export type Protocol = "tcp" | "udp" | "icmp" | "any";
+export interface ProcessContainerNetwork {
+  /**
+   * Installed package family name or AppContainer profile allowed to host the configured loopback proxy.
+   */
+  allowedProxyPeer?: string | null;
+}
 
 /**
  * Proxy configuration. Exactly one variant applies.
@@ -413,11 +427,11 @@ export interface Proxy {
 }
 
 /**
- * Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+).
+ * Runtime values supplied alongside, but separate from, sandbox policy.
  */
 export interface RuntimeConfig {
   /**
-   * Loopback HTTP(S) proxy endpoint, e.g. `"http://127.0.0.1:8080"`. Must be `http`/`https` with a host of `localhost`, `127.0.0.1`, or `[::1]` and an explicit port; this is the schema-0.8 replacement for the legacy `network.proxy.localhost`/`network.proxy.url`.
+   * HTTP/S loopback proxy URL.
    */
   networkProxy?: string | null;
 }
@@ -642,7 +656,7 @@ export interface MXCConfiguration {
    */
   processContainer?: ProcessContainer | null;
   /**
-   * Runtime data passed to MXC that is not part of the sandbox policy (schema 0.8+). Currently carries only the loopback network proxy endpoint; see `network.egress`/`network.ingress`.
+   * Runtime values supplied alongside, but separate from, sandbox policy.
    */
   runtimeConfig?: RuntimeConfig | null;
   /**

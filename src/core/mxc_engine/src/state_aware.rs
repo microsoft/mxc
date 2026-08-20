@@ -37,9 +37,9 @@ fn wslc_unavailable() -> MxcError {
 }
 
 /// Reject a state-aware request for an experimental backend when the caller has
-/// not opted in via `--experimental`. Applied by both the envelope dispatcher
+/// not enabled experimental features. Applied by both the envelope dispatcher
 /// ([`run_state_aware`]) and the streaming exec dispatcher ([`exec_state_aware`])
-/// so no entry point can reach an experimental backend without the flag.
+/// so no entry point can reach an experimental backend without the opt-in.
 fn require_experimental_optin(
     backend: &wxc_common::models::ContainmentBackend,
     parsed: &ParsedStateAwareRequest,
@@ -52,8 +52,7 @@ fn require_experimental_optin(
     ) && !parsed.request.experimental_enabled
     {
         return Err(MxcError::backend_unavailable(format!(
-            "{backend:?} is an experimental backend; pass --experimental to enable state-aware \
-             dispatch against it"
+            "{backend:?} is an experimental backend; enable experimental features to use it"
         )));
     }
     Ok(())
@@ -139,10 +138,21 @@ pub fn exec_state_aware(
 
 /// Parse a state-aware request JSON string into a [`ParsedStateAwareRequest`],
 /// rejecting a one-shot config (no `phase`).
-fn parse_state_aware(request_json: &str) -> Result<ParsedStateAwareRequest, Error> {
+///
+/// `experimental` is the in-process equivalent of the executor's
+/// `--experimental` flag, and is applied **here, after parsing**, because
+/// `config_parser` hardcodes `experimental_enabled: false` for every
+/// state-aware request.
+fn parse_state_aware(
+    request_json: &str,
+    experimental: bool,
+) -> Result<ParsedStateAwareRequest, Error> {
     let mut logger = Logger::new(Mode::Buffer);
     match wxc_common::config_parser::load_mxc_request_from_json(request_json, &mut logger) {
-        Ok(MxcRequest::StateAware(parsed)) => Ok(parsed),
+        Ok(MxcRequest::StateAware(mut parsed)) => {
+            parsed.request.experimental_enabled = experimental;
+            Ok(parsed)
+        }
         Ok(MxcRequest::OneShot(_)) => Err(Error::from(MxcError::malformed_request(
             "expected a state-aware lifecycle request (with a 'phase' field), got a one-shot config",
         ))),
@@ -169,8 +179,16 @@ fn parse_error_to_mxc(e: wxc_common::config_parser::ParseError) -> MxcError {
 /// Handles the envelope phases (provision / start / stop / deprovision) and a
 /// dry-run of any phase. A non-dry-run `exec` streams its output and is rejected
 /// here — drive it through [`exec_state_aware_json`] instead.
-pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String, Error> {
-    let parsed = parse_state_aware(request_json)?;
+///
+/// `experimental` opts in to the experimental backends (WindowsSandbox,
+/// IsolationSession, WSLc); without it they are refused with
+/// `backend_unavailable` before any work is done.
+pub fn run_state_aware_json(
+    request_json: &str,
+    dry_run: bool,
+    experimental: bool,
+) -> Result<String, Error> {
+    let parsed = parse_state_aware(request_json, experimental)?;
 
     if matches!(parsed.phase, Phase::Exec) && !dry_run {
         return Err(Error::from(MxcError::malformed_request(
@@ -194,8 +212,14 @@ pub fn run_state_aware_json(request_json: &str, dry_run: bool) -> Result<String,
 
 /// Run the `exec` phase of a state-aware request (from a JSON string) as a live
 /// streaming process, returning a [`SandboxProcess`] handle.
-pub fn exec_state_aware_json(request_json: &str) -> Result<Box<dyn SandboxProcess>, Error> {
-    let parsed = parse_state_aware(request_json)?;
+///
+/// `experimental` opts in to the experimental backends, as for
+/// [`run_state_aware_json`].
+pub fn exec_state_aware_json(
+    request_json: &str,
+    experimental: bool,
+) -> Result<Box<dyn SandboxProcess>, Error> {
+    let parsed = parse_state_aware(request_json, experimental)?;
     if !matches!(parsed.phase, Phase::Exec) {
         return Err(Error::from(MxcError::malformed_request(format!(
             "streaming exec requires the exec phase, got {}",
@@ -213,7 +237,7 @@ mod tests {
     use wxc_common::state_aware_request::Phase;
 
     #[test]
-    fn experimental_backend_requires_flag() {
+    fn experimental_backend_requires_optin() {
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
             phase: Phase::Provision,
@@ -227,13 +251,13 @@ mod tests {
         let error = run_state_aware(parsed, false).unwrap_err();
 
         assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
-        assert!(error.message.contains("--experimental"));
+        assert!(error.message.contains("experimental"));
     }
 
     #[test]
-    fn exec_experimental_backend_requires_flag() {
+    fn exec_experimental_backend_requires_optin() {
         // The streaming exec entry point applies the same opt-in gate as the
-        // envelope dispatcher: a `wslc:` exec without `--experimental` must be
+        // envelope dispatcher: a `wslc:` exec without the opt-in must be
         // refused before reaching the backend.
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
@@ -247,12 +271,12 @@ mod tests {
 
         let error = match exec_state_aware(parsed) {
             Ok(_) => {
-                panic!("expected experimental gate to reject wslc exec without --experimental")
+                panic!("expected the experimental gate to reject a wslc exec without the opt-in")
             }
             Err(e) => e,
         };
 
         assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
-        assert!(error.message.contains("--experimental"));
+        assert!(error.message.contains("experimental"));
     }
 }

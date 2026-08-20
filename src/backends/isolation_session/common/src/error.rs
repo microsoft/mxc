@@ -75,10 +75,8 @@ const NO_API_MESSAGE: &str = "the IsolationSession API reported a failure withou
 ///
 /// `operation` is always present — this type only describes failures where an
 /// API call was in flight. `code` is absent only when the status could not be
-/// read; `remediation` only when the API supplied one. That is what upholds
-/// the `MxcError` invariant that `nativeCode` and `remediation` never appear
-/// without `operation`. `message` is likewise never empty — see
-/// [`IsoApiFailure::new`].
+/// read; `remediation` only when the API supplied one. `message` is likewise
+/// never empty — see [`IsoApiFailure::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct IsoApiFailure {
     /// Interface-qualified operation, e.g. `IsoSessionOps.AddUserAsync`.
@@ -694,8 +692,8 @@ mod tests {
         assert_eq!(mapped.remediation(), None);
     }
 
-    /// `nativeCode` implies `operation`, and `remediation` implies
-    /// `operation`. Neither may ever appear alone.
+    /// Every variant of this type describes a failure with an API call in
+    /// flight, so each carries an `operation`.
     #[test]
     fn every_variant_upholds_the_field_invariant() {
         let com = windows_core::Error::from_hresult(windows_core::HRESULT(0x80004005_u32 as i32));

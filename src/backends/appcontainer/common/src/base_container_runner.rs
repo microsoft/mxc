@@ -55,17 +55,14 @@ use crate::launch_diagnostics::{
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, EndpointPolicy as PsecEndpointPolicy,
-    EndpointPolicyArgs as PsecEndpointPolicyArgs, FilterAction as PsecFilterAction,
-    NetworkPolicy as PsecNetworkPolicy, NetworkPolicyArgs as PsecNetworkPolicyArgs,
-    ProcessSecurityEnvironment as PsecProcessSecurityEnvironment,
-    ProcessSecurityEnvironmentArgs as PsecProcessSecurityEnvironmentArgs,
-    ProxyInfo as PsecProxyInfo, ProxyInfoArgs as PsecProxyInfoArgs, SchemaVersion,
+    finish_process_security_environment_buffer, EndpointPolicyT as PsecEndpointPolicy,
+    FilterAction as PsecFilterAction, NetworkPolicyT as PsecNetworkPolicy,
+    ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
+    SchemaVersionT,
 };
 use sandbox_spec::base_container_layout::{
-    endpoint_policy, endpoint_policyArgs, finish_sandbox_spec_buffer, proxy_info, proxy_infoArgs,
-    FilterAction as SboxFilterAction, IntegrityLevel, NetworkPolicy as FbsNetworkPolicy,
-    NetworkPolicyArgs, SandboxSpec, SandboxSpecArgs,
+    endpoint_policyT, finish_sandbox_spec_buffer, proxy_infoT, FilterAction as SboxFilterAction,
+    IntegrityLevel, NetworkPolicyT as SboxNetworkPolicy, SandboxSpecT,
 };
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
@@ -86,6 +83,7 @@ use wxc_common::sandbox_process::{
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
+use wxc_common::validator::validate_network_policy_support;
 
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -110,21 +108,6 @@ fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
     }
     block.push(0);
     block
-}
-
-fn create_string_vector<'a>(
-    builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-    values: &'a [String],
-) -> Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<&'a str>>>>
-{
-    if values.is_empty() {
-        return None;
-    }
-    let offsets: Vec<_> = values
-        .iter()
-        .map(|value| builder.create_string(value))
-        .collect();
-    Some(builder.create_vector(&offsets))
 }
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -798,90 +781,50 @@ impl BaseContainerRunner {
     }
 
     // A BaseContainer network policy contains either proxy settings or an egress policy.
-    fn build_network_policy<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
-        policy: &ContainerPolicy,
-    ) -> flatbuffers::WIPOffset<FbsNetworkPolicy<'a>> {
+    fn build_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
+        let mut network = SboxNetworkPolicy::default();
         match Self::resolved_network_policy(policy) {
             ResolvedNetworkPolicy::Proxy(address) => {
-                let proxy = address.map(|address| {
-                    let url = builder.create_string(&address.to_url());
-                    proxy_info::create(builder, &proxy_infoArgs { url: Some(url) })
+                network.proxy = address.map(|address| {
+                    let mut proxy = proxy_infoT::default();
+                    proxy.url = Some(address.to_url());
+                    Box::new(proxy)
                 });
-
-                FbsNetworkPolicy::create(
-                    builder,
-                    &NetworkPolicyArgs {
-                        proxy,
-                        ..Default::default()
-                    },
-                )
             }
             ResolvedNetworkPolicy::Egress(default_policy) => {
-                let default_action = match default_policy {
+                let mut egress = endpoint_policyT::default();
+                egress.default_action = match default_policy {
                     NetworkPolicy::Allow => SboxFilterAction::allow,
                     NetworkPolicy::Block => SboxFilterAction::deny,
                 };
-                let egress = endpoint_policy::create(
-                    builder,
-                    &endpoint_policyArgs {
-                        default_action,
-                        ..Default::default()
-                    },
-                );
-
-                FbsNetworkPolicy::create(
-                    builder,
-                    &NetworkPolicyArgs {
-                        egress: Some(egress),
-                        ..Default::default()
-                    },
-                )
+                network.egress = Some(Box::new(egress));
             }
         }
+        network
     }
 
-    fn build_process_security_environment_network_policy<'a>(
-        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+    fn build_process_security_environment_network_policy(
         policy: &ContainerPolicy,
-    ) -> flatbuffers::WIPOffset<PsecNetworkPolicy<'a>> {
+    ) -> PsecNetworkPolicy {
+        let mut network = PsecNetworkPolicy::default();
         match Self::resolved_network_policy(policy) {
             ResolvedNetworkPolicy::Proxy(address) => {
-                let proxy = address.map(|address| {
-                    let url = builder.create_string(&address.to_url());
-                    PsecProxyInfo::create(builder, &PsecProxyInfoArgs { url: Some(url) })
+                network.proxy = address.map(|address| {
+                    let mut proxy = PsecProxyInfo::default();
+                    proxy.url = Some(address.to_url());
+                    Box::new(proxy)
                 });
-
-                PsecNetworkPolicy::create(
-                    builder,
-                    &PsecNetworkPolicyArgs {
-                        proxy,
-                        ..Default::default()
-                    },
-                )
             }
             ResolvedNetworkPolicy::Egress(default_policy) => {
-                let default_action = match default_policy {
+                let mut egress = PsecEndpointPolicy::default();
+                egress.default_action = match default_policy {
                     NetworkPolicy::Allow => PsecFilterAction::allow,
                     NetworkPolicy::Block => PsecFilterAction::deny,
                 };
-                let egress = PsecEndpointPolicy::create(
-                    builder,
-                    &PsecEndpointPolicyArgs {
-                        default_action,
-                        ..Default::default()
-                    },
-                );
-
-                PsecNetworkPolicy::create(
-                    builder,
-                    &PsecNetworkPolicyArgs {
-                        egress: Some(egress),
-                        ..Default::default()
-                    },
-                )
+                network.egress = Some(Box::new(egress));
             }
         }
+        network
     }
 
     fn should_use_process_security_environment(
@@ -1019,30 +962,8 @@ impl BaseContainerRunner {
 
     fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-        let version = SchemaVersion::new(1, 0);
 
-        let needs_internet_client = Self::needs_internet_client(request);
-        let capabilities = if request.policy.capabilities.is_empty() && !needs_internet_client {
-            None
-        } else {
-            let mut capabilities = request.policy.capabilities.join(",");
-            if needs_internet_client {
-                if !capabilities.is_empty() {
-                    capabilities.push(',');
-                }
-                capabilities.push_str("internetClient");
-            }
-            Some(builder.create_string(&capabilities))
-        };
-
-        let fs_read_write = create_string_vector(&mut builder, &request.policy.readwrite_paths);
-        let fs_read_only = create_string_vector(&mut builder, &request.policy.readonly_paths);
-        let fs_deny = create_string_vector(&mut builder, &request.policy.denied_paths);
-        let network_policy = Some(Self::build_process_security_environment_network_policy(
-            &mut builder,
-            &request.policy,
-        ));
-
+        let capabilities = Self::effective_capabilities(request);
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
             &wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -1050,19 +971,18 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        let spec = PsecProcessSecurityEnvironment::create(
-            &mut builder,
-            &PsecProcessSecurityEnvironmentArgs {
-                version: Some(&version),
-                capabilities,
-                disallow_win32k_system_calls: request.policy.ui.disable,
-                ui_restrictions,
-                fs_read_write,
-                fs_read_only,
-                fs_deny,
-                network_policy,
-            },
-        );
+        let mut spec = PsecProcessSecurityEnvironment::default();
+        spec.version = SchemaVersionT { major: 1, minor: 0 };
+        spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
+        spec.disallow_win32k_system_calls = request.policy.ui.disable;
+        spec.ui_restrictions = ui_restrictions;
+        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
+        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
+        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
+        spec.network_policy = Some(Box::new(
+            Self::build_process_security_environment_network_policy(&request.policy),
+        ));
+        let spec = spec.pack(&mut builder);
         finish_process_security_environment_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
     }
@@ -1083,54 +1003,7 @@ impl BaseContainerRunner {
     fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
         let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
 
-        let version = builder.create_string(SANDBOX_SPEC_VERSION);
-
         let caps = Self::effective_capabilities(request);
-        let capabilities = if caps.is_empty() {
-            None
-        } else {
-            Some(builder.create_string(&caps.join(",")))
-        };
-
-        let fs_read_write = if request.policy.readwrite_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .readwrite_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let fs_read_only = if request.policy.readonly_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .readonly_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let fs_deny = if request.policy.denied_paths.is_empty() {
-            None
-        } else {
-            let offsets: Vec<_> = request
-                .policy
-                .denied_paths
-                .iter()
-                .map(|s| builder.create_string(s))
-                .collect();
-            Some(builder.create_vector(&offsets))
-        };
-
-        let network_policy = Some(Self::build_network_policy(&mut builder, &request.policy));
-
-        // UI restrictions
         let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
             &wxc_common::ui_policy::resolve_ui_restrictions(
                 &request.policy.ui,
@@ -1138,25 +1011,25 @@ impl BaseContainerRunner {
             ),
         ) as u64;
 
-        let spec = SandboxSpec::create(
-            &mut builder,
-            &SandboxSpecArgs {
-                version: Some(version),
-                app_container: true,
-                disallow_win32k_system_calls: request.policy.ui.disable,
-                ui_restrictions,
-                least_privilege: request.policy.least_privilege_mode,
-                capabilities,
-                fs_read_write,
-                fs_read_only,
-                fs_deny,
-                network_policy,
-                ..Default::default()
-            },
-        );
-
+        let mut spec = SandboxSpecT::default();
+        spec.version = SANDBOX_SPEC_VERSION.to_string();
+        spec.app_container = true;
+        spec.disallow_win32k_system_calls = request.policy.ui.disable;
+        spec.ui_restrictions = ui_restrictions;
+        spec.least_privilege = request.policy.least_privilege_mode;
+        spec.capabilities = (!caps.is_empty()).then(|| caps.join(","));
+        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
+        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
+        spec.network_policy = Some(Box::new(Self::build_network_policy(&request.policy)));
+        spec.integrity = IntegrityLevel::system_default;
+        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
+        let spec = spec.pack(&mut builder);
         finish_sandbox_spec_buffer(&mut builder, spec);
         builder.finished_data().to_vec()
+    }
+
+    fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
+        (!paths.is_empty()).then(|| paths.to_vec())
     }
 
     fn needs_internet_client(request: &ExecutionRequest) -> bool {
@@ -1177,7 +1050,13 @@ impl BaseContainerRunner {
         // Match legacy AppContainer behaviour: when network enforcement uses
         // capabilities and the default policy is Allow, ensure internetClient
         // is present so the sandboxed process has network access.
-        let mut caps = request.policy.capabilities.clone();
+        let mut caps: Vec<_> = request
+            .policy
+            .capabilities
+            .iter()
+            .filter(|capability| !capability.is_empty())
+            .cloned()
+            .collect();
         if Self::needs_internet_client(request) {
             caps.push("internetClient".to_string());
         }
@@ -2321,6 +2200,8 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(
@@ -3973,6 +3854,22 @@ mod tests {
         assert_eq!(version.major(), 1);
         assert_eq!(version.minor(), 0);
         assert_eq!(spec.capabilities(), Some("internetClient,registryRead"));
+        assert!(spec.disallow_win32k_system_calls());
+        assert_eq!(
+            spec.ui_restrictions(),
+            expected_mask(EffectiveUiRestrictions {
+                block_clipboard_read: true,
+                block_clipboard_write: true,
+                block_input_injection: true,
+                block_input_method_changes: true,
+                block_external_ui_objects: true,
+                block_global_ui_namespace: true,
+                block_desktop_switching: true,
+                block_logoff_or_shutdown: true,
+                block_system_parameter_changes: true,
+                block_display_settings_changes: true,
+            })
+        );
         assert_eq!(
             spec.fs_read_write().unwrap().iter().collect::<Vec<_>>(),
             vec!["C:\\temp"]
@@ -3992,6 +3889,18 @@ mod tests {
         assert_eq!(egress.default_action(), psec_layout::FilterAction::deny);
         assert!(egress.allow().is_none());
         assert!(egress.deny().is_none());
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_ignores_empty_capability() {
+        let mut request = ExecutionRequest::default();
+        request.policy.capabilities = vec![String::new()];
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+
+        assert_eq!(spec.capabilities(), Some("internetClient"));
     }
 
     #[test]
@@ -4172,6 +4081,7 @@ mod tests {
 
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert_eq!(spec.capabilities(), Some("internetClient"));
         let network = spec.network_policy().expect("network_policy should be set");
         let egress = network.egress().expect("egress should be set");
         assert_eq!(

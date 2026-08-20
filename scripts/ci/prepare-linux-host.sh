@@ -129,57 +129,56 @@ start_lxc_bridge() {
     ip addr show "$bridge" || true
 }
 
-# Report the host-side state that container networking depends on. Purely
-# diagnostic: never fails the job, so a networking problem still surfaces as
-# the backend test failure rather than as a prerequisite error.
-report_lxc_network_diagnostics() {
+# Outbound container traffic leaves the bridge subnet with a private source
+# address, so it needs a MASQUERADE rule to reach anything off-host. lxc-net
+# normally installs one, but it skips its firewall setup when it believes
+# another manager owns the ruleset, leaving a bridge that hands out leases the
+# container cannot use. The symptom is a name-resolution failure inside the
+# guest, which reads like a policy problem and is not one.
+ensure_bridge_nat() {
     local bridge="${LXC_BRIDGE:-lxcbr0}"
+    local subnet
 
-    echo "--- LXC network diagnostics (host) ---"
-
-    echo "net.ipv4.ip_forward: $(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo unknown)"
-
-    echo "Bridge $bridge:"
-    ip -4 addr show "$bridge" 2>/dev/null | sed 's/^/  /' || echo "  (absent)"
-
-    echo "dnsmasq processes:"
-    pgrep -af dnsmasq 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-
-    echo "NAT rules for the bridge subnet:"
-    sudo iptables -t nat -S POSTROUTING 2>/dev/null | grep -E '10\.0\.3|MASQUERADE' |
-        sed 's/^/  /' || echo "  (none found)"
-
-    echo "FORWARD policy and bridge rules:"
-    sudo iptables -S FORWARD 2>/dev/null | grep -E "policy|$bridge" | sed 's/^/  /' ||
-        echo "  (none found)"
-
-    echo "Host /etc/resolv.conf nameservers:"
-    grep '^nameserver' /etc/resolv.conf 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-
-    echo "lxc-net configuration:"
-    grep -E '^(USE_LXC_BRIDGE|LXC_ADDR|LXC_NETMASK|LXC_DHCP_RANGE|LXC_DHCP_CONFILE)' \
-        /etc/default/lxc-net 2>/dev/null | sed 's/^/  /' || echo "  (no /etc/default/lxc-net)"
-
-    # Prove the host itself can resolve the name the network test uses. If this
-    # fails, the container was never going to succeed.
-    if command -v getent >/dev/null 2>&1; then
-        echo "Host resolution of api.github.com:"
-        getent ahostsv4 api.github.com 2>/dev/null | head -n 2 | sed 's/^/  /' ||
-            echo "  FAILED - the host cannot resolve it either"
+    subnet="$(ip -4 -o addr show "$bridge" 2>/dev/null | awk '{print $4}' | head -n 1)"
+    if [[ -z "$subnet" ]]; then
+        echo "WARNING: $bridge has no IPv4 subnet; skipping NAT setup." >&2
+        return 0
     fi
 
-    # Ask the bridge's own resolver, which is what a container is handed via
-    # DHCP. This isolates "dnsmasq is broken" from "the host is fine".
-    local bridge_ip
-    bridge_ip="$(ip -4 -o addr show "$bridge" 2>/dev/null |
-        awk '{print $4}' | cut -d/ -f1 | head -n 1)"
-    if [[ -n "$bridge_ip" ]] && command -v nslookup >/dev/null 2>&1; then
-        echo "Resolution via bridge resolver ($bridge_ip):"
-        nslookup api.github.com "$bridge_ip" 2>&1 | tail -n 4 | sed 's/^/  /' ||
-            echo "  FAILED - dnsmasq on $bridge is not answering"
+    # Match on the source subnet rather than the rule text: lxc-net's own rule
+    # and ours are equivalent however they are spelled.
+    if sudo iptables -t nat -S POSTROUTING 2>/dev/null |
+        grep -q -- "-s ${subnet%%/*}"; then
+        echo "NAT for $subnet is already present."
+        return 0
     fi
 
-    echo "--- end diagnostics ---"
+    if sudo iptables -t nat -A POSTROUTING -s "$subnet" ! -d "$subnet" -j MASQUERADE; then
+        echo "Installed MASQUERADE for $subnet."
+    else
+        echo "WARNING: could not install MASQUERADE for $subnet; containers will not reach off-host destinations." >&2
+    fi
+}
+
+# Container network policy is programmed as iptables rules reached from
+# FORWARD, which only sees bridged traffic when br_netfilter is loaded and
+# bridge-nf-call-iptables is enabled. Neither is guaranteed on a fresh image,
+# and without them the backend refuses to report success for a policy it
+# cannot enforce.
+enable_bridge_netfilter() {
+    if ! sudo modprobe br_netfilter 2>/dev/null; then
+        echo "WARNING: could not load br_netfilter; bridged traffic may bypass iptables." >&2
+    fi
+
+    local knob
+    for knob in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
+        if [[ -e "/proc/sys/net/bridge/$knob" ]]; then
+            sudo sysctl -w "net.bridge.$knob=1" >/dev/null ||
+                echo "WARNING: could not enable net.bridge.$knob." >&2
+        else
+            echo "WARNING: /proc/sys/net/bridge/$knob is absent; container network policy cannot be enforced." >&2
+        fi
+    done
 }
 
 chmod +x "$binary_directory/lxc-exec"
@@ -203,7 +202,8 @@ case "$backend" in
             sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
         fi
         start_lxc_bridge
-        report_lxc_network_diagnostics
+        enable_bridge_netfilter
+        ensure_bridge_nat
         ;;
     microvm)
         for file in nanvixd.elf nanvix_rootfs.img python3.initrd bin/kernel.elf; do

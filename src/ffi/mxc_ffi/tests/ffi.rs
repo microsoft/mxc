@@ -26,15 +26,17 @@ fn extern_run_rejects_malformed_policy() {
 
     assert_eq!(status, mxc_ffi::MXC_STATUS_MALFORMED_REQUEST);
     assert_eq!(out.status, status);
-    assert!(!out.error_utf8.is_null());
-    // SAFETY: `error_utf8` is a valid C string filled by `mxc_run`.
-    let msg = unsafe { CStr::from_ptr(out.error_utf8) }.to_str().unwrap();
+    assert!(!out.error.message_utf8.is_null());
+    // SAFETY: the message is a valid C string filled by `mxc_run`.
+    let msg = unsafe { CStr::from_ptr(out.error.message_utf8) }
+        .to_str()
+        .unwrap();
     assert!(msg.contains("policy"), "unexpected message: {msg}");
     assert!(out.stdout_utf8.is_null());
 
     // SAFETY: `out` was filled by `mxc_run`; frees its owned strings.
     unsafe { mxc_run_result_free(&mut out) };
-    assert!(out.error_utf8.is_null());
+    assert!(out.error.message_utf8.is_null());
 }
 
 #[test]

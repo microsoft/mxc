@@ -7,5 +7,11 @@ mod annotations;
 mod common;
 #[path = "version_boundaries/compatibility.rs"]
 mod compatibility;
+#[path = "version_boundaries/containment.rs"]
+mod containment;
+#[path = "version_boundaries/experimental.rs"]
+mod experimental;
+#[path = "version_boundaries/process_container.rs"]
+mod process_container;
 #[path = "version_boundaries/seatbelt.rs"]
 mod seatbelt;
