@@ -5220,6 +5220,24 @@ mod tests {
     }
 
     #[test]
+    fn schema_v08_allows_legacy_network_with_empty_directional_sections() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "allow"},
+            "runtimeConfig": {},
+            "processContainer": {"network": {}}
+        }"#;
+        let request = match load_mxc(json).expect("empty sections do not select directional format")
+        {
+            MxcRequest::OneShot(request) => request,
+            _ => panic!("expected one-shot request"),
+        };
+        assert_eq!(request.policy.default_network_policy, NetworkPolicy::Allow);
+        assert!(request.policy.network_egress.is_none());
+    }
+
+    #[test]
     fn schema_v07_rejects_v08_network_fields() {
         let json = r#"{
             "version": "0.7.0-alpha",
@@ -5252,6 +5270,7 @@ mod tests {
                 "except": ["192.168.0.0/16"]
             }]}]}}"#,
             r#"{"egress": {"allow": [{"ports": [{"port": 445, "endPort": 443}]}]}}"#,
+            r#"{"egress": {"allow": [{"ports": [{"protocol": "icmp", "port": 8}]}]}}"#,
         ] {
             let json = format!(
                 r#"{{

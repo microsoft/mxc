@@ -2,8 +2,8 @@
 
 Schema 0.8.0 accepts the `network.egress` and `network.ingress` sections
 described in this document. Schema 0.7 and earlier retain their legacy network
-configuration shape; the two shapes are selected by `version` and cannot be
-mixed.
+configuration shape. During the additive transition, schema 0.8 requests may
+use either shape, but cannot mix them.
 
 ## Overview
 
