@@ -31,13 +31,17 @@ impl NetworkPolicySupport {
     /// Support for the runtime loopback proxy endpoint.
     pub const RUNTIME_PROXY: Self = Self(1 << 3);
 
+    /// Support for restricting a ProcessContainer proxy to a named peer.
+    pub const PROXY_PEER_IDENTITY: Self = Self(1 << 5);
+
     /// A backend that fully supports every optional network policy feature.
     pub const ALL: Self = Self(
         Self::EGRESS_DEFAULT.0
             | Self::EGRESS_RULES.0
             | Self::INGRESS_DEFAULT.0
             | Self::HOST_LOOPBACK.0
-            | Self::RUNTIME_PROXY.0,
+            | Self::RUNTIME_PROXY.0
+            | Self::PROXY_PEER_IDENTITY.0,
     );
 
     /// Returns whether all features in `required` are supported.
@@ -152,9 +156,16 @@ pub fn validate_network_policy_support(
         ));
     }
 
+    if !support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY)
+        && request.policy.allowed_proxy_peer.is_some()
+    {
+        return Err(ScriptResponse::error(
+            "processContainer.network.allowedProxyPeer is not supported by the selected backend",
+        ));
+    }
+
     if !support.contains(NetworkPolicySupport::RUNTIME_PROXY)
-        && request.policy.network_egress.is_some()
-        && request.policy.network_proxy.is_enabled()
+        && request.policy.runtime_network_proxy_specified
     {
         return Err(ScriptResponse::error(
             "runtimeConfig.networkProxy is not supported by the selected backend",
@@ -350,7 +361,7 @@ mod tests {
         assert!(error.error_message.contains("network.ingress.hostLoopback"));
 
         let mut request = ExecutionRequest::default();
-        request.policy.network_egress = Some(NetworkEgressPolicy::default());
+        request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
@@ -364,6 +375,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.error_message.contains("runtimeConfig.networkProxy"));
+
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+        let error = validate_network_policy_support(
+            &request,
+            NetworkPolicySupport::EGRESS_DEFAULT
+                | NetworkPolicySupport::EGRESS_RULES
+                | NetworkPolicySupport::INGRESS_DEFAULT
+                | NetworkPolicySupport::HOST_LOOPBACK
+                | NetworkPolicySupport::RUNTIME_PROXY,
+        )
+        .unwrap_err();
+        assert!(error.error_message.contains("allowedProxyPeer"));
     }
 
     #[test]
@@ -382,6 +406,8 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
         assert!(validate_network_policy_support(&request, NetworkPolicySupport::ALL,).is_ok());
     }
 
@@ -444,7 +470,8 @@ mod tests {
             | NetworkPolicySupport::EGRESS_RULES
             | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
-            | NetworkPolicySupport::RUNTIME_PROXY;
+            | NetworkPolicySupport::RUNTIME_PROXY
+            | NetworkPolicySupport::PROXY_PEER_IDENTITY;
 
         assert_eq!(support, NetworkPolicySupport::ALL);
     }

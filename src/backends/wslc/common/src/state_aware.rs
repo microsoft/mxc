@@ -531,6 +531,7 @@ mod tests {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
                 network_egress: Some(NetworkEgressPolicy::default()),
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()
