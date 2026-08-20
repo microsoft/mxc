@@ -111,7 +111,7 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Both halves require `enforcementMode` to be `firewall` or `both`.  Under the default `capabilities` mode, MXC installs no iptables rules at all, so `defaultPolicy`, `allowedHosts`, and `blockedHosts` are parsed but never take effect.
+Which configurations reach the firewall depends on the schema shape in use.  A legacy `network` block — `defaultPolicy` with `allowedHosts` and `blockedHosts` — installs rules only when `enforcementMode` is `firewall` or `both`; under the default `capabilities` mode those fields are parsed and never take effect.  A schema 0.8 `network.egress` block always installs rules.  That shape has no `enforcementMode` to set — the schema rejects `enforcementMode` written beside `egress` — and gating it on the mode would leave every 0.8 policy unenforced while reporting success.
 
 Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
@@ -152,7 +152,7 @@ wins" is not true without them:
   The guarantee holds for *addresses*, not for names. Use literal IPs or CIDRs
   when a destination must be denied deterministically.
 
-`allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Host-list rules match all ports and protocols; port- and protocol-specific egress rules are not supported.
+`allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Host-list rules match all ports and protocols. Port- and protocol-specific egress rules are a schema 0.8 feature, described below; the legacy host lists cannot express them.
 
 An entry that resolves to nothing — an unknown hostname, or a CIDR prefix out
 of range for its family — cannot be turned into a rule. What that costs
@@ -170,6 +170,45 @@ rule went unwritten still reaches that destination. Detecting it would require
 the address the failed entry was *meant* to resolve to, which is by definition
 unavailable, so no check over the policy text can be complete — and a partial
 check would imply a guarantee this code cannot make.
+
+### Schema 0.8 egress rules
+
+Schema 0.8 replaces the host lists with `network.egress`, which carries a
+per-direction default and two rule lists. Peers are CIDRs only — the shape has
+no hostname form, and the resolution failure modes tabulated above therefore
+have no 0.8 equivalent.
+
+| Field | Implementation |
+|-------|---------------|
+| `egress.default: "deny"` | Final DROP rule in the container chain |
+| `egress.default: "allow"` | Final ACCEPT rule in the container chain |
+| `egress.deny[]` | DROP rules, emitted *before* the allow rules |
+| `egress.allow[]` | ACCEPT rules |
+| `to[].cidr` | `-d <cidr>`, routed to the `iptables` or `ip6tables` chain by address family |
+| `to[].except[]` | Carve-outs within the peer's CIDR |
+| `ports[].protocol` | `-p tcp`, `-p udp`, or ICMP; `any` matches every protocol |
+| `ports[].port`, `ports[].endPort` | `--dport <port>` or `--dport <port>:<endPort>` |
+
+Omitting `to` selects every destination, and omitting `ports` selects every
+port and protocol. Deny-before-allow ordering, and the reasons a deny does not
+win unconditionally, are the same as for the host lists above: the base chain's
+`ESTABLISHED,RELATED` and DNS accepts are installed ahead of the generated
+rules and are exempt.
+
+Three points where one schema field does not map to one iptables rule:
+
+- **`protocol: "any"` with a port expands to two rules**, one TCP and one UDP.
+  `-p all --dport` is not a legal match, and ICMP is excluded from the
+  expansion because it carries no port.
+- **ICMP is named by address family.** A rule reaching the IPv4 chain matches
+  `icmp` and the same rule reaching the IPv6 chain matches `icmpv6`, because
+  `ip6tables` rejects `-p icmp` outright.
+- **`except` on a deny peer emits nothing.** On an allow peer it becomes a DROP
+  ahead of the ACCEPT it narrows. On a deny peer the peer's own DROP already
+  covers the excepted range, and a carve-out DROP inside it could never change
+  a verdict. The condition is reported as a warning rather than silently
+  dropped, because a policy author who wrote one was expressing an intent the
+  chain does not carry.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
@@ -224,12 +263,14 @@ Inbound filtering is a separate chain from the egress chains above, and it lives
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
-The rows below describe the `firewall` and `both` enforcement modes. `networkEnforcementMode` defaults to `capabilities`, and under that mode the ingress path installs nothing at all — the same gate that skips the egress chains skips this one, so inbound is unfiltered and `allowLocalNetwork: true` is accepted rather than refused. Inbound default-deny is a property of the firewall enforcement modes, not of every LXC run.
+The rows below describe every run that reaches the firewall: the `firewall` and `both` enforcement modes under a legacy block, and every schema 0.8 config. The ingress path takes the same gate as the egress chains. A legacy config left at the default `capabilities` mode installs nothing at all, which leaves inbound unfiltered and accepts `allowLocalNetwork: true` rather than refusing it. Inbound default-deny is a property of the runs that reach the firewall, not of every LXC run.
 
-| Policy (`networkEnforcementMode`: `firewall` or `both`) | Implementation |
+Schema 0.8 states the same posture with `ingress.default` and `ingress.hostLoopback`. LXC has one inbound chain rather than two independent controls, and the mapping is lossless for the values it implements: `deny` on either field is served by the default-deny chain, and `allow` on either is refused by the not-yet-implemented error below. The field named in that error is whichever one the operator actually wrote.
+
+| Policy (legacy `networkEnforcementMode`: `firewall` or `both`; or any schema 0.8 config) | Implementation |
 |--------|---------------|
-| `allowLocalNetwork: false` (default) | Container `INPUT` chain drops new inbound connections |
-| `allowLocalNetwork: true` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
+| `allowLocalNetwork: false` (default), or `ingress.default`/`ingress.hostLoopback` of `deny` | Container `INPUT` chain drops new inbound connections |
+| `allowLocalNetwork: true`, or `ingress.default`/`ingress.hostLoopback` of `allow` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 

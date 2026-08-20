@@ -95,23 +95,23 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 15 | **(N3) IP/CIDR only, no DNS names** | 🟡 Actionable | Accepts hostnames, resolves to IPv4 only. IPv6 silently dropped — dual-stack bypass. No CIDR range support. New GA schema (`egress.allow[]/deny[]` with CIDR+port+protocol) replaces `allowedHosts`/`blockedHosts`. | L |
+| 15 | **(N3) IP/CIDR only, no DNS names** | ✅ Addressed | Schema 0.8 `network.egress` is lowered into the chain with CIDR peers, `except` carve-outs, ports, and protocols. IPv4 and IPv6 peers are routed to the `iptables` and `ip6tables` chains by address family, which closes the dual-stack bypass for this shape. The legacy `allowedHosts`/`blockedHosts` path is unchanged and still resolves names. Covered end-to-end by `tests/scripts/run_lxc_network_ga_egress_test.sh`. | L |
 
 > **Example (N3).** Today: `allowedHosts: ["api.github.com"]` resolves once to `140.82.112.4`. On a dual-stack host, IPv6 `2606:50c0:8000::64` passes unfiltered. GA: `egress.allow: [{ to: [{ cidr: "140.82.112.0/20" }], ports: [{ protocol: "tcp", port: 443 }] }]` — deterministic, auditable, covers the subnet.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 16 | **(N4) Deny-wins precedence** | 🟡 Actionable | Already in place: iptables chain with allow/deny rules. New work: ensure deny rules inserted before allow rules for explicit block-precedence. | S |
+| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The exemptions that keep this from being unconditional — the base chain's `ESTABLISHED,RELATED` and DNS accepts, installed ahead of the generated rules — are stated in `docs/lxc-support/lxc-backend.md`. | S |
 | 17 | **(N5) Proxy — env vars + enforcement** | 🟡 Actionable | Schema field exists, backend ignores it. Fix: inject `HTTP_PROXY`/`HTTPS_PROXY`, clear all inherited proxy vars, and restrict egress to proxy port only via iptables. | M |
 
 > **Example (N5).** Consumer starts proxy on `127.0.0.1:8080`. MXC sets `HTTP_PROXY=127.0.0.1:8080` inside the container and applies `iptables -A OUTPUT -d 127.0.0.1 --dport 8080 -j ACCEPT` + default DROP. An app ignoring the env var tries `connect(140.82.112.4:443)` → dropped.
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 18 | **(N7) Schema migration** | 🟡 Actionable | Adopt shared 0.8 egress/ingress and runtime proxy types. | L |
+| 18 | **(N7) Schema migration** | 🟡 Actionable | Egress and ingress adopt the shared 0.8 types, and LXC is the first backend to declare network policy support beyond `LEGACY` — the two egress bits plus the two ingress bits. Runtime proxy types are not yet adopted, and `RUNTIME_PROXY` stays unclaimed, so a config carrying `runtimeConfig.networkProxy` is still rejected. | L |
 | 19 | **IPv6 + CIDR parsing** | 🟡 Actionable | `NetworkIptablesManager` resolves hostnames to IPv4 only. Add proper CIDR parsing + `ip6tables` for IPv6. | M |
-| 20 | **Port filtering** | 🟡 Actionable | Not implemented. iptables `--dport` natively supported. | S |
-| 21 | **Protocol filtering** | 🟡 Actionable | Not implemented. iptables `-p tcp/udp/icmp` natively supported. | S |
+| 20 | **Port filtering** | ✅ Addressed | `ports[].port` and `ports[].endPort` become `--dport <port>` and `--dport <start>:<end>`. Proven by the wrong-port case in `run_lxc_network_ga_egress_test.sh`, which allows tcp/444 to the destination CIDR and confirms tcp/443 to that same CIDR is still blocked. | S |
+| 21 | **Protocol filtering** | ✅ Addressed | `tcp`, `udp`, and `icmp` map to `-p`, and `any` matches every protocol. `any` combined with a port expands to one TCP rule and one UDP rule, because `-p all --dport` is not a legal match. ICMP is named by address family: `icmp` on the IPv4 chain and `icmpv6` on the IPv6 chain, which `ip6tables` requires. | S |
 | 22 | **Proxy env-var hygiene** | 🟡 Actionable | Clear ALL proxy vars (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY` + lowercase), then set only configured proxy. | S |
 | 23 | **Hostname re-resolution** | 🟡 Actionable | DNS resolved once at policy install time; subsequent changes bypass the firewall. Periodic refresh needed. `network_iptables.rs:84-96`. *(see [Ext-Dep E8](#external-dependencies))* | M |
 | 24 | **nftables backend** | ⏳ Deferred | GA spec lists `iptables/nftables` as valid enforcement. Today MXC uses `iptables` commands, which work on all target distros via the `iptables-nft` compatibility shim. Native `nft` command support becomes necessary when distros drop the iptables shim (Fedora 41+, RHEL 10). Not a GA blocker. | M |
