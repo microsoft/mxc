@@ -6,8 +6,10 @@ and under review as GitHub stack #948: Phase 5A merged in PR #909, Phase 5B in
 PR #910, Phase 5C in PR #929, Phase 5D in PR #941, and the Phase 5A review
 follow-up in PR #949. Phase 6 is implemented in 11 commits on the local branch
 `user/gudge/version_specific_config_parsers_phase6`, branched from #949; it has
-not been pushed and has no pull request, so it is unreviewed. Phases 7-11 remain
-to be implemented.
+not been pushed and has no pull request, so it is unreviewed. Phase 7.1 is
+complete and pushed to `user/gudge/version_specific_config_parsers_phase7`, also
+unreviewed; Phases 7.2-7.5 and Phases 8-11 remain. Phase 7 is paused pending
+parser-parity remediation on the Phase 5 stack.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -2228,6 +2230,37 @@ Nothing else moves: no call site of the rolling parser changes, `wxc_common`
 grows no public API, and no runtime behavior differs. The seam in particular
 must be real production code rather than a test-only copy — a copy would
 validate a fork of the logic rather than the logic the rolling parser runs.
+
+### Phase 7 status
+
+Phase 7.1 is complete and pushed to
+`user/gudge/version_specific_config_parsers_phase7`, branched from PR #949 and
+rebased onto it after the Phase 5 stack was rewritten. No pull request has been
+opened, so none of it is reviewed.
+
+| Commit | Step |
+| --- | --- |
+| `ede25060` | 7.1.1.0 characterization tests |
+| `46d76dd2` | 7.1.1.1 pre-parse probes |
+| `f2a40309` | 7.1.1.2 splice |
+| `67049c81` | 7.1.1.3a override pipeline |
+| `abfa504c` | 7.1.1.3b loader wiring and deletion |
+| `98463cc1` | 7.1.2 build-time command |
+
+`allow_missing_command` and `SandboxRequest::set_script` no longer exist. Both
+consumers resolved on the same principle: the command is present before the
+request is parsed or built, never patched into it afterwards. The 7.1.1.0
+characterization tests passed unchanged across the refactor, which is the
+evidence that the CLI behavior was preserved.
+
+Two lessons worth carrying into the remaining steps. First, `cargo doc` belongs
+in this phase's quality gate: `-D warnings` lives in `RUSTFLAGS` and rustdoc
+reads `RUSTDOCFLAGS`, so deleting a documented item breaks intra-doc links that
+no other gate reports. Second, the repository has 11 pre-existing broken
+intra-doc links, so compare against a baseline rather than requiring zero.
+
+Phases 7.2 through 7.5 remain. Work is paused pending parser-parity remediation
+on the Phase 5 stack.
 
 ### Phase 7 step breakdown
 
