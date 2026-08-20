@@ -84,6 +84,7 @@ use std::path::{Path, PathBuf};
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use hyperlight_unikraft::pyhl;
 use hyperlight_unikraft::{AllowList, BlockList, Preopen};
@@ -503,7 +504,9 @@ impl HyperlightScriptRunner {
 
 impl ScriptRunner for HyperlightScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        Self::validate_policies(request).map_err(|e| e.to_response())
+        Self::validate_policies(request).map_err(|e| e.to_response())?;
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {

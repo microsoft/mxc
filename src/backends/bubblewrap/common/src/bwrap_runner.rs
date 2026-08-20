@@ -42,7 +42,7 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::validate_common;
+use wxc_common::validator::{validate_common, validate_network_policy_support};
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
@@ -62,6 +62,7 @@ impl BubblewrapScriptRunner {
 
 impl SandboxBackend for BubblewrapScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
         // hosts without bwrap installed.

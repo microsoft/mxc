@@ -28,6 +28,7 @@ use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcCo
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::container_steps::sdk_error;
 use crate::policy_mapping;
@@ -656,6 +657,7 @@ impl ScriptRunner for WSLContainerRunner {
                  ports with experimental.wslc portMappings instead.",
             ));
         }
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         Ok(())
     }
 

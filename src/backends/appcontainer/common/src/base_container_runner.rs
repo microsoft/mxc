@@ -86,6 +86,7 @@ use wxc_common::sandbox_process::{
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
 use wxc_common::string_util;
+use wxc_common::validator::validate_network_policy_support;
 
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
@@ -2321,6 +2322,13 @@ struct BaseChild {
 
 impl SandboxBackend for BaseContainerRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+        if request.policy.allowed_proxy_peer.is_some() {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer is not implemented",
+            ));
+        }
+
         let capture_denials = request.policy.capture_denials.is_some();
         if !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty() {
             return Err(ScriptResponse::error(

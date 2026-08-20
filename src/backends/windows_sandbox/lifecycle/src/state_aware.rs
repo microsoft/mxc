@@ -21,6 +21,7 @@ use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::Foundation::HANDLE;
 
@@ -997,6 +998,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         policy::plan_policy(request)
             .map(|_| ())
             .map_err(map_policy_error)

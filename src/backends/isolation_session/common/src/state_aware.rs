@@ -17,6 +17,7 @@ use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::Foundation::HANDLE;
 
@@ -181,6 +182,7 @@ impl StatefulSandboxBackend for IsolationSessionRunner {
         request: &ExecutionRequest,
         config: Option<&IsolationSessionProvisionConfig>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         // Structural only — MXC carries `appId` for a future OS consumer and
         // does not judge what a valid application identity looks like.
         if let Some(app_id) = config.and_then(|c| c.app_id.as_deref()) {
