@@ -91,6 +91,8 @@ import type {
   Containment as WireContainment,
   NetworkPolicy as WireNetworkPolicy,
   NetworkEnforcement as WireNetworkEnforcement,
+  NetworkAction as WireNetworkAction,
+  NetworkProtocol as WireNetworkProtocol,
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
@@ -125,6 +127,18 @@ type _NetDefaultPolicy = AssertTrue<
 >;
 type _NetEnforcement = AssertTrue<
   Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
+>;
+type _NetworkEgressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkEgressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressHostLoopback = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['hostLoopback']>, WireNetworkAction>
+>;
+type _NetworkPortProtocol = AssertTrue<
+  Equivalent<NonNullable<NetworkPortConfig['protocol']>, WireNetworkProtocol>
 >;
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
@@ -253,7 +267,9 @@ type _RootWireKeys = AssertTrue<
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
   _Clipboard, _Containment,
-  _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
+  _NetDefaultPolicy, _NetEnforcement,
+  _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
+  _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
   _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
   _NetworkRuleVals, _RuntimeConfigVals,

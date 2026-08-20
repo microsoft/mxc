@@ -35,10 +35,18 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
         .is_some_and(|peer| !peer.trim().is_empty())
 }
 
-fn supports_directional_network(version: &str) -> bool {
+pub(crate) fn supports_directional_network(version: &str) -> bool {
     semver::Version::parse(version)
         .map(|version| version.major > 0 || version.minor >= 8)
         .unwrap_or(false)
+}
+
+pub(crate) fn directional_network_version_error() -> WxcError {
+    WxcError::ConfigParse(
+        "network.egress, network.ingress, runtimeConfig, and processContainer.network \
+         require schema version 0.8 or later"
+            .to_string(),
+    )
 }
 
 #[derive(Debug)]
@@ -176,11 +184,7 @@ fn select_network_format(
     }
 
     if (has_directional_policy || has_directional_section) && !supports_directional {
-        return Err(WxcError::ConfigParse(
-            "network.egress, network.ingress, runtimeConfig, and processContainer.network \
-             require schema version 0.8 or later"
-                .to_string(),
-        ));
+        return Err(directional_network_version_error());
     }
 
     // An empty or omitted network block has no fields that identify its format.
