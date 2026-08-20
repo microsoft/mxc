@@ -5272,6 +5272,21 @@ mod tests {
     }
 
     #[test]
+    fn schema_v08_runtime_proxy_errors_name_runtime_field() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "runtimeConfig": {"networkProxy": "http://localhost"}
+        }"#;
+        let error = match load_mxc(json) {
+            Err(ParseError::OneShot(error)) => error.to_string(),
+            other => panic!("expected one-shot rejection, got: {other:?}"),
+        };
+        assert!(error.contains("runtimeConfig.networkProxy must include a port"));
+        assert!(!error.contains("network.proxy"));
+    }
+
+    #[test]
     fn schema_v08_rejects_invalid_cidr_and_port_range() {
         for network in [
             r#"{"egress": {"allow": [{"to": [{"cidr": "example.com"}]}]}}"#,
