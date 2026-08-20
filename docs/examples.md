@@ -92,14 +92,25 @@ and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
 spawn option, which must be set to `true` for a policy that uses
 `builtinTestServer`.
 
-#### Schema 0.8 shape (Seatbelt only): `runtimeConfig.networkProxy`
+#### Schema 0.8 shape: `egress` / `ingress` / `runtimeConfig.networkProxy`
 
-Starting at `"version": "0.8.0-alpha"`, the Seatbelt (macOS) backend also accepts a
-replacement `egress`/`ingress`/`runtimeConfig.networkProxy` shape in place of the
-legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy` fields above — a
-config must use one shape or the other, never both. `runtimeConfig.networkProxy`
-covers only the loopback-proxy case (`network.proxy.localhost` / loopback
-`network.proxy.url`); there is no schema-0.8 equivalent for a remote proxy URL or
+Starting at `"version": "0.8.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
+shape replaces the legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy`
+fields above — a config must use one shape or the other, never both. This is
+the official, cross-backend schema (see
+[`docs/sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
+for the full design and per-backend enforcement matrix), not a
+backend-specific format: it's parsed the same way regardless of
+`containment`. Each backend independently declares which parts of it — if
+any — it actually enforces; a backend that hasn't declared support for a
+given field rejects a config that sets it. **Seatbelt (macOS) is currently
+the only backend with that support implemented** (`EGRESS_DEFAULT`,
+`INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` — see
+[`docs/macos-support/seatbelt-backend.md`](macos-support/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy));
+other backends are expected to add their own declarations as separate
+follow-up work. On Seatbelt, `runtimeConfig.networkProxy` covers only the
+loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
+there is no schema-0.8 equivalent for a remote proxy URL or
 `builtinTestServer`. See
 [`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
 for the full field mapping and [`tests/examples/30_mac_network_schema_v2.json`](../tests/examples/30_mac_network_schema_v2.json)

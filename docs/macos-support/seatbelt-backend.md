@@ -319,8 +319,18 @@ Starting at config `"version": "0.8.0-alpha"` or newer, Seatbelt also accepts
 the schema-0.8 network shape described in
 [`docs/sandbox-policy/0.8.0/networking/`](../sandbox-policy/0.8.0/networking/networking.md).
 A config must use either this shape or the legacy fields above, never both —
-mixing the two is rejected during validation. Other containment backends do
-not accept this shape yet.
+mixing the two is rejected during validation. This shape is **not**
+Seatbelt-specific: it's the official, cross-backend schema, and
+`network_parser.rs` parses it identically regardless of `containment`. What's
+backend-specific is *enforcement* — each backend declares which parts of the
+shape it actually supports via `SandboxBackend::network_policy_support()`
+(`wxc_common::validator::NetworkPolicySupport`), and a backend that hasn't
+declared a given feature rejects a config that sets it, before ever reaching
+backend-specific code. Seatbelt is currently the only backend that declares
+support (`EGRESS_DEFAULT | INGRESS_DEFAULT | HOST_LOOPBACK | RUNTIME_PROXY`,
+in `seatbelt_runner.rs`); other backends still declare `LEGACY` only, so the
+same config would be rejected under a different `containment` until each adds
+its own declaration as separate follow-up work.
 
 | Field | Behavior |
 |---|---|
