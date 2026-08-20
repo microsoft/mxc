@@ -466,7 +466,7 @@ jobs:
       authcertname: ${{ parameters.ESRPInfo.authCertName }}
       signcertname: ${{ parameters.ESRPInfo.signCertName }}
       clientid: ${{ parameters.ESRPInfo.clientId }}
-      intent: FileLinkGeneration
+      intent: filedownloadlinkgeneration
       contenttype: binaries
       contentsource: Folder
       folderlocation: $(releaseContentDirectory)
