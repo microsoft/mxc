@@ -1042,7 +1042,7 @@ impl AppContainerScriptRunner {
         let env_block: Vec<u16> = {
             let mut entries = create_default_env_entries()?;
             if !request.env.is_empty() {
-                let explicit = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+                let explicit = build_explicit_entries(&request.env, None);
                 for (key, value) in explicit {
                     if let Some(existing) = entries
                         .iter_mut()
@@ -1053,7 +1053,8 @@ impl AppContainerScriptRunner {
                         entries.push((key, value));
                     }
                 }
-            } else if let Some(addr) = self.proxy_address.as_ref() {
+            }
+            if let Some(addr) = self.proxy_address.as_ref() {
                 inject_proxy_vars(&mut entries, addr);
             }
             encode_env_block(&entries)
