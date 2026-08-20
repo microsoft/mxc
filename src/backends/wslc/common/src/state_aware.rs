@@ -240,6 +240,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 
@@ -250,6 +251,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_exec_policy(request)
     }
 
@@ -260,6 +262,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 
@@ -270,6 +273,7 @@ impl StatefulSandboxBackend for WslcStateAwareRunner {
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
         validate_sandbox_id(sandbox_id)?;
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         validate_post_provision_policy(request)
     }
 }
@@ -429,7 +433,7 @@ fn split_env(env: &[String]) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::ContainerPolicy;
+    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy};
 
     /// A `Library` exec is refused before the backend touches the daemon.
     ///
@@ -519,6 +523,24 @@ mod tests {
     #[test]
     fn validate_sandbox_id_rejects_uppercase_hex() {
         assert!(validate_sandbox_id("wslc:0123456789ABCDEF0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn post_provision_hooks_reject_directional_network_fields() {
+        let runner = WslcStateAwareRunner::new();
+        let request = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let id = "wslc:0123456789abcdef0123456789abcdef";
+
+        assert!(runner.validate_start(id, &request, None).is_err());
+        assert!(runner.validate_exec(id, &request, None).is_err());
+        assert!(runner.validate_stop(id, &request, None).is_err());
+        assert!(runner.validate_deprovision(id, &request, None).is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
+use crate::models::{ExecutionRequest, ScriptResponse};
 use crate::mxc_error::MxcError;
 
 /// Declares which optional network policy features a backend enforces.
@@ -59,44 +59,11 @@ pub fn validate_network_policy_support(
     request: &ExecutionRequest,
     support: NetworkPolicySupport,
 ) -> Result<(), ScriptResponse> {
-    if support == NetworkPolicySupport::LEGACY {
-        if request
-            .policy
-            .network_egress
-            .as_ref()
-            .is_some_and(|egress| egress.default == NetworkAction::Deny)
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-        {
-            return Err(ScriptResponse::error(
-                "network.egress.default='deny' conflicts with the legacy outbound policy",
-            ));
-        }
-
-        if request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| {
-                ingress.default == NetworkAction::Deny
-                    || ingress.host_loopback == NetworkAction::Deny
-            })
-            && request.policy.allow_local_network
-        {
-            return Err(ScriptResponse::error(
-                "deny-by-default network.ingress conflicts with the legacy inbound policy",
-            ));
-        }
-    }
-
     if !support.contains(NetworkPolicySupport::EGRESS_DEFAULT)
-        && request
-            .policy
-            .network_egress
-            .as_ref()
-            .is_some_and(|egress| egress.default == NetworkAction::Allow)
+        && request.policy.network_egress.is_some()
     {
         return Err(ScriptResponse::error(
-            "network.egress.default='allow' is not supported by the selected backend",
+            "network.egress.default is not supported by the selected backend",
         ));
     }
 
@@ -113,26 +80,18 @@ pub fn validate_network_policy_support(
     }
 
     if !support.contains(NetworkPolicySupport::INGRESS_DEFAULT)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == NetworkAction::Allow)
+        && request.policy.network_ingress.is_some()
     {
         return Err(ScriptResponse::error(
-            "network.ingress.default='allow' is not supported by the selected backend",
+            "network.ingress.default is not supported by the selected backend",
         ));
     }
 
     if !support.contains(NetworkPolicySupport::HOST_LOOPBACK)
-        && request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
+        && request.policy.network_ingress.is_some()
     {
         return Err(ScriptResponse::error(
-            "network.ingress.hostLoopback='allow' is not supported by the selected backend",
+            "network.ingress.hostLoopback is not supported by the selected backend",
         ));
     }
 
@@ -195,8 +154,8 @@ pub fn validate_exec_common(request: &ExecutionRequest) -> Result<(), MxcError> 
 mod tests {
     use super::*;
     use crate::models::{
-        ExecutionRequest, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule, ProxyAddress,
-        ProxyConfig,
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+        ProxyAddress, ProxyConfig,
     };
     use crate::mxc_error::MxcErrorCode;
 
@@ -343,20 +302,18 @@ mod tests {
     }
 
     #[test]
-    fn legacy_network_support_rejects_conflicting_dual_model_values() {
+    fn partial_network_support_rejects_undeclared_directional_defaults() {
         let mut request = ExecutionRequest::default();
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
-        request.policy.default_network_policy = NetworkPolicy::Allow;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
-        assert!(error.error_message.contains("legacy outbound policy"));
+        let error = validate_network_policy_support(&request, NetworkPolicySupport::RUNTIME_PROXY)
+            .unwrap_err();
+        assert!(error.error_message.contains("network.egress.default"));
 
-        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.network_egress = None;
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
-        request.policy.allow_local_network = true;
-        let error =
-            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
-        assert!(error.error_message.contains("legacy inbound policy"));
+        let error = validate_network_policy_support(&request, NetworkPolicySupport::EGRESS_DEFAULT)
+            .unwrap_err();
+        assert!(error.error_message.contains("network.ingress.default"));
     }
 
     #[test]
@@ -383,6 +340,6 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(error.code, MxcErrorCode::PolicyValidation);
-        assert!(error.message.contains("network.egress.default='allow'"));
+        assert!(error.message.contains("network.egress.default"));
     }
 }
