@@ -243,7 +243,7 @@ try {
         -PrimaryWinmdHash $primaryWinmdHash `
         -PreviewWinmdHash $previewWinmdHash
 
-    Test-Case 'Happy path: multi-arch package carries both WinMDs and both runtimes' {
+    Test-Case 'Happy path: package carries OS metadata and MXC activation assets' {
         $outDir = Join-Path $testRoot 'out-happy'
         & $packScript `
             -X64BinDir $x64BinDir `
@@ -263,10 +263,9 @@ try {
                 'metadata/windows.ai.isolationsession.preview.winmd',
                 'metadata/GENERATION_INFO.toml',
                 'metadata/RELEASE_INFO.json',
-                'runtimes/win-x64/native/IsoSessionApp.dll',
-                'runtimes/win-x64/native/IsoSession.manifest',
-                'runtimes/win-arm64/native/IsoSessionApp.dll',
-                'runtimes/win-arm64/native/IsoSession.manifest')) {
+                'runtime/IsoSessionApp.dll',
+                'runtime/IsoSessionApp.comClass.manifest',
+                'runtime/IsoSessionApp.runtimeversion')) {
             Assert-True ($entries -contains $entry) "entry '$entry' is present"
         }
 
@@ -274,10 +273,26 @@ try {
         Assert-True ($nuspecText -match '<id>Microsoft\.Windows\.AI\.IsolationSession\.SDK</id>') 'package id is canonical'
         Assert-True ($nuspecText -match [regex]::Escape("<version>$($releaseInfo.nugetVersion)</version>")) 'package version includes the patch'
 
-        foreach ($rid in @('win-x64', 'win-arm64')) {
-            $manifestText = Get-ZipEntryTextFromPath -NupkgPath $expectedNupkg -EntryName "runtimes/$rid/native/IsoSession.manifest"
-            Assert-True ($manifestText -match [regex]::Escape("name=`"$monthId`"")) "$rid manifest stamped with MonthId"
-        }
+        $runtimeVersion = Get-ZipEntryTextFromPath `
+            -NupkgPath $expectedNupkg `
+            -EntryName 'runtime/IsoSessionApp.runtimeversion'
+        Assert-True ($runtimeVersion -eq $releaseInfo.monthUnderscore) `
+            'runtime sidecar uses the MSI registry token'
+
+        $comClassManifest = Get-ZipEntryTextFromPath `
+            -NupkgPath $expectedNupkg `
+            -EntryName 'runtime/IsoSessionApp.comClass.manifest'
+        Assert-True ($comClassManifest -match [regex]::Escape(
+                '{6EF3155B-D1A2-4A34-BCAA-089F8A6D9916}')) `
+            'COM activation manifest carries the IsoSessionOps activator CLSID'
+
+        $packagedAppBytes = Get-ZipEntryBytesFromPath `
+            -NupkgPath $expectedNupkg `
+            -EntryName 'runtime/IsoSessionApp.dll'
+        Assert-True (
+            [Convert]::ToBase64String($packagedAppBytes) -eq
+            [Convert]::ToBase64String($x64RuntimeBytes)) `
+            'runtime shim comes from the x64 OS build payload'
 
         $releaseMetadata = Get-ZipEntryTextFromPath -NupkgPath $expectedNupkg -EntryName 'metadata/RELEASE_INFO.json' |
             ConvertFrom-Json

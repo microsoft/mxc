@@ -221,14 +221,30 @@ try {
         throw 'NuGet package version does not match the canonical NuGet version.'
     }
 
-    foreach ($rid in @('win-x64', 'win-arm64')) {
-        $runtimeManifest = Get-ZipEntryText -Archive $packageZip -EntryName "runtimes/$rid/native/IsoSession.manifest"
-        if (-not $runtimeManifest) {
-            throw "NuGet package is missing runtimes/$rid/native/IsoSession.manifest."
+    $runtimeVersion = Get-ZipEntryText -Archive $packageZip `
+        -EntryName 'runtime/IsoSessionApp.runtimeversion'
+    if ($runtimeVersion -ne $releaseInfo.monthUnderscore) {
+        throw 'NuGet runtime-version sidecar does not match the MSI registry token.'
+    }
+
+    $comClassManifest = Get-ZipEntryText -Archive $packageZip `
+        -EntryName 'runtime/IsoSessionApp.comClass.manifest'
+    foreach ($clsid in @(
+            '{6EF3155B-D1A2-4A34-BCAA-089F8A6D9916}',
+            '{36B03FF1-21AA-4F3C-819D-2430EC830DD0}')) {
+        if ($comClassManifest -notmatch [regex]::Escape($clsid)) {
+            throw "NuGet COM activation manifest is missing CLSID '$clsid'."
         }
-        if ($runtimeManifest -notmatch [regex]::Escape("name=`"$MonthId`"")) {
-            throw "Runtime manifest for $rid does not carry MonthId '$MonthId'."
-        }
+    }
+
+    $packagedAppBytes = Get-ZipEntryBytes -Archive $packageZip `
+        -EntryName 'runtime/IsoSessionApp.dll'
+    if (-not $packagedAppBytes) {
+        throw 'NuGet package is missing runtime/IsoSessionApp.dll.'
+    }
+    $packagedAppHash = Get-Sha256Hex -Bytes $packagedAppBytes
+    if ($packagedAppHash -ne $releaseMetadata.source.payloads.x64.isoSessionAppSha256) {
+        throw 'NuGet activation shim does not match the signed x64 OS payload.'
     }
 
     if ($generationInfo -notmatch [regex]::Escape("instance = `"$MonthId`"")) {

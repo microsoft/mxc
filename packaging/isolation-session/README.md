@@ -5,16 +5,20 @@ This directory contains the repository-owned packaging inputs used by
 
 The payload binaries are not built in this repository. The pipeline resolves a
 Windows OS `BIN` artifact drop from a BNS `BuildGuid`, downloads the seven
-required IsolationSession binaries, generates the month-specific
+required IsolationSession binaries and two WinMDs, generates the month-specific
 `IsoSession.manifest`, and then:
 
 1. builds and signs x64 and ARM64 MSI/EXE outputs in parallel, including the
    detached Burn engine and the complete bootstrapper EXE;
-2. records per-architecture provenance and a shared release contract; and
-3. publishes separate x64 and ARM64 installer artifacts.
+2. records per-architecture provenance and a shared release contract;
+3. aggregates the two WinMDs and the signed x64 `IsoSessionApp.dll` activation
+   shim into `Microsoft.Windows.AI.IsolationSession.SDK`; and
+4. publishes the per-architecture installer artifacts plus a combined release
+   artifact containing the NuGet, installers, provenance, and release metadata.
 
-The SDK NuGet aggregation and publication path is deferred because the BNS
-`BIN` drop does not contain the two IsolationSession WinMDs.
+The NuGet also carries the repository-owned reg-free COM activation manifest
+and a pipeline-stamped `IsoSessionApp.runtimeversion` sidecar. The sidecar uses
+the same underscore runtime token as the MSI registry key.
 
 ## Upstream source
 
@@ -45,7 +49,8 @@ reference with a durable upstream commit identifier before a public release.
 
 ## Release status
 
-The current pipeline produces **test-signed installer artifacts only** and
+The current pipeline produces **test-signed installer and SDK artifacts**. It
+can optionally publish the SDK to the restricted Azure Artifacts feed, but
 does not publish to NuGet.org or GitHub Releases. Public release requires:
 
 - production signing of the payloads and installers;

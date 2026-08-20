@@ -33,6 +33,13 @@ if ($verb -eq 'list') {
 if ($verb -eq 'get') {
     $destinationIndex = [array]::IndexOf($args, '-d')
     $destination = $args[$destinationIndex + 1]
+    $filterIndex = [array]::IndexOf($args, '-r')
+    $filters = if ($filterIndex -ge 0) { $args[$filterIndex + 1] } else { '' }
+    if ($filters -notmatch '/windows\.ai\.isolationsession\.winmd' -or
+        $filters -notmatch '/windows\.ai\.isolationsession\.preview\.winmd') {
+        Write-Output 'WinMD filters were not requested.'
+        exit 3
+    }
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
     foreach ($name in @(
         'IsoSessionServer.dll',
@@ -41,7 +48,9 @@ if ($verb -eq 'get') {
         'IsoSessionApp.dll',
         'IsoSessionProxyStub.dll',
         'IsolationProxy.exe',
-        'IsoSessionCli.exe'
+        'IsoSessionCli.exe',
+        'windows.ai.isolationsession.winmd',
+        'windows.ai.isolationsession.preview.winmd'
     )) {
         $content = if ($name -eq 'IsoSessionClient.dll') {
             "SOFTWARE\Microsoft\IsoSession ClientClsid IsolationSession_"
@@ -70,11 +79,11 @@ exit 9
     if ($manifest.dropName -ne 'wdg/test/arm64fre/BIN/newest') {
         throw "Resolver did not select the newest finalized drop: $($manifest.dropName)"
     }
-    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 7) {
+    if ($manifest.flavor -ne 'arm64fre' -or $manifest.files.Count -ne 9) {
         throw 'Download manifest did not contain the expected ARM64 payload.'
     }
-    if (@($manifest.files | Where-Object { $_.kind -ne 'binary' }).Count -ne 0) {
-        throw 'Download manifest unexpectedly contained a non-binary payload.'
+    if (@($manifest.files | Where-Object { $_.kind -eq 'winmd' }).Count -ne 2) {
+        throw 'Download manifest did not contain both WinMD payloads.'
     }
 
     Write-Host 'IsoSession filtered download tests passed.'

@@ -64,13 +64,13 @@ function New-ReleaseMetadata {
                     arch = 'x64'
                     dropName = 'wdg/test/amd64fre/BIN/test'
                     flavor = 'amd64fre'
-                    isoSessionAppSha256 = 'x64-runtime-sha'
+                    isoSessionAppSha256 = $InstallerHashes.x64App
                 }
                 arm64 = [ordered]@{
                     arch = 'arm64'
                     dropName = 'wdg/test/arm64fre/BIN/test'
                     flavor = 'arm64fre'
-                    isoSessionAppSha256 = 'arm64-runtime-sha'
+                    isoSessionAppSha256 = $InstallerHashes.arm64App
                 }
             }
         }
@@ -149,6 +149,8 @@ try {
     $hashes = @{
         primaryWinmd = (Get-FileHash -LiteralPath (Join-Path $metadataDir 'windows.ai.isolationsession.winmd') -Algorithm SHA256).Hash.ToLowerInvariant()
         previewWinmd = (Get-FileHash -LiteralPath (Join-Path $metadataDir 'windows.ai.isolationsession.preview.winmd') -Algorithm SHA256).Hash.ToLowerInvariant()
+        x64App = (Get-FileHash -LiteralPath (Join-Path $x64BinDir 'IsoSessionApp.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+        arm64App = (Get-FileHash -LiteralPath (Join-Path $arm64BinDir 'IsoSessionApp.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
         x64Msi = (Get-FileHash -LiteralPath (Join-Path $artifactDir "IsoSession_$($releaseInfo.monthUnderscore)_x64.msi") -Algorithm SHA256).Hash.ToLowerInvariant()
         arm64Msi = (Get-FileHash -LiteralPath (Join-Path $artifactDir "IsoSession_$($releaseInfo.monthUnderscore)_arm64.msi") -Algorithm SHA256).Hash.ToLowerInvariant()
         x64Bundle = (Get-FileHash -LiteralPath (Join-Path $artifactDir "IsoSessionSetup_$($releaseInfo.monthUnderscore)_x64.exe") -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -80,6 +80,30 @@ try {
         (Join-Path $dropRoot 'IsoSessionCli.exe'),
         'test-IsoSessionCli.exe',
         [System.Text.Encoding]::Unicode)
+
+    Remove-Item -LiteralPath (
+        Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd') -Force
+    $failed = $false
+    try {
+        & $script `
+            -DropRoot $dropRoot `
+            -OutDir (Join-Path $testRoot 'missing-winmd') `
+            -ArchTag x64 `
+            -BuildGuid '72de6fa1-35ec-8b71-6bd4-6e74b1af57db' `
+            -DropName 'wdg/test/amd64fre/BIN/test' `
+            -Flavor amd64fre
+    }
+    catch {
+        $failed = $_.Exception.Message -match 'windows.ai.isolationsession.preview.winmd'
+    }
+    if (-not $failed) {
+        throw 'Staging unexpectedly succeeded with a required WinMD missing.'
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $dropRoot 'windows.ai.isolationsession.preview.winmd'),
+        'test-windows.ai.isolationsession.preview.winmd',
+        [System.Text.Encoding]::Unicode)
+
     [System.IO.File]::WriteAllText(
         (Join-Path $dropRoot 'IsoSessionClient.dll'),
         'legacy-client-without-monthly-routing',

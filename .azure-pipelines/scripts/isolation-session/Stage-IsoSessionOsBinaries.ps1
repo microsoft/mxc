@@ -41,11 +41,11 @@ $requiredBinaries = @(
     'IsolationProxy.exe',
     'IsoSessionCli.exe'
 )
-$optionalWinmds = @(
+$requiredWinmds = @(
     'windows.ai.isolationsession.winmd',
     'windows.ai.isolationsession.preview.winmd'
 )
-$recognizedFiles = @($requiredBinaries + $optionalWinmds)
+$recognizedFiles = @($requiredBinaries + $requiredWinmds)
 $expectedFileLookup = @{}
 foreach ($name in $recognizedFiles) {
     $expectedFileLookup[$name.ToLowerInvariant()] = $name
@@ -63,7 +63,7 @@ Get-ChildItem -LiteralPath $DropRoot -Recurse -File | ForEach-Object {
 }
 
 $missing = @(
-    $requiredBinaries | Where-Object {
+    $recognizedFiles | Where-Object {
         -not $foundByName.ContainsKey($_.ToLowerInvariant())
     })
 if ($missing.Count -gt 0) {
@@ -106,7 +106,7 @@ $files = foreach ($name in $filesToStage) {
 
     [ordered]@{
         name = $name
-        kind = if ($optionalWinmds -contains $name) { 'winmd' } else { 'binary' }
+        kind = if ($requiredWinmds -contains $name) { 'winmd' } else { 'binary' }
         sizeBytes = $item.Length
         sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
         fileVersion = $item.VersionInfo.FileVersion
