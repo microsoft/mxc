@@ -11,7 +11,6 @@ public sealed class MxcTelemetryCollectionDefinition
 {
 }
 
-[Collection("MxcTelemetry")]
 /// <summary>
 /// Redirects the debug-build-only <c>MXC_TEST_LOCALAPPDATA_OVERRIDE</c>
 /// environment variable (read by <c>wxc_common::telemetry::consent</c> in
@@ -28,6 +27,7 @@ public sealed class MxcTelemetryCollectionDefinition
 /// rather than silently operating on the real per-user store when the native
 /// library under test happens to be a release build.
 /// </summary>
+[Collection("MxcTelemetry")]
 public sealed class MxcTelemetryTests : IDisposable
 {
     private const string OverrideEnvVar = "MXC_TEST_LOCALAPPDATA_OVERRIDE";
