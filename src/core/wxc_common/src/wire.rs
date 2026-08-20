@@ -424,8 +424,10 @@ pub enum NetworkAction {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NetworkRule {
     /// Destination CIDRs. Omission matches both IP families.
+    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
     pub to: Option<Vec<NetworkPeer>>,
     /// Destination protocols and ports. Omission matches all.
+    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
     pub ports: Option<Vec<NetworkPort>>,
 }
 

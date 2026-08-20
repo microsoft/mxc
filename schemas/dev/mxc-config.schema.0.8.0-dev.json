@@ -678,6 +678,7 @@
           "items": {
             "$ref": "#/definitions/NetworkPort"
           },
+          "minItems": 1,
           "type": [
             "array",
             "null"
@@ -688,6 +689,7 @@
           "items": {
             "$ref": "#/definitions/NetworkPeer"
           },
+          "minItems": 1,
           "type": [
             "array",
             "null"
