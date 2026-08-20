@@ -179,6 +179,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn isolated_run_produces_owned_cleanup_targets() {
         let plan = RunPlan::new(
             "docker.io/library/alpine:3.23",
