@@ -204,6 +204,29 @@ impl<'de> Deserialize<'de> for ProcessContainerCapability {
     }
 }
 
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for ProcessContainerCapability {
+    fn schema_name() -> String {
+        "ProcessContainerCapability".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec, StringValidation};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                pattern: Some(
+                    r"^(?![\s\S]*,)(?!(?:[lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE][lL][oO][gG][gG][iI][nN][gG]|[pP][eE][rR][mM][iI][sS][sS][iI][vV][eE][lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE])$)[\s\S]*$"
+                        .to_string(),
+                ),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
 /// ProcessContainer-specific settings.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]

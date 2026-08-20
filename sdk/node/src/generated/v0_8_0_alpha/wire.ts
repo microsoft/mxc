@@ -506,9 +506,9 @@ export interface Process {
  */
 export interface ProcessContainer {
   /**
-   * Optional AppContainer capability names.
+   * Optional AppContainer capability names. Each entry must contain one name; commas are rejected because BaseContainer uses them as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved; use `learningMode`, `--audit`, or `captureDenials` instead.
    */
-  capabilities?: string[];
+  capabilities?: ProcessContainerCapability[];
   /**
    * Optional capture-denials policy.
    */
@@ -526,6 +526,8 @@ export interface ProcessContainer {
    */
   ui?: ProcessContainerUi;
 }
+
+export type ProcessContainerCapability = string;
 
 /**
  * ProcessContainer-specific user-interface policy.

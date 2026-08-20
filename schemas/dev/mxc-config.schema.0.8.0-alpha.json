@@ -958,9 +958,9 @@
       "description": "ProcessContainer-specific settings.",
       "properties": {
         "capabilities": {
-          "description": "Optional AppContainer capability names.",
+          "description": "Optional AppContainer capability names. Each entry must contain one name; commas are rejected because BaseContainer uses them as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved; use `learningMode`, `--audit`, or `captureDenials` instead.",
           "items": {
-            "type": "string"
+            "$ref": "#/definitions/ProcessContainerCapability"
           },
           "type": "array"
         },
@@ -982,6 +982,10 @@
         }
       },
       "type": "object"
+    },
+    "ProcessContainerCapability": {
+      "pattern": "^(?![\\s\\S]*,)(?!(?:[lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE][lL][oO][gG][gG][iI][nN][gG]|[pP][eE][rR][mM][iI][sS][sS][iI][vV][eE][lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE])$)[\\s\\S]*$",
+      "type": "string"
     },
     "ProcessContainerUi": {
       "additionalProperties": false,
