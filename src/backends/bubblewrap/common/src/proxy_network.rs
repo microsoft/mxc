@@ -816,18 +816,22 @@ fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
     Ok(ProbeOutput { status, stdout })
 }
 
-/// Write the sandbox's `/etc/hosts`: the pin, then the host's own entries.
+/// Write the sandbox's `/etc/hosts`: the pin, then the host's own entries with
+/// every competing mapping for the pinned name removed.
 ///
-/// The pin goes first because the first match wins in a hosts file. A host
-/// whose `/etc/hosts` already maps the proxy name -- to a stale address, or to
-/// one the egress chain never authorized -- would otherwise shadow the pin and
-/// leave the sandbox unable to reach its proxy.
+/// Ordering alone is *not* enough, which is why the name is stripped rather
+/// than merely outranked. glibc's `files` backend collects **every** line that
+/// matches a name and hands the whole set to `getaddrinfo`, which then re-sorts
+/// it by RFC 6724 destination-address rules. Those rules promote a loopback
+/// address above a global one, so a leftover `127.0.0.1 <proxy>` entry is
+/// returned *ahead* of a pin written on line 1. A client walking the result in
+/// order then dials an address the egress chain never authorized -- or, worse,
+/// dials back into the sandbox's own loopback.
 ///
-/// The host's entries are kept rather than discarded so the sandbox retains
-/// the mappings a workload expects (`localhost` above all). They are read
-/// before the file is created, so a read failure cannot leave a half-written
-/// pin behind.
-fn write_pinned_hosts(path: &PathBuf, pin: &ProxyHostPin) -> Result<(), String> {
+/// The host's other entries are kept so the sandbox retains the mappings a
+/// workload expects (`localhost` above all). They are read before the file is
+/// created, so a read failure cannot leave a half-written pin behind.
+fn write_pinned_hosts(path: &Path, pin: &ProxyHostPin) -> Result<(), String> {
     // The host file is optional: a host without one simply contributes no
     // entries, which is not a reason to refuse to pin.
     let existing = match fs::read_to_string(SANDBOX_HOSTS_PATH) {
@@ -841,9 +845,80 @@ fn write_pinned_hosts(path: &PathBuf, pin: &ProxyHostPin) -> Result<(), String> 
         }
     };
 
-    let contents = format!("{}\n{}", pin.hosts_line(), existing);
+    let contents = format!(
+        "{}\n{}",
+        pin.hosts_line(),
+        strip_host_from_hosts(&existing, pin.hostname())
+    );
     fs::write(path, contents)
         .map_err(|error| format!("Bubblewrap: failed to write the proxy hosts pin: {error}"))
+}
+
+/// Remove `hostname` from every entry in a hosts file, dropping a line that has
+/// no names left.
+///
+/// Only the name is removed, never the whole line: an entry like
+/// `127.0.0.1 localhost <proxy>` still has to keep resolving `localhost`.
+/// Comments and blank lines pass through untouched so the sandbox's file stays
+/// recognizable, and a trailing comment on a mapping line is preserved.
+///
+/// Matching is ASCII-case-insensitive because DNS names are, so a host file
+/// spelling the proxy name in a different case would otherwise survive and
+/// reintroduce exactly the competing mapping this removes.
+fn strip_host_from_hosts(contents: &str, hostname: &str) -> String {
+    let mut out = String::with_capacity(contents.len());
+    for line in contents.lines() {
+        let (body, comment) = match line.split_once('#') {
+            Some((body, comment)) => (body, Some(comment)),
+            None => (line, None),
+        };
+
+        let mut fields = body.split_whitespace();
+        let Some(address) = fields.next() else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+
+        // Lines that never mention the pinned name are passed through byte for
+        // byte. Rewriting them would normalize the operator's tabs and column
+        // alignment for no benefit.
+        let names: Vec<&str> = fields.collect();
+        if !names.iter().any(|name| name.eq_ignore_ascii_case(hostname)) {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+
+        let kept: Vec<&str> = names
+            .into_iter()
+            .filter(|name| !name.eq_ignore_ascii_case(hostname))
+            .collect();
+
+        // Every name on the line was the pinned one, so the mapping is gone.
+        // Keep a trailing comment rather than silently deleting the operator's
+        // text along with the entry.
+        if kept.is_empty() {
+            if let Some(comment) = comment {
+                out.push('#');
+                out.push_str(comment);
+                out.push('\n');
+            }
+            continue;
+        }
+
+        out.push_str(address);
+        for name in kept {
+            out.push(' ');
+            out.push_str(name);
+        }
+        if let Some(comment) = comment {
+            out.push_str(" #");
+            out.push_str(comment);
+        }
+        out.push('\n');
+    }
+    out
 }
 
 /// Reject a hostname endpoint whose pin would defeat a denied `/etc/hosts`.
@@ -1479,8 +1554,8 @@ mod tests {
 
     #[test]
     fn pinned_hosts_file_puts_the_pin_first() {
-        // First match wins in a hosts file, so a host entry for the same name
-        // must not be able to shadow the pin.
+        // Ordering is not sufficient on its own (see the duplicate-name tests
+        // below), but the pin still leads the file so the intent is legible.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("hosts");
         write_pinned_hosts(&path, &test_pin()).unwrap();
@@ -1489,6 +1564,74 @@ mod tests {
         assert_eq!(
             contents.lines().next().unwrap(),
             format!("{SLIRP_HOST_GATEWAY} proxy.example")
+        );
+    }
+
+    /// The reason the name is stripped rather than merely outranked: glibc
+    /// returns *every* matching hosts line to `getaddrinfo`, which re-sorts
+    /// them by RFC 6724 and promotes a loopback address above the pin. A
+    /// surviving duplicate is therefore tried first, sending the workload to an
+    /// address the egress chain never authorized -- or back into the sandbox.
+    #[test]
+    fn a_competing_mapping_for_the_pinned_name_is_removed() {
+        let stripped = strip_host_from_hosts(
+            "127.0.0.1 localhost\n127.0.0.1 proxy.example\n10.9.9.9 proxy.example\n",
+            "proxy.example",
+        );
+        assert_eq!(stripped, "127.0.0.1 localhost\n");
+    }
+
+    #[test]
+    fn stripping_the_pinned_name_keeps_the_other_names_on_its_line() {
+        // Dropping the whole line would cost the sandbox `localhost`.
+        let stripped =
+            strip_host_from_hosts("127.0.0.1 localhost proxy.example\n", "proxy.example");
+        assert_eq!(stripped, "127.0.0.1 localhost\n");
+    }
+
+    #[test]
+    fn stripping_the_pinned_name_ignores_case() {
+        // DNS names are case-insensitive, so a differently cased duplicate
+        // would otherwise survive and reintroduce the competing mapping.
+        let stripped = strip_host_from_hosts("127.0.0.1 Proxy.EXAMPLE\n", "proxy.example");
+        assert_eq!(stripped, "");
+    }
+
+    #[test]
+    fn stripping_leaves_unrelated_lines_byte_for_byte() {
+        // Real hosts files are tab-aligned; normalizing them would churn the
+        // sandbox's file for no benefit.
+        let original = "127.0.0.1\tlocalhost\n\n# a comment\n::1\tip6-localhost ip6-loopback\n";
+        assert_eq!(strip_host_from_hosts(original, "proxy.example"), original);
+    }
+
+    #[test]
+    fn stripping_an_entire_entry_keeps_its_trailing_comment() {
+        let stripped =
+            strip_host_from_hosts("10.9.9.9 proxy.example # operator note\n", "proxy.example");
+        assert_eq!(stripped, "# operator note\n");
+    }
+
+    #[test]
+    fn the_written_hosts_file_has_exactly_one_mapping_for_the_pinned_name() {
+        // End-to-end twin of the unit tests above, against the real host file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts");
+        write_pinned_hosts(&path, &test_pin()).unwrap();
+
+        let written = fs::read_to_string(&path).unwrap();
+        let matches = written
+            .lines()
+            .filter(|line| {
+                let body = line.split('#').next().unwrap_or("");
+                body.split_whitespace()
+                    .skip(1)
+                    .any(|name| name.eq_ignore_ascii_case("proxy.example"))
+            })
+            .count();
+        assert_eq!(
+            matches, 1,
+            "exactly one mapping may survive for the pinned name:\n{written}"
         );
     }
 
@@ -1502,7 +1645,18 @@ mod tests {
 
         let written = fs::read_to_string(&path).unwrap();
         let host_file = fs::read_to_string(SANDBOX_HOSTS_PATH).unwrap_or_default();
-        for line in host_file.lines().filter(|line| !line.trim().is_empty()) {
+        for line in host_file.lines().filter(|line| {
+            // A line mapping the pinned name is *expected* to be rewritten;
+            // every other line must survive untouched.
+            !line.trim().is_empty()
+                && !line
+                    .split('#')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .skip(1)
+                    .any(|name| name.eq_ignore_ascii_case("proxy.example"))
+        }) {
             assert!(
                 written.contains(line),
                 "host entry should be preserved: {line}"
