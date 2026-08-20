@@ -54,6 +54,24 @@ enum RuleAction {
     Deny,
 }
 
+/// One egress entry the chain emits a rule for, lowered from whichever network
+/// schema the policy was written in.
+///
+/// The emitter consumes these in list order and iptables applies
+/// first-match-wins within a chain, which makes an entry's position its
+/// precedence. Deny-precedence is therefore a property each lowering function
+/// establishes, and the emitter only has to preserve the order it is handed.
+///
+/// Borrowing rather than owning keeps the lowering allocation-free per entry
+/// and lets the emitter's diagnostics name the operator's original string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EgressEntry<'a> {
+    /// Hostname, IP literal, or CIDR, exactly as the operator wrote it.
+    /// Interpreted by [`NetworkIptablesManager::resolve_host`].
+    destination: &'a str,
+    action: RuleAction,
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct ResolvedDestinations {
     ipv4: Vec<String>,
@@ -1230,9 +1248,33 @@ impl NetworkIptablesManager {
         )
     }
 
-    /// Resolve every allow/block entry exactly once and build the rule args
-    /// from that single resolution, logging a warning for any entry that
-    /// resolved to nothing. This is the shipping rule-generation path.
+    /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the entries
+    /// the chain emits, in the order they must be emitted.
+    ///
+    /// Block entries come first. Deny-precedence (AB#62830341) is emission
+    /// order and nothing else: iptables/ip6tables apply first-match-wins
+    /// within the chain, which makes a destination present in both lists
+    /// DROP. There is no separate reconciliation pass anywhere in this
+    /// backend. Exchanging the two halves reverses the security semantics of
+    /// every policy whose lists overlap and produces no other symptom.
+    fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry<'_>> {
+        policy
+            .blocked_hosts
+            .iter()
+            .map(|host| EgressEntry {
+                destination: host.as_str(),
+                action: RuleAction::Deny,
+            })
+            .chain(policy.allowed_hosts.iter().map(|host| EgressEntry {
+                destination: host.as_str(),
+                action: RuleAction::Allow,
+            }))
+            .collect()
+    }
+
+    /// Resolve every lowered entry exactly once and build the rule args from
+    /// that single resolution, logging a warning for any entry that resolved
+    /// to nothing. This is the shipping rule-generation path.
     ///
     /// Resolving once is a correctness requirement, not just an optimization:
     /// the previous apply path resolved each host once for the warning pass
@@ -1241,13 +1283,9 @@ impl NetworkIptablesManager {
     /// expires between the calls — so the rule installed would not match the
     /// rule that was validated and logged.
     ///
-    /// Deny-precedence (AB#62830341) is emission order and nothing else:
-    /// block-list rules are emitted before allow-list rules, and
-    /// iptables/ip6tables apply first-match-wins within the chain, so a
-    /// destination present in both lists is DROPped. There is no separate
-    /// reconciliation pass, so exchanging these two iterators reverses the
-    /// security semantics of every policy whose lists overlap and produces no
-    /// other symptom.
+    /// Entries are emitted in the order the lowering produced them, which is
+    /// the whole of this backend's deny-precedence guarantee. See
+    /// [`Self::lower_legacy_hosts`] for why that order is load-bearing.
     ///
     /// An entry that resolves to nothing programs no rule, and the two
     /// directions are not symmetric. An unwritten deny leaves reachable a
@@ -1265,17 +1303,11 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = policy
-            .blocked_hosts
-            .iter()
-            .map(|host| (host, RuleAction::Deny))
-            .chain(
-                policy
-                    .allowed_hosts
-                    .iter()
-                    .map(|host| (host, RuleAction::Allow)),
-            );
-        for (host, action) in entries {
+        for EgressEntry {
+            destination: host,
+            action,
+        } in Self::lower_legacy_hosts(policy)
+        {
             let destinations = Self::resolve_host(host);
             if destinations.is_empty() {
                 if default_permits && matches!(action, RuleAction::Deny) {
