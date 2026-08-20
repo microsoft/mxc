@@ -218,8 +218,6 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         || !p.blocked_hosts.is_empty()
         || p.network_proxy.is_enabled()
         || p.network_mode_specified
-        || p.network_egress.is_some()
-        || p.network_ingress.is_some()
     {
         return Err(MxcError::policy_validation(
             "Windows Sandbox filesystem/network policy is fixed at provision; it cannot be \
@@ -1325,6 +1323,7 @@ mod tests {
         let req = ExecutionRequest {
             policy: ContainerPolicy {
                 network_egress: Some(NetworkEgressPolicy::default()),
+                network_mode_specified: true,
                 ..Default::default()
             },
             ..Default::default()

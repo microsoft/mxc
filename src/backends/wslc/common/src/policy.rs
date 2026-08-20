@@ -123,15 +123,10 @@ fn reject_host_filtering(request: &ExecutionRequest) -> Result<(), MxcError> {
 /// posture (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host
 /// lists) is bound to the provision phase; presence — not value — is checked so
 /// an explicit `defaultPolicy: "block"` (indistinguishable from an omitted
-/// block by value) is rejected too. State-aware requests do not synthesize
-/// directional defaults, so raw directional fields also indicate an attempted
-/// post-provision policy change. The cooperative proxy is a separate exec-time
-/// concern handled by the callers.
+/// block by value) is rejected too. The cooperative proxy is a separate
+/// exec-time concern handled by the callers.
 fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), MxcError> {
-    if request.policy.network_mode_specified
-        || request.policy.network_egress.is_some()
-        || request.policy.network_ingress.is_some()
-    {
+    if request.policy.network_mode_specified {
         return Err(MxcError::policy_validation(ERR_NETWORK_IMMUTABLE));
     }
     Ok(())
