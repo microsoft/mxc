@@ -31,6 +31,7 @@ string_enum! {
 
 /// One of the proxy configurations accepted by the `0.8.0-alpha` contract.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 pub enum NetworkProxy {
     /// Connect to an existing proxy on a non-zero localhost TCP port.
     #[serde(rename = "localhost")]
@@ -45,6 +46,7 @@ pub enum NetworkProxy {
 
 /// Network access policy shared by the stable containment backends.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Network {
     /// Optional default network posture.

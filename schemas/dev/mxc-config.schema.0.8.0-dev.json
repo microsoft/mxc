@@ -772,6 +772,7 @@
         },
         "timeout": {
           "description": "Wall-clock timeout in milliseconds.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1046,6 +1047,7 @@
         },
         "idleTimeout": {
           "description": "Idle timeout (legacy seconds field).",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1054,6 +1056,7 @@
         },
         "idleTimeoutMs": {
           "description": "Idle timeout before teardown (ms).",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1068,6 +1071,7 @@
       "properties": {
         "cpuCount": {
           "description": "vCPU count.",
+          "maximum": 4294967295,
           "minimum": 0.0,
           "type": [
             "integer",
@@ -1097,6 +1101,7 @@
         },
         "memoryMb": {
           "description": "Memory limit (MB).",
+          "maximum": 18446744073709551615,
           "minimum": 0.0,
           "type": [
             "integer",

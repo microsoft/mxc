@@ -6,6 +6,7 @@
   "scripts": {
     "pretest": "node check-tests-present.js",
     "test": "node --test tests/*.test.js",
+    "check-contract-codegen": "node check-contract-codegen.js",
     "check-schema-versions": "node check-schema-versions.js",
     "validate-configs": "node validate-configs.js"
   },

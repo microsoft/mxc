@@ -7,6 +7,23 @@ use serde::{de, Deserialize, Deserializer};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct True;
 
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for True {
+    fn schema_name() -> String {
+        "True".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Boolean))),
+            enum_values: Some(vec![serde_json::Value::Bool(true)]),
+            ..Default::default()
+        })
+    }
+}
+
 impl<'de> Deserialize<'de> for True {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -27,6 +44,24 @@ impl<'de> Deserialize<'de> for True {
 /// therefore rejected unless `T` itself accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionalField<T>(Option<T>);
+
+#[cfg(feature = "schema-gen")]
+impl<T> schemars::JsonSchema for OptionalField<T>
+where
+    T: schemars::JsonSchema,
+{
+    fn schema_name() -> String {
+        T::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        generator.subschema_for::<T>()
+    }
+
+    fn is_referenceable() -> bool {
+        false
+    }
+}
 
 impl<T> Default for OptionalField<T> {
     fn default() -> Self {
@@ -61,6 +96,26 @@ where
 /// A non-empty string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmptyString(String);
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for NonEmptyString {
+    fn schema_name() -> String {
+        "NonEmptyString".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec, StringValidation};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                min_length: Some(1),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
 
 impl NonEmptyString {
     /// Creates a validated string.
@@ -109,5 +164,34 @@ mod tests {
     fn non_empty_string_rejects_empty() {
         let error = NonEmptyString::new(String::new()).unwrap_err();
         assert_eq!(error, "string must not be empty");
+    }
+
+    #[cfg(feature = "schema-gen")]
+    #[test]
+    fn constrained_primitive_schemas_match_deserialization() {
+        use schemars::JsonSchema;
+
+        let mut generator = schemars::gen::SchemaGenerator::default();
+        let true_schema = serde_json::to_value(True::json_schema(&mut generator)).unwrap();
+        assert_eq!(true_schema["type"], "boolean");
+        assert_eq!(true_schema["enum"], serde_json::json!([true]));
+
+        let non_empty = serde_json::to_value(NonEmptyString::json_schema(&mut generator)).unwrap();
+        assert_eq!(non_empty["type"], "string");
+        assert_eq!(non_empty["minLength"], 1);
+    }
+
+    #[cfg(feature = "schema-gen")]
+    #[test]
+    fn optional_field_schema_is_transparent_and_not_referenceable() {
+        use schemars::JsonSchema;
+
+        let mut generator = schemars::gen::SchemaGenerator::default();
+        let schema =
+            serde_json::to_value(OptionalField::<String>::json_schema(&mut generator)).unwrap();
+
+        assert_eq!(schema["type"], "string");
+        assert!(schema.get("anyOf").is_none());
+        assert!(!OptionalField::<String>::is_referenceable());
     }
 }

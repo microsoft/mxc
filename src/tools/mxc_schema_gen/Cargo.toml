@@ -3,8 +3,10 @@ name = "mxc_schema_gen"
 version.workspace = true
 edition.workspace = true
 
-# Emits the MXC config JSON Schema generated from the dedicated
-# `wxc_common::wire` model. Run with:
-#   cargo run -p mxc_schema_gen -- <out-path>
+# Emits versioned MXC config schemas and TypeScript wire oracles.
 [dependencies]
+clap.workspace = true
+mxc_config_contract = { workspace = true, features = ["schema-gen"] }
+mxc_schema_support.workspace = true
+serde_json.workspace = true
 wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }

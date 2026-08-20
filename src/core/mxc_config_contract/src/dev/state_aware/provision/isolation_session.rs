@@ -18,6 +18,7 @@ string_marker! {
 
 /// IsolationSession settings accepted during provisioning.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IsolationSessionProvision {
     /// Optional application identifier carried by the sandbox identity.
@@ -27,6 +28,7 @@ pub struct IsolationSessionProvision {
 
 /// State-aware IsolationSession experimental settings.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StateAwareIsolationSession {
     /// Optional provision-phase settings.
@@ -36,6 +38,7 @@ pub struct StateAwareIsolationSession {
 
 /// Experimental settings accepted by an IsolationSession provision request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IsolationSessionProvisionExperimental {
     /// Optional IsolationSession backend settings.
@@ -48,6 +51,7 @@ pub struct IsolationSessionProvisionExperimental {
 
 /// The exact unrestricted-network acknowledgment required when provisioning an IsolationSession.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IsolationSessionNetwork {
     /// Exact `allow` default network policy marker.
@@ -58,6 +62,7 @@ pub struct IsolationSessionNetwork {
 
 /// A complete state-aware `provision` request for isolation_session
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IsolationSessionProvisionRequest {
     /// Optional JSON Schema reference for editor validation.
