@@ -7,7 +7,8 @@
 //! log-file). On macOS it dispatches to `SeatbeltScriptRunner`; on every
 //! other platform it prints an explanatory error and exits 1 — that way
 //! `cargo build -p mxc_darwin` succeeds in CI from any host, while runtime
-//! use still requires macOS.
+//! use still requires macOS. Seatbelt remains the default backend; explicit
+//! experimental Apple Container requests dispatch through the same binary.
 
 use std::fmt::Write;
 use std::process;
@@ -120,11 +121,11 @@ fn main() {
 
     log_request(&request, &mut logger);
 
-    run_seatbelt(&request, &mut logger);
+    run_backend(&request, &mut logger);
 }
 
 #[cfg(target_os = "macos")]
-fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
+fn run_backend(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     use wxc_common::telemetry;
 
     // ── Telemetry init (experimental) ───────────────────────────────
@@ -152,8 +153,8 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
     }
 
     // Backend selection lives in `mxc_engine::run`, the single home for one-shot
-    // dispatch. On macOS it always resolves to Seatbelt (logging a note if the
-    // request asked for a different backend) and runs it to completion.
+    // dispatch. Seatbelt remains the default while an explicit Apple Container
+    // request selects that experimental backend without changing executables.
     let run_start = Instant::now();
     let response = match mxc_engine::run(request, logger) {
         Ok(response) => response,
@@ -193,7 +194,7 @@ fn run_seatbelt(request: &ExecutionRequest, logger: &mut Logger) -> ! {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn run_seatbelt(_request: &ExecutionRequest, logger: &mut Logger) -> ! {
+fn run_backend(_request: &ExecutionRequest, logger: &mut Logger) -> ! {
     eprintln!(
         "mxc-exec-mac: the macOS sandbox backend is only available on macOS. \
          This binary was built for a non-Darwin target and cannot execute scripts."

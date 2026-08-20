@@ -29,7 +29,7 @@ parameters:
       # macOS-only crates (mxc_darwin, seatbelt_common) — the workspace
       # has Windows-only crates that do not compile on macOS, so we can't
       # use --all-features here.
-      clippyArgs: --locked --release -p mxc_darwin -p seatbelt_common
+      clippyArgs: --locked --release -p mxc_darwin -p seatbelt_common -p apple_container_common
 
 jobs:
 - ${{ each item in parameters.matrix }}:
