@@ -14,7 +14,10 @@ use crate::models::{
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
-use crate::network_parser::{host_is_loopback, parse_network_policy, NetworkSections};
+use crate::network_parser::{
+    directional_network_version_error, host_is_loopback, parse_network_policy,
+    supports_directional_network, NetworkSections,
+};
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
 use serde::{Deserialize, Deserializer};
@@ -125,6 +128,9 @@ pub fn load_request_with_options(
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        let raw: serde_json::Value = config_deserialize::from_str(&json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        validate_directional_network_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command)
     })();
@@ -145,8 +151,10 @@ pub fn load_request_from_value(
     allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
+        let raw = config.clone();
         let cfg: wire::MxcConfig = config_deserialize::from_value(config)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        validate_directional_network_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command)
     })();
@@ -221,6 +229,11 @@ fn parse_mxc_request_json(
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
 
     if discriminator.phase.is_some() {
+        let raw: serde_json::Value = config_deserialize::from_str(json_str)
+            .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
+        validate_directional_network_field_versions(&raw).map_err(|error| {
+            ParseError::StateAware(MxcError::malformed_request(error.to_string()))
+        })?;
         convert_wire_state_aware(
             json_str,
             discriminator.experimental,
@@ -232,10 +245,42 @@ fn parse_mxc_request_json(
     } else {
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        let raw: serde_json::Value = config_deserialize::from_str(json_str)
+            .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
+        validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, allow_missing_command)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
+}
+
+fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    if config
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(supports_directional_network)
+    {
+        return Ok(());
+    }
+
+    let has_directional_network = config
+        .get("network")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|network| network.contains_key("egress") || network.contains_key("ingress"));
+    let has_runtime_config = config.contains_key("runtimeConfig");
+    let has_process_container_network = ["processContainer", "appContainer"]
+        .into_iter()
+        .filter_map(|key| config.get(key))
+        .filter_map(serde_json::Value::as_object)
+        .any(|process_container| process_container.contains_key("network"));
+
+    if has_directional_network || has_runtime_config || has_process_container_network {
+        return Err(directional_network_version_error());
+    }
+    Ok(())
 }
 
 fn log_one_shot_error<T>(logger: &mut Logger, result: &Result<T, WxcError>) {
@@ -5242,8 +5287,11 @@ mod tests {
     fn schema_v07_rejects_v08_network_fields() {
         for extra in [
             r#""network": {"egress": {"default": "deny"}}"#,
+            r#""network": {"egress": null}"#,
             r#""runtimeConfig": {}"#,
+            r#""runtimeConfig": null"#,
             r#""processContainer": {"network": {}}"#,
+            r#""processContainer": {"network": null}"#,
         ] {
             let json = format!(
                 r#"{{
