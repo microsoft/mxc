@@ -59,6 +59,8 @@ const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
 /// The gateway as an address, for rules and pins. Kept in step with
 /// [`SLIRP_HOST_GATEWAY`] by [`tests::gateway_constants_agree`].
 const SLIRP_HOST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+/// The network slirp gives the sandbox, for diagnostics.
+const SLIRP_NETWORK: &str = "10.0.2.0/24";
 /// Path the hosts-file pin is mounted over inside the sandbox.
 const SANDBOX_HOSTS_PATH: &str = "/etc/hosts";
 /// Egress chain installed inside the sandbox's own network namespace.
@@ -254,6 +256,7 @@ impl SandboxProxy {
             return if ip.is_loopback() || ip.is_unspecified() {
                 Ok(Self::rewritten(configured)?)
             } else {
+                reject_slirp_reserved(ip, host)?;
                 Ok(Self {
                     address: configured.clone(),
                     egress: ProxyEgress {
@@ -289,7 +292,9 @@ impl SandboxProxy {
             return Self::rewritten(configured);
         }
 
-        let ip = sandbox_facing_ip(resolve(host, configured.port())?);
+        let resolved = resolve(host, configured.port())?;
+        reject_slirp_reserved(resolved, host)?;
+        let ip = sandbox_facing_ip(resolved);
         let pin = configured
             .host_pin(IpAddr::V4(ip))
             .map_err(|error| format!("Bubblewrap: {error}"))?;
@@ -341,6 +346,32 @@ fn sandbox_facing_ip(resolved: Ipv4Addr) -> Ipv4Addr {
         resolved
     }
 }
+
+/// Reject an endpoint the host resolved into the sandbox's own slirp network.
+///
+/// Every address in [`SLIRP_NETWORK`] is on-link inside the namespace, so it
+/// does not name the machine the host meant: [`SLIRP_HOST_GATEWAY`] is the
+/// route to host loopback, `.100` is the sandbox itself, and the rest have no
+/// neighbour at all. Opening the gateway is the sharp case -- the egress rule
+/// would grant the workload an unrelated host-loopback service on the proxy
+/// port. Applied to what the host answered, so the deliberate loopback and
+/// wildcard translations in [`sandbox_facing_ip`] still reach the gateway.
+fn reject_slirp_reserved(resolved: Ipv4Addr, host: &str) -> Result<(), String> {
+    if !SLIRP_NETWORK_OCTETS.eq(&resolved.octets()[..3]) {
+        return Ok(());
+    }
+    Err(format!(
+        "Bubblewrap: proxy endpoint '{host}' is {resolved}, which is inside the sandbox's own \
+         network ({SLIRP_NETWORK}); there that address is slirp's own, not the host's \
+         {resolved}, so the egress rule would open an unrelated service. Bind the proxy to \
+         127.0.0.1 -- which is translated to the gateway deliberately -- or give it an address \
+         outside {SLIRP_NETWORK}."
+    ))
+}
+
+/// Leading octets of [`SLIRP_NETWORK`], asserted against it by
+/// [`tests::gateway_constants_agree`].
+const SLIRP_NETWORK_OCTETS: [u8; 3] = [10, 0, 2];
 
 /// Resolve `host` to the address the egress chain will open.
 ///
@@ -1299,6 +1330,70 @@ mod tests {
         // from the string. A drift between them would open one endpoint and
         // point the workload at another.
         assert_eq!(SLIRP_HOST_GATEWAY_IP.to_string(), SLIRP_HOST_GATEWAY);
+        // The reserved-range check is written from the octets, the diagnostic
+        // from the string; the gateway must fall inside the range it names.
+        assert!(SLIRP_NETWORK.starts_with(&format!(
+            "{}.{}.{}.",
+            SLIRP_NETWORK_OCTETS[0], SLIRP_NETWORK_OCTETS[1], SLIRP_NETWORK_OCTETS[2]
+        )));
+        assert_eq!(SLIRP_HOST_GATEWAY_IP.octets()[..3], SLIRP_NETWORK_OCTETS);
+    }
+
+    /// A hostname answering with the gateway is the sharp case: the address is
+    /// routable on the host, so nothing else flags it, but inside the namespace
+    /// it is the route to host loopback. Pinning it would hand the workload an
+    /// unrelated host service on the proxy port.
+    #[test]
+    fn egress_rejects_a_hostname_resolving_into_the_sandbox_network() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let error = SandboxProxy::resolve_with(&address, resolver([10, 0, 2, 2]))
+            .expect_err("the slirp gateway must not be pinned as if it were a host address");
+
+        assert!(
+            error.contains("10.0.2.0/24") && error.contains("127.0.0.1"),
+            "error should name the reserved range and the supported alternative: {error}"
+        );
+    }
+
+    /// The sandbox's own tap address, and a plain neighbour, are wrong for the
+    /// same reason -- so the whole range is rejected, not just the gateway.
+    #[test]
+    fn egress_rejects_every_address_in_the_sandbox_network() {
+        for octets in [[10, 0, 2, 3], [10, 0, 2, 100], [10, 0, 2, 50]] {
+            let address = ProxyAddress::new("proxy.example".into(), 3128);
+            assert!(
+                SandboxProxy::resolve_with(&address, resolver(octets)).is_err(),
+                "{octets:?} is on-link inside the namespace and cannot name a host endpoint"
+            );
+
+            let literal = ProxyAddress::new(Ipv4Addr::from(octets).to_string(), 3128);
+            assert!(
+                SandboxProxy::resolve(&literal).is_err(),
+                "{octets:?} must be rejected as a literal too, not only as an answer"
+            );
+        }
+    }
+
+    /// The rejection must not swallow the translation it sits next to: a
+    /// loopback answer is *meant* to become the gateway.
+    #[test]
+    fn rejecting_the_sandbox_network_leaves_the_loopback_translation_intact() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let resolved = SandboxProxy::resolve_with(&address, resolver([127, 0, 0, 1]))
+            .expect("a loopback answer is translated, not rejected");
+
+        assert_eq!(resolved.egress().ip, SLIRP_HOST_GATEWAY_IP);
+    }
+
+    /// The neighbouring /24 is ordinary host space, so the check must not
+    /// widen past the network slirp actually assigns.
+    #[test]
+    fn egress_accepts_an_address_just_outside_the_sandbox_network() {
+        let address = ProxyAddress::new("proxy.example".into(), 3128);
+        let resolved = SandboxProxy::resolve_with(&address, resolver([10, 0, 3, 2]))
+            .expect("10.0.3.2 is a normal routable answer");
+
+        assert_eq!(resolved.egress().ip, Ipv4Addr::new(10, 0, 3, 2));
     }
 
     #[test]
