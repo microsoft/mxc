@@ -105,29 +105,28 @@ pub fn load_request(
         let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-        convert_wire_config(cfg, logger, true, false)
+        convert_wire_config(cfg, logger, true)
     })();
     log_one_shot_error(logger, &result);
     result
 }
 
 /// Build a request from an already-parsed wire-format config [`Value`], running
-/// the same validation and wire→model mapping as [`load_request_with_options`]
-/// but without a base64 (or file) round-trip. For in-process callers (e.g. the
-/// `mxc` crate) that already hold the config as JSON and would otherwise pay to
+/// the same validation and wire→model mapping as [`load_request`] but without a
+/// base64 (or file) round-trip. For in-process callers (e.g. the `mxc` crate)
+/// that already hold the config as JSON and would otherwise pay to
 /// serialise → base64 → decode → re-parse it.
 ///
 /// [`Value`]: serde_json::Value
 pub fn load_request_from_value(
     config: serde_json::Value,
     logger: &mut Logger,
-    allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
         let cfg: wire::MxcConfig = config_deserialize::from_value(config)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
 
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -281,7 +280,7 @@ fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequ
     } else {
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-        convert_wire_config(cfg, logger, true, false)
+        convert_wire_config(cfg, logger, true)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
@@ -802,15 +801,10 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
     }
 }
 
-// `allow_missing_command` relaxes the `require_process == true` arms so that a
-// CLI command-line override (provided by the driver after parsing) can stand in
-// for `process.commandLine`. When set, a missing or empty `commandLine` is
-// silently accepted and `script_code` is left empty.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
-    allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -843,19 +837,17 @@ fn convert_wire_config(
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
-    // non-exec state-aware phases (require_process == false) or when the driver
-    // signalled a CLI command-line override (allow_missing_command).
-    let command_required = require_process && !allow_missing_command;
+    // non-exec state-aware phases (require_process == false)
     let (script_code, working_directory, script_timeout, env) = match cfg.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
-                Some(_) if command_required => {
+                Some(_) if require_process => {
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
-                None if command_required => {
+                None if require_process => {
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
                     ));
@@ -877,7 +869,7 @@ fn convert_wire_config(
                 process.env.unwrap_or_default(),
             )
         }
-        None if command_required => {
+        None if require_process => {
             return Err(WxcError::ConfigParse(
                 "'process' section is required".into(),
             ));
@@ -1652,7 +1644,7 @@ fn convert_wire_state_aware(
     cfg.lifecycle = None;
 
     let require_process = phase == Phase::Exec;
-    let mut request = convert_wire_config(cfg, logger, require_process, false)?;
+    let mut request = convert_wire_config(cfg, logger, require_process)?;
 
     // Populate the typed `experimental.telemetry` field from the raw block that
     // was peeled off above. The rest of `experimental` is typed per-backend at
@@ -2431,7 +2423,7 @@ mod tests {
         });
         let mut logger = test_logger();
 
-        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        let error = load_request_from_value(config, &mut logger).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Invalid configuration at `process.timeout`"));
         assert!(message.contains("expected u32"));
