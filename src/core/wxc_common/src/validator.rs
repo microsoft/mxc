@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::models::{ExecutionRequest, NetworkAction, ScriptResponse};
+use crate::models::{ExecutionRequest, NetworkAction, NetworkPolicy, ScriptResponse};
 use crate::mxc_error::MxcError;
 
 /// Declares which optional network policy features a backend enforces.
@@ -59,6 +59,35 @@ pub fn validate_network_policy_support(
     request: &ExecutionRequest,
     support: NetworkPolicySupport,
 ) -> Result<(), ScriptResponse> {
+    if support == NetworkPolicySupport::LEGACY {
+        if request
+            .policy
+            .network_egress
+            .as_ref()
+            .is_some_and(|egress| egress.default == NetworkAction::Deny)
+            && request.policy.default_network_policy == NetworkPolicy::Allow
+        {
+            return Err(ScriptResponse::error(
+                "network.egress.default='deny' conflicts with the legacy outbound policy",
+            ));
+        }
+
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| {
+                ingress.default == NetworkAction::Deny
+                    || ingress.host_loopback == NetworkAction::Deny
+            })
+            && request.policy.allow_local_network
+        {
+            return Err(ScriptResponse::error(
+                "deny-by-default network.ingress conflicts with the legacy inbound policy",
+            ));
+        }
+    }
+
     if !support.contains(NetworkPolicySupport::EGRESS_DEFAULT)
         && request
             .policy
@@ -311,6 +340,23 @@ mod tests {
             builtin_test_server: false,
         };
         assert!(validate_network_policy_support(&request, NetworkPolicySupport::ALL,).is_ok());
+    }
+
+    #[test]
+    fn legacy_network_support_rejects_conflicting_dual_model_values() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(NetworkEgressPolicy::default());
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+        let error =
+            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+        assert!(error.error_message.contains("legacy outbound policy"));
+
+        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+        request.policy.allow_local_network = true;
+        let error =
+            validate_network_policy_support(&request, NetworkPolicySupport::LEGACY).unwrap_err();
+        assert!(error.error_message.contains("legacy inbound policy"));
     }
 
     #[test]
