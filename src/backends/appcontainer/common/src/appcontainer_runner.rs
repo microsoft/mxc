@@ -1548,6 +1548,11 @@ impl SandboxBackend for AppContainerScriptRunner {
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
+        if request.policy.allowed_proxy_peer.is_some() {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer requires a BaseContainer path",
+            ));
+        }
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(
@@ -2491,6 +2496,20 @@ mod tests {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_proxy_peer_identity() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not drop the BaseContainer-only proxy identity");
+        assert!(error
+            .error_message
+            .contains("requires a BaseContainer path"));
     }
 
     #[test]
