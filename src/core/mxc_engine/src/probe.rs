@@ -89,6 +89,11 @@ fn macos_backends() -> Vec<AvailableBackend> {
             ContainmentBackend::Seatbelt.wire_name(),
         ));
     }
+    if apple_container_common::is_available() {
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::AppleContainer.wire_name(),
+        ));
+    }
     backends
 }
 
@@ -204,6 +209,7 @@ mod tests {
             Containment::Seatbelt,
             Containment::IsolationSession,
             Containment::Bubblewrap,
+            Containment::AppleContainer,
         ]
         .iter()
         .map(wire_name)
@@ -263,7 +269,7 @@ mod tests {
     /// from `ContainmentBackend` (the same source as the `push` calls) so the
     /// emitted names can't be typo'd, and checked against the `wire::Containment`
     /// serde names so the two enums can't drift.
-    const EMITTABLE_BACKENDS: [ContainmentBackend; 7] = [
+    const EMITTABLE_BACKENDS: [ContainmentBackend; 8] = [
         ContainmentBackend::Seatbelt,
         ContainmentBackend::Bubblewrap,
         ContainmentBackend::Lxc,
@@ -271,6 +277,7 @@ mod tests {
         ContainmentBackend::WindowsSandbox,
         ContainmentBackend::Wslc,
         ContainmentBackend::IsolationSession,
+        ContainmentBackend::AppleContainer,
     ];
 
     /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use wxc_common::mxc_error::MxcError;
 
-use crate::command::{CliArgument, CliCommand, CommandOutput, CommandRunner};
+use crate::command::{CliArgument, CliCommand, CommandOutput, CommandRunner, SystemCommandRunner};
 
 /// Fixed path where Apple's installer places the Container CLI.
 pub const APPLE_CONTAINER_CLI_PATH: &str = "/usr/local/bin/container";
@@ -123,6 +123,46 @@ impl AvailabilityError {
 /// Check only the fixed CLI installation path without invoking the executable.
 pub fn check_cli_installed() -> Result<(), AvailabilityError> {
     check_cli_presence(Path::new(APPLE_CONTAINER_CLI_PATH).is_file())
+}
+
+/// Probe the current host using the production bounded command runner.
+pub fn probe() -> Result<AppleContainerAvailability, AvailabilityError> {
+    probe_with(&SystemCommandRunner, &current_host_info())
+}
+
+/// Whether the current host passes the full read-only availability probe.
+pub fn is_available() -> bool {
+    probe().is_ok()
+}
+
+fn current_host_info() -> HostInfo {
+    HostInfo::current(current_macos_major_version())
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_major_version() -> Option<u32> {
+    let mut name = std::mem::MaybeUninit::<libc::utsname>::uninit();
+    // SAFETY: `uname` initializes the supplied `utsname` on success.
+    if unsafe { libc::uname(name.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: `uname` succeeded, so every field is initialized and the release
+    // field is a NUL-terminated C string.
+    let name = unsafe { name.assume_init() };
+    let release = unsafe { std::ffi::CStr::from_ptr(name.release.as_ptr()) };
+    let darwin_major = release
+        .to_str()
+        .ok()?
+        .split('.')
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    darwin_major.checked_add(1)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_macos_major_version() -> Option<u32> {
+    None
 }
 
 fn check_cli_presence(present: bool) -> Result<(), AvailabilityError> {

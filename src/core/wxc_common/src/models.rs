@@ -624,8 +624,14 @@ pub struct ContainerPolicy {
     pub readonly_paths: Vec<String>,
     pub denied_paths: Vec<String>,
     pub fallback: FallbackPolicy,
+    /// Whether the caller supplied the Windows-only `fallback` block.
+    #[serde(skip)]
+    pub fallback_specified: bool,
     pub default_network_policy: NetworkPolicy,
     pub network_enforcement_mode: NetworkEnforcementMode,
+    /// Whether the caller explicitly supplied `network.enforcementMode`.
+    #[serde(skip)]
+    pub network_enforcement_mode_specified: bool,
     /// When true, the sandboxed process may bind() + listen() on local IPs
     /// and accept incoming connections. Independent of `default_network_policy`
     /// (which governs outbound traffic).

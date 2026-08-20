@@ -343,7 +343,14 @@ fn resolve_runner_inner(
     use wxc_common::sandbox_process::Runner;
 
     if request.containment == ContainmentBackend::AppleContainer {
-        return reject_unimplemented_apple_container(request);
+        if !request.experimental_enabled {
+            return Err(MxcError::malformed_request(
+                "Apple Container is an experimental feature. Use --experimental flag.",
+            ));
+        }
+        return Ok(ResolvedRunner::without_guard(Box::new(Runner::new(
+            apple_container_common::AppleContainerBackend::new(),
+        ))));
     }
     if request.containment != ContainmentBackend::Seatbelt {
         logger.log_line("Note: Overriding containment backend to Seatbelt on macOS.");
@@ -353,6 +360,7 @@ fn resolve_runner_inner(
     ))))
 }
 
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn reject_unimplemented_apple_container(
     request: &ExecutionRequest,
 ) -> Result<ResolvedRunner, MxcError> {
@@ -391,21 +399,25 @@ mod macos_tests {
     }
 
     #[test]
-    fn apple_container_does_not_fall_back_to_seatbelt() {
+    fn apple_container_resolves_without_falling_back_to_seatbelt() {
         let request = ExecutionRequest {
             containment: ContainmentBackend::AppleContainer,
             experimental_enabled: true,
+            script_code: "true".to_string(),
+            experimental: wxc_common::models::ExperimentalConfig {
+                apple_container: Some(wxc_common::models::AppleContainerConfig {
+                    image: "alpine:3.22".to_string(),
+                    cpu_count: None,
+                    memory_mb: None,
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         };
         let mut logger = Logger::new(Mode::Buffer);
 
-        let error = match resolve_runner_inner(&request, &mut logger) {
-            Ok(_) => panic!("Apple Container must not fall back to Seatbelt"),
-            Err(error) => error,
-        };
-
-        assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);
-        assert!(error.message.contains("not implemented"));
+        assert!(resolve_runner_inner(&request, &mut logger).is_ok());
+        assert!(logger.get_buffer().is_empty());
     }
 }
 

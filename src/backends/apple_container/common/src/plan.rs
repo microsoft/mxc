@@ -13,6 +13,8 @@ pub enum PlanError {
     RelativePath { field: &'static str },
     #[error("Apple Container image must not be empty")]
     EmptyImage,
+    #[error("Apple Container image must not begin with '-'")]
+    InvalidImage,
     #[error("Apple Container CPU count must be greater than zero")]
     InvalidCpuCount,
     #[error("Apple Container memory limit must be greater than zero")]
@@ -101,6 +103,7 @@ impl ResourceLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunPlan {
     pub image: String,
+    pub ownership_token: OwnershipToken,
     pub container: OwnedResource,
     pub network: NetworkPlan,
     pub mounts: Vec<MountPlan>,
@@ -120,9 +123,14 @@ impl RunPlan {
         resources: ResourceLimits,
     ) -> Result<Self, PlanError> {
         let image = image.into();
-        if image.trim().is_empty() {
+        let image = image.trim();
+        if image.is_empty() {
             return Err(PlanError::EmptyImage);
         }
+        if image.starts_with('-') {
+            return Err(PlanError::InvalidImage);
+        }
+        let image = image.to_string();
         let names = ResourceNames::new(container_hint, token);
         let container = OwnedResource::container(names.container, token);
         let network = if isolated_network {
@@ -134,6 +142,7 @@ impl RunPlan {
         };
         Ok(Self {
             image,
+            ownership_token: token.clone(),
             container,
             network,
             mounts,
@@ -175,7 +184,6 @@ mod tests {
     #[cfg(target_os = "macos")]
     use crate::resource::ResourceKind;
 
-    #[cfg(target_os = "macos")]
     fn token() -> OwnershipToken {
         OwnershipToken::parse("0123456789abcdef0123456789abcdef").unwrap()
     }
@@ -211,5 +219,21 @@ mod tests {
         assert!(EnvironmentFile::new("relative.env").is_err());
         assert!(ResourceLimits::new(Some(0), None).is_err());
         assert!(ResourceLimits::new(None, Some(0)).is_err());
+    }
+
+    #[test]
+    fn plans_reject_image_values_that_look_like_cli_options() {
+        assert!(matches!(
+            RunPlan::new(
+                "--rm",
+                "test",
+                &token(),
+                false,
+                Vec::new(),
+                None,
+                ResourceLimits::default(),
+            ),
+            Err(PlanError::InvalidImage)
+        ));
     }
 }

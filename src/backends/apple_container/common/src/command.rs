@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 use std::ffi::{OsStr, OsString};
-use std::time::Duration;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
@@ -164,6 +167,227 @@ pub trait CommandRunner: Send + Sync {
     fn run(&self, command: &CliCommand) -> Result<CommandOutput, CommandError>;
 }
 
+/// Production runner for bounded Apple Container management commands.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemCommandRunner;
+
+impl CommandRunner for SystemCommandRunner {
+    fn run(&self, command: &CliCommand) -> Result<CommandOutput, CommandError> {
+        run_program(command.program(), command)
+    }
+}
+
+fn run_program(program: &OsStr, command: &CliCommand) -> Result<CommandOutput, CommandError> {
+    let diagnostic = command.diagnostic();
+    let mut child = Command::new(program)
+        .args(command.arguments())
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            CommandError::new(
+                CommandErrorKind::Spawn,
+                format!("failed to start {diagnostic}: {error}"),
+            )
+        })?;
+
+    let Some(stdout) = child.stdout.take() else {
+        terminate_and_reap(&mut child);
+        return Err(CommandError::new(
+            CommandErrorKind::Spawn,
+            format!("{diagnostic} did not provide a stdout pipe"),
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_and_reap(&mut child);
+        return Err(CommandError::new(
+            CommandErrorKind::Spawn,
+            format!("{diagnostic} did not provide a stderr pipe"),
+        ));
+    };
+
+    let (sender, receiver) = mpsc::channel();
+    read_stream(stdout, StreamKind::Stdout, sender.clone());
+    read_stream(stderr, StreamKind::Stderr, sender);
+
+    let deadline = Instant::now() + command.timeout();
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut readers_open = 2;
+    let exit_code = loop {
+        drain_available(
+            &receiver,
+            &mut stdout,
+            &mut stderr,
+            &mut readers_open,
+            command.output_limit(),
+            &diagnostic,
+            &mut child,
+        )?;
+
+        match child.try_wait() {
+            Ok(Some(status)) => break status.code(),
+            Ok(None) => {}
+            Err(error) => {
+                terminate_and_reap(&mut child);
+                return Err(CommandError::new(
+                    CommandErrorKind::Wait,
+                    format!("failed while waiting for {diagnostic}: {error}"),
+                ));
+            }
+        }
+
+        if Instant::now() >= deadline {
+            terminate_and_reap(&mut child);
+            return Err(CommandError::new(
+                CommandErrorKind::Timeout,
+                format!("{diagnostic} exceeded its {:?} timeout", command.timeout()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    let drain_deadline = Instant::now() + Duration::from_secs(1);
+    while readers_open > 0 {
+        if Instant::now() >= drain_deadline {
+            return Err(CommandError::new(
+                CommandErrorKind::Wait,
+                format!("{diagnostic} output pipes did not close after process exit"),
+            ));
+        }
+        match receiver.recv_timeout(Duration::from_millis(10)) {
+            Ok(message) => append_message(
+                message,
+                &mut stdout,
+                &mut stderr,
+                &mut readers_open,
+                command.output_limit(),
+                &diagnostic,
+            )?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => readers_open = 0,
+        }
+    }
+
+    Ok(CommandOutput {
+        exit_code,
+        stdout,
+        stderr,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamKind {
+    Stdout,
+    Stderr,
+}
+
+enum StreamMessage {
+    Data(StreamKind, Vec<u8>),
+    Closed,
+    Failed(StreamKind, std::io::Error),
+}
+
+fn read_stream(
+    mut stream: impl Read + Send + 'static,
+    kind: StreamKind,
+    sender: mpsc::Sender<StreamMessage>,
+) {
+    std::thread::spawn(move || {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = sender.send(StreamMessage::Closed);
+                    return;
+                }
+                Ok(count) => {
+                    if sender
+                        .send(StreamMessage::Data(kind, buffer[..count].to_vec()))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(StreamMessage::Failed(kind, error));
+                    return;
+                }
+            }
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_available(
+    receiver: &mpsc::Receiver<StreamMessage>,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    readers_open: &mut usize,
+    output_limit: usize,
+    diagnostic: &str,
+    child: &mut std::process::Child,
+) -> Result<(), CommandError> {
+    while let Ok(message) = receiver.try_recv() {
+        if let Err(error) = append_message(
+            message,
+            stdout,
+            stderr,
+            readers_open,
+            output_limit,
+            diagnostic,
+        ) {
+            terminate_and_reap(child);
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn append_message(
+    message: StreamMessage,
+    stdout: &mut Vec<u8>,
+    stderr: &mut Vec<u8>,
+    readers_open: &mut usize,
+    output_limit: usize,
+    diagnostic: &str,
+) -> Result<(), CommandError> {
+    match message {
+        StreamMessage::Data(kind, bytes) => {
+            if stdout
+                .len()
+                .saturating_add(stderr.len())
+                .saturating_add(bytes.len())
+                > output_limit
+            {
+                return Err(CommandError::new(
+                    CommandErrorKind::OutputLimit,
+                    format!("{diagnostic} output exceeded the {output_limit}-byte limit"),
+                ));
+            }
+            match kind {
+                StreamKind::Stdout => stdout.extend_from_slice(&bytes),
+                StreamKind::Stderr => stderr.extend_from_slice(&bytes),
+            }
+        }
+        StreamMessage::Closed => *readers_open = readers_open.saturating_sub(1),
+        StreamMessage::Failed(kind, error) => {
+            return Err(CommandError::new(
+                CommandErrorKind::Wait,
+                format!("{diagnostic} failed reading {kind:?}: {error}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn terminate_and_reap(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +414,22 @@ mod tests {
         );
         assert_eq!(command.timeout(), DEFAULT_COMMAND_TIMEOUT);
         assert_eq!(command.output_limit(), DEFAULT_COMMAND_OUTPUT_LIMIT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_enforces_timeout() {
+        let command =
+            CliCommand::new([CliArgument::literal("5")]).with_timeout(Duration::from_millis(25));
+        let error = run_program(OsStr::new("/bin/sleep"), &command).unwrap_err();
+        assert_eq!(error.kind, CommandErrorKind::Timeout);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_enforces_combined_output_limit() {
+        let command = CliCommand::new([CliArgument::literal("x")]).with_output_limit(128);
+        let error = run_program(OsStr::new("/usr/bin/yes"), &command).unwrap_err();
+        assert_eq!(error.kind, CommandErrorKind::OutputLimit);
     }
 }

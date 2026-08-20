@@ -70,21 +70,44 @@ pub fn spawn_runner(
         ContainmentBackend::Bubblewrap => spawn_bubblewrap(request, logger),
         ContainmentBackend::ProcessContainer => spawn_process_container(request, logger),
         ContainmentBackend::Wslc => spawn_wslc(request, logger),
-        ContainmentBackend::AppleContainer => {
-            if !request.experimental_enabled {
-                return Err(MxcError::malformed_request(
-                    "Apple Container is an experimental feature. Use --experimental flag.",
-                ));
-            }
-            Err(MxcError::unsupported_containment(
-                "Apple Container configuration is recognized, but streaming execution is not implemented",
-            ))
-        }
+        ContainmentBackend::AppleContainer => spawn_apple_container(request, logger),
         other => Err(MxcError::unsupported_containment(format!(
             "the mxc engine does not yet support streaming for the '{}' backend",
             other.wire_name()
         ))),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_apple_container(
+    request: &ExecutionRequest,
+    logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "Apple Container is an experimental feature. Use --experimental flag.",
+        ));
+    }
+    let mut runner = apple_container_common::AppleContainerBackend::new();
+    runner
+        .spawn(request, logger, StdioMode::Pipes)
+        .map_err(map_spawn_error)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn spawn_apple_container(
+    request: &ExecutionRequest,
+    _logger: &mut Logger,
+) -> Result<Box<dyn SandboxProcess>, MxcError> {
+    if !request.experimental_enabled {
+        return Err(MxcError::malformed_request(
+            "Apple Container is an experimental feature. Use --experimental flag.",
+        ));
+    }
+    Err(MxcError::unsupported_containment(
+        "Apple Container is only available on macOS",
+    ))
 }
 
 /// Map a backend's `spawn` failure `ScriptResponse` to an
@@ -104,6 +127,7 @@ fn map_spawn_error(resp: ScriptResponse) -> MxcError {
     }
     match resp.failure_phase {
         FailurePhase::BackendUnavailable => MxcError::backend_unavailable(message),
+        FailurePhase::Rejected => MxcError::policy_validation(message),
         _ => MxcError::backend_error(message),
     }
 }
@@ -306,7 +330,8 @@ mod tests {
     }
 
     #[test]
-    fn streaming_apple_container_is_gated_then_unimplemented() {
+    #[cfg(not(target_os = "macos"))]
+    fn streaming_apple_container_is_gated_then_rejected_off_macos() {
         let mut request = build_request(&minimal_policy(), None).expect("build_request");
         request.inner.containment = ContainmentBackend::AppleContainer;
         let mut logger = Logger::new(Mode::Buffer);
@@ -319,7 +344,7 @@ mod tests {
 
         request.inner.experimental_enabled = true;
         let error = match spawn_runner(&request.inner, &mut logger) {
-            Ok(_) => panic!("Apple Container streaming must remain unimplemented"),
+            Ok(_) => panic!("Apple Container must be rejected off macOS"),
             Err(error) => error,
         };
         assert_eq!(error.code, MxcErrorCode::UnsupportedContainment);

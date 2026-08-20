@@ -1006,6 +1006,7 @@ fn convert_wire_config(
     normalize_filesystem_paths(&mut policy, logger);
 
     // Fallback section
+    policy.fallback_specified = cfg.fallback.is_some();
     if let Some(fbcfg) = cfg.fallback {
         if let Some(v) = fbcfg.allow_dacl_mutation {
             policy.fallback.allow_dacl_mutation = v;
@@ -1018,6 +1019,7 @@ fn convert_wire_config(
     // to `Block` either way).
     policy.network_specified = cfg.network.is_some();
     if let Some(net) = cfg.network {
+        policy.network_enforcement_mode_specified = net.enforcement_mode.is_some();
         // Presence of any network *mode* field (everything except `proxy`), so
         // post-provision phases can reject an immutable-posture change by
         // presence while still accepting a proxy-only network block.
@@ -3257,6 +3259,32 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(!req.policy.network_specified);
+    }
+
+    #[test]
+    fn enforcement_mode_presence_is_preserved_even_at_its_default() {
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "network": {"enforcementMode": "capabilities"}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.network_enforcement_mode_specified);
+    }
+
+    #[test]
+    fn fallback_presence_is_preserved_even_when_empty() {
+        let json = r#"{
+            "process": {"commandLine": "echo x"},
+            "fallback": {}
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.policy.fallback_specified);
     }
 
     #[test]

@@ -38,17 +38,22 @@ pub struct PlatformSupport {
 pub fn platform_support() -> PlatformSupport {
     #[cfg(target_os = "macos")]
     {
+        let mut available_methods = Vec::new();
         if std::path::Path::new("/usr/bin/sandbox-exec").exists() {
+            available_methods.push("seatbelt".to_string());
+        }
+        if apple_container_common::is_available() {
+            available_methods.push("apple_container".to_string());
+        }
+        if available_methods.is_empty() {
             PlatformSupport {
-                is_supported: true,
-                available_methods: vec!["seatbelt".to_string()],
+                reason: Some("no supported macOS containment backend is available".to_string()),
                 ..Default::default()
             }
         } else {
             PlatformSupport {
-                reason: Some(
-                    "/usr/bin/sandbox-exec not found; macOS install is incomplete".to_string(),
-                ),
+                is_supported: true,
+                available_methods,
                 ..Default::default()
             }
         }
@@ -160,6 +165,7 @@ mod tests {
             Containment::Seatbelt,
             Containment::IsolationSession,
             Containment::Bubblewrap,
+            Containment::AppleContainer,
         ]
         .iter()
         .map(wire_name)
@@ -178,6 +184,7 @@ mod tests {
         );
         assert_eq!(wire_name(&Containment::Bubblewrap), "bubblewrap");
         assert_eq!(wire_name(&Containment::Seatbelt), "seatbelt");
+        assert_eq!(wire_name(&Containment::AppleContainer), "apple_container");
     }
 
     /// Exercises the live per-target arm, catching a typo'd literal (e.g.

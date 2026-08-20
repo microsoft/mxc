@@ -1,0 +1,11 @@
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce AS firewall
+RUN apk add --no-cache iptables
+
+FROM ghcr.io/apple/containerization/vminit:0.40.1@sha256:8a097617a16ec70420bf452bd17c219ca4fde5e5d5d9b3e9c50e0f8a1d3913a2
+COPY --from=firewall /bin /bin
+COPY --from=firewall /lib /lib
+COPY --from=firewall /sbin /sbin
+COPY --from=firewall /usr /usr
+RUN mv /sbin/vminitd /sbin/vminitd.real
+COPY vminitd-wrapper.sh /sbin/vminitd
+RUN chmod 0755 /sbin/vminitd
