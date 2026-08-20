@@ -6,7 +6,7 @@ use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
 fn windows_sandbox_request(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "experimental": {{
                 "windows_sandbox": {{{fields}}}
             }},
@@ -35,7 +35,7 @@ fn accepts_windows_sandbox_fields() {
 #[test]
 fn rejects_incorrect_windows_sandbox_spellings() {
     let wrong_outer_name = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "experimental": {"windowsSandbox": {}},
         "process": {"commandLine": "echo"}
     }"#;
@@ -88,7 +88,7 @@ fn rejects_unknown_windows_sandbox_field() {
 
 #[test]
 fn rejects_duplicate_windows_sandbox_fields() {
-    let version_and_process = r#""version": "0.8.0-alpha", "process": {"commandLine": "echo"}"#;
+    let version_and_process = r#""version": "0.9.0-alpha", "process": {"commandLine": "echo"}"#;
 
     assert_invalid_cases(
         [

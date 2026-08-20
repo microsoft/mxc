@@ -4,21 +4,21 @@
 use super::common::{
     assert_invalid as assert_invalid_request, assert_valid as assert_valid_request,
 };
-use mxc_config_contract::dev::StopRequest;
+use mxc_config_contract::dev::DeprovisionRequest;
 
 fn assert_valid(json: &str) {
-    assert_valid_request::<StopRequest>(json);
+    assert_valid_request::<DeprovisionRequest>(json);
 }
 
 fn assert_invalid(json: &str) {
-    assert_invalid_request::<StopRequest>(json);
+    assert_invalid_request::<DeprovisionRequest>(json);
 }
 
 fn request_with_additional_fields(additional_fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
-            "phase": "stop",
+            "version": "0.9.0-alpha",
+            "phase": "deprovision",
             "sandboxId": "test123456",
             {additional_fields}
         }}"#
@@ -26,22 +26,22 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
 }
 
 #[test]
-fn accepts_minimal_stop_request() {
+fn accepts_minimal_deprovision_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn accepts_stop_request_with_optional_fields() {
+fn accepts_deprovision_request_with_optional_fields() {
     let json = r#"{
-        "$schema": "https://example.com/stop.schema.json",
+        "$schema": "https://example.com/deprovision.schema.json",
         "_comment": "This is a comment",
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "correlationVector": "test-correlation-vector",
         "experimental": {
@@ -54,18 +54,18 @@ fn accepts_stop_request_with_optional_fields() {
 }
 
 #[test]
-fn accepts_empty_stop_experimental_objects() {
+fn accepts_empty_deprovision_experimental_objects() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {}
     }"#;
     assert_valid(json);
 
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {
             "telemetry": {}
@@ -75,12 +75,12 @@ fn accepts_empty_stop_experimental_objects() {
 }
 
 #[test]
-fn accepts_stop_telemetry_enabled_values() {
+fn accepts_deprovision_telemetry_enabled_values() {
     for enabled in [true, false] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
-                "phase": "stop",
+                "version": "0.9.0-alpha",
+                "phase": "deprovision",
                 "sandboxId": "test123456",
                 "experimental": {{
                     "telemetry": {{
@@ -96,19 +96,19 @@ fn accepts_stop_telemetry_enabled_values() {
 #[test]
 fn accepts_empty_sandbox_id_structurally() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": ""
     }"#;
     assert_valid(json);
 }
 
 #[test]
-fn stop_phase_accepts_exact_and_escaped_spelling() {
-    for phase in ["stop", "sto\\u0070"] {
+fn deprovision_phase_accepts_exact_and_escaped_spelling() {
+    for phase in ["deprovision", "deprovis\\u0069on"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{}",
                 "sandboxId": "test123456"
             }}"#,
@@ -119,11 +119,11 @@ fn stop_phase_accepts_exact_and_escaped_spelling() {
 }
 
 #[test]
-fn stop_request_rejects_other_phases() {
-    for phase in ["provision", "start", "exec", "deprovision"] {
+fn deprovision_request_rejects_other_phases() {
+    for phase in ["provision", "start", "exec", "stop"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{}",
                 "sandboxId": "test123456"
             }}"#,
@@ -134,22 +134,22 @@ fn stop_request_rejects_other_phases() {
 }
 
 #[test]
-fn rejects_missing_required_stop_fields() {
+fn rejects_missing_required_deprovision_fields() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop"
+        "version": "0.9.0-alpha",
+        "phase": "deprovision"
     }"#;
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "sandboxId": "test123456"
     }"#;
 
     assert_invalid(json);
 
     let json = r#"{
-        "phase": "stop",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
 
@@ -157,16 +157,16 @@ fn rejects_missing_required_stop_fields() {
 }
 
 #[test]
-fn rejects_null_required_stop_fields() {
+fn rejects_null_required_deprovision_fields() {
     let json = r#"{
         "version": null,
-        "phase": "stop",
+        "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": null,
         "sandboxId": "test123456"
     }"#;
@@ -174,8 +174,8 @@ fn rejects_null_required_stop_fields() {
     assert_invalid(json);
 
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": null
     }"#;
 
@@ -187,7 +187,7 @@ fn rejects_non_string_phase_field() {
     for phase in ["123", "true", "false", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": {phase},
                 "sandboxId": "test123456"
             }}"#
@@ -201,8 +201,8 @@ fn rejects_non_string_sandbox_id_field() {
     for sandbox_id in ["123", "true", "false", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
-                "phase": "stop",
+                "version": "0.9.0-alpha",
+                "phase": "deprovision",
                 "sandboxId": {sandbox_id}
             }}"#
         );
@@ -215,8 +215,8 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
     for enabled in ["123", "\"true\"", "\"false\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
-                "phase": "stop",
+                "version": "0.9.0-alpha",
+                "phase": "deprovision",
                 "sandboxId": "test123456",
                 "experimental": {{
                     "telemetry": {{
@@ -243,10 +243,10 @@ fn rejects_null_optional_fields() {
 }
 
 #[test]
-fn rejects_unknown_stop_fields() {
+fn rejects_unknown_deprovision_fields() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "unknownField": "value"
     }"#;
@@ -254,10 +254,10 @@ fn rejects_unknown_stop_fields() {
 }
 
 #[test]
-fn rejects_unknown_stop_experimental_fields() {
+fn rejects_unknown_deprovision_experimental_fields() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {
             "unknownField": "value"
@@ -267,10 +267,10 @@ fn rejects_unknown_stop_experimental_fields() {
 }
 
 #[test]
-fn rejects_unknown_stop_experimental_telemetry_fields() {
+fn rejects_unknown_deprovision_experimental_telemetry_fields() {
     let json = r#"{
-        "version": "0.8.0-alpha",
-        "phase": "stop",
+        "version": "0.9.0-alpha",
+        "phase": "deprovision",
         "sandboxId": "test123456",
         "experimental": {
             "telemetry": {
@@ -318,12 +318,12 @@ fn rejects_backend_experimental_fields() {
 }
 
 #[test]
-fn rejects_duplicate_stop_fields() {
+fn rejects_duplicate_deprovision_fields() {
     for fields in [
         r#""$schema": "first", "$schema": "second""#,
         r#""_comment": "first", "_comment": "second""#,
-        r#""version": "0.8.0-alpha""#,
-        r#""phase": "stop""#,
+        r#""version": "0.9.0-alpha""#,
+        r#""phase": "deprovision""#,
         r#""sandboxId": "other""#,
         r#""correlationVector": "first", "correlationVector": "second""#,
         r#""experimental": {}, "experimental": {}"#,
@@ -333,7 +333,7 @@ fn rejects_duplicate_stop_fields() {
 }
 
 #[test]
-fn rejects_duplicate_stop_experimental_fields() {
+fn rejects_duplicate_deprovision_experimental_fields() {
     for experimental in [
         r#""telemetry": {}, "telemetry": {}"#,
         r#""telemetry": {"enabled": true, "enabled": false}"#,
@@ -348,7 +348,7 @@ fn rejects_duplicate_stop_experimental_fields() {
 fn rejects_invalid_version_field() {
     for version in [
         r#""0.7.0-alpha""#,
-        r#""0.8.0""#,
+        r#""0.9.0""#,
         r#""invalid""#,
         "123",
         "true",
@@ -358,7 +358,7 @@ fn rejects_invalid_version_field() {
         let json = format!(
             r#"{{
                 "version": {version},
-                "phase": "stop",
+                "phase": "deprovision",
                 "sandboxId": "test123456"
             }}"#
         );
@@ -369,7 +369,7 @@ fn rejects_invalid_version_field() {
 #[test]
 fn rejects_unknown_phase_value() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "restart",
         "sandboxId": "test123456"
     }"#;

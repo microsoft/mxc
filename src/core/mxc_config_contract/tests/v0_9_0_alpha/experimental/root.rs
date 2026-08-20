@@ -6,7 +6,7 @@ use crate::common::{assert_invalid, assert_valid};
 #[test]
 fn accepts_experimental_section() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
         "experimental": {
             "test": {"message": "this is a message"}
@@ -19,7 +19,7 @@ fn accepts_experimental_section() {
 #[test]
 fn rejects_unknown_experimental_field() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
         "experimental": {
             "unknown": "value"
@@ -32,7 +32,7 @@ fn rejects_unknown_experimental_field() {
 #[test]
 fn rejects_null_experimental_section() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
         "experimental": null
     }"#;
@@ -43,7 +43,7 @@ fn rejects_null_experimental_section() {
 #[test]
 fn rejects_duplicate_experimental_section() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"},
         "experimental": {
             "test": {"message": "this is a message"}
@@ -61,7 +61,7 @@ fn rejects_moved_experimental_seatbelt_sections() {
     for field in [r#""seatbelt": {}"#, r#""macos_sandbox": {}"#] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "process": {{"commandLine": "echo"}},
                 "experimental": {{{field}}}
             }}"#
@@ -79,7 +79,7 @@ fn rejects_state_aware_experimental_sections() {
     ] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "process": {{"commandLine": "echo"}},
                 "experimental": {{{field}}}
             }}"#

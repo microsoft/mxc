@@ -1,11 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::published::v0_8_0_alpha::Request;
+use mxc_config_contract::dev::OneShotRequest;
 
 const VALID_FIXTURES: &[(&str, &str)] = &[
     ("minimal", include_str!("fixtures/valid/minimal.json")),
     ("complete", include_str!("fixtures/valid/complete.json")),
+    (
+        "experimental field",
+        include_str!("fixtures/valid/experimental.json"),
+    ),
     (
         "empty optional objects",
         include_str!("fixtures/valid/empty_optional_objects.json"),
@@ -71,7 +75,7 @@ const INVALID_FIXTURES: &[(&str, &str)] = &[
 #[test]
 fn accepts_valid_fixtures() {
     for (name, json) in VALID_FIXTURES {
-        serde_json::from_str::<Request>(json)
+        serde_json::from_str::<OneShotRequest>(json)
             .unwrap_or_else(|error| panic!("valid fixture '{name}' was rejected: {error}"));
     }
 }
@@ -80,7 +84,7 @@ fn accepts_valid_fixtures() {
 fn rejects_invalid_fixtures() {
     for (name, json) in INVALID_FIXTURES {
         assert!(
-            serde_json::from_str::<Request>(json).is_err(),
+            serde_json::from_str::<OneShotRequest>(json).is_err(),
             "invalid fixture '{name}' was accepted"
         );
     }

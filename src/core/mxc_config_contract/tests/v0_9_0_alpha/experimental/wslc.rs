@@ -6,7 +6,7 @@ use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
 fn wslc_request(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "experimental": {{
                 "wslc": {{{fields}}}
             }},
@@ -85,7 +85,7 @@ fn rejects_unknown_wslc_field() {
 
 #[test]
 fn rejects_duplicate_wslc_fields() {
-    let version_and_process = r#""version": "0.8.0-alpha", "process": {"commandLine": "echo"}"#;
+    let version_and_process = r#""version": "0.9.0-alpha", "process": {"commandLine": "echo"}"#;
 
     assert_invalid_cases(
         [
@@ -234,7 +234,7 @@ fn rejects_unknown_wslc_port_mapping_field() {
 
 #[test]
 fn rejects_duplicate_wslc_port_mapping_fields() {
-    let version_and_process = r#""version": "0.8.0-alpha", "process": {"commandLine": "echo"}"#;
+    let version_and_process = r#""version": "0.9.0-alpha", "process": {"commandLine": "echo"}"#;
 
     assert_invalid_cases(
         [

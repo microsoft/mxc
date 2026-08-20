@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
-
 use crate::common::{assert_invalid, assert_valid};
 
 #[test]
 fn accepts_complete_seatbelt_object() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "seatbelt": {
             "profileOverride": "none",
             "guiAccess": false,
@@ -26,7 +25,7 @@ fn accepts_every_seatbelt_launch_method() {
     for launch_method in ["exec", "open"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "launchMethod": "{launch_method}"
                 }},
@@ -41,7 +40,7 @@ fn accepts_every_seatbelt_launch_method() {
 #[test]
 fn rejects_invalid_seatbelt_launch_method() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "seatbelt": {
                 "launchMethod": "invalid"
             },
@@ -54,7 +53,7 @@ fn rejects_invalid_seatbelt_launch_method() {
 #[test]
 fn accepts_empty_profile_override() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "seatbelt": {
             "profileOverride": ""
         },
@@ -69,7 +68,7 @@ fn rejects_non_string_extra_mach_lookup_items() {
     for extra_mach_lookup in ["true", "false", "0", "1", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "extraMachLookups": [{extra_mach_lookup}]
                 }},
@@ -86,7 +85,7 @@ fn rejects_non_array_extra_mach_lookups() {
     for extra_mach_lookup in ["true", "false", "0", "1", "\"string\"", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "extraMachLookups": {extra_mach_lookup}
                 }},
@@ -103,7 +102,7 @@ fn rejects_non_string_profile_override_values() {
     for profile_override in ["true", "false", "0", "1", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "profileOverride": {profile_override}
                 }},
@@ -120,7 +119,7 @@ fn rejects_non_boolean_gui_access_values() {
     for gui_access in ["0", "1", "\"string\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "guiAccess": {gui_access}
                 }},
@@ -137,7 +136,7 @@ fn rejects_non_boolean_nested_pty_values() {
     for nested_pty in ["0", "1", "\"string\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "nestedPty": {nested_pty}
                 }},
@@ -154,7 +153,7 @@ fn rejects_non_boolean_keychain_access_values() {
     for keychain_access in ["0", "1", "\"string\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "keychainAccess": {keychain_access}
                 }},
@@ -169,7 +168,7 @@ fn rejects_non_boolean_keychain_access_values() {
 #[test]
 fn rejects_unknown_seatbelt_field() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "seatbelt": {
             "unknownField": "value"
         },
@@ -182,7 +181,7 @@ fn rejects_unknown_seatbelt_field() {
 #[test]
 fn accepts_macos_sandbox_section_alias() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "macos_sandbox": {
             "profileOverride": "none"
         },
@@ -195,7 +194,7 @@ fn accepts_macos_sandbox_section_alias() {
 #[test]
 fn rejects_seatbelt_and_macos_sandbox_section_alias_together() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "seatbelt": {
             "profileOverride": "none"
         },

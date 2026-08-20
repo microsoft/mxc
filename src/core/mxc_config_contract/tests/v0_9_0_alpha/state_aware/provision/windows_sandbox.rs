@@ -17,7 +17,7 @@ fn assert_invalid(json: &str) {
 fn request_with_additional_fields(additional_fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
             {additional_fields}
@@ -28,7 +28,7 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
 fn request_with_containment_value(containment: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": {containment}
         }}"#
@@ -39,7 +39,7 @@ fn request_with_containment_value(containment: &str) -> String {
 fn accepts_minimal_provision_request() {
     assert_valid(
         r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox"
         }"#,
@@ -52,7 +52,7 @@ fn accepts_provision_request_with_optional_fields() {
         r#"{
             "$schema": "https://example.com/provision.schema.json",
             "_comment": "Windows Sandbox provision",
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
             "filesystem": {
@@ -94,7 +94,7 @@ fn phase_accepts_exact_and_escaped_spelling() {
     for phase in ["provision", "provis\\u0069on"] {
         assert_valid(&format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{phase}",
                 "containment": "windows_sandbox"
             }}"#
@@ -107,7 +107,7 @@ fn rejects_other_phases() {
     for phase in ["start", "exec", "stop", "deprovision"] {
         assert_invalid(&format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{phase}",
                 "containment": "windows_sandbox"
             }}"#
@@ -144,8 +144,8 @@ fn rejects_non_string_containment_field() {
 fn rejects_missing_required_fields() {
     for json in [
         r#"{"phase":"provision","containment":"windows_sandbox"}"#,
-        r#"{"version":"0.8.0-alpha","containment":"windows_sandbox"}"#,
-        r#"{"version":"0.8.0-alpha","phase":"provision"}"#,
+        r#"{"version":"0.9.0-alpha","containment":"windows_sandbox"}"#,
+        r#"{"version":"0.9.0-alpha","phase":"provision"}"#,
     ] {
         assert_invalid(json);
     }
@@ -155,8 +155,8 @@ fn rejects_missing_required_fields() {
 fn rejects_null_required_fields() {
     for json in [
         r#"{"version":null,"phase":"provision","containment":"windows_sandbox"}"#,
-        r#"{"version":"0.8.0-alpha","phase":null,"containment":"windows_sandbox"}"#,
-        r#"{"version":"0.8.0-alpha","phase":"provision","containment":null}"#,
+        r#"{"version":"0.9.0-alpha","phase":null,"containment":"windows_sandbox"}"#,
+        r#"{"version":"0.9.0-alpha","phase":"provision","containment":null}"#,
     ] {
         assert_invalid(json);
     }
@@ -167,7 +167,7 @@ fn rejects_non_string_phase_field() {
     for phase in ["123", "true", "false", "[]", "{}"] {
         assert_invalid(&format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": {phase},
                 "containment": "windows_sandbox"
             }}"#
@@ -245,7 +245,7 @@ fn rejects_duplicate_fields() {
     for fields in [
         r#""$schema": "first", "$schema": "second""#,
         r#""_comment": "first", "_comment": "second""#,
-        r#""version": "0.8.0-alpha""#,
+        r#""version": "0.9.0-alpha""#,
         r#""phase": "provision""#,
         r#""containment": "windows_sandbox""#,
         r#""filesystem": {}, "filesystem": {}"#,
@@ -272,7 +272,7 @@ fn rejects_duplicate_nested_fields() {
 fn rejects_invalid_version_field() {
     for version in [
         r#""0.7.0-alpha""#,
-        r#""0.8.0""#,
+        r#""0.9.0""#,
         r#""invalid""#,
         "123",
         "true",
@@ -293,7 +293,7 @@ fn rejects_invalid_version_field() {
 fn rejects_unknown_phase_value() {
     assert_invalid(
         r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "restart",
             "containment": "windows_sandbox"
         }"#,

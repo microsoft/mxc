@@ -49,6 +49,10 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
     },
     ContractDescriptor {
         version: ContractVersion::V0_8_0Alpha,
+        status: ContractStatus::Published,
+    },
+    ContractDescriptor {
+        version: ContractVersion::V0_9_0Alpha,
         status: ContractStatus::Development,
     },
 ];
@@ -59,6 +63,7 @@ pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
         ContractVersion::V0_6_0Alpha => CONTRACTS[0],
         ContractVersion::V0_7_0Alpha => CONTRACTS[1],
         ContractVersion::V0_8_0Alpha => CONTRACTS[2],
+        ContractVersion::V0_9_0Alpha => CONTRACTS[3],
     }
 }
 
@@ -84,10 +89,11 @@ mod tests {
     #[test]
     fn test_supported_versions() {
         let versions = supported_versions();
-        assert_eq!(versions.len(), 3);
+        assert_eq!(versions.len(), 4);
         assert!(versions.contains(&ContractVersion::V0_6_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_7_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_8_0Alpha));
+        assert!(versions.contains(&ContractVersion::V0_9_0Alpha));
     }
 
     #[test]
@@ -104,3 +110,4 @@ mod tests {
         }
     }
 }
+

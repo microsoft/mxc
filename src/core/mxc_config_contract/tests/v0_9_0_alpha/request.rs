@@ -9,7 +9,7 @@ use mxc_config_contract::dev::{
 #[test]
 fn no_phase_selects_one_shot_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo"}
     }"#;
 
@@ -19,7 +19,7 @@ fn no_phase_selects_one_shot_request() {
 #[test]
 fn invalid_one_shot_root_returns_invalid_request() {
     let json = r#"{
-        "version": "0.8.0-alpha"
+        "version": "0.9.0-alpha"
     }"#;
 
     assert!(matches!(
@@ -34,7 +34,7 @@ fn invalid_one_shot_root_returns_invalid_request() {
 #[test]
 fn unknown_phase_returns_phase_error() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "restart"
     }"#;
 
@@ -50,7 +50,7 @@ fn non_string_phase_returns_phase_error() {
     for phase in ["42", "true", "{}", "[]"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": {phase},
                 "containment": "wslc"
             }}"#
@@ -65,7 +65,7 @@ fn non_string_phase_returns_phase_error() {
 #[test]
 fn missing_provision_containment_returns_containment_error() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "provision"
     }"#;
 
@@ -78,7 +78,7 @@ fn missing_provision_containment_returns_containment_error() {
 #[test]
 fn unsupported_provision_containment_returns_containment_error() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "somevalue"
     }"#;
@@ -93,7 +93,7 @@ fn unsupported_provision_containment_returns_containment_error() {
 fn provision_phase_with_isolation_session_containment_selects_isolation_session_provision_request()
 {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -111,7 +111,7 @@ fn provision_phase_with_isolation_session_containment_selects_isolation_session_
 #[test]
 fn provision_phase_with_windows_sandbox_containment_selects_windows_sandbox_provision_request() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox"
     }"#;
@@ -125,7 +125,7 @@ fn provision_phase_with_windows_sandbox_containment_selects_windows_sandbox_prov
 #[test]
 fn provision_phase_with_wslc_containment_selects_wslc_provision_request() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "wslc"
     }"#;
@@ -139,7 +139,7 @@ fn provision_phase_with_wslc_containment_selects_wslc_provision_request() {
 #[test]
 fn invalid_provision_phase_isolation_session_root_returns_invalid_request() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session"
     }"#;
@@ -156,7 +156,7 @@ fn invalid_provision_phase_isolation_session_root_returns_invalid_request() {
 #[test]
 fn deprovision_phase_selects_deprovision_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "deprovision",
         "sandboxId": "test123456"
     }"#;
@@ -170,7 +170,7 @@ fn deprovision_phase_selects_deprovision_request() {
 #[test]
 fn invalid_deprovision_phase_root_returns_invalid_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "deprovision"
     }"#;
 
@@ -186,7 +186,7 @@ fn invalid_deprovision_phase_root_returns_invalid_request() {
 #[test]
 fn exec_phase_selects_exec_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "test123456",
         "process": {"commandLine": "echo"}
@@ -198,7 +198,7 @@ fn exec_phase_selects_exec_request() {
 #[test]
 fn invalid_exec_phase_root_returns_invalid_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "test123456"
     }"#;
@@ -215,7 +215,7 @@ fn invalid_exec_phase_root_returns_invalid_request() {
 #[test]
 fn start_phase_selects_start_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "start",
         "sandboxId": "test123456"
     }"#;
@@ -226,7 +226,7 @@ fn start_phase_selects_start_request() {
 #[test]
 fn invalid_start_phase_root_returns_invalid_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "start"
     }"#;
 
@@ -242,7 +242,7 @@ fn invalid_start_phase_root_returns_invalid_request() {
 #[test]
 fn stop_phase_selects_stop_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "stop",
         "sandboxId": "test123456"
     }"#;
@@ -253,7 +253,7 @@ fn stop_phase_selects_stop_request() {
 #[test]
 fn invalid_stop_phase_root_returns_invalid_request() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "stop"
     }"#;
 

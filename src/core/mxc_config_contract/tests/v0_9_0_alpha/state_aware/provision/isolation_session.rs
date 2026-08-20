@@ -17,7 +17,7 @@ fn assert_invalid(json: &str) {
 fn request_with_additional_fields(additional_fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {{
@@ -32,7 +32,7 @@ fn request_with_additional_fields(additional_fields: &str) -> String {
 fn request_with_network_fields(network_fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {{{network_fields}}}
@@ -43,7 +43,7 @@ fn request_with_network_fields(network_fields: &str) -> String {
 fn request_with_containment_value(containment: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": {containment},
             "network": {{
@@ -57,7 +57,7 @@ fn request_with_containment_value(containment: &str) -> String {
 #[test]
 fn accepts_minimal_provision_request() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -73,7 +73,7 @@ fn accepts_provision_request_with_optional_fields() {
     let json = r#"{
         "$schema": "https://example.com/provision.schema.json",
         "_comment": "This is a comment",
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
         "network": {
@@ -111,7 +111,7 @@ fn accepts_provision_telemetry_enabled_values() {
     for enabled in [true, false] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "provision",
                 "containment": "isolation_session",
                 "network": {{
@@ -134,7 +134,7 @@ fn provision_phase_accepts_exact_and_escaped_spelling() {
     for phase in ["provision", "pr\\u006Fvision"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{phase}",
                 "containment": "isolation_session",
                 "network": {{
@@ -152,7 +152,7 @@ fn provision_request_rejects_other_phases() {
     for phase in ["deprovision", "exec", "start", "stop"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "{phase}",
                 "containment": "isolation_session",
                 "network": {{
@@ -170,7 +170,7 @@ fn containment_accepts_exact_and_escaped_spelling() {
     for containment in ["isolation_session", "is\\u006Flation_session"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "provision",
                 "containment": "{containment}",
                 "network": {{
@@ -196,7 +196,7 @@ fn rejects_missing_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "isolation_session",
             "network": {
                 "defaultPolicy": "allow",
@@ -206,7 +206,7 @@ fn rejects_missing_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "network": {
                 "defaultPolicy": "allow",
@@ -216,14 +216,14 @@ fn rejects_missing_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session"
     }"#;
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -233,7 +233,7 @@ fn rejects_missing_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -257,7 +257,7 @@ fn rejects_null_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": null,
             "containment": "isolation_session",
             "network": {
@@ -268,7 +268,7 @@ fn rejects_null_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": null,
             "network": {
@@ -279,7 +279,7 @@ fn rejects_null_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": null
@@ -287,7 +287,7 @@ fn rejects_null_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -298,7 +298,7 @@ fn rejects_null_required_provision_fields() {
     assert_invalid(json);
 
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -314,7 +314,7 @@ fn rejects_non_string_phase_field() {
     for phase in ["123", "true", "false", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": {phase},
                 "containment": "isolation_session",
                 "network": {{
@@ -332,7 +332,7 @@ fn rejects_non_boolean_experimental_telemetry_enabled_field() {
     for enabled in ["123", "\"true\"", "\"false\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "phase": "provision",
                 "containment": "isolation_session",
                 "network": {{
@@ -368,7 +368,7 @@ fn rejects_null_optional_fields() {
 #[test]
 fn rejects_unknown_provision_fields() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -383,7 +383,7 @@ fn rejects_unknown_provision_fields() {
 #[test]
 fn rejects_unknown_provision_experimental_fields() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -400,7 +400,7 @@ fn rejects_unknown_provision_experimental_fields() {
 #[test]
 fn rejects_unknown_provision_experimental_telemetry_fields() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -419,7 +419,7 @@ fn rejects_unknown_provision_experimental_telemetry_fields() {
 #[test]
 fn rejects_unknown_provision_experimental_isolation_session_fields() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -438,7 +438,7 @@ fn rejects_unknown_provision_experimental_isolation_session_fields() {
 #[test]
 fn rejects_unknown_provision_experimental_isolation_session_provision_fields() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -524,7 +524,7 @@ fn rejects_duplicate_provision_fields() {
     for fields in [
         r#""$schema": "first", "$schema": "second""#,
         r#""_comment": "first", "_comment": "second""#,
-        r#""version": "0.8.0-alpha""#,
+        r#""version": "0.9.0-alpha""#,
         r#""phase": "provision""#,
         r#""containment": "isolation_session""#,
         r#""network": {}"#,
@@ -552,7 +552,7 @@ fn rejects_duplicate_provision_experimental_fields() {
 fn rejects_invalid_version_field() {
     for version in [
         r#""0.7.0-alpha""#,
-        r#""0.8.0""#,
+        r#""0.9.0""#,
         r#""invalid""#,
         "123",
         "true",
@@ -577,7 +577,7 @@ fn rejects_invalid_version_field() {
 #[test]
 fn rejects_unknown_phase_value() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "startup",
         "containment": "isolation_session",
         "network": {
@@ -646,7 +646,7 @@ fn network_default_policy_accepts_exact_and_escaped_spelling() {
 #[test]
 fn rejects_network_policy_block() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {
@@ -660,7 +660,7 @@ fn rejects_network_policy_block() {
 #[test]
 fn rejects_allow_local_network_false() {
     let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {

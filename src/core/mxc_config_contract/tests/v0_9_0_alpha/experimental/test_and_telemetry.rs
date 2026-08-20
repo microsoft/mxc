@@ -6,7 +6,7 @@ use crate::common::{assert_invalid, assert_invalid_cases, assert_valid};
 #[test]
 fn accepts_empty_test_object() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "experimental": {"test": {}},
         "process": {"commandLine": "echo"}
     }"#;
@@ -19,7 +19,7 @@ fn accepts_test_message_values() {
     for message in ["", "Hello, world!", "This is a test message."] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "experimental": {{
                     "test": {{
                         "message": "{message}"
@@ -38,7 +38,7 @@ fn rejects_non_string_test_message_values() {
     for message in ["null", "true", "false", "123", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "experimental": {{
                     "test": {{
                         "message": {message}
@@ -55,7 +55,7 @@ fn rejects_non_string_test_message_values() {
 #[test]
 fn rejects_unknown_test_field() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "experimental": {
             "test": {
                 "unknownField": "value"
@@ -69,7 +69,7 @@ fn rejects_unknown_test_field() {
 
 #[test]
 fn rejects_duplicate_test_fields() {
-    let version_and_process = r#""version": "0.8.0-alpha", "process": {"commandLine": "echo"}"#;
+    let version_and_process = r#""version": "0.9.0-alpha", "process": {"commandLine": "echo"}"#;
 
     assert_invalid_cases(
         [
@@ -91,7 +91,7 @@ fn rejects_duplicate_test_fields() {
 #[test]
 fn accepts_empty_telemetry_object() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "experimental": {"telemetry": {}},
         "process": {"commandLine": "echo"}
     }"#;
@@ -104,7 +104,7 @@ fn accepts_telemetry_enabled_values() {
     for enabled in ["true", "false"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "experimental": {{
                     "telemetry": {{
                         "enabled": {enabled}
@@ -123,7 +123,7 @@ fn rejects_non_boolean_telemetry_enabled_values() {
     for enabled in ["null", "123", "\"true\"", "\"false\"", "[]", "{}"] {
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "experimental": {{
                     "telemetry": {{
                         "enabled": {enabled}
@@ -140,7 +140,7 @@ fn rejects_non_boolean_telemetry_enabled_values() {
 #[test]
 fn rejects_unknown_telemetry_field() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "experimental": {
             "telemetry": {
                 "unknownField": "value"
@@ -154,7 +154,7 @@ fn rejects_unknown_telemetry_field() {
 
 #[test]
 fn rejects_duplicate_telemetry_fields() {
-    let version_and_process = r#""version": "0.8.0-alpha", "process": {"commandLine": "echo"}"#;
+    let version_and_process = r#""version": "0.9.0-alpha", "process": {"commandLine": "echo"}"#;
 
     assert_invalid_cases(
         [
