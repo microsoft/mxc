@@ -667,7 +667,10 @@ mod tests {
     }
 
     #[test]
-    fn trace_input_cannot_collide_with_verbose_logging_output() {
+    fn rejects_user_selected_trace_path_that_matches_derived_verbose_output() {
+        // `--trace-file` is caller-controlled, while this sibling path is
+        // derived from denials.json. Without this check, publishing the verbose
+        // output would overwrite the retained ETL before post-processing ends.
         let trace = Path::new(r"C:\captures\denials.verbose.json");
         let error = prepare_config_output_paths(
             None,

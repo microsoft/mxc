@@ -445,23 +445,71 @@ fn backup_existing_output(
     final_path: &Path,
     kind: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    if !final_path.try_exists().map_err(|error| {
+    backup_existing_output_with(operation, final_path, kind, persist_existing_file_noclobber)
+}
+
+fn backup_existing_output_with(
+    operation: &str,
+    final_path: &Path,
+    kind: &str,
+    persist: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<Option<PathBuf>> {
+    let file = match std::fs::File::open(final_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "{operation} failed to inspect {kind} output file {}: {error}",
+                final_path.display()
+            )))
+        }
+    };
+    let expected = PromotedOutput::from_file(file).map_err(|error| {
         std::io::Error::other(format!(
-            "{operation} failed to inspect {kind} output file {}: {error}",
+            "{operation} failed to identify existing {kind} output file {}: {error}",
             final_path.display()
         ))
-    })? {
-        return Ok(None);
-    }
-
+    })?;
     let backup_path = vacant_sibling_path(operation, final_path, kind)?;
-    persist_existing_file_noclobber(final_path, &backup_path).map_err(|error| {
+    persist(final_path, &backup_path).map_err(|error| {
         std::io::Error::other(format!(
             "{operation} failed to back up {kind} output file {}: {error}",
             final_path.display()
         ))
     })?;
-    Ok(Some(backup_path))
+    let matches = expected.matches_path(&backup_path).map_err(|error| {
+        std::io::Error::other(format!(
+            "{operation} failed to verify backed-up {kind} output file {}: {error}",
+            backup_path.display()
+        ))
+    });
+    drop(expected);
+
+    match matches {
+        Ok(true) => Ok(Some(backup_path)),
+        Ok(false) => {
+            let error = std::io::Error::other(format!(
+                "{operation} detected that {kind} output {} was replaced while it was being backed up",
+                final_path.display()
+            ));
+            match persist_existing_file_noclobber(&backup_path, final_path) {
+                Ok(()) => Err(error),
+                Err(restore_error) => Err(std::io::Error::other(format!(
+                    "{error}; additionally failed to restore unowned file {} to {}: {restore_error}",
+                    backup_path.display(),
+                    final_path.display()
+                ))),
+            }
+        }
+        Err(error) => match persist_existing_file_noclobber(&backup_path, final_path) {
+            Ok(()) => Err(error),
+            Err(restore_error) => Err(std::io::Error::other(format!(
+                "{error}; additionally failed to restore unverifiable file {} to {}: {restore_error}",
+                backup_path.display(),
+                final_path.display()
+            ))),
+        },
+    }
 }
 
 fn vacant_sibling_path(operation: &str, final_path: &Path, kind: &str) -> std::io::Result<PathBuf> {
@@ -875,6 +923,28 @@ mod tests {
         assert!(error.to_string().contains("identity check failed"));
         assert!(error.to_string().contains("quarantine.tmp"));
         assert!(error.to_string().contains("restore failed"));
+    }
+
+    #[test]
+    fn backup_restores_concurrent_replacement_instead_of_claiming_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let final_path = directory.path().join("denials.json");
+        std::fs::write(&final_path, b"original").unwrap();
+
+        let error = backup_existing_output_with(
+            "test",
+            &final_path,
+            "canonical",
+            |source_path, backup_path| {
+                std::fs::remove_file(source_path)?;
+                std::fs::write(source_path, b"concurrent")?;
+                persist_existing_file_noclobber(source_path, backup_path)
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("was replaced"));
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"concurrent");
     }
 
     #[test]
