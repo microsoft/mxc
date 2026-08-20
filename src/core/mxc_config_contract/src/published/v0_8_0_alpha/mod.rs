@@ -140,7 +140,7 @@ mod network;
 mod primitives;
 mod request;
 
-pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, NetworkProxy};
+pub use network::{DefaultNetworkPolicy, Network, NetworkEgress, NetworkEgressAllowDenyRules, NetworkEgressAllowDenyTo, NetworkEnforcementMode, NetworkIngress, NetworkProxy};
 pub use primitives::{NonEmptyString, OptionalField, True};
 pub use request::{
     Containment, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc, Process, ProcessContainer,
