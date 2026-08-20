@@ -33,14 +33,19 @@ const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
 /// Number of `iptables`/`ip6tables` calls the supervisor makes. Only used to
 /// size the rule-installation budget, so it is asserted against the script.
 const RULE_COMMAND_COUNT: u32 = 9;
-/// Budget for the rule-installation phase, which begins once slirp is up.
+/// Work the rule phase does beyond waiting on the lock: slirp coming up, plus
+/// one `nsenter` launch per rule. Headroom only — the supervisor raises a single
+/// signal for both phases, so they cannot be budgeted separately.
+const RULE_INSTALL_OVERHEAD: Duration =
+    Duration::from_secs(STARTUP_TIMEOUT.as_secs() + RULE_COMMAND_COUNT as u64);
+/// Budget for bringing slirp up and installing every egress rule.
 ///
-/// Sized so that lock contention -- the expected reason a rule stalls -- cannot
-/// exhaust the budget before `-w` has had a chance to succeed. A single
-/// [`STARTUP_TIMEOUT`] cannot cover this: it would reject a viable sandbox the
-/// moment one call waited on a busy host.
-const RULE_INSTALL_TIMEOUT: Duration =
-    Duration::from_secs(XTABLES_LOCK_WAIT.as_secs() * RULE_COMMAND_COUNT as u64);
+/// Covers the fully contended lock case plus [`RULE_INSTALL_OVERHEAD`], so a host
+/// that legitimately consumes most of its `-w` allowance is not cut off just
+/// short of finishing.
+const RULE_INSTALL_TIMEOUT: Duration = Duration::from_secs(
+    XTABLES_LOCK_WAIT.as_secs() * RULE_COMMAND_COUNT as u64 + RULE_INSTALL_OVERHEAD.as_secs(),
+);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
@@ -1288,13 +1293,23 @@ mod tests {
         }
     }
 
-    /// The budget must cover the worst case it was sized for, or `-w` just
-    /// moves the failure from iptables to the parent's timeout.
+    /// Equality with the lock sum is not enough: the same deadline also spans
+    /// slirp startup and one process launch per rule.
     #[test]
     fn rule_install_budget_covers_every_command_blocking_on_the_lock() {
+        let contended = XTABLES_LOCK_WAIT * RULE_COMMAND_COUNT;
         assert!(
-            RULE_INSTALL_TIMEOUT >= XTABLES_LOCK_WAIT * RULE_COMMAND_COUNT,
+            RULE_INSTALL_TIMEOUT > contended,
             "a fully contended host would time out before -w could succeed"
+        );
+        assert!(
+            RULE_INSTALL_TIMEOUT - contended >= STARTUP_TIMEOUT,
+            "the budget leaves no room for slirp startup on top of lock contention"
+        );
+        assert!(
+            RULE_INSTALL_TIMEOUT - contended - STARTUP_TIMEOUT
+                >= Duration::from_secs(RULE_COMMAND_COUNT as u64),
+            "the budget leaves no room to spawn one nsenter per rule"
         );
     }
 
