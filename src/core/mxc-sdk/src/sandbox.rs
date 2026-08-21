@@ -39,14 +39,9 @@ pub enum WaitOutcome {
     /// That state-aware route is reachable from this crate once the caller
     /// passes the `experimental` opt-in to
     /// [`exec_sandbox`](crate::exec_sandbox) and the backend is compiled in via
-    /// `mxc_engine/isolation_session`, which this crate does not forward yet.
-    /// The two are refused differently: without the opt-in the experimental gate
-    /// rejects the request before dispatch
-    /// ([`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable)),
-    /// while without the feature it passes the gate and finds no arm to dispatch
-    /// to ([`ErrorCode::UnsupportedPhase`](crate::ErrorCode::UnsupportedPhase)).
-    /// The distinction is documented here because it is what implementors build
-    /// against.
+    /// this crate's `isolation_session` feature, which forwards to the engine.
+    /// Both refusals are
+    /// [`ErrorCode::BackendUnavailable`](crate::ErrorCode::BackendUnavailable).
     TimedOut,
 }
 
@@ -66,12 +61,12 @@ pub struct Output {
     pub output_metadata: Option<SandboxOutputMetadata>,
 }
 
-/// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox).
+/// A live sandboxed process, returned by [`spawn_sandbox`](crate::spawn_sandbox)
+/// and [`exec_sandbox`](crate::exec_sandbox).
 ///
 /// Stream the child's stdio with the `take_*` accessors, wait for it, or kill
-/// it (and its whole tree). No pty is allocated — the streams are ordinary
-/// pipes. Any stdout/stderr the caller does not `take_*` is drained and
-/// discarded by [`wait`](Self::wait).
+/// it. No pty is allocated — the streams are ordinary pipes. Any stdout/stderr
+/// the caller does not `take_*` is drained and discarded by [`wait`](Self::wait).
 pub struct Sandbox {
     inner: Box<dyn SandboxProcess>,
 }
@@ -127,7 +122,7 @@ impl Sandbox {
         self.inner.id()
     }
 
-    /// Kill the child and its process tree.
+    /// Kill the child.
     pub fn kill(&mut self) -> std::io::Result<()> {
         self.inner.kill()
     }
@@ -136,10 +131,8 @@ impl Sandbox {
     /// stdout/stderr so it can't block on a full pipe.
     ///
     /// Returns [`WaitOutcome::Exited`] with the exit code, or
-    /// [`WaitOutcome::TimedOut`] if the request's `scriptTimeout` elapsed (the
-    /// workload is terminated first; see [`WaitOutcome::TimedOut`] for how far
-    /// that reaches on each backend). `Err` is reserved for an actual OS / wait
-    /// failure.
+    /// [`WaitOutcome::TimedOut`] if the request's `scriptTimeout` elapsed. `Err`
+    /// is reserved for an actual OS / wait failure.
     pub fn wait(&mut self) -> std::io::Result<WaitOutcome> {
         match self.inner.wait() {
             Ok(code) => Ok(WaitOutcome::Exited(code)),
@@ -157,7 +150,7 @@ impl Sandbox {
     ///
     /// `Err` is reserved for an actual OS / wait failure; a timeout is reported
     /// as [`Output`] with `outcome: WaitOutcome::TimedOut` and whatever each
-    /// stream produced before the workload was terminated.
+    /// stream produced.
     pub fn wait_with_output(mut self) -> std::io::Result<Output> {
         fn capture(stream: Option<Box<dyn Read + Send>>) -> std::thread::JoinHandle<Vec<u8>> {
             std::thread::spawn(move || {

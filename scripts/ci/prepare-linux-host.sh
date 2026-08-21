@@ -41,21 +41,45 @@ install_epel() {
 }
 
 install_bubblewrap() {
-    if command -v bwrap >/dev/null 2>&1; then
+    if command -v bwrap >/dev/null 2>&1 &&
+        command -v slirp4netns >/dev/null 2>&1 &&
+        command -v unshare >/dev/null 2>&1 &&
+        command -v nsenter >/dev/null 2>&1 &&
+        command -v iptables >/dev/null 2>&1 &&
+        command -v ip6tables >/dev/null 2>&1 &&
+        command -v ip >/dev/null 2>&1; then
         return
     fi
     if command -v apt-get >/dev/null 2>&1; then
         apt_update
-        sudo apt-get install -y --no-install-recommends bubblewrap
+        sudo apt-get install -y --no-install-recommends \
+            bubblewrap slirp4netns util-linux iptables iproute2
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y bubblewrap
+        sudo dnf install -y bubblewrap slirp4netns util-linux iptables iproute
     elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y bubblewrap
+        sudo yum install -y bubblewrap slirp4netns util-linux iptables iproute
     elif command -v microdnf >/dev/null 2>&1; then
-        sudo microdnf install -y bubblewrap
+        sudo microdnf install -y bubblewrap slirp4netns util-linux iptables iproute
     else
-        echo "No supported package manager found to install bubblewrap." >&2
+        echo "No supported package manager found to install Bubblewrap prerequisites." >&2
         exit 1
+    fi
+}
+
+# The ingress chain matches on connection state, which iptables can only
+# resolve once nf_conntrack is loaded; without it the whole transaction is
+# rejected as "Invalid argument". Loading it here turns a confusing rule
+# failure into a prerequisite the host either satisfies or reports.
+load_conntrack_module() {
+    # Keyed on a conntrack-specific indicator: the net/netfilter directory
+    # belongs to the netfilter core (nf_log and friends register there too), so
+    # its presence does not imply conntrack. The sysctl covers a loaded module
+    # and a built-in; /sys/module covers a kernel that defers the sysctl.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max || -d /sys/module/nf_conntrack ]]; then
+        return
+    fi
+    if ! sudo modprobe nf_conntrack 2>/dev/null; then
+        echo "WARNING: could not load nf_conntrack; the inbound default-deny test may fail to install its rules." >&2
     fi
 }
 
@@ -186,6 +210,16 @@ case "$backend" in
     bubblewrap)
         install_bubblewrap
         command -v bwrap
+        command -v slirp4netns
+        command -v unshare
+        command -v nsenter
+        command -v iptables
+        command -v ip6tables
+        command -v ip
+        load_conntrack_module
+        # The inbound test is invoked through sudo, so prove it is available
+        # here rather than midway through the suite.
+        sudo -n true
         # disabled AppArmor restrictions on unprivileged user namespaces, which bubblewrap needs to create a new namespace.
         # should only be used on ephemeral CI runners, not on persistent hosts.
         if sysctl kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then

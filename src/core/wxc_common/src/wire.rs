@@ -726,10 +726,12 @@ pub struct IsolationSession {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionProvisionPhase {
-    /// Optional application identifier for the calling application. For a
-    /// packaged application this is the Package Family Name; for an unpackaged
-    /// one it may be any string. Carried inside the `sandboxId` so later
-    /// lifecycle phases can recover it without the caller re-supplying it.
+    /// Optional identifier for the calling application.
+    ///
+    /// **A packaged application must supply its Package Family Name in the
+    /// form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`).
+    /// An unpackaged application may pass any string. Carried inside the `sandboxId`
+    /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
 }
 

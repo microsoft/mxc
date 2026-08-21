@@ -165,8 +165,8 @@ pub use primitives::{NonEmptyString, OptionalField, True};
 pub use request::{parse_request, Request, RequestParseError};
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
-    Process, ProcessContainer, ProcessContainerUi, ProcessContainerUiIsolation, Seatbelt, Ui,
-    UiClipboard,
+    Process, ProcessContainer, ProcessContainerCapability, ProcessContainerUi,
+    ProcessContainerUiIsolation, Seatbelt, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

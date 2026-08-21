@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::primitives::{NonEmptyString, OptionalField};
+use serde::{de, Deserialize, Deserializer};
 
 /// Container lifecycle settings.
 #[derive(Debug, serde::Deserialize)]
@@ -147,6 +148,55 @@ pub struct CaptureDenials {
     pub retain_etl: OptionalField<bool>,
 }
 
+/// An AppContainer capability name supplied by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessContainerCapability(String);
+
+impl ProcessContainerCapability {
+    /// Creates a validated capability name.
+    ///
+    /// Commas are rejected because BaseContainer uses them as its wire
+    /// delimiter. Learning-mode capabilities are reserved for MXC's dedicated
+    /// learning-mode and denial-capture controls.
+    pub fn new(value: String) -> Result<Self, String> {
+        if value.contains(',') {
+            return Err(
+                "capability must not contain a comma; provide multiple capabilities as separate array entries"
+                    .to_string(),
+            );
+        }
+        if value.eq_ignore_ascii_case("learningModeLogging")
+            || value.eq_ignore_ascii_case("permissiveLearningMode")
+        {
+            return Err(
+                "learningModeLogging and permissiveLearningMode are reserved; use learningMode, --audit, or captureDenials instead"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated capability name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the validated capability name.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ProcessContainerCapability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
 /// ProcessContainer-specific settings.
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -157,9 +207,12 @@ pub struct ProcessContainer {
     /// Optional learning-mode (deny-and-record)
     #[serde(default)]
     pub learning_mode: OptionalField<bool>,
-    /// Optional AppContainer capability names.
+    /// Optional AppContainer capability names. Each entry must contain one
+    /// name; commas are rejected because BaseContainer uses them as its wire
+    /// delimiter. `learningModeLogging` and `permissiveLearningMode` are
+    /// reserved; use `learningMode`, `--audit`, or `captureDenials` instead.
     #[serde(default)]
-    pub capabilities: OptionalField<Vec<String>>,
+    pub capabilities: OptionalField<Vec<ProcessContainerCapability>>,
     /// Optional capture-denials policy.
     #[serde(default)]
     pub capture_denials: OptionalField<CaptureDenials>,

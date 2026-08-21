@@ -96,7 +96,12 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
     wire::ProcessContainer {
         least_privilege: least_privilege.into_option(),
         learning_mode: learning_mode.into_option(),
-        capabilities: capabilities.into_option(),
+        capabilities: capabilities.into_option().map(|capabilities| {
+            capabilities
+                .into_iter()
+                .map(contract::ProcessContainerCapability::into_inner)
+                .collect()
+        }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
         network: None,

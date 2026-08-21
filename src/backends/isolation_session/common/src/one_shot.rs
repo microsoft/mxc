@@ -87,7 +87,11 @@ impl ScriptRunner for IsolationSessionRunner {
         // keeps a freshly-minted agent user from being stranded: a separate
         // `new()` would activate the service a second time, and a failure
         // there would leave an account that can no longer be removed.
-        let manager = match IsolationSessionManager::add_user() {
+        // One-shot takes no backend config, so there is no caller-supplied
+        // `appId`. Passing `None` selects the default registration, which the
+        // in-proc client resolves to the calling process's PFN when packaged
+        // (or leaves empty when unpackaged).
+        let manager = match IsolationSessionManager::add_user(None) {
             Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,
