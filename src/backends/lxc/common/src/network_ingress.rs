@@ -543,12 +543,14 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // `enforcementMode` is deliberately not consulted here; a caller may get
-        // more enforcement than the mode asked for, never less.
-        if !policy.requires_firewall() {
+        // Not `requires_firewall`: that answers whether the *egress* chain has
+        // a rule to carry, and a firewall-mode config with permissive egress
+        // has none while still asking for the inbound deny this chain is.
+        if !policy.installs_firewall() {
             logger.log_line(
-                "Network policy requires no egress firewall (permissive default, no host \
-                 lists, no proxy, no directional posture); skipping ingress chain.",
+                "Network policy installs no firewall (permissive default, no host lists, \
+                 no proxy, no firewall enforcement mode, no directional posture); \
+                 skipping ingress chain.",
             );
             return Ok(true);
         }
@@ -2833,5 +2835,70 @@ mod tests {
                  every install on that host"
             );
         }
+    }
+
+    /// A 0.7 config that asks for firewall enforcement while restricting
+    /// nothing outbound: `enforcementMode: "firewall"`, `defaultPolicy:
+    /// "allow"`, no host lists, no proxy. `allowLocalNetwork` defaults to
+    /// false, and that inbound deny is the whole of what this config asks for.
+    fn legacy_firewall_mode_with_permissive_egress(mode: NetworkEnforcementMode) -> ContainerPolicy {
+        ContainerPolicy {
+            network_enforcement_mode: mode,
+            default_network_policy: NetworkPolicy::Allow,
+            ..Default::default()
+        }
+    }
+
+    // The inbound chain cannot be gated on whether the *egress* chain has a
+    // rule to carry. This config has none, and its inbound deny is still owed:
+    // dropping it accepts new inbound connections on every interface, which is
+    // the fail-open direction.
+    #[test]
+    fn a_firewall_mode_config_with_nothing_to_restrict_outbound_still_installs_the_inbound_chain() {
+        for mode in [NetworkEnforcementMode::Firewall, NetworkEnforcementMode::Both] {
+            let label = format!("{mode:?}");
+            let policy = legacy_firewall_mode_with_permissive_egress(mode);
+
+            assert!(
+                !policy.requires_firewall(),
+                "{label}: this config is only interesting while it has no egress rule to \
+                 carry; if that changes the test no longer covers the inbound gate"
+            );
+            assert!(
+                policy.installs_firewall(),
+                "{label}: a config naming a firewall enforcement mode is owed the inbound \
+                 deny chain even with nothing to restrict outbound"
+            );
+        }
+    }
+
+    // The gate stays narrow. A config that names no firewall mode, states no
+    // posture, and restricts nothing has no inbound chain to install, so
+    // skipping it is correct rather than dangerous.
+    #[test]
+    fn a_config_that_asks_for_no_firewall_at_all_installs_no_inbound_chain() {
+        let policy = legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
+
+        assert!(
+            !policy.installs_firewall(),
+            "a policy naming no firewall mode, no posture, no hosts and no proxy has \
+             nothing inbound to enforce"
+        );
+    }
+
+    // 0.8 JSON always arrives with an egress section beside the ingress one, so
+    // a stated directional posture reaches the inbound gate through the egress
+    // arm. This pins that, and fails if the parser ever stops writing egress.
+    #[test]
+    fn a_stated_directional_posture_installs_the_inbound_chain() {
+        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        policy.default_network_policy = NetworkPolicy::Allow;
+        policy.network_egress = Some(Default::default());
+
+        assert!(
+            policy.installs_firewall(),
+            "a 0.8 config states its posture with no enforcementMode to name, so the \
+             inbound chain has to follow from the posture itself"
+        );
     }
 }

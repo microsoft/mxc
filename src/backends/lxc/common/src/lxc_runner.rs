@@ -234,10 +234,9 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the policy has something for the firewall
-        // to carry, or when the container must reach a proxy. Both questions
-        // are `requires_firewall`.
-        let needs_network = request.policy.requires_firewall();
+        // Wait for network only when the run installs a firewall, or when the
+        // container must reach a proxy. Both questions are `installs_firewall`.
+        let needs_network = request.policy.installs_firewall();
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -279,12 +278,13 @@ impl LxcScriptRunner {
         // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
         // container's own iptables INPUT chain, reached with `nsenter`.
         //
-        // A policy with anything for the firewall to carry means the caller is
-        // owed the inbound deny chain, whichever schema stated it. LXC enforces
-        // it inside the container's own netns, so it is useless without the
-        // init PID that lets us enter that netns — and the ingress manager
-        // cannot even be constructed without one.
-        let use_firewall = request.policy.requires_firewall();
+        // A policy that installs a firewall means the caller is owed the inbound
+        // deny chain, whichever schema stated it. LXC enforces it inside the
+        // container's own netns, so it is useless without the init PID that
+        // lets us enter that netns — and the ingress manager cannot even be
+        // constructed without one. This has to be the same question the ingress
+        // gate asks, or a run skips the guard and then skips the chain.
+        let use_firewall = request.policy.installs_firewall();
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).

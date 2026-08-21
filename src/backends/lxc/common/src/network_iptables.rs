@@ -4561,7 +4561,8 @@ mod tests {
         assert!(
             policy.requires_firewall(),
             "a 0.7 policy naming blocked hosts is owed the firewall whatever mode it \
-             names; the JSON parser rejects this combination, but a hand-built \
+             names; the engine rewrites the mode to firewall when host rules arrive \
+             without a proxy, but nothing rejects this shape and a hand-built \
              ExecutionRequest reaches here and would otherwise restrict nothing"
         );
     }

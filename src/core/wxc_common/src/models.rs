@@ -810,6 +810,29 @@ impl ContainerPolicy {
             || self.network_proxy.is_enabled()
             || self.network_egress.is_some()
     }
+
+    /// True when the run installs firewall chains at all, which is a wider
+    /// question than [`Self::requires_firewall`].
+    ///
+    /// The two differ on one shape: `enforcementMode: firewall` (or `both`)
+    /// with a permissive egress default and no host lists. Outbound, that
+    /// policy has no rule to install, so skipping the chain costs nothing and
+    /// `requires_firewall` correctly answers no. Inbound, the chain *is* the
+    /// policy — its default deny is what keeps `allowLocalNetwork: false`
+    /// true — so skipping opens the container to new inbound connections the
+    /// config asked to refuse. Anything gating the inbound chain has to ask
+    /// this instead.
+    ///
+    /// Schema 0.8 needs no arm of its own here: it cannot carry
+    /// `enforcementMode`, and its parser writes an egress section for every
+    /// config, so `requires_firewall` already answers every directional policy.
+    pub fn installs_firewall(&self) -> bool {
+        self.requires_firewall()
+            || matches!(
+                self.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+    }
 }
 
 /// Windows denial-capture settings (from `processContainer.captureDenials`).
