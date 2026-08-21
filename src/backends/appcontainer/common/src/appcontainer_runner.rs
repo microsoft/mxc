@@ -38,7 +38,7 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::diagnose_create_process_failure;
-use crate::network_policy_helpers::add_default_network_capabilities;
+use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
@@ -1534,6 +1534,19 @@ impl SandboxBackend for AppContainerScriptRunner {
             .policy
             .network_ingress
             .as_ref()
+            .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
+            && !allows_network_egress(&request.policy)
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.default='allow' cannot be combined with denied network egress \
+                 on the AppContainer fallback because privateNetworkClientServer grants \
+                 bidirectional private-network access",
+            ));
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
             .is_some_and(|ingress| {
                 ingress.host_loopback == wxc_common::models::NetworkAction::Allow
             })
@@ -2512,6 +2525,45 @@ mod tests {
         assert!(
             runner.validate(&request).is_ok(),
             "AppContainer naturally enforces the schema 0.8 default-deny posture"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_ingress_allow_with_egress_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not weaken denied private-network egress");
+        assert!(error
+            .error_message
+            .contains("privateNetworkClientServer grants bidirectional"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_ingress_and_egress_allow() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "bidirectional private-network access is compatible with allow defaults"
         );
     }
 
