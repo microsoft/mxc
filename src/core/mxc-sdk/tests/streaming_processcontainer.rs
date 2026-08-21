@@ -9,7 +9,8 @@
 
 #![cfg(target_os = "windows")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_sdk::policy::{build_request, SandboxPolicy};
+use mxc_sdk::{spawn_sandbox, WaitOutcome};
 
 #[test]
 #[ignore = "requires an elevated, host-prepped Windows host (see docs/host-prep.md)"]

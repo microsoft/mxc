@@ -4,9 +4,10 @@
 //! Tests for the ported SDK helpers: policy discovery, platform support, and
 //! the SandboxPolicy -> SandboxRequest builder.
 
-use mxc_sdk::{
-    available_tools_policy, build_request, platform_support, temporary_files_policy,
-    user_profile_policy, SandboxPolicy,
+use mxc_sdk::platform_support;
+use mxc_sdk::policy::{
+    available_tools_policy, build_request, temporary_files_policy, user_profile_policy,
+    SandboxPolicy,
 };
 
 #[cfg(target_os = "macos")]
@@ -139,7 +140,7 @@ fn build_request_host_rules_require_outbound() {
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(mxc_sdk::policy::NetworkSection {
+        network: Some(mxc_sdk::policy::network::NetworkSection {
             allow_outbound: false,
             allow_local_network: false,
             allowed_hosts: vec!["example.com".to_string()],
@@ -166,6 +167,53 @@ fn build_request_host_rules_require_outbound() {
             "Windows ProcessContainer requires allowOutbound for host rules"
         );
     }
+}
+
+#[test]
+fn public_policy_modules_build_process_container_networking() {
+    use mxc_sdk::policy::network::{
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+        RuntimeConfigSection,
+    };
+    use mxc_sdk::policy::process_container::{
+        ProcessContainerNetworkSection, ProcessContainerSection,
+    };
+    use mxc_sdk::policy::{build_request_with_containment, Containment};
+
+    let policy = SandboxPolicy {
+        version: "0.8.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://127.0.0.1:8080".to_string()),
+            }),
+            ..Default::default()
+        }),
+        ui: None,
+        timeout_ms: None,
+        capture_denials: None,
+    };
+    let process_container = ProcessContainerSection {
+        network: Some(ProcessContainerNetworkSection {
+            allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    build_request_with_containment(
+        &policy,
+        &Containment::ProcessContainer(process_container),
+        None,
+    )
+    .expect("public policy modules should build a schema 0.8 ProcessContainer request");
 }
 
 #[cfg(target_os = "macos")]

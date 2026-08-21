@@ -4,13 +4,15 @@
 //! Streaming (handle-based) API tests: live stdio, kill, and wait.
 //! Seatbelt-specific cases run only on macOS.
 //!
-//! These drive the real consumer path: build a [`SandboxRequest`] from a
-//! [`SandboxPolicy`] via `build_request`, fill in the command, then
-//! `spawn_sandbox`.
+//! These drive the real consumer path: build a
+//! [`policy::SandboxRequest`](mxc_sdk::policy::SandboxRequest) from a
+//! [`policy::SandboxPolicy`](mxc_sdk::policy::SandboxPolicy), fill in the
+//! command, then call `spawn_sandbox`.
 
 #![cfg(target_os = "macos")]
 
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, SandboxRequest, WaitOutcome};
+use mxc_sdk::policy::{build_request, SandboxPolicy, SandboxRequest};
+use mxc_sdk::{spawn_sandbox, WaitOutcome};
 
 /// A Seatbelt streaming request (`/tmp` read-write) with the given command and
 /// timeout (ms; `0` == run until exit, required for interactive/long cases).

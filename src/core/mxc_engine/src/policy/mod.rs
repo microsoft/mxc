@@ -12,6 +12,22 @@
 //!   crate supports (Seatbelt, Bubblewrap, ProcessContainer) — so callers no
 //!   longer need the TypeScript SDK to build a spawnable config.
 
+pub mod network;
+pub mod process_container;
+
+#[cfg(target_os = "linux")]
+use network::has_host_rules;
+use network::{proxy_to_wire, NetworkSection};
+#[cfg(test)]
+use network::{
+    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, ProxySpec, RuntimeConfigSection,
+};
+use process_container::apply as apply_process_container_backend;
+use process_container::{ProcessContainerNetworkSection, ProcessContainerSection};
+#[cfg(test)]
+use process_container::{ProcessContainerUiIsolation, ProcessContainerUiSection};
+
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -433,142 +449,6 @@ pub struct FilesystemSection {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// Network proxy configuration, mirroring the SDK union type
-/// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
-#[derive(Debug, Clone)]
-pub enum ProxySpec {
-    /// Route through the built-in test proxy server.
-    BuiltinTestServer,
-    /// Route through `127.0.0.1:<port>`.
-    Localhost(u16),
-    /// Route through an explicit proxy URL.
-    Url(String),
-}
-
-// Custom `Deserialize` matching the SDK's object union
-// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
-// serde's default derive can't express it, and an untagged enum would silently
-// keep the first matching variant when several conflicting keys are present, so
-// we parse all recognised modes and require exactly one — rejecting conflicts
-// the way the shared wire-config parser does.
-impl<'de> serde::Deserialize<'de> for ProxySpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Raw {
-            #[serde(default)]
-            builtin_test_server: Option<bool>,
-            #[serde(default)]
-            localhost: Option<u16>,
-            #[serde(default)]
-            url: Option<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        match (raw.builtin_test_server, raw.localhost, raw.url) {
-            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
-            // The SDK union type is `{ builtinTestServer: true }`, so an explicit
-            // `false` is malformed. Reject it rather than silently selecting the
-            // (experimental, deliberately-permissive) built-in proxy — fail closed.
-            (Some(false), None, None) => Err(serde::de::Error::custom(
-                "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
-            )),
-            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
-            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
-            _ => Err(serde::de::Error::custom(
-                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
-            )),
-        }
-    }
-}
-
-/// Network section of a [`SandboxPolicy`]. All flags default to deny.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NetworkSection {
-    pub allow_outbound: bool,
-    pub allow_local_network: bool,
-    pub allowed_hosts: Vec<String>,
-    pub blocked_hosts: Vec<String>,
-    pub proxy: Option<ProxySpec>,
-    /// Schema 0.8 outbound network policy.
-    pub egress: Option<NetworkEgressSection>,
-    /// Schema 0.8 inbound and host-loopback network policy.
-    pub ingress: Option<NetworkIngressSection>,
-    /// Schema 0.8 runtime values supplied separately from sandbox policy.
-    pub runtime_config: Option<RuntimeConfigSection>,
-}
-
-/// Allow or deny network action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkAction {
-    Allow,
-    Deny,
-}
-
-/// Transport protocol selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum NetworkProtocol {
-    Tcp,
-    Udp,
-    Icmp,
-    Any,
-}
-
-/// CIDR network peer.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkPeerSection {
-    pub cidr: String,
-    pub except: Option<Vec<String>>,
-}
-
-/// Protocol and destination-port selector.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkPortSection {
-    pub protocol: Option<NetworkProtocol>,
-    pub port: Option<u16>,
-    pub end_port: Option<u16>,
-}
-
-/// Outbound network rule.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkRuleSection {
-    pub to: Option<Vec<NetworkPeerSection>>,
-    pub ports: Option<Vec<NetworkPortSection>>,
-}
-
-/// Schema 0.8 outbound network policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkEgressSection {
-    pub default: Option<NetworkAction>,
-    pub allow: Option<Vec<NetworkRuleSection>>,
-    pub deny: Option<Vec<NetworkRuleSection>>,
-}
-
-/// Schema 0.8 inbound and host-loopback network policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkIngressSection {
-    pub default: Option<NetworkAction>,
-    pub host_loopback: Option<NetworkAction>,
-}
-
-/// Schema 0.8 runtime values supplied separately from sandbox policy.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeConfigSection {
-    /// HTTP/S loopback proxy URL.
-    pub network_proxy: Option<String>,
-}
-
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -593,7 +473,6 @@ pub enum CaptureDenialsMode {
     Allow,
 }
 
-#[cfg(any(target_os = "windows", test))]
 impl CaptureDenialsMode {
     /// Wire-format value accepted by the config parser.
     fn wire(self) -> &'static str {
@@ -651,85 +530,6 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
-}
-
-/// ProcessContainer settings carried by [`Containment::ProcessContainer`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessContainerSection {
-    /// Enable least-privilege process creation.
-    pub least_privilege: bool,
-    /// Enable deny-and-record AppContainer learning mode.
-    pub learning_mode: bool,
-    /// Additional AppContainer capability names.
-    pub capabilities: Vec<String>,
-    /// Optional BaseProcessContainer user-interface settings.
-    pub ui: Option<ProcessContainerUiSection>,
-    /// Optional ProcessContainer-specific network settings.
-    pub network: Option<ProcessContainerNetworkSection>,
-}
-
-impl Default for ProcessContainerSection {
-    fn default() -> Self {
-        Self {
-            least_privilege: false,
-            learning_mode: false,
-            capabilities: Vec::new(),
-            ui: Some(ProcessContainerUiSection::default()),
-            network: None,
-        }
-    }
-}
-
-/// ProcessContainer-specific network settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ProcessContainerNetworkSection {
-    /// Package family name or AppContainer profile authorized as proxy peer.
-    pub allowed_proxy_peer: Option<String>,
-}
-
-/// BaseProcessContainer user-interface settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProcessContainerUiSection {
-    /// Desktop-resource isolation level.
-    pub isolation: ProcessContainerUiIsolation,
-    /// Permit desktop system control.
-    pub desktop_system_control: bool,
-    /// System-settings access level.
-    pub system_settings: String,
-    /// Permit Input Method Editor access.
-    pub ime: bool,
-}
-
-impl Default for ProcessContainerUiSection {
-    fn default() -> Self {
-        Self {
-            isolation: ProcessContainerUiIsolation::Container,
-            desktop_system_control: false,
-            system_settings: "none".to_string(),
-            ime: false,
-        }
-    }
-}
-
-/// Desktop-resource isolation level for BaseProcessContainer.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ProcessContainerUiIsolation {
-    Desktop,
-    Handles,
-    Atoms,
-    #[default]
-    Container,
-}
-
-impl ProcessContainerUiIsolation {
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Desktop => "desktop",
-            Self::Handles => "handles",
-            Self::Atoms => "atoms",
-            Self::Container => "container",
-        }
-    }
 }
 
 /// LXC distribution settings carried by [`Containment::Lxc`].
@@ -1163,15 +963,6 @@ fn build_wire_config(
     Ok(config)
 }
 
-fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
-    use serde_json::json;
-    match proxy {
-        ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
-        ProxySpec::Localhost(port) => json!({ "localhost": port }),
-        ProxySpec::Url(url) => json!({ "url": url }),
-    }
-}
-
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
 /// same way the SDK does (Bubblewrap on Linux, Seatbelt on macOS,
 /// ProcessContainer on Windows — which itself resolves to BaseContainer or
@@ -1216,87 +1007,6 @@ fn apply_host_process_backend(
     {
         let _ = (policy, container_id);
     }
-}
-
-fn apply_process_container_backend(
-    config: &mut serde_json::Value,
-    policy: &SandboxPolicy,
-    process_container: &ProcessContainerSection,
-    containment: &str,
-) {
-    use serde_json::json;
-
-    config["containment"] = json!(containment);
-
-    let mut capabilities = process_container.capabilities.clone();
-    if let Some(net) = &policy.network {
-        if net.allow_outbound
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("internetClient"))
-        {
-            capabilities.push("internetClient".to_string());
-        }
-        if net.allow_local_network
-            && !capabilities
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case("privateNetworkClientServer"))
-        {
-            capabilities.push("privateNetworkClientServer".to_string());
-        }
-    }
-
-    config["processContainer"] = json!({
-        "leastPrivilege": process_container.least_privilege,
-        "learningMode": process_container.learning_mode,
-        "capabilities": capabilities,
-    });
-    if let Some(ui) = &process_container.ui {
-        config["processContainer"]["ui"] = json!({
-            "isolation": ui.isolation.wire(),
-            "desktopSystemControl": ui.desktop_system_control,
-            "systemSettings": ui.system_settings,
-            "ime": ui.ime,
-        });
-    }
-    if let Some(allowed_proxy_peer) = process_container
-        .network
-        .as_ref()
-        .and_then(|network| network.allowed_proxy_peer.as_ref())
-    {
-        config["processContainer"]["network"] = json!({
-            "allowedProxyPeer": allowed_proxy_peer,
-        });
-    }
-    if let Some(cd) = &policy.capture_denials {
-        config["processContainer"]["captureDenials"] = json!({
-            "mode": cd.mode.wire(),
-            "outputPath": cd.output_path,
-            "retainEtl": cd.retain_etl,
-        });
-    }
-    if let Some(network) = config.get_mut("network") {
-        if network.get("egress").is_none() && network.get("ingress").is_none() {
-            let mode = if has_host_rules(network) {
-                "both"
-            } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
-        }
-    }
-}
-
-/// True when the network section carries any host allow/deny rules, deciding
-/// whether host-level enforcement is engaged. (Linux + Windows only.)
-fn has_host_rules(network: &serde_json::Value) -> bool {
-    let non_empty = |key: &str| {
-        network
-            .get(key)
-            .and_then(|v| v.as_array())
-            .is_some_and(|a| !a.is_empty())
-    };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
 }
 
 fn apply_lxc_backend(config: &mut serde_json::Value, lxc: &LxcSection) {

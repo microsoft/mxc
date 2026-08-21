@@ -5,7 +5,7 @@
 //!
 //! This crate owns the logic that turns an execution request into a running
 //! sandbox: backend dispatch, host-platform probing, and config building from
-//! a [`SandboxPolicy`]. It is the single implementation that both the public
+//! a [`policy::SandboxPolicy`]. It is the single implementation that both the public
 //! Rust SDK (`mxc-sdk`) and — over subsequent increments — the executor
 //! binaries call into, so backend selection lives in exactly one place.
 //!
@@ -15,10 +15,11 @@
 //!
 //! ## Surface
 //!
-//! - [`build_request`] / [`build_request_with_containment`] / [`SandboxPolicy`]
-//!   / [`SandboxRequest`] — build a spawnable request from a policy (the Rust
+//! - [`policy::build_request`] / [`policy::build_request_with_containment`] /
+//!   [`policy::SandboxPolicy`] / [`policy::SandboxRequest`] — build a spawnable
+//!   request from a policy (the Rust
 //!   port of the SDK's `createConfigFromPolicy`), for the host's native
-//!   containment or an explicitly selected [`Containment`] backend.
+//!   containment or an explicitly selected [`policy::Containment`] backend.
 //! - [`spawn`] — spawn a streaming [`SandboxProcess`] handle for a request.
 //! - [`run`] / [`resolve_runner`] (Windows) — run-to-completion backend
 //!   selection and execution.
@@ -44,25 +45,18 @@ pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
-pub use policy::{
-    available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, LxcSection, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, ProcessContainerNetworkSection, ProcessContainerSection,
-    ProcessContainerUiIsolation, ProcessContainerUiSection, RuntimeConfigSection, SandboxPolicy,
-    SandboxRequest, WslcSection,
-};
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
 pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
 
+use policy::SandboxRequest;
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};
 
-/// Spawn a streaming [`SandboxProcess`] handle for a [`SandboxRequest`] built
-/// by [`build_request`] (with the command, and any working directory / env,
-/// filled in).
+/// Spawn a streaming [`SandboxProcess`] handle for a
+/// [`policy::SandboxRequest`] built by [`policy::build_request`] (with the
+/// command, and any working directory / env, filled in).
 ///
 /// Selects the containment backend for the host, spawns the sandboxed process
 /// with piped stdio, and returns the handle. No pty is allocated. Backends

@@ -3,7 +3,7 @@
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
 **in-process**, without ever allocating a pty.
 
-Build a `SandboxRequest` from a [`SandboxPolicy`], then either **run it to
+Build a `policy::SandboxRequest` from a `policy::SandboxPolicy`, then either **run it to
 completion** with [`run`] (capturing stdout/stderr in one call) or hand it to
 [`spawn_sandbox`] for a live handle you can stream, feed stdin, and kill.
 Either way it selects the right containment backend for the host and runs the
@@ -12,7 +12,8 @@ sandboxed process — no pty is ever allocated.
 ## Usage
 
 ```rust,no_run
-use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
+use mxc_sdk::{run, WaitOutcome};
+use mxc_sdk::policy::{build_request, SandboxPolicy};
 
 // Describe what to restrict, turn it into a request, fill in the command.
 let policy = SandboxPolicy {
@@ -37,26 +38,27 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [`spawn_sandbox`] when you need to drive the process live (see
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
-[`build_request`] is the Rust port of the SDK's `createConfigFromPolicy`. It
+`policy::build_request` is the Rust port of the SDK's
+`createConfigFromPolicy`. It
 resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
 Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
 network validation, building the same wire config internally and running it
-through the shared parser. The returned [`SandboxRequest`] has an empty
-command line — set the command with [`SandboxRequest::set_script`] (and any
+through the shared parser. The returned `policy::SandboxRequest` has an empty
+command line — set the command with `policy::SandboxRequest::set_script` (and any
 working directory / env) before spawning.
 
 To target a specific backend instead of the host default, use
-[`build_request_with_containment`] with a [`Containment`] — the same choice the
+`policy::build_request_with_containment` with a `policy::Containment` — the same choice the
 TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
 
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
-available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
-dirs), [`user_profile_policy`], and [`temporary_files_policy`].
+available in `mxc_sdk::policy`: `available_tools_policy` (PATH + tool/SDK env
+dirs), `user_profile_policy`, and `temporary_files_policy`.
 
 ## Diagnosing a failure
 
-Every fallible **entry point** — [`build_request`],
-[`build_request_with_containment`], [`run`], [`spawn_sandbox`],
+Every fallible **entry point** — `policy::build_request`,
+`policy::build_request_with_containment`, [`run`], [`spawn_sandbox`],
 [`exec_sandbox`], [`run_state_aware_json`] — returns an [`Error`] carrying a
 closed [`ErrorCode`] and a message, plus, when the failure came from an
 underlying platform API, the call that failed and its status.
@@ -164,8 +166,7 @@ learning-mode capture: the runner records every access the policy does not
 grant and writes them to a JSON denials document.
 
 ```rust
-use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
-use mxc_sdk::SandboxPolicy;
+use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection, SandboxPolicy};
 
 let policy = SandboxPolicy {
     version: "0.8.0-alpha".to_string(),
@@ -204,7 +205,8 @@ allocated; the streams are ordinary pipes.
 
 ```rust,no_run
 use std::io::{Read, Write};
-use mxc_sdk::{build_request, spawn_sandbox, SandboxPolicy, WaitOutcome};
+use mxc_sdk::{spawn_sandbox, WaitOutcome};
+use mxc_sdk::policy::{build_request, SandboxPolicy};
 
 let policy = SandboxPolicy {
     version: "0.7.0-alpha".to_string(),
@@ -354,10 +356,10 @@ Use the concrete containment variants when backend-specific settings are
 required. `Containment::Process` remains the portable host-default selection.
 
 ```rust,no_run
-use mxc_sdk::{
-    build_request_with_containment, Containment, LxcSection,
-    ProcessContainerSection, SandboxPolicy,
+use mxc_sdk::policy::{
+    build_request_with_containment, Containment, LxcSection, SandboxPolicy,
 };
+use mxc_sdk::policy::process_container::ProcessContainerSection;
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
@@ -391,10 +393,9 @@ do not combine them with active legacy fields such as `allow_outbound`,
 `allowed_hosts`, or `proxy`.
 
 ```rust,no_run
-use mxc_sdk::policy::NetworkSection;
-use mxc_sdk::{
+use mxc_sdk::policy::network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection,
-    RuntimeConfigSection,
+    NetworkSection, RuntimeConfigSection,
 };
 
 let network = NetworkSection {
@@ -418,15 +419,19 @@ let network = NetworkSection {
 
 WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
 opt-in on two axes: build this crate with its **`wslc` feature**, and call
-[`SandboxRequest::set_experimental(true)`] on the request (the library-side
+`policy::SandboxRequest::set_experimental(true)` on the request (the library-side
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
-memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
-inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
+memory, GPU, storage path, port forwards — are carried by
+`policy::WslcSection` inside `policy::Containment::Wslc`, mirroring the SDK's
+`experimental.wslc` block, and
 go through the same parser the executor uses — so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
-use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+use mxc_sdk::run;
+use mxc_sdk::policy::{
+    build_request_with_containment, Containment, SandboxPolicy, WslcSection,
+};
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
