@@ -334,6 +334,13 @@ export function createConfigFromPolicy(
                 networkProxy: policy.runtimeConfig.networkProxy,
             };
         }
+        if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+            config.processContainer = {
+                network: {
+                    allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
+                },
+            };
+        }
         // Legacy network mapping (cross-platform) — default-deny unless explicitly allowed.
     } else if (policy.network) {
         // Linux: only Bubblewrap supports network.proxy (cooperative env-var

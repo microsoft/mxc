@@ -1032,6 +1032,24 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
     });
 
+    it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
+      const config = createConfigFromPolicy(
+        {
+          version: '0.8.0-alpha',
+          processContainer: {
+            network: {
+              allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+            },
+          },
+        },
+        'wslc',
+      );
+
+      assert.deepStrictEqual(config.processContainer?.network, {
+        allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+      });
+    });
+
     it('should set default-deny network when no network policy is specified', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       assert.strictEqual(config.network!.defaultPolicy, 'block');
