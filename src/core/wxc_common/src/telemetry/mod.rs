@@ -11,12 +11,15 @@
 //!
 //! On non-Windows platforms, all telemetry functions are no-ops.
 
+pub mod consent;
+pub mod consent_prompt;
 pub mod correlation_vector;
 pub mod events;
+pub mod policy;
 
 use std::time::Duration;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use crate::logger::Logger;
@@ -24,7 +27,36 @@ use crate::models::{ContainmentBackend, FailurePhase, ScriptResponse, TelemetryC
 use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
+pub use consent::ConsentState;
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use policy::PolicyState;
+
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// Lock-order-safe redirect guard for tests that need both the consent
+    /// store and the policy key redirected away from real user/machine state.
+    pub struct TelemetryTestEnv {
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirect both telemetry globals for the lifetime of the guard.
+        pub fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
+}
 
 /// Conventional process exit code for a Rust panic/abort. Used as the reported
 /// `exit_code` on crash telemetry, since the panicking process has not (and
@@ -76,7 +108,7 @@ static PROCESS_CORRELATION_VECTOR: Mutex<Option<String>> = Mutex::new(None);
 /// handler) can race the main thread's normal completion emit; this guard makes
 /// emission exactly-once so a single dispatch never yields duplicate
 /// `MXC.Execution` records.
-static HAS_EMITTED: AtomicBool = AtomicBool::new(false);
+static HAS_EMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(test)]
 thread_local! {
@@ -141,13 +173,16 @@ pub fn version() -> &'static str {
 /// Resolve whether telemetry is enabled for this invocation.
 ///
 /// Resolution:
-/// - `experimental.telemetry.enabled` in JSON config — explicit override.
-/// - Default: off (telemetry requires explicit opt-in).
+/// - `telemetry.enabled` in JSON config — explicit kill-switch/opt-in.
+/// - Persisted user consent state — must be `Granted`.
+/// - Administrative policy ceiling — must allow collection.
 ///
-/// Note: Consent is the SDK consumer's responsibility. MXC does not implement
-/// consent prompts or persistent consent storage.
+/// All three terms must hold. The function fails closed if either consent or
+/// policy cannot be read: those helpers resolve to non-collecting states.
 pub fn is_enabled(config: &TelemetryConfig) -> bool {
     config.enabled.unwrap_or(false)
+        && consent::get_consent().allows_collection()
+        && policy::get_policy().allows_collection()
 }
 
 /// Initialize the TraceLogging ETW provider.
@@ -223,6 +258,7 @@ pub fn emit_completion(
 
     log_execution(&ExecutionEvent {
         backend,
+        sandbox_kind: backend,
         exit_code: response.exit_code,
         outcome,
         duration_ms: elapsed.as_millis() as u64,
@@ -241,6 +277,7 @@ pub fn emit_completion(
         log_error(
             TelemetryContext {
                 backend,
+                sandbox_kind: backend,
                 phase: "",
                 correlation_vector: "",
             },
@@ -274,6 +311,7 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
 
     log_execution(&ExecutionEvent {
         backend,
+        sandbox_kind: backend,
         exit_code: 1,
         outcome: "failure",
         duration_ms: 0,
@@ -287,6 +325,7 @@ pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: F
     log_error(
         TelemetryContext {
             backend,
+            sandbox_kind: backend,
             phase: "",
             correlation_vector: "",
         },
@@ -420,6 +459,7 @@ fn crash_event<'a>(
 ) -> ExecutionEvent<'a> {
     ExecutionEvent {
         backend: ctx.backend,
+        sandbox_kind: ctx.sandbox_kind,
         exit_code,
         outcome: "failure",
         duration_ms: 0,
@@ -484,6 +524,7 @@ pub fn emit_panic() {
     emit_crash(
         TelemetryContext {
             backend: process_backend(),
+            sandbox_kind: process_backend(),
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
@@ -513,6 +554,7 @@ pub fn emit_cancellation() {
     emit_crash(
         TelemetryContext {
             backend: process_backend(),
+            sandbox_kind: process_backend(),
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
@@ -560,6 +602,7 @@ fn plan_state_aware<'a>(
         Ok(DispatchOutcome::Envelope(_)) => StateAwareEvents {
             execution: ExecutionEvent {
                 backend: ctx.backend,
+                sandbox_kind: ctx.sandbox_kind,
                 exit_code: 0,
                 outcome: "success",
                 duration_ms,
@@ -574,6 +617,7 @@ fn plan_state_aware<'a>(
             StateAwareEvents {
                 execution: ExecutionEvent {
                     backend: ctx.backend,
+                    sandbox_kind: ctx.sandbox_kind,
                     exit_code: *exit_code,
                     outcome: if failed { "failure" } else { "success" },
                     duration_ms,
@@ -593,6 +637,7 @@ fn plan_state_aware<'a>(
             StateAwareEvents {
                 execution: ExecutionEvent {
                     backend: ctx.backend,
+                    sandbox_kind: ctx.sandbox_kind,
                     exit_code: 1,
                     outcome: "failure",
                     duration_ms,
@@ -661,14 +706,6 @@ mod tests {
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn is_enabled_explicit_true() {
-        let config = TelemetryConfig {
-            enabled: Some(true),
-        };
-        assert!(is_enabled(&config));
-    }
-
-    #[test]
     fn is_enabled_explicit_false() {
         let config = TelemetryConfig {
             enabled: Some(false),
@@ -679,6 +716,42 @@ mod tests {
     #[test]
     fn is_enabled_default_off() {
         let config = TelemetryConfig::default();
+        assert!(!is_enabled(&config));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn is_enabled_explicit_true_requires_granted_consent_and_permitting_policy() {
+        let store = tempfile::tempdir().expect("temp dir");
+        let env = test_support::TelemetryTestEnv::new(store.path());
+        let config = TelemetryConfig {
+            enabled: Some(true),
+        };
+
+        assert!(
+            !is_enabled(&config),
+            "undetermined consent must fail closed"
+        );
+
+        consent::set_consent(true, "test").expect("set consent");
+        assert!(
+            is_enabled(&config),
+            "granted + allowed policy should enable"
+        );
+
+        env.set_policy_value(0);
+        assert!(
+            !is_enabled(&config),
+            "blocked policy must suppress telemetry even with granted consent"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn is_enabled_explicit_true_is_false_off_windows() {
+        let config = TelemetryConfig {
+            enabled: Some(true),
+        };
         assert!(!is_enabled(&config));
     }
 
@@ -737,12 +810,14 @@ mod tests {
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::InternalError));
         assert_eq!(exec.phase, "exec");
+        assert_eq!(exec.sandbox_kind, "isolation_session");
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1, "panic emits exactly one MXC.Error");
         let error = &errors[0];
         assert_eq!(error.backend, "isolation_session");
+        assert_eq!(error.sandbox_kind, "isolation_session");
         assert_eq!(error.error_type, FailureReason::InternalError);
         assert_eq!(error.exit_code, PANIC_EXIT_CODE);
         assert_eq!(error.phase, "exec");
@@ -772,10 +847,12 @@ mod tests {
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::Cancelled));
         assert_eq!(exec.phase, "start");
+        assert_eq!(exec.sandbox_kind, "isolation_session");
         assert_eq!(exec.correlation_vector, "iso:wxc-abcd");
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].sandbox_kind, "isolation_session");
         assert_eq!(errors[0].error_type, FailureReason::Cancelled);
         assert_eq!(errors[0].exit_code, CANCELLED_EXIT_CODE);
 
@@ -868,6 +945,7 @@ mod tests {
             false,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -934,6 +1012,7 @@ mod tests {
         let event = crash_event(
             TelemetryContext {
                 backend: "lxc",
+                sandbox_kind: "lxc",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -950,6 +1029,7 @@ mod tests {
         let cancel = crash_event(
             TelemetryContext {
                 backend: "appcontainer",
+                sandbox_kind: "appcontainer",
                 phase: "",
                 correlation_vector: "",
             },
@@ -970,6 +1050,7 @@ mod tests {
         let panic = plan_crash(
             TelemetryContext {
                 backend: "lxc",
+                sandbox_kind: "lxc",
                 phase: "exec",
                 correlation_vector: "iso:wxc-abcd",
             },
@@ -992,6 +1073,7 @@ mod tests {
         let cancel = plan_crash(
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "",
                 correlation_vector: "",
             },
@@ -1028,6 +1110,7 @@ mod tests {
         for phase in PHASES {
             let ctx = TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase,
                 correlation_vector: correlation,
             };
@@ -1139,6 +1222,7 @@ mod tests {
             true,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "provision",
                 correlation_vector: "corr-provision",
             },
@@ -1148,6 +1232,7 @@ mod tests {
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1);
         assert_eq!(execs[0].phase, "provision");
+        assert_eq!(execs[0].sandbox_kind, "isolation_session");
         assert_eq!(execs[0].correlation_vector, "corr-provision");
         assert_eq!(execs[0].outcome, "success");
         assert!(events::test_sink::take_errors().is_empty());
@@ -1160,6 +1245,7 @@ mod tests {
             true,
             TelemetryContext {
                 backend: "isolation_session",
+                sandbox_kind: "isolation_session",
                 phase: "start",
                 correlation_vector: "corr-start",
             },
@@ -1169,12 +1255,14 @@ mod tests {
         let execs = events::test_sink::take_executions();
         assert_eq!(execs.len(), 1);
         assert_eq!(execs[0].phase, "start");
+        assert_eq!(execs[0].sandbox_kind, "isolation_session");
         assert_eq!(execs[0].correlation_vector, "corr-start");
         assert_eq!(execs[0].outcome, "failure");
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].error_type, FailureReason::PolicyError);
         assert_eq!(errors[0].phase, "start");
+        assert_eq!(errors[0].sandbox_kind, "isolation_session");
         assert_eq!(errors[0].correlation_vector, "corr-start");
 
         reset_for_test();
