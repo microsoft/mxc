@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn directional_networking_ignores_legacy_enforcement_mode() {
         let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::WfpOnly,
+            network_enforcement_mode: NetworkEnforcementMode::Firewall,
             network_egress: Some(NetworkEgressPolicy {
                 default: NetworkAction::Allow,
                 ..Default::default()
