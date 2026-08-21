@@ -74,14 +74,16 @@ public static class MxcProxyActivation
     public static uint Activate(string appUserModelId, string arguments)
     {
         var manager = (IApplicationActivationManager)new ApplicationActivationManager();
-        int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out uint pid);
+        uint pid;
+        int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out pid);
         Marshal.ThrowExceptionForHR(hr);
         return pid;
     }
 
     public static string DeriveSid(string profile)
     {
-        int hr = DeriveAppContainerSidFromAppContainerName(profile, out IntPtr sid);
+        IntPtr sid;
+        int hr = DeriveAppContainerSidFromAppContainerName(profile, out sid);
         Marshal.ThrowExceptionForHR(hr);
         try
         {
@@ -260,12 +262,13 @@ public static class MxcUnpackagedAppContainer
             startup.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
             startup.lpAttributeList = attributeList;
             string command = "\"" + executable + "\" " + arguments;
+            PROCESS_INFORMATION process;
             if (!CreateProcess(
                 executable, new System.Text.StringBuilder(command),
                 IntPtr.Zero, IntPtr.Zero, false,
                 EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
                 IntPtr.Zero, System.IO.Path.GetDirectoryName(executable),
-                ref startup, out PROCESS_INFORMATION process))
+                ref startup, out process))
                 ThrowLastError("CreateProcessW(AppContainer proxy)");
 
             CloseHandle(process.hThread);
@@ -291,22 +294,25 @@ public static class MxcUnpackagedAppContainer
 }
 
 function Wait-Proxy {
-    param([int]$Port)
+    param(
+        [int]$Port,
+        [Parameter(Mandatory)][Diagnostics.Process]$Process
+    )
+
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    $lastError = $null
     do {
-        $client = [Net.Sockets.TcpClient]::new()
-        try {
-            $client.Connect('127.0.0.1', $Port)
-            return
-        } catch [Net.Sockets.SocketException] {
-            $lastError = $_.Exception.Message
-            Start-Sleep -Milliseconds 250
-        } finally {
-            $client.Dispose()
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            throw "Proxy process $($Process.Id) exited with code $($Process.ExitCode)"
         }
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen `
+            -OwningProcess $Process.Id -ErrorAction SilentlyContinue
+        if ($listener) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Proxy did not listen on 127.0.0.1:$Port. Last socket error: $lastError"
+    throw "Proxy process $($Process.Id) did not listen on port $Port"
 }
 
 function Invoke-Client {
@@ -325,6 +331,7 @@ function Invoke-Client {
         containerId = "proxy-client-$Name"
         containment = 'processcontainer'
         process = @{ commandLine = $clientCommand }
+        ui = @{ disable = $false }
         network = @{
             egress = @{ default = 'deny' }
             ingress = @{ default = 'allow'; hostLoopback = $HostLoopback }
@@ -336,7 +343,11 @@ function Invoke-Client {
         $config.processContainer.network = @{ allowedProxyPeer = $AllowedPeer }
     }
     $configPath = Join-Path $testRoot "$Name.json"
-    $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding utf8
+    [IO.File]::WriteAllText(
+        $configPath,
+        ($config | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false)
+    )
     & $wxc --config $configPath
     if ($ExpectFailure) {
         if ($LASTEXITCODE -eq 0) {
@@ -361,29 +372,21 @@ function Start-PackagedProxy {
     )
     $process = Get-Process -Id $pidValue
     $script:processes += $process
-    Wait-Proxy $proxyPort
-    $process.Refresh()
-    if ($process.HasExited) {
-        throw "Packaged proxy $PackageName exited before becoming ready"
-    }
+    Wait-Proxy -Port $proxyPort -Process $process
     return $package.PackageFamilyName
 }
 
 function Start-UnpackagedProxy {
     $process = Start-Process $proxy -ArgumentList '--port', $proxyPort, '--standalone' -PassThru
     $script:processes += $process
-    Wait-Proxy $proxyPort
-    $process.Refresh()
-    if ($process.HasExited) {
-        throw 'Unpackaged full-trust proxy exited before becoming ready'
-    }
+    Wait-Proxy -Port $proxyPort -Process $process
 }
 
 New-Item -ItemType Directory $testRoot -Force | Out-Null
 try {
     $packages = & $packageBuilder -ProxyBinary $proxy -OutputDirectory $PackageOutput
     $trustedCertificate = Import-Certificate -FilePath $packages.Certificate `
-        -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople'
+        -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
 
     foreach ($packagePath in $packages.AppContainerPackage, $packages.FullTrustPackage) {
         Add-AppxPackage $packagePath
@@ -415,11 +418,7 @@ try {
         -Protocol TCP -LocalPort $proxyPort -Program $proxy -Package $profileSid | Out-Null
     $firewallRules += $rule
 
-    Wait-Proxy $proxyPort
-    $process.Refresh()
-    if ($process.HasExited) {
-        throw 'Unpackaged AppContainer proxy exited before becoming ready'
-    }
+    Wait-Proxy -Port $proxyPort -Process $process
     Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $appContainerProfile
     $process | Stop-Process -Force
     $process.WaitForExit()
@@ -444,7 +443,7 @@ try {
     Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.FullTrust' |
         Remove-AppxPackage -ErrorAction SilentlyContinue
     if ($trustedCertificate) {
-        Remove-Item "Cert:\CurrentUser\TrustedPeople\$($trustedCertificate.Thumbprint)" `
+        Remove-Item "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" `
             -Force -ErrorAction SilentlyContinue
     }
     [MxcUnpackagedAppContainer]::DeleteAppContainerProfile(
