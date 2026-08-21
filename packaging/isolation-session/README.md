@@ -16,9 +16,12 @@ required IsolationSession binaries and two WinMDs, generates the month-specific
 4. publishes the per-architecture installer artifacts plus a combined release
    artifact containing the NuGet, installers, provenance, and release metadata.
 
-The NuGet also carries the repository-owned reg-free COM activation manifest
-and a pipeline-stamped `IsoSessionApp.runtimeversion` sidecar. The sidecar uses
-the same underscore runtime token as the MSI registry key.
+The NuGet uses the x64 WinMD pair and signed x64 activation shim consumed by
+MXC. ARM64 WinMD hashes remain in release provenance but are not required to
+match the independently generated x64 metadata byte-for-byte. The package also
+carries the repository-owned reg-free COM activation manifest and a
+pipeline-stamped `IsoSessionApp.runtimeversion` sidecar. The sidecar uses the
+same underscore runtime token as the MSI registry key.
 
 ## Upstream source
 

@@ -264,8 +264,8 @@ try {
             'release metadata records the signed runtime hash'
     }
 
-    Test-Case 'Negative: aggregation fails when WinMD hashes differ across architectures' {
-        $caseRoot = Join-Path $testRoot 'bad-winmd'
+    Test-Case 'Architecture-specific WinMDs select x64 metadata and preserve both hashes' {
+        $caseRoot = Join-Path $testRoot 'architecture-specific-winmd'
         $artifacts = Get-PreparedCaseArtifacts -CaseRoot $caseRoot
         $armPreviewPath = Join-Path $artifacts.arm64 'bin\arm64\windows.ai.isolationsession.preview.winmd'
         Set-Content -LiteralPath $armPreviewPath -Value 'mutated-preview-winmd' -Encoding UTF8
@@ -277,10 +277,26 @@ try {
         $armManifest | ConvertTo-Json -Depth 20 |
             Set-Content -LiteralPath $armManifestPath -Encoding UTF8
 
-        Invoke-AggregationExpectFailure `
+        $outDir = Join-Path $caseRoot 'final'
+        & $aggregateScript `
             -X64ArtifactDirectory $artifacts.x64 `
             -Arm64ArtifactDirectory $artifacts.arm64 `
-            -OutDir (Join-Path $caseRoot 'final')
+            -OutDir $outDir `
+            -MonthId $script:releaseInfo.monthId `
+            -Patch $script:releaseInfo.patch `
+            -SigningMode unsigned
+
+        $releaseMetadata = Get-Content -LiteralPath (
+            Join-Path $outDir 'release-metadata.json') -Raw | ConvertFrom-Json
+        $record = @(
+            $releaseMetadata.source.winmds |
+                Where-Object { $_.name -eq 'windows.ai.isolationsession.preview.winmd' })[0]
+        Assert-True ($record.selectedArchitecture -eq 'x64') `
+            'release metadata selects the x64 WinMD used by the package'
+        Assert-True ($record.sha256 -eq $record.x64.sha256) `
+            'selected WinMD hash matches the x64 provenance record'
+        Assert-True ($record.x64.sha256 -ne $record.arm64.sha256) `
+            'architecture-specific WinMD hashes are preserved independently'
     }
 
     Test-Case 'Negative: aggregation fails when an architecture payload is missing' {

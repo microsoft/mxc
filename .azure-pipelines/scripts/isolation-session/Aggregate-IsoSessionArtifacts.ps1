@@ -200,9 +200,6 @@ foreach ($winmdName in @('windows.ai.isolationsession.winmd', 'windows.ai.isolat
     if ($x64Winmd.Count -ne 1 -or $arm64Winmd.Count -ne 1) {
         throw "WinMD '$winmdName' was not found exactly once in both source manifests."
     }
-    if ($x64Winmd[0].sha256 -ne $arm64Winmd[0].sha256) {
-        throw "WinMD hash mismatch across architectures for '$winmdName'."
-    }
 }
 
 $releaseMetadata = [ordered]@{
@@ -225,15 +222,20 @@ $releaseMetadata = [ordered]@{
                     name = $winmdName
                     sha256 = $x64Record.sha256
                     sizeBytes = $x64Record.sizeBytes
+                    selectedArchitecture = 'x64'
                     x64 = [ordered]@{
                         dropName = $x64State.sourceManifest.dropName
                         flavor = $x64State.sourceManifest.flavor
                         relativeSourcePath = $x64Record.relativeSourcePath
+                        sha256 = $x64Record.sha256
+                        sizeBytes = $x64Record.sizeBytes
                     }
                     arm64 = [ordered]@{
                         dropName = $arm64State.sourceManifest.dropName
                         flavor = $arm64State.sourceManifest.flavor
                         relativeSourcePath = $arm64Record.relativeSourcePath
+                        sha256 = $arm64Record.sha256
+                        sizeBytes = $arm64Record.sizeBytes
                     }
                 }
             })
