@@ -418,14 +418,18 @@ Model 2 permits only the proxy endpoint.
 > requires `nf_conntrack`; the sandbox fails to launch without it rather than
 > running unenforced.
 >
-> Not yet covered: the `ingress` section does not exist in the schema yet —
-> neither `ingress.default` nor `ingress.hostLoopback` is accepted, so a config
-> carrying them is rejected as an unknown field. The inbound posture is instead
-> derived from the existing `network.allowLocalNetwork`, and at 0.8 that field
-> is rejected outright when it is `true` on a private-namespace mode (there is
-> no inbound-only primitive to honor it with). Deny is therefore the only
-> reachable posture today; wiring `ingress` is what will make `allow`
-> expressible. Inbound denial also does not currently depend on the `INPUT`
+> Not yet covered: the `ingress` section exists in the 0.8 schema and parses
+> into `ContainerPolicy::network_ingress`, but Bubblewrap declares
+> `NetworkPolicySupport::LEGACY`, so a config carrying `ingress.default` or
+> `ingress.hostLoopback` is rejected in `validate` as an unsupported *backend
+> feature* — not as an unknown field. (Supplying `ingress` marks the request as
+> directional, so the message names `network.egress.default`.) The inbound
+> posture is instead derived from the existing `network.allowLocalNetwork`, and
+> at 0.8 that field is rejected outright when it is `true` on a
+> private-namespace mode (there is no inbound-only primitive to honor it with).
+> Deny is therefore the only reachable posture today; wiring `ingress` — and
+> declaring the matching support bits — is what will make `allow` expressible.
+> Inbound denial also does not currently depend on the `INPUT`
 > chain in practice: no port forwarding is configured, so nothing outside the
 > sandbox can reach in regardless. Schema 0.6/0.7 keeps the previous
 > warn-and-continue behavior.

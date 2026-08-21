@@ -71,7 +71,11 @@ install_bubblewrap() {
 # rejected as "Invalid argument". Loading it here turns a confusing rule
 # failure into a prerequisite the host either satisfies or reports.
 load_conntrack_module() {
-    if [[ -d /proc/sys/net/netfilter ]]; then
+    # Keyed on a conntrack-specific indicator: the net/netfilter directory
+    # belongs to the netfilter core (nf_log and friends register there too), so
+    # its presence does not imply conntrack. The sysctl covers a loaded module
+    # and a built-in; /sys/module covers a kernel that defers the sysctl.
+    if [[ -e /proc/sys/net/netfilter/nf_conntrack_max || -d /sys/module/nf_conntrack ]]; then
         return
     fi
     if ! sudo modprobe nf_conntrack 2>/dev/null; then

@@ -428,6 +428,11 @@ pub(crate) struct IngressPlan {
 impl IngressPlan {
     /// The posture the policy asks for.
     ///
+    /// Legacy-derived: the posture comes from `allowLocalNetwork`. The
+    /// directional `network.ingress` section exists in the 0.8 contract, but
+    /// Bubblewrap declares `NetworkPolicySupport::LEGACY`, so an explicit
+    /// `ingress` request is rejected in `validate` before this runs.
+    ///
     /// Only the deny posture is reachable on the private-namespace path today:
     /// `allowLocalNetwork: true` is refused before this point at schema 0.8+
     /// (see `bwrap_command::local_network_diagnostic_for_mode`) because

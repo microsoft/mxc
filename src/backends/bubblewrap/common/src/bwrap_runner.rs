@@ -362,6 +362,7 @@ impl BubblewrapScriptRunner {
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     egress.pin(),
                     logger,
+                    request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -387,6 +388,7 @@ impl BubblewrapScriptRunner {
                     &network_rules::IngressPlan::for_policy(&request.policy),
                     None,
                     logger,
+                    request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {

@@ -121,7 +121,8 @@ fi
 
 if ! command -v slirp4netns >/dev/null 2>&1; then
     echo "SKIP: slirp4netns not installed; firewall enforcement needs the private namespace."
-    exit 0
+    # 77, not 0: run_bwrap_all_tests.sh must record SKIPPED, not a false PASS.
+    exit 77
 fi
 
 # A host-side listener stands in for "a destination the policy allows". It is
@@ -219,7 +220,8 @@ fi
 if ! grep -q DENY_TARGET_REACHABLE <<<"$PROBE_OUT"; then
     echo "SKIP: 1.1.1.1:443 is not reachable from an unfiltered sandbox on this host."
     echo "      The deny assertions would pass without proving anything."
-    exit 0
+    # 77, not 0: run_bwrap_all_tests.sh must record SKIPPED, not a false PASS.
+    exit 77
 fi
 echo "  1.1.1.1:443 is reachable when allowed, so a drop is real evidence"
 

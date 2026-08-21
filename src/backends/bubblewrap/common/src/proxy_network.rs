@@ -52,18 +52,35 @@ const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
 /// unusable: a long host list could push startup past any sane bound. The
 /// ceiling keeps a wedged host bounded, and it is generous enough that a
 /// policy reaching it is contending for the lock rather than merely large.
-fn rule_install_timeout(transactions: usize) -> Duration {
+///
+/// Also clamped to the caller's `script_timeout` when there is one, so setup
+/// cannot silently outlast the deadline the request asked for -- it is spent
+/// before the child's own timeout exists. The clamp stops at
+/// [`RULE_INSTALL_FLOOR`]: setup has an irreducible cost, so a shorter workload
+/// timeout bounds the workload, not the sandbox that has to exist to run it.
+fn rule_install_timeout(transactions: usize, script_timeout_ms: u32) -> Duration {
     let waits = XTABLES_LOCK_WAIT
         .checked_mul(u32::try_from(transactions).unwrap_or(u32::MAX))
         .unwrap_or(RULE_INSTALL_CEILING);
-    waits
+    let budget = waits
         .saturating_add(RULE_INSTALL_HEADROOM)
-        .min(RULE_INSTALL_CEILING)
+        .min(RULE_INSTALL_CEILING);
+
+    if script_timeout_ms == 0 {
+        return budget;
+    }
+    budget
+        .min(Duration::from_millis(u64::from(script_timeout_ms)))
+        .max(RULE_INSTALL_FLOOR)
 }
 /// Slack for slirp startup and process spawn inside [`rule_install_timeout`].
 const RULE_INSTALL_HEADROOM: Duration = Duration::from_secs(20);
 /// Upper bound on [`rule_install_timeout`], however large the policy is.
 const RULE_INSTALL_CEILING: Duration = Duration::from_secs(120);
+/// Floor the caller-deadline clamp will not go below: slirp startup plus one
+/// contended transaction.
+const RULE_INSTALL_FLOOR: Duration =
+    Duration::from_secs(STARTUP_TIMEOUT.as_secs() + XTABLES_LOCK_WAIT.as_secs());
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
@@ -605,6 +622,9 @@ pub(crate) struct ProxyNetworkNamespace {
     /// Restore transactions the supervisor will apply, which sizes the
     /// readiness budget in [`Self::attach`].
     transactions: usize,
+    /// The request's `script_timeout` in ms, 0 when absent. Clamps the same
+    /// budget, which is spent before the child's own timeout exists.
+    script_timeout_ms: u32,
 }
 
 impl ProxyNetworkNamespace {
@@ -623,6 +643,7 @@ impl ProxyNetworkNamespace {
         ingress: &IngressPlan,
         pin: Option<&ProxyHostPin>,
         logger: &mut Logger,
+        script_timeout_ms: u32,
     ) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
@@ -739,6 +760,7 @@ impl ProxyNetworkNamespace {
             userns: Some(userns),
             hosts,
             transactions,
+            script_timeout_ms,
         })
     }
 
@@ -819,14 +841,13 @@ impl ProxyNetworkNamespace {
             self.state_dir.path().join("slirp.ready"),
             &mut self.supervisor,
             &self.state_dir.path().join("supervisor.stderr"),
-            // Names both phases: this signal is written after slirp is up *and*
-            // every egress rule is installed, so attributing a stall to
-            // slirp alone would send the reader to the wrong place.
-            "slirp4netns startup and egress rule installation",
-            rule_install_timeout(self.transactions),
+            // Written after slirp is up *and* both rule sets are installed, so
+            // naming slirp alone would send the reader to the wrong place.
+            "slirp4netns startup and network rule installation",
+            rule_install_timeout(self.transactions, self.script_timeout_ms),
         )?;
         logger.log_line(
-            "Bubblewrap: slirp4netns configured the private network namespace and the egress \
+            "Bubblewrap: slirp4netns configured the private network namespace and the network \
              rules are in force",
         );
         Ok(())
@@ -2396,7 +2417,7 @@ mod tests {
     #[test]
     fn rule_install_budget_covers_every_transaction_blocking_on_the_lock() {
         for transactions in [2usize, 5, 11] {
-            let budget = rule_install_timeout(transactions);
+            let budget = rule_install_timeout(transactions, 0);
             assert!(
                 budget > XTABLES_LOCK_WAIT * transactions as u32,
                 "a fully contended host would time out before -w could succeed, and the \
@@ -2411,11 +2432,32 @@ mod tests {
     /// budget had.
     #[test]
     fn the_rule_install_budget_is_bounded_however_large_the_policy_is() {
-        assert_eq!(rule_install_timeout(usize::MAX), RULE_INSTALL_CEILING);
+        assert_eq!(rule_install_timeout(usize::MAX, 0), RULE_INSTALL_CEILING);
         assert!(
-            rule_install_timeout(2) < RULE_INSTALL_CEILING,
+            rule_install_timeout(2, 0) < RULE_INSTALL_CEILING,
             "an ordinary policy must not be charged the ceiling"
         );
+    }
+
+    /// This budget is spent before the child's own timeout exists, so without
+    /// the clamp setup could outlast the deadline the caller asked for.
+    #[test]
+    fn rule_install_budget_never_outlasts_the_requested_deadline() {
+        let deadline = Duration::from_secs(25);
+        assert!(rule_install_timeout(2, 0) > deadline, "premise");
+        assert_eq!(rule_install_timeout(2, 25_000), deadline);
+    }
+
+    /// Setup has an irreducible cost, so clamping all the way down would fail
+    /// every sandbox with a short workload timeout.
+    #[test]
+    fn the_deadline_clamp_stops_at_the_startup_floor() {
+        assert_eq!(rule_install_timeout(2, 1_000), RULE_INSTALL_FLOOR);
+    }
+
+    #[test]
+    fn an_absent_deadline_leaves_the_budget_unclamped() {
+        assert!(rule_install_timeout(2, 0) > RULE_INSTALL_FLOOR);
     }
 
     /// A plan whose rule count is what the test cares about. Sized through the
