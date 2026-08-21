@@ -65,6 +65,13 @@ HOST_NETNS="$(readlink /proc/self/ns/net)"
 # config rejection always fails, a privilege failure is tolerated but named,
 # a success is held to the sentinel and the namespace, and anything else fails.
 echo "Running Bubblewrap firewall test: pre-0.8 is unchanged..."
+# Probed up front: the legacy path does not pin the iptables locale, and the
+# runner's generic error wrapper would excuse any apply failure on a
+# privileged runner, so neither is a dependable discriminator.
+HOST_IPTABLES_OK=0
+if iptables -w 2 -S >/dev/null 2>&1; then
+    HOST_IPTABLES_OK=1
+fi
 LEGACY_RC=0
 LEGACY_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
     "$REPO_DIR/tests/configs/bubblewrap_network_firewall.json" 2>&1) || LEGACY_RC=$?
@@ -102,13 +109,13 @@ if [ "$LEGACY_RC" = 0 ]; then
         exit 1
     fi
     echo "PASS: pre-0.8 firewall is unchanged (enforced end to end)"
-elif grep -qE "failed to apply iptables firewall rules|network policy error" <<<"$LEGACY_OUT"; then
-    # Unprivileged: host-side iptables was refused. The compatibility invariant
-    # above still held, which is all this host can prove.
+elif [ "$HOST_IPTABLES_OK" = 0 ]; then
+    # No privilege to program iptables, established by the probe rather than
+    # by the message. The invariant above is all this host can prove.
     echo "PASS: pre-0.8 firewall is unchanged (host iptables needs privilege; behavior not asserted)"
 else
     echo "$LEGACY_OUT"
-    echo "FAIL: pre-0.8 firewall (exited $LEGACY_RC for a reason that is neither a rejection nor a privilege failure)"
+    echo "FAIL: pre-0.8 firewall (exited $LEGACY_RC on a host that can program iptables)"
     exit 1
 fi
 

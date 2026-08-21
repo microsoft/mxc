@@ -361,6 +361,7 @@ impl BubblewrapScriptRunner {
                     &egress.plan(),
                     egress.pin(),
                     logger,
+                    request.script_timeout,
                 ) {
                     Ok(network) => Some(network),
                     Err(error) => {
@@ -381,7 +382,12 @@ impl BubblewrapScriptRunner {
                         return Err(ScriptResponse::error(&error));
                     }
                 };
-                match proxy_network::ProxyNetworkNamespace::start(&plan, None, logger) {
+                match proxy_network::ProxyNetworkNamespace::start(
+                    &plan,
+                    None,
+                    logger,
+                    request.script_timeout,
+                ) {
                     Ok(network) => Some(network),
                     Err(error) => {
                         proxy.stop(logger);
@@ -1260,7 +1266,6 @@ mod tests {
         let mut req = base_request();
         req.schema_version = "0.8.0-alpha".into();
         req.policy.default_network_policy = wxc_common::models::NetworkPolicy::Allow;
-        req.policy.allow_local_network_specified = true;
 
         let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
         assert!(

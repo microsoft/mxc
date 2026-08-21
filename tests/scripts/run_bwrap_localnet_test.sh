@@ -96,6 +96,39 @@ assert_rejected "allowLocalNetwork=true under a private namespace" \
     "bubblewrap_network_localnet_private_rejected.json" \
     "is confined to the sandbox's own network namespace"
 
+# The same rejection with the field omitted. `false` is the schema default *and*
+# a deny, so silence still asks for inbound denial. Separate from the explicit
+# case because a presence check would pass that one and fail this one.
+assert_rejected "an omitted allowLocalNetwork on a shared namespace" \
+    "bubblewrap_network_localnet_omitted_rejected.json" \
+    "is not enforced while the sandbox shares the host network namespace"
+
+# The escape hatch from both cases above. Pinned because "reject the deny" is
+# also satisfiable by rejecting every shared-namespace request, which would
+# leave these callers with no expressible policy.
+echo "Running Bubblewrap localnet test: acknowledged exposure is accepted..."
+ACK_RC=0
+ACK_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_localnet_acknowledged.json" 2>&1) \
+    || ACK_RC=$?
+if [ "$ACK_RC" != 0 ]; then
+    echo "$ACK_OUT"
+    echo "FAIL: acknowledged localnet (exited $ACK_RC; the acknowledgment is not honored)"
+    exit 1
+fi
+if ! grep -q LOCALNET_ACK_OK <<<"$ACK_OUT"; then
+    echo "$ACK_OUT"
+    echo "FAIL: acknowledged localnet (succeeded without running the workload)"
+    exit 1
+fi
+ACK_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$ACK_OUT" | tail -n 1)"
+if [ "$ACK_NETNS" != "$HOST_NETNS" ]; then
+    echo "$ACK_OUT"
+    echo "FAIL: acknowledged localnet (expected the host netns $HOST_NETNS, got $ACK_NETNS)"
+    exit 1
+fi
+echo "PASS: acknowledged exposure is accepted"
+
 # The pre-0.8 twin of the first case. GHCP consumes Bubblewrap proxy mode on
 # 0.6/0.7, so the rejection above must be invisible there.
 #

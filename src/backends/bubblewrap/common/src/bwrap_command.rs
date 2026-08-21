@@ -240,7 +240,8 @@ pub const BWRAP_LOCAL_NETWORK_SHARED_NS: &str =
      sandbox shares the host network namespace (defaultPolicy='allow'). \
      The sandboxed process can still bind, listen and accept on host-local addresses. For \
      an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
-     which applies --unshare-net.";
+     which applies --unshare-net; to keep the shared namespace, acknowledge the exposure \
+     with allowLocalNetwork=true.";
 
 /// Rejection text for `allowLocalNetwork=true` under a private namespace.
 pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
@@ -307,15 +308,13 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
 /// `builtinTestServer` has no address until the proxy starts, which is after
 /// validation.
 ///
-/// An unset `allowLocalNetwork` is never rejected. The field defaults to
-/// `false`, so rejecting on the value alone would fail every 0.8 request that
-/// shares the host namespace without asking for inbound policy at all. The
-/// warning path keeps the looser check: it only logs.
+/// Rejects on the value, not on whether the caller wrote the field. `false` is
+/// the schema default *and* a deny, so an omitted `allowLocalNetwork` still
+/// asks for inbound denial. Callers wanting the shared namespace acknowledge
+/// the exposure with `allowLocalNetwork=true`. The warning path keeps the
+/// looser check: it only logs.
 pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     if !rejects_unhonorable_network(request) {
-        return None;
-    }
-    if !request.policy.allow_local_network && !request.policy.allow_local_network_specified {
         return None;
     }
     let mode =
@@ -909,11 +908,34 @@ mod tests {
         let mut r = base_request();
         r.schema_version = "0.8.0-alpha".into();
         r.policy.default_network_policy = NetworkPolicy::Allow;
-        r.policy.allow_local_network_specified = true;
         let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
         assert!(msg.contains("allowLocalNetwork=false"));
         // The text is reused verbatim as an error, so it must carry no severity.
         assert!(!msg.contains("WARNING"));
+    }
+
+    #[test]
+    fn an_omitted_local_network_is_rejected_like_an_explicit_deny_at_0_8() {
+        // `false` is the schema default *and* a deny, so silence still asks for
+        // inbound denial.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        assert!(!r.policy.allow_local_network, "default is the deny posture");
+        let msg = local_network_rejection(&r).expect("an omitted deny is still a deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+        // Actionable only if it names the acknowledgment.
+        assert!(msg.contains("allowLocalNetwork=true"));
+    }
+
+    #[test]
+    fn acknowledged_local_network_exposure_is_accepted_at_0_8() {
+        // The escape hatch from the rejection above.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        assert!(local_network_rejection(&r).is_none());
     }
 
     #[test]

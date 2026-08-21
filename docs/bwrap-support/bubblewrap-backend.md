@@ -285,10 +285,14 @@ first-match chain.
 
 **Schema 0.7 and earlier — accepted but not enforced.** The legacy path shares
 the host network namespace and applies rules to the *host* via
-`NetworkIptablesManager`, which **requires root**; unprivileged, the rules are
-not installed and the sandbox runs with unrestricted network access. This is
-retained unchanged for existing callers and is the reason enforcement is 0.8+
-only. Names are accepted on this path and resolved to IPv4 only.
+`NetworkIptablesManager`, which **requires root**. Unprivileged, the request
+fails closed rather than running unfiltered: `spawn_bwrap` returns the
+`apply_firewall_rules` error before `bwrap` is spawned, so no workload runs.
+The unenforced case is the *privileged* one — the rules install on the host's
+chains, which the sandbox does not traverse, so they filter nothing while
+appearing to succeed. This is retained unchanged for existing callers and is
+the reason enforcement is 0.8+ only. Names are accepted on this path and
+resolved to IPv4 only.
 
 > **Legacy path, IPv4 only.** On schema ≤ 0.7, host names are resolved to
 > IPv4 addresses only; AAAA records and IPv6 literals are silently dropped
@@ -327,6 +331,14 @@ emit a
 failing silently. Windows (AppContainer's `privateNetworkClientServer`
 capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
 enforce the field at the syscall level; this divergence is Linux-specific.
+
+Row 2 is keyed on the value, not on whether the caller wrote the field.
+`false` is the schema's default *and* a deny, so an omitted `allowLocalNetwork`
+is still a request for inbound denial and is rejected the same way: a bare
+`defaultPolicy: "allow"` does not silently opt out of the deny it inherits.
+Callers who want the shared namespace acknowledge the exposure with
+`allowLocalNetwork: true` (row 4), the same acknowledgment IsolationSession
+requires for this field.
 
 ### Process Settings
 

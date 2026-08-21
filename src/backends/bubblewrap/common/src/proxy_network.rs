@@ -36,6 +36,17 @@ const XTABLES_LOCK_WAIT: Duration = Duration::from_secs(5);
 /// Lock file the legacy `iptables` backend opens before touching any table.
 /// `nf_tables` does not use it. See [`iptables_backend_is_usable`].
 const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
+/// Ceiling on the rule-installation budget. The per-command sum below is
+/// caller-scaled and host lists are uncapped, so without this a large policy
+/// could authorize hours of blocked startup. Covers ~50 fully contended
+/// commands.
+const RULE_INSTALL_TIMEOUT_CAP: Duration = Duration::from_secs(300);
+/// Floor for the deadline clamp: slirp startup plus one contended call. Setup
+/// has an irreducible cost, so a shorter workload timeout bounds the workload,
+/// not the sandbox that has to exist to run it.
+const RULE_INSTALL_TIMEOUT_FLOOR: Duration =
+    Duration::from_secs(STARTUP_TIMEOUT.as_secs() + XTABLES_LOCK_WAIT.as_secs());
+
 /// Budget for the rule-installation phase, which begins once slirp is up.
 ///
 /// Sized so that lock contention -- the expected reason a rule stalls -- cannot
@@ -49,11 +60,23 @@ const XTABLES_LOCK_PATH: &str = "/run/xtables.lock";
 /// because the same deadline also spans slirp readiness and one `nsenter`
 /// launch per rule. Headroom only -- the supervisor raises a single signal for
 /// both phases, so they cannot be budgeted separately.
-fn rule_install_timeout(plan: &EgressPlan) -> Duration {
+///
+/// Bounded twice, because this phase runs before the child's own timeout
+/// exists: by [`RULE_INSTALL_TIMEOUT_CAP`], and by `script_timeout` when the
+/// caller set one, down to [`RULE_INSTALL_TIMEOUT_FLOOR`].
+fn rule_install_timeout(plan: &EgressPlan, script_timeout_ms: u32) -> Duration {
     let commands = plan.command_count() as u64;
-    Duration::from_secs(
+    let budget = Duration::from_secs(
         XTABLES_LOCK_WAIT.as_secs() * commands + STARTUP_TIMEOUT.as_secs() + commands,
     )
+    .min(RULE_INSTALL_TIMEOUT_CAP);
+
+    if script_timeout_ms == 0 {
+        return budget;
+    }
+    budget
+        .min(Duration::from_millis(u64::from(script_timeout_ms)))
+        .max(RULE_INSTALL_TIMEOUT_FLOOR)
 }
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
@@ -624,6 +647,7 @@ impl ProxyNetworkNamespace {
         plan: &EgressPlan,
         pin: Option<&ProxyHostPin>,
         logger: &mut Logger,
+        script_timeout_ms: u32,
     ) -> Result<Self, String> {
         let state_dir = tempfile::Builder::new()
             .prefix("mxc-bwrap-proxy-")
@@ -730,7 +754,7 @@ impl ProxyNetworkNamespace {
             pid_writer: Some(pid_writer),
             userns: Some(userns),
             hosts,
-            rule_install_timeout: rule_install_timeout(plan),
+            rule_install_timeout: rule_install_timeout(plan, script_timeout_ms),
         })
     }
 
@@ -2439,7 +2463,7 @@ mod tests {
             plan_with_rule_count(25),
         ] {
             let contended = XTABLES_LOCK_WAIT * plan.command_count();
-            let budget = rule_install_timeout(&plan);
+            let budget = rule_install_timeout(&plan, 0);
             assert!(
                 budget > contended,
                 "a fully contended host would time out before -w could succeed"
@@ -2463,7 +2487,9 @@ mod tests {
             schema_version: "0.8.0-alpha".into(),
             ..Default::default()
         };
-        request.policy.allowed_hosts = (0..count).map(|n| format!("10.0.0.{n}")).collect();
+        request.policy.allowed_hosts = (0..count)
+            .map(|n| format!("10.{}.{}.{}", (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff))
+            .collect();
         EgressPlan::for_policy(&request).expect("literal addresses must build a plan")
     }
 
@@ -2472,9 +2498,47 @@ mod tests {
     #[test]
     fn rule_install_budget_grows_with_the_rule_list() {
         assert!(
-            rule_install_timeout(&plan_with_rule_count(50))
-                > rule_install_timeout(&plan_with_rule_count(1))
+            rule_install_timeout(&plan_with_rule_count(50), 0)
+                > rule_install_timeout(&plan_with_rule_count(1), 0)
         );
+    }
+
+    /// Host lists are uncapped and this budget is consumed before the child's
+    /// own timeout exists, so an unbounded sum would authorize hours of startup.
+    #[test]
+    fn rule_install_budget_is_capped_for_a_pathological_rule_list() {
+        let budget = rule_install_timeout(&plan_with_rule_count(10_000), 0);
+        assert_eq!(budget, RULE_INSTALL_TIMEOUT_CAP);
+        // The uncapped sum is what makes the cap load-bearing.
+        assert!(
+            Duration::from_secs(10_000 * XTABLES_LOCK_WAIT.as_secs()) > RULE_INSTALL_TIMEOUT_CAP
+        );
+    }
+
+    #[test]
+    fn rule_install_budget_never_outlasts_the_requested_deadline() {
+        // 30s workload deadline against a list whose uncapped budget exceeds it.
+        let plan = plan_with_rule_count(25);
+        let deadline = Duration::from_secs(30);
+        assert!(rule_install_timeout(&plan, 0) > deadline, "premise");
+        assert_eq!(rule_install_timeout(&plan, 30_000), deadline);
+    }
+
+    #[test]
+    fn the_deadline_clamp_stops_at_the_startup_floor() {
+        // A 1s workload timeout cannot starve slirp startup: setup has an
+        // irreducible cost, and clamping to it would fail every sandbox.
+        let plan = plan_with_rule_count(25);
+        assert_eq!(
+            rule_install_timeout(&plan, 1_000),
+            RULE_INSTALL_TIMEOUT_FLOOR
+        );
+    }
+
+    #[test]
+    fn an_absent_deadline_leaves_the_budget_unclamped() {
+        let plan = plan_with_rule_count(5);
+        assert!(rule_install_timeout(&plan, 0) > RULE_INSTALL_TIMEOUT_FLOOR);
     }
 
     #[test]

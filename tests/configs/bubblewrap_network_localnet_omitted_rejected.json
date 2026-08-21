@@ -1,0 +1,11 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-LocalNet-Omitted-Rejected",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "echo LOCALNET_SHOULD_NOT_RUN"
+  },
+  "network": {
+    "defaultPolicy": "allow"
+  }
+}

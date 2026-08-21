@@ -703,15 +703,6 @@ pub struct ContainerPolicy {
     /// and accept incoming connections. Independent of `default_network_policy`
     /// (which governs outbound traffic).
     pub allow_local_network: bool,
-    /// Whether the caller supplied `network.allowLocalNetwork` on the wire.
-    ///
-    /// Field-level twin of `network_specified`, needed because this field
-    /// defaults to `false`, which is also the value a caller may set
-    /// explicitly. Backends that reject an unenforceable `false` must not
-    /// reject a request that never asked for one. Parse-derived, never on the
-    /// wire.
-    #[serde(skip)]
-    pub allow_local_network_specified: bool,
     pub allowed_hosts: Vec<String>,
     pub blocked_hosts: Vec<String>,
     /// Outbound CIDR, protocol, and port policy.
