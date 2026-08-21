@@ -296,7 +296,9 @@ coexist.
 
 - `schemas/schema-version.json`: `stableLatest` to `0.8.0-alpha`,
   `maxSupported` and `devSchemaFile` to the `0.9` line, then
-  `check-schema-versions.js` drags the Rust and SDK constants.
+  `check-schema-versions.js` drags the Rust and SDK constants. **Sequencing
+  caveat:** these constants describe what the runtime accepts, so they must not
+  advance before Phase 9. See "Two coexisting versioning models".
 - The contract registry: flip `V0_8_0Alpha` to `Published` and add the `0.9`
   development arm by hand; Phase 11 replaces that with generated metadata later.
 - The three-way fork of Phase 11, minus the `mxc_engine::policy` builder, which
@@ -319,6 +321,101 @@ coexist.
 - Phase 9's blocker is resolved by this sequence: the exact path gains
   directional networking through step 2, so enabling exact dispatch no longer
   regresses a shipped feature.
+
+## Two coexisting versioning models
+
+Recorded 2026-08-21, after the early publication of `0.8.0-alpha` produced four
+contradictions between the two models inside a single day's work. The overlap
+was always intended — Phase 6 adds the second generator "alongside" the first,
+Phase 9 makes the contract authoritative, and Phase 11 replaces
+`schemas/schema-version.json` outright. What was not intended is that
+**publication moved earlier while retirement did not**, so the two models now
+disagree about the same version numbers rather than merely duplicating them.
+
+### The two models
+
+| | Rolling (old stack) | Contract (new stack) |
+| --- | --- | --- |
+| Source of truth | `schemas/schema-version.json` | `mxc_config_contract::registry` |
+| Shape authority | `wxc_common::wire` | per-version Rust modules |
+| Version model | a range, `min` to `maxSupported` | an exact enum |
+| Artifacts | `…0.8.0-dev.json`, `generated/wire.ts` | `…0.8.0-alpha.json`, `generated/v0_9_0_alpha/wire.ts` |
+| Gates | `check-schema-versions`, `check-schema-codegen`, `validate-configs` | `check-contract-codegen` |
+| Enforced at runtime | yes, parser and SDK | no, until Phase 9 |
+
+### Observed contradictions
+
+1. **`0.8.0-alpha` means two different things.** The rolling model treats it as
+   `maxSupported` — the mutable dev line, as that file's own comment states —
+   while the contract registry marks it `Published` and therefore immutable.
+2. **Two files describe `0.8` and disagree.** `mxc-config.schema.0.8.0-dev.json`
+   carries directional networking and an open `experimental`;
+   `mxc-config.schema.0.8.0-alpha.json` carries neither and still describes the
+   pre-publication development contract. Both sit in `schemas/dev/`, and
+   neither is what published `0.8` will be.
+3. **`devSchemaFile` is a rolling concept with a contract-shaped name.**
+   Setting it to `0.9.0-dev` directs `check-schema-codegen` and
+   `validate-configs` at a *rolling* artifact for a line whose rolling model is
+   still `0.8` and is slated for deletion in Phase 9, while the contract emits
+   `0.9.0-alpha`. Two suffix conventions for one line.
+4. **Three places disagree on where the published `0.8` schema lives.**
+   `stableLatest` implies `schemas/stable/…0.8.0-alpha.json`; the registry's
+   `schema_path` says `schemas/dev/…`; its `schema_id` says `schemas/stable/…`.
+5. **The runtime cannot run the development contract.** `SUPPORTED_VERSION`,
+   `CURRENT_SCHEMA_VERSION`, and the SDK's `SUPPORTED_VERSION` all still cap at
+   `0.8.0-alpha`, so a `0.9` config is authorable and unrunnable.
+6. **A range cannot express the new reality.** `>=0.6, <=0.8` cannot say
+   "0.6, 0.7, 0.8 published; 0.9 development, opt-in" — which is exactly why the
+   contract model uses an exact enum. Widening it to `<=0.9` would silently make
+   an unfinished development contract runnable.
+
+### Remediation
+
+**Immediate.**
+
+- Do not advance `schemas/schema-version.json` ahead of Phase 9. Its constants
+  describe what the runtime accepts, and the runtime has not moved. Advancing
+  it red-lines three previously green gates for a state nothing can satisfy
+  until published-contract generation exists.
+- Fix one suffix convention: `-alpha` for contract artifacts, `-dev` reserved
+  for the rolling family being retired. An audit on 2026-08-21 found the
+  contract stack already compliant — `registry.rs` and `mxc_schema_gen` contain
+  no `-dev` reference — with a single exception: the `$schema` string in
+  `tests/v0_9_0_alpha/fixtures/one_shot/valid/annotations.json` points at a
+  nonexistent `0.9.0-dev` file. It is inert, since `$schema` is a free string
+  the contract does not resolve, which is why no gate catches it.
+- Move the published `0.8` artifact to `schemas/stable/` and make `schema_id`
+  and `schema_path` agree. A `Published` descriptor writing into `schemas/dev/`
+  is what makes contradiction 4 possible.
+
+**Medium.** Split the three jobs "version" currently conflates: what the
+runtime accepts, what shape is frozen, and what artifact is generated. Narrow
+`schemas/schema-version.json` to the runtime-accepted range only, and let the
+registry own shape and artifacts. `check-schema-versions` then stops needing to
+know about contract files at all. This is most of Phase 11's replacement work,
+done incrementally instead of as one swap.
+
+**Add the missing gate.** Nothing asserts the two models agree. One check —
+every registry version falls within the rolling supported range, and each
+version's `status` matches whether its artifact lives in `stable/` or `dev/` —
+would have caught contradictions 1, 3, and 4 as they were introduced. Model it
+on the existing `check-dotnet-errorcode-parity.js` precedent.
+
+**Strategic.** Every contradiction above is a symptom of publishing before
+retiring. Two coherent resolutions:
+
+- *Pull Phase 9 forward for one-shot only.* Make exact dispatch authoritative
+  for one-shot requests, delete the rolling parse path for them, and let
+  state-aware keep the rolling parser until `0.9` stabilizes. This collapses the
+  duplication where it actually hurts.
+- *Or freeze the rolling model deliberately.* Declare `0.8.0-dev` the last
+  rolling artifact, stop regenerating it, and let the contract family own
+  everything from `0.9`. Cheaper, but leaves two live schemas for `0.8`
+  indefinitely.
+
+Avoid the current implicit third option — advancing both models version by
+version in lockstep. That is twice the work per version, with no gate proving
+the two agree, and it is how four contradictions appeared in one afternoon.
 
 ## Intended parse flow
 
