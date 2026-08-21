@@ -80,8 +80,12 @@ try {
         Copy-Item $resolvedProxy (Join-Path $stage 'wxc-test-proxy.exe')
 
         $manifest = Get-Content (Join-Path $PSScriptRoot "$kind\AppxManifest.xml") -Raw
-        $manifest.Replace('$architecture$', $Architecture) |
-            Set-Content (Join-Path $stage 'AppxManifest.xml') -Encoding utf8NoBOM
+        $manifestPath = Join-Path $stage 'AppxManifest.xml'
+        [IO.File]::WriteAllText(
+            $manifestPath,
+            $manifest.Replace('$architecture$', $Architecture),
+            [Text.UTF8Encoding]::new($false)
+        )
         New-PackageLogo -Path (Join-Path $stage 'Assets\Logo44.png') -Size 44
         New-PackageLogo -Path (Join-Path $stage 'Assets\Logo150.png') -Size 150
 
