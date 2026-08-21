@@ -868,6 +868,8 @@ struct RelayScope<'a> {
 
 impl<'a> RelayScope<'a> {
     const JOIN_MS: u32 = 1000;
+    /// Expiry cancels the read, dropping an in-flight chunk.
+    const DRAIN_MS: u32 = 5000;
 
     fn new(process: &'a IsoSessionProcess, stop_event: HANDLE) -> Self {
         Self {
@@ -917,8 +919,8 @@ impl<'a> RelayScope<'a> {
     /// Teardown for a workload that has already exited.
     fn finish(&mut self) {
         self.signal_stop();
-        let stdout_drained = Self::join(&self.stdout, Self::JOIN_MS);
-        let stderr_drained = Self::join(&self.stderr, Self::JOIN_MS);
+        let stdout_drained = Self::join(&self.stdout, Self::DRAIN_MS);
+        let stderr_drained = Self::join(&self.stderr, Self::DRAIN_MS);
         if !(stdout_drained && stderr_drained) {
             self.cancel_output_reads();
             Self::join(&self.stdout, Self::JOIN_MS);
