@@ -22,7 +22,7 @@ use wxc_common::models::{
 
 use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
 
-pub(super) const LOOPBACK_NETWORK_CAPABILITY: &str = "loopbackNetwork";
+pub(super) const LOOPBACK_NETWORK_CAPABILITY: &str = "networkLoopback";
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
 const SANDBOX_SPEC_VERSION: &str = "0.1.0";
