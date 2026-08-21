@@ -1519,13 +1519,29 @@ impl AppContainerScriptRunner {
 
 impl SandboxBackend for AppContainerScriptRunner {
     fn network_policy_support(&self) -> NetworkPolicySupport {
+        // AppContainer naturally enforces host-loopback deny. Advertise the
+        // field so shared validation accepts that default posture; `validate`
+        // below rejects the unsupported allow value.
         NetworkPolicySupport::EGRESS_DEFAULT
             | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
             | NetworkPolicySupport::RUNTIME_PROXY
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| {
+                ingress.host_loopback == wxc_common::models::NetworkAction::Allow
+            })
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.hostLoopback='allow' is not supported by the AppContainer fallback",
+            ));
+        }
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(
@@ -2483,6 +2499,20 @@ mod tests {
             .validate(&request)
             .expect_err("AppContainer must not accept host-loopback access");
         assert!(error.error_message.contains("network.ingress.hostLoopback"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_directional_default_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy::default());
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "AppContainer naturally enforces the schema 0.8 default-deny posture"
+        );
     }
 
     #[test]
