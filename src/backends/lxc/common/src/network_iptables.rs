@@ -1008,11 +1008,12 @@ impl NetworkIptablesManager {
     /// The unconditional port 53 accept that only the legacy host-list path
     /// carries.
     ///
-    /// Schema 0.8 governs DNS with the same rules as every other destination:
-    /// a resolver the policy never allowed is a resolver the container cannot
-    /// reach.  Emitting this pair under a directional posture would accept
-    /// port 53 to the whole internet ahead of the generated rules, leaving a
-    /// standing DNS-tunnel path out of an `egress.default: "deny"` container.
+    /// A directional posture governs forwarded DNS with the same rules as
+    /// every other forwarded destination: a resolver the policy never allowed
+    /// is a resolver the container cannot reach.  Emitting this pair there
+    /// would accept port 53 to the whole internet ahead of the generated
+    /// rules, leaving a standing DNS-tunnel path out of an
+    /// `egress.default: "deny"` container.
     fn build_legacy_dns_exemption_rule_args(chain_name: &str) -> Vec<Vec<String>> {
         vec![
             vec![
@@ -2234,8 +2235,9 @@ impl NetworkIptablesManager {
             }
         } else {
             let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
-            // `network_egress` is set for every schema 0.8 config and never for
-            // a legacy one, which is what separates the two postures here.
+            // The field records the network format the parser actually chose,
+            // not the version the request declared: a 0.8 request written in
+            // the legacy shape lands here and keeps legacy DNS behavior.
             if policy.network_egress.is_none() {
                 base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
             }

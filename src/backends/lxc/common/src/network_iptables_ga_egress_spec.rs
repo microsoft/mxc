@@ -599,17 +599,41 @@ fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<V
         .collect()
 }
 
-/// Whether the chain carries an unscoped port 53 ACCEPT -- one that names no
-/// destination and reaches every resolver on the internet.
+/// Whether the chain carries the legacy DNS exemption: the UDP and TCP port 53
+/// ACCEPT pair, sitting ahead of every generated policy rule and reaching every
+/// resolver on the internet.
+///
+/// A generated rule always names a destination, which is what tells the pair
+/// apart from an `egress.allow` entry that happens to name port 53.
 fn opens_dns_unconditionally(rules: &[Vec<String>]) -> bool {
-    rules.iter().any(|rule| {
-        argument_after(rule, "--dport") == Some("53")
-            && argument_after(rule, "-d").is_none()
-            && argument_after(rule, "-j") == Some("ACCEPT")
-    })
+    let generated = rules
+        .iter()
+        .position(|rule| argument_after(rule, "-d").is_some())
+        .unwrap_or(rules.len());
+    let exempts = |protocol: &str| {
+        rules[..generated].iter().any(|rule| {
+            argument_after(rule, "-p") == Some(protocol)
+                && argument_after(rule, "--dport") == Some("53")
+                && argument_after(rule, "-j") == Some("ACCEPT")
+        })
+    };
+    exempts("udp") && exempts("tcp")
 }
 
-// Schema 0.8 governs DNS with the same rules as every other destination: a
+/// Parse a request the way production does and hand back the policy the
+/// firewall installer will be given.
+fn policy_from_json(json: &str) -> ContainerPolicy {
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+    let request = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
+        .unwrap_or_else(|_| panic!("config must parse: {json}"));
+    match request {
+        wxc_common::state_aware_request::MxcRequest::OneShot(request) => request.policy,
+        _ => panic!("expected a one-shot request"),
+    }
+}
+
+// A directional posture governs forwarded DNS with the same rules as every
+// other forwarded destination: a
 // resolver the policy never allowed is a resolver the container cannot reach.
 // The unconditional port 53 accept sits ahead of every generated rule, and
 // leaving it in place carries DNS out of a deny-all posture to the whole
@@ -704,5 +728,77 @@ fn a_legacy_policy_still_opens_dns() {
     assert!(
         opens_dns_unconditionally(&rules),
         "input=legacy defaultPolicy=block; expected the documented port 53 accept; output={rules:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The same contract driven from a request rather than a hand-built policy.
+//
+// Everything above hands the installer a policy assembled in the test, so it
+// cannot catch a parser that stopped agreeing with it.  The exemption follows
+// the network format the parser selected, and these four cover every route
+// into that decision.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_parsed_legacy_request_keeps_the_dns_exemption() {
+    let policy = policy_from_json(
+        r#"{"version": "0.7.0",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
+
+    assert!(
+        opens_dns_unconditionally(&rules),
+        "input=0.7 defaultPolicy=block; expected the legacy port 53 accept; output={rules:?}"
+    );
+}
+
+#[test]
+fn a_parsed_directional_request_drops_the_dns_exemption() {
+    let policy = policy_from_json(
+        r#"{"version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "network": {"egress": {"default": "deny"}}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("parsed-directional", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=0.8 egress.default=deny; expected no port 53 accept; output={rules:?}"
+    );
+}
+
+// A 0.8 request may still be written in the legacy shape while callers
+// migrate, and it keeps legacy semantics throughout -- including this one.
+#[test]
+fn a_parsed_v08_request_in_the_legacy_shape_keeps_the_dns_exemption() {
+    let policy = policy_from_json(
+        r#"{"version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"},
+            "network": {"defaultPolicy": "block"}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("parsed-v08-legacy-shape", &policy);
+
+    assert!(
+        opens_dns_unconditionally(&rules),
+        "input=0.8 defaultPolicy=block; expected the legacy port 53 accept; output={rules:?}"
+    );
+}
+
+// An omitted network section on 0.8 is a directional deny default, not a
+// legacy request.
+#[test]
+fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
+    let policy = policy_from_json(
+        r#"{"version": "0.8.0-alpha",
+            "process": {"commandLine": "echo hi"}}"#,
+    );
+    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=0.8 with no network section; expected no port 53 accept; output={rules:?}"
     );
 }

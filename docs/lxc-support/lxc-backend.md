@@ -145,8 +145,9 @@ wins" is not true without them:
   unconditionally and is installed ahead of the generated policy rules, so
   port-53 traffic to a blocked destination is accepted before its DROP rule is
   reached. Narrowing that rule needs to know which resolver addresses are
-  legitimate, and no schema field carries them today. This exemption is
-  legacy-only — schema 0.8 has a field for it and does not carry the exemption.
+  legitimate, and no schema field carries them today. This exemption belongs to
+  the legacy host-list path: a request that parses into the directional
+  `network.egress` format does not carry it, whichever version it declares.
 - **A hostname in both lists is resolved twice.** Each list entry is resolved
   independently, so a name behind round-robin DNS can return one address for
   the `blockedHosts` entry and a different one for the `allowedHosts` entry.
@@ -196,20 +197,24 @@ does the `ESTABLISHED,RELATED` exemption: the base chain accepts a flow that
 conntrack already knows, ahead of the generated rules.
 
 **DNS is not exempt here.** The unconditional port 53 accept is emitted only on
-the legacy path. Schema 0.8 governs DNS with the same rules as every other
-destination — a resolver the policy never allowed is a resolver the container
-cannot reach, and reaching one takes an `egress.allow` rule naming its address.
-That is the GA decision, not a local choice: [D3](../sandbox-policy/0.8.0/networking/networking.md)
+the legacy host-list path. Under a directional posture this chain governs
+forwarded DNS with the same rules as every other forwarded destination — a
+resolver the policy never allowed is a resolver the container cannot reach, and
+reaching one takes an `egress.allow` rule naming its address. That is the GA
+decision, not a local choice: [D3](../sandbox-policy/0.8.0/networking/networking.md)
 states that DNS is not a first-class policy surface and that queries fail when
 the rules do not allow the resolver's IP. Carrying the exemption into a
 directional posture would accept port 53 to every destination ahead of the
 generated rules, leaving an `egress.default: "deny"` container a standing
 DNS-tunnel path — the same path the proxy posture refuses to open.
 
-LXC's own bridge resolver is addressed to the bridge gateway and traverses
-`INPUT` rather than this `FORWARD` chain; dropping the exemption does not reach
-it. What a 0.8 container loses is the unasked-for route to an external
-resolver.
+**One resolver sits outside that guarantee.** LXC's own bridge resolver is
+addressed to the bridge gateway, which the container reaches through the host's
+`INPUT` path rather than this `FORWARD` chain. No egress rule is consulted for
+it, and none can block it. A container keeps ordinary name resolution through
+the bridge whatever its policy says; what a directional posture takes away is
+the unasked-for route to an *external* resolver. Closing that gap needs a
+host-local rule and is not done here.
 
 Three points where one schema field does not map to one iptables rule:
 

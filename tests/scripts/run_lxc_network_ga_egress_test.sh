@@ -29,7 +29,8 @@
 # unconditionally, ahead of every generated rule. Carried into a directional
 # posture that would leave an `egress.default: "deny"` container able to reach
 # any resolver on the internet -- a standing DNS-tunnel path out of a deny-all
-# policy. Schema 0.8 governs port 53 like any other destination (GA decision
+# policy. A directional posture governs port 53 like any other forwarded
+# destination (GA decision
 # D3), and the pair proves both halves: denied by default, reachable when the
 # policy names the resolver. The allowed case is the control that keeps the
 # denied case from passing on a container that simply has no DNS at all.
