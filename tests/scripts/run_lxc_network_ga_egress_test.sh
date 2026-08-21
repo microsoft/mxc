@@ -11,17 +11,28 @@
 # in run_lxc_network_enforcement_test.sh: a chain can install cleanly, name the
 # right chain, and still filter nothing.
 #
-# The three cases are chosen so that no single defect leaves the suite green:
+# The five cases are chosen so that no single defect leaves the suite green:
 #
-#   deny        egress.default deny, no rules       -> unreachable
-#   allow       same default, CIDR + tcp/443 rule   -> reachable
-#   wrong_port  same CIDR, tcp/444 instead of 443   -> unreachable
+#   deny         egress.default deny, no rules       -> unreachable
+#   allow        same default, CIDR + tcp/443 rule   -> reachable
+#   wrong_port   same CIDR, tcp/444 instead of 443   -> unreachable
+#   dns_denied   same default, DNS probe to 8.8.8.8  -> unreachable
+#   dns_allowed  same probe, 8.8.8.8/32 + udp/53     -> reachable
 #
 # The allow case alone would pass on a backend that skipped enforcement
 # entirely, and the deny case alone would pass on a host with no working
 # network. The wrong-port case is what proves the port selector is enforced
 # rather than parsed and dropped: it differs from the allow case in one field,
 # so a backend that ignored `ports` would let it through.
+#
+# The two DNS cases exist because the legacy chain accepts UDP and TCP port 53
+# unconditionally, ahead of every generated rule. Carried into a directional
+# posture that would leave an `egress.default: "deny"` container able to reach
+# any resolver on the internet -- a standing DNS-tunnel path out of a deny-all
+# policy. Schema 0.8 governs port 53 like any other destination (GA decision
+# D3), and the pair proves both halves: denied by default, reachable when the
+# policy names the resolver. The allowed case is the control that keeps the
+# denied case from passing on a container that simply has no DNS at all.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,6 +60,8 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny.json"
 ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_allow.json"
 WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_wrong_port.json"
+DNS_DENIED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_denied.json"
+DNS_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_allowed.json"
 
 fail() {
     echo "FAIL: $1"
@@ -150,5 +163,11 @@ assert_allowed "an explicitly allowed destination was unreachable. The policy is
 run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG"
 assert_blocked "traffic to tcp/443 succeeded while the policy allowed only tcp/444. The port selector is being dropped, so the allow case above proves only that the destination matched."
 
-echo "PASS: schema 0.8 egress rules filtered by destination and by port."
+run_case "dns-denied case: egress.default deny, DNS probe to an external resolver" "$DNS_DENIED_CONFIG"
+assert_blocked "a DNS query to 8.8.8.8 succeeded under egress.default deny with no allow rules. The legacy unconditional port 53 accept is still being emitted into a directional chain, which leaves this container a DNS-tunnel path out of a deny-all policy."
+
+run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG"
+assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. DNS is over-blocked, so the dns-denied case above proves only that this container has no DNS at all."
+
+echo "PASS: schema 0.8 egress rules filtered by destination, by port, and by resolver."
 echo "LXC schema 0.8 egress enforcement test complete."

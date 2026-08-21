@@ -999,6 +999,22 @@ impl NetworkIptablesManager {
                 "-j",
                 "ACCEPT",
             ],
+        ]
+        .into_iter()
+        .map(|args| args.into_iter().map(String::from).collect())
+        .collect()
+    }
+
+    /// The unconditional port 53 accept that only the legacy host-list path
+    /// carries.
+    ///
+    /// Schema 0.8 governs DNS with the same rules as every other destination:
+    /// a resolver the policy never allowed is a resolver the container cannot
+    /// reach.  Emitting this pair under a directional posture would accept
+    /// port 53 to the whole internet ahead of the generated rules, leaving a
+    /// standing DNS-tunnel path out of an `egress.default: "deny"` container.
+    fn build_legacy_dns_exemption_rule_args(chain_name: &str) -> Vec<Vec<String>> {
+        vec![
             vec![
                 "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
             ],
@@ -2217,7 +2233,12 @@ impl NetworkIptablesManager {
                 );
             }
         } else {
-            let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+            let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+            // `network_egress` is set for every schema 0.8 config and never for
+            // a legacy one, which is what separates the two postures here.
+            if policy.network_egress.is_none() {
+                base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
+            }
             Self::run_iptables_rule_args(&base_rules, logger)?;
             if ipv6_enabled {
                 Self::run_ip6tables_rule_args(&base_rules, logger)?;
@@ -3645,12 +3666,14 @@ mod tests {
 
     #[test]
     fn base_chain_rule_args_are_family_agnostic() {
-        // The same base rules are fed to both iptables and ip6tables, so they
-        // must not name an address family or a v4-only protocol.
+        // The same rules are fed to both iptables and ip6tables, so neither
+        // builder may name an address family or a v4-only protocol.
         let base = NetworkIptablesManager::build_base_chain_rule_args("MXC-test");
+        let dns = NetworkIptablesManager::build_legacy_dns_exemption_rule_args("MXC-test");
 
-        assert_eq!(base.len(), 4);
-        for rule in &base {
+        assert_eq!(base.len(), 2);
+        assert_eq!(dns.len(), 2);
+        for rule in base.iter().chain(dns.iter()) {
             assert!(!rule.iter().any(|arg| arg == "icmp"));
         }
     }
@@ -4343,7 +4366,7 @@ mod tests {
     }
 
     #[test]
-    fn base_chain_rules_are_four_family_agnostic_rules_in_documented_order() {
+    fn base_chain_rules_are_two_family_agnostic_rules_in_documented_order() {
         let chain_name = "MXC-base";
         let rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
         let expected = vec![
@@ -4358,6 +4381,26 @@ mod tests {
                 "-j",
                 "ACCEPT",
             ]),
+        ];
+
+        assert_eq!(
+            rules, expected,
+            "base chain rules should be the documented two rules in order"
+        );
+        for (index, rule) in rules.iter().enumerate() {
+            assert_rule_omits(rule, "-d", &format!("base rule {index}"));
+            assert!(
+                !rule.iter().any(|arg| arg == "icmp" || arg == "icmpv6"),
+                "base rule {index} must be family-agnostic; -p icmp is invalid for ip6tables and would make the v6 chain fail: {rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_dns_exemption_is_the_documented_udp_then_tcp_pair() {
+        let chain_name = "MXC-base";
+        let rules = NetworkIptablesManager::build_legacy_dns_exemption_rule_args(chain_name);
+        let expected = vec![
             strings(&[
                 "-A", chain_name, "-p", "udp", "--dport", "53", "-j", "ACCEPT",
             ]),
@@ -4368,14 +4411,10 @@ mod tests {
 
         assert_eq!(
             rules, expected,
-            "base chain rules should be the documented four rules in order"
+            "the legacy DNS exemption should be the documented udp/tcp pair"
         );
         for (index, rule) in rules.iter().enumerate() {
-            assert_rule_omits(rule, "-d", &format!("base rule {index}"));
-            assert!(
-                !rule.iter().any(|arg| arg == "icmp" || arg == "icmpv6"),
-                "base rule {index} must be family-agnostic; -p icmp is invalid for ip6tables and would make the v6 chain fail: {rule:?}"
-            );
+            assert_rule_omits(rule, "-d", &format!("dns rule {index}"));
         }
     }
 

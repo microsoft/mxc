@@ -571,3 +571,138 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
         rules.ipv6
     );
 }
+
+// ---------------------------------------------------------------------------
+// DNS under a directional posture.
+// ---------------------------------------------------------------------------
+
+/// Apply `policy` against the command fake and return the rules appended to
+/// the container's IPv4 chain, in issue order.
+fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<Vec<String>> {
+    let fake = super::test_firewall::install();
+    let mut manager = NetworkIptablesManager::new(container);
+    manager.set_veth_interface("veth-dns0");
+    let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+    let _ = fake.forget_issued();
+
+    let result = manager.apply_firewall_rules(policy, &mut logger);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    let chain = manager.chain_name().to_string();
+    fake.issued()
+        .into_iter()
+        .filter(|argv| {
+            argv.first().map(String::as_str) == Some("iptables")
+                && argv.get(1).map(String::as_str) == Some("-A")
+                && argv.get(2).map(String::as_str) == Some(chain.as_str())
+        })
+        .collect()
+}
+
+/// Whether the chain carries an unscoped port 53 ACCEPT -- one that names no
+/// destination and reaches every resolver on the internet.
+fn opens_dns_unconditionally(rules: &[Vec<String>]) -> bool {
+    rules.iter().any(|rule| {
+        argument_after(rule, "--dport") == Some("53")
+            && argument_after(rule, "-d").is_none()
+            && argument_after(rule, "-j") == Some("ACCEPT")
+    })
+}
+
+// Schema 0.8 governs DNS with the same rules as every other destination: a
+// resolver the policy never allowed is a resolver the container cannot reach.
+// The unconditional port 53 accept sits ahead of every generated rule, and
+// leaving it in place carries DNS out of a deny-all posture to the whole
+// internet.
+#[test]
+fn a_directional_deny_default_chain_does_not_open_dns() {
+    let policy = directional_policy(NetworkAction::Deny, vec![], vec![]);
+    let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=egress.default=deny; expected no unscoped port 53 accept; output={rules:?}"
+    );
+}
+
+// The exemption must not survive on the allow-default branch either.  The
+// closing ACCEPT already reaches every destination, which would hide a
+// reintroduced exemption from the test above.
+#[test]
+fn a_directional_allow_default_chain_does_not_open_dns() {
+    let policy = directional_policy(NetworkAction::Allow, vec![], vec![]);
+    let rules = appended_ipv4_chain_rules("ga-dns-allow", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=egress.default=allow; expected no unscoped port 53 accept; output={rules:?}"
+    );
+}
+
+// Removing the exemption must not make DNS unreachable when the policy asks
+// for it.  An explicit rule is what the schema offers in place of the
+// carve-out.
+#[test]
+fn a_directional_policy_reaches_a_resolver_it_allows() {
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(
+            vec![peer("8.8.8.8/32", &[])],
+            vec![port(NetworkProtocol::Udp, Some(53), None)],
+        )],
+        vec![],
+    );
+    let rules = appended_ipv4_chain_rules("ga-dns-allowed", &policy);
+
+    assert!(
+        rules.iter().any(|emitted| {
+            argument_after(emitted, "-d") == Some("8.8.8.8/32")
+                && argument_after(emitted, "--dport") == Some("53")
+                && argument_after(emitted, "-j") == Some("ACCEPT")
+        }),
+        "input=egress.allow=[8.8.8.8/32 udp/53]; expected a scoped accept; output={rules:?}"
+    );
+}
+
+// The shape the exemption defeated outright: a deny naming a resolver under an
+// allow default.  An unscoped accept ahead of it wins on first match and the
+// deny never fires.
+#[test]
+fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
+    let policy = directional_policy(
+        NetworkAction::Allow,
+        vec![],
+        vec![rule(
+            vec![peer("8.8.8.8/32", &[])],
+            vec![port(NetworkProtocol::Udp, Some(53), None)],
+        )],
+    );
+    let rules = appended_ipv4_chain_rules("ga-dns-denied", &policy);
+
+    assert!(
+        !opens_dns_unconditionally(&rules),
+        "input=egress.deny=[8.8.8.8/32 udp/53]; expected no unscoped port 53 accept ahead of it; output={rules:?}"
+    );
+    assert!(
+        rules.iter().any(|emitted| {
+            argument_after(emitted, "-d") == Some("8.8.8.8/32")
+                && argument_after(emitted, "-j") == Some("DROP")
+        }),
+        "input=egress.deny=[8.8.8.8/32 udp/53]; expected the deny rule; output={rules:?}"
+    );
+}
+
+// Negative control for the four tests above: the legacy path keeps the
+// exemption.  Schema 0.7 carries no field naming a legitimate resolver, and
+// the limitation is documented rather than closed.  Without this, those tests
+// would pass against a manager that had stopped emitting base rules at all.
+#[test]
+fn a_legacy_policy_still_opens_dns() {
+    let policy = ContainerPolicy::default();
+    let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
+
+    assert!(
+        opens_dns_unconditionally(&rules),
+        "input=legacy defaultPolicy=block; expected the documented port 53 accept; output={rules:?}"
+    );
+}

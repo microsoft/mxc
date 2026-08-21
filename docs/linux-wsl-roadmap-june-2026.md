@@ -101,7 +101,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Status | Description | Effort |
 |---|---|---|---|---|
-| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The exemptions that keep this from being unconditional — the base chain's `ESTABLISHED,RELATED` and DNS accepts, installed ahead of the generated rules — are stated in `docs/lxc-support/lxc-backend.md`. | S |
+| 16 | **(N4) Deny-wins precedence** | ✅ Addressed | `egress.deny[]` rules are emitted ahead of `egress.allow[]` rules, matching the ordering already used for the legacy host lists. The legacy DNS exemption is not carried into a directional posture — schema 0.8 governs port 53 with the same rules as every other destination, per GA decision D3. The one remaining exemption, the base chain's `ESTABLISHED,RELATED` accept installed ahead of the generated rules, is stated in `docs/lxc-support/lxc-backend.md`. | S |
 | 17 | **(N5) Proxy — env vars + enforcement** | 🟡 Actionable | Schema field exists, backend ignores it. Fix: inject `HTTP_PROXY`/`HTTPS_PROXY`, clear all inherited proxy vars, and restrict egress to proxy port only via iptables. | M |
 
 > **Example (N5).** Consumer starts proxy on `127.0.0.1:8080`. MXC sets `HTTP_PROXY=127.0.0.1:8080` inside the container and applies `iptables -A OUTPUT -d 127.0.0.1 --dport 8080 -j ACCEPT` + default DROP. An app ignoring the env var tries `connect(140.82.112.4:443)` → dropped.

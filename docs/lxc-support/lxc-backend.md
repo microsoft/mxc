@@ -145,7 +145,8 @@ wins" is not true without them:
   unconditionally and is installed ahead of the generated policy rules, so
   port-53 traffic to a blocked destination is accepted before its DROP rule is
   reached. Narrowing that rule needs to know which resolver addresses are
-  legitimate, and no schema field carries them today.
+  legitimate, and no schema field carries them today. This exemption is
+  legacy-only — schema 0.8 has a field for it and does not carry the exemption.
 - **A hostname in both lists is resolved twice.** Each list entry is resolved
   independently, so a name behind round-robin DNS can return one address for
   the `blockedHosts` entry and a different one for the `allowedHosts` entry.
@@ -190,10 +191,25 @@ have no 0.8 equivalent.
 | `ports[].port`, `ports[].endPort` | `--dport <port>` or `--dport <port>:<endPort>` |
 
 Omitting `to` selects every destination, and omitting `ports` selects every
-port and protocol. Deny-before-allow ordering, and the reasons a deny does not
-win unconditionally, are the same as for the host lists above: the base chain's
-`ESTABLISHED,RELATED` and DNS accepts are installed ahead of the generated
-rules and are exempt.
+port and protocol. Deny-before-allow ordering matches the host lists above, as
+does the `ESTABLISHED,RELATED` exemption: the base chain accepts a flow that
+conntrack already knows, ahead of the generated rules.
+
+**DNS is not exempt here.** The unconditional port 53 accept is emitted only on
+the legacy path. Schema 0.8 governs DNS with the same rules as every other
+destination — a resolver the policy never allowed is a resolver the container
+cannot reach, and reaching one takes an `egress.allow` rule naming its address.
+That is the GA decision, not a local choice: [D3](../sandbox-policy/0.8.0/networking/networking.md)
+states that DNS is not a first-class policy surface and that queries fail when
+the rules do not allow the resolver's IP. Carrying the exemption into a
+directional posture would accept port 53 to every destination ahead of the
+generated rules, leaving an `egress.default: "deny"` container a standing
+DNS-tunnel path — the same path the proxy posture refuses to open.
+
+LXC's own bridge resolver is addressed to the bridge gateway and traverses
+`INPUT` rather than this `FORWARD` chain; dropping the exemption does not reach
+it. What a 0.8 container loses is the unasked-for route to an external
+resolver.
 
 Three points where one schema field does not map to one iptables rule:
 
