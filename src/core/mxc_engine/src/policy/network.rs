@@ -74,6 +74,24 @@ pub struct NetworkSection {
     pub runtime_config: Option<RuntimeConfigSection>,
 }
 
+impl NetworkSection {
+    pub(super) fn has_directional_fields(&self) -> bool {
+        self.has_directional_policy() || self.runtime_config.is_some()
+    }
+
+    pub(super) fn has_directional_policy(&self) -> bool {
+        self.egress.is_some() || self.ingress.is_some()
+    }
+
+    pub(super) fn has_legacy_fields(&self) -> bool {
+        self.allow_outbound
+            || self.allow_local_network
+            || !self.allowed_hosts.is_empty()
+            || !self.blocked_hosts.is_empty()
+            || self.proxy.is_some()
+    }
+}
+
 /// Allow or deny network action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]

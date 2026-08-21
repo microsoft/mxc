@@ -34,6 +34,14 @@ impl Default for ProcessContainerSection {
     }
 }
 
+impl ProcessContainerSection {
+    pub(super) fn has_allowed_proxy_peer(&self) -> bool {
+        self.network
+            .as_ref()
+            .is_some_and(|network| network.allowed_proxy_peer.is_some())
+    }
+}
+
 /// ProcessContainer-specific network settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessContainerNetworkSection {

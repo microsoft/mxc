@@ -886,45 +886,35 @@ fn build_wire_config(
     let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
         || matches!(containment, Containment::Lxc(_) | Containment::Wslc(_));
 
-    let uses_process_container_network = matches!(
-        containment,
-        Containment::ProcessContainer(ProcessContainerSection {
-            network: Some(ProcessContainerNetworkSection {
-                allowed_proxy_peer: Some(_),
-            }),
-            ..
-        })
-    );
-    let uses_directional_network = policy.network.as_ref().is_some_and(|network| {
-        network.egress.is_some() || network.ingress.is_some() || network.runtime_config.is_some()
-    }) || uses_process_container_network;
+    let uses_directional_network = policy
+        .network
+        .as_ref()
+        .is_some_and(NetworkSection::has_directional_fields)
+        || matches!(
+            containment,
+            Containment::ProcessContainer(process_container)
+                if process_container.has_allowed_proxy_peer()
+        );
 
     if uses_directional_network {
-        let net = policy.network.as_ref();
-        let mixes_legacy = net.is_some_and(|network| {
-            network.allow_outbound
-                || network.allow_local_network
-                || !network.allowed_hosts.is_empty()
-                || !network.blocked_hosts.is_empty()
-                || network.proxy.is_some()
-        });
-        if mixes_legacy {
+        let network = policy.network.as_ref();
+        if network.is_some_and(NetworkSection::has_legacy_fields) {
             return Err(MxcError::malformed_request(
                 "schema 0.8 directional networking cannot be combined with legacy network fields",
             ));
         }
 
-        if let Some(net) = net {
-            if net.egress.is_some() || net.ingress.is_some() {
+        if let Some(network) = network {
+            if network.has_directional_policy() {
                 config["network"] = json!({});
-                if let Some(egress) = &net.egress {
+                if let Some(egress) = &network.egress {
                     config["network"]["egress"] = json!(egress);
                 }
-                if let Some(ingress) = &net.ingress {
+                if let Some(ingress) = &network.ingress {
                     config["network"]["ingress"] = json!(ingress);
                 }
             }
-            if let Some(runtime_config) = &net.runtime_config {
+            if let Some(runtime_config) = &network.runtime_config {
                 config["runtimeConfig"] = json!(runtime_config);
             }
         }
