@@ -72,7 +72,9 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
 legacy `network.allowOutbound`, `network.allowLocalNetwork`, host-list, or
 `network.proxy` policy fields. Schema 0.6 and 0.7 policies continue to produce
-the legacy wire shape.
+the legacy wire shape. See the
+[Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
+for the complete authoring shape.
 
 ```typescript
 const config = createConfigFromPolicy({
@@ -473,7 +475,7 @@ for the stable registry contract and interaction rules.
 - [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
 - [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
 - [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
-- [Sandbox policy 0.7.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.7.0/policy.md)
+- [Sandbox policy 0.8.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
   — policy specification
 - Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
 
