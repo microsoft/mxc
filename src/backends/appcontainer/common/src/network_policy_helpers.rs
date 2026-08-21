@@ -11,7 +11,7 @@ pub(crate) const PRIVATE_NETWORK_CAPABILITY: &str = "privateNetworkClientServer"
 pub(crate) fn allows_network_egress(policy: &ContainerPolicy) -> bool {
     policy.network_egress.as_ref().map_or(
         policy.default_network_policy == NetworkPolicy::Allow,
-        |egress| egress.default == NetworkAction::Allow,
+        |egress| egress.default == NetworkAction::Allow || !egress.allow.is_empty(),
     )
 }
 
@@ -65,6 +65,13 @@ mod tests {
         policy.default_network_policy = NetworkPolicy::Block;
         policy.network_egress = Some(NetworkEgressPolicy {
             default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        assert!(allows_network_egress(&policy));
+
+        policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![Default::default()],
             ..Default::default()
         });
         assert!(allows_network_egress(&policy));

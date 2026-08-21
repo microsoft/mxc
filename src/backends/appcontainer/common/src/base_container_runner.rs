@@ -3968,6 +3968,7 @@ mod tests {
             .and_then(|policy| policy.egress())
             .expect("egress policy");
 
+        assert_eq!(spec.capabilities(), Some("internetClient"));
         let allow = egress.allow().expect("allow rules");
         assert_eq!(allow.len(), 2, "ICMP must expand by address family");
         assert_eq!(
