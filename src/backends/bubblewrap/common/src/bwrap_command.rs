@@ -161,31 +161,32 @@ impl ResolvedNetworkMode {
         }
 
         // The directional 0.8 posture is authoritative when present: the parser
-        // fills `network_egress` only on that path and leaves every legacy
-        // field at its default, so classifying from the legacy fields below
-        // would read `defaultPolicy='block'` with no host rules out of a policy
-        // that never said either, land on `Isolated`, and take the sandbox
-        // offline with the requested rules programmed nowhere. The
-        // discriminator matches `EgressPlan::for_request`, so the mode and the
-        // chain always agree on which schema is in force.
+        // fills these sections only on that path and leaves every legacy field
+        // at its default, so classifying from the legacy fields below would
+        // read a policy that never said either as `Isolated` and take the
+        // sandbox offline with the requested rules programmed nowhere.
         //
-        // Directional never selects `Shared`. The host namespace has no inbound
-        // primitive, and the parser fills `network_ingress` unconditionally --
-        // with no `_specified` twin, a defaulted `ingress.default='deny'` is
-        // indistinguishable from one the caller wrote. Sharing the host
-        // namespace would therefore leave a deny posture silently unenforced on
-        // configs that never mentioned inbound at all, and it could not be
-        // refused without refusing every "allow all outbound" policy with it.
-        // The private namespace honors both directions as written, so an open
-        // egress posture is an accept-all chain rather than an unfiltered
-        // namespace.
-        if let Some(egress) = request.policy.network_egress.as_ref() {
+        // Either section makes it directional, matching `EgressPlan::for_request`.
+        // Keying on `egress` alone sent an ingress-only request to the legacy
+        // arm, where a leftover `defaultPolicy='allow'` resolves to `Shared` and
+        // programs no chain -- discarding both the ingress denial and the
+        // host-loopback drop. A missing egress defaults to deny, failing closed.
+        //
+        // Directional never selects `Shared`: the host namespace has no inbound
+        // primitive, and `network_ingress` has no `_specified` twin, so a
+        // defaulted `ingress.default='deny'` is indistinguishable from one the
+        // caller wrote and could not be refused without refusing every
+        // "allow all outbound" policy with it. The private namespace honors
+        // both directions, so an open egress posture becomes an accept-all
+        // chain rather than an unfiltered namespace.
+        if request.policy.network_egress.is_some() || request.policy.network_ingress.is_some() {
             // Off the 0.8 contract there is no private namespace to program.
             // Report the unfiltered truth and let `validate` refuse it rather
             // than pretending the posture was applied.
             if !uses_private_network_contract(request) {
                 return Self::Shared;
             }
+            let egress = request.policy.network_egress.clone().unwrap_or_default();
             // A bare deny is `--unshare-net`: cheaper than slirp plus a
             // deny-all chain, identical in effect, and inbound is denied by
             // the absence of connectivity rather than by a rule.
@@ -332,7 +333,7 @@ pub const BWRAP_DIRECTIONAL_PRE_0_8: &str =
     "Bubblewrap: network.egress/network.ingress require schema 0.8.0-alpha or later. \
      Earlier schemas run the sandbox in the host network namespace, where the \
      directional posture would be accepted and then never programmed. Raise the \
-     config's $schema version, or express the policy with defaultPolicy, \
+     config's version field, or express the policy with defaultPolicy, \
      allowedHosts and blockedHosts.";
 
 /// Rejection text for an inbound-accepting directional posture.
@@ -441,10 +442,12 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     // would refuse every directional runtime proxy -- the one posture the
     // parser already constrains to `egress.default='deny'` with no direct
     // rules, which *is* proxy-only egress and carries no host lists that could
-    // be silently dropped. The discriminator matches `EgressPlan::for_request`
-    // and `ResolvedNetworkMode::from_request`, so all three agree on which
-    // schema shape is in force.
-    let legacy_shape = request.policy.network_egress.is_none();
+    // be silently dropped. Either directional section makes it non-legacy,
+    // matching `EgressPlan::for_request` and `ResolvedNetworkMode::from_request`;
+    // keying on `egress` alone refused an ingress-only request as though the
+    // defaulted `Block` had been asked for.
+    let legacy_shape =
+        request.policy.network_egress.is_none() && request.policy.network_ingress.is_none();
     let conflicts = has_host_rules
         || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block);
 
@@ -1183,6 +1186,21 @@ mod tests {
             "a directional proxy-only posture carries no host lists to drop"
         );
 
+        // An ingress-only directional request is directional too: keying the
+        // legacy discriminator on `egress` alone read the defaulted `Block` as
+        // a caller statement and refused it.
+        r.policy.network_egress = None;
+        r.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy::default());
+        assert!(
+            external_proxy_host_rules_rejection(&r).is_none(),
+            "an absent egress section is not a legacy `defaultPolicy='block'`"
+        );
+        r.policy.network_ingress = None;
+        r.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+
         // Real host lists are still refused even on the directional shape --
         // the parser forbids the mix, so this only reaches a programmatic
         // caller, which is exactly who this twin exists for.
@@ -1328,6 +1346,30 @@ mod tests {
             ResolvedNetworkMode::from_request(&request, true),
             ResolvedNetworkMode::ProxyOnly
         );
+    }
+
+    /// An ingress-only directional request must not fall to the legacy arm.
+    ///
+    /// It did: keying on `network_egress` alone sent it there, where a leftover
+    /// `defaultPolicy='allow'` resolved to `Shared` -- the host namespace, with
+    /// no chain at all -- silently discarding both the ingress denial and the
+    /// host-loopback drop.
+    #[test]
+    fn an_ingress_only_directional_request_still_gets_a_private_namespace() {
+        use wxc_common::models::{NetworkIngressPolicy, NetworkPolicy};
+
+        let mut request = base_request();
+        request.schema_version = "0.8.0-alpha".into();
+        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+        request.policy.default_network_policy = NetworkPolicy::Allow;
+
+        let mode = ResolvedNetworkMode::from_request(&request, false);
+        assert_ne!(
+            mode,
+            ResolvedNetworkMode::Shared,
+            "the host namespace programs no chain, so the deny posture would be lost"
+        );
+        assert!(mode.uses_private_netns(), "{mode:?}");
     }
 
     /// Build a directional request: no legacy network field is touched, which

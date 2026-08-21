@@ -316,6 +316,15 @@ struct Block {
 /// restore transaction. Failing loudly beats installing a partial policy.
 const MAX_BLOCKS_PER_PEER: usize = 256;
 
+/// Ceiling on the rules one policy may lower into, across every entry.
+///
+/// [`MAX_BLOCKS_PER_PEER`] bounds a single peer, but a rule is a cross product
+/// of blocks and ports and neither the peer list, the port list, nor the rule
+/// lists themselves are bounded by the wire contract. Without a total, a small
+/// policy expands into an arbitrarily large allocation. This is far above any
+/// real policy; it exists to turn runaway amplification into a rejection.
+const MAX_EGRESS_RULES: usize = 65_536;
+
 impl Block {
     fn width(family: RuleFamily) -> u8 {
         match family {
@@ -351,12 +360,30 @@ impl Block {
     ///
     /// # Errors
     ///
-    /// Rejects a sub-`/96` IPv6 block that swallows the IPv4-mapped range, for
-    /// the reason [`straddles_mapped_range`] gives. `RuleAddress::parse` makes
-    /// the same refusal on the legacy string path; both entry points into the
-    /// renderer must agree, or the directional shape becomes a way to install
-    /// the rule the legacy shape refuses.
+    /// Rejects a prefix wider than its address family, and a sub-`/96` IPv6
+    /// block that swallows the IPv4-mapped range, for the reason
+    /// [`straddles_mapped_range`] gives. `RuleAddress::parse` makes the same
+    /// refusals on the legacy string path; both entry points into the renderer
+    /// must agree, or the directional shape becomes a way to install the rule
+    /// the legacy shape refuses.
     fn from_cidr(cidr: &NetworkCidr) -> Result<(RuleFamily, Self), String> {
+        // Checked against the *source* family, before mapped rewriting: a
+        // `::ffff:0:0/97` is out of range as v6 even though the /33 it rewrites
+        // to would look in range for v4. `NetworkCidr` has public fields and
+        // only its `FromStr` validates, so unchecked `width - prefix` underflows
+        // on a programmatic request.
+        let source_width = match cidr.address {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if cidr.prefix_length > source_width {
+            return Err(format!(
+                "network rule address '{}/{}' has a prefix wider than its address family \
+                 (max /{source_width})",
+                cidr.address, cidr.prefix_length
+            ));
+        }
+
         let (family, address, prefix) = match cidr.address {
             IpAddr::V4(ip) => (RuleFamily::V4, IpAddr::V4(ip), cidr.prefix_length),
             IpAddr::V6(ip) => match mapped_v4_block(ip, cidr.prefix_length) {
@@ -463,8 +490,18 @@ fn lower_rule(
     verdict: RuleVerdict,
     out: &mut Vec<EgressRule>,
 ) -> Result<(), String> {
-    let addresses = lower_peers(&rule.to)?;
+    // `out` carries the running total, so each rule is lowered against what
+    // the budget has left rather than against the ceiling.
+    let remaining = MAX_EGRESS_RULES.saturating_sub(out.len());
+    let addresses = lower_peers(&rule.to, remaining)?;
     let ports = lower_ports(&rule.ports)?;
+
+    // Counted before the product is built, so an over-budget policy is
+    // rejected rather than materialized.
+    let emitted = addresses.len().checked_mul(ports.len());
+    if emitted.is_none_or(|count| count > remaining) {
+        return Err(egress_budget_error());
+    }
 
     for address in &addresses {
         for port in &ports {
@@ -478,12 +515,27 @@ fn lower_rule(
     Ok(())
 }
 
+/// The refusal shared by both places the rule budget is enforced.
+fn egress_budget_error() -> String {
+    format!(
+        "Bubblewrap: network.egress expands into more than {MAX_EGRESS_RULES} firewall \
+         rules. A rule becomes every destination block it resolves to in every port it \
+         names, so narrow the peers, the exclusions, or the ports."
+    )
+}
+
 /// The destination blocks a rule's peers resolve to, exclusions removed.
+///
+/// `budget` is what the rule ceiling has left. A rule emits at least one entry
+/// per address, so an address vector already past the budget can never fit;
+/// stopping there bounds the intermediate rather than letting an unbounded
+/// peer count materialize first and be rejected afterwards.
 ///
 /// # Errors
 ///
-/// Propagates an `except` expansion that exceeds the per-peer ceiling.
-fn lower_peers(peers: &[NetworkPeer]) -> Result<Vec<RuleAddress>, String> {
+/// Propagates an `except` expansion that exceeds the per-peer ceiling, and
+/// refuses a peer list whose blocks alone exceed `budget`.
+fn lower_peers(peers: &[NetworkPeer], budget: usize) -> Result<Vec<RuleAddress>, String> {
     if peers.is_empty() {
         return Ok(vec![
             RuleAddress::any(RuleFamily::V4),
@@ -514,6 +566,9 @@ fn lower_peers(peers: &[NetworkPeer]) -> Result<Vec<RuleAddress>, String> {
                 .into_iter()
                 .map(|block| RuleAddress::from_block(family, block.address(family), block.prefix)),
         );
+        if addresses.len() > budget {
+            return Err(egress_budget_error());
+        }
     }
     Ok(addresses)
 }
@@ -532,6 +587,13 @@ fn lower_ports(ports: &[NetworkPort]) -> Result<Vec<PortSpec>, String> {
 
     let mut specs = Vec::new();
     for port in ports {
+        // `NetworkPort` has public fields, so a programmatic caller can hand us
+        // a zero the JSON parser would have refused.
+        if port.port == Some(0) || port.end_port == Some(0) {
+            return Err(
+                "Bubblewrap: network.egress port values must be between 1 and 65535.".to_string(),
+            );
+        }
         let range = match (port.port, port.end_port) {
             (Some(start), Some(end)) if end < start => {
                 return Err(format!(
@@ -1988,6 +2050,25 @@ mod tests {
         EgressPlan::for_request(&req).expect_err("an inverted range cannot be honored");
     }
 
+    /// The JSON parser refuses port 0, but `NetworkPort` is publicly
+    /// constructible, so the backend refuses it too rather than rendering a
+    /// `--dport 0` rule no packet can match.
+    #[test]
+    fn a_zero_port_is_refused() {
+        for (start, end) in [(Some(0), None), (Some(80), Some(0)), (None, Some(0))] {
+            let req = directional_rules_request(
+                NetworkAction::Deny,
+                vec![rule(
+                    vec![peer("192.0.2.1/32", &[])],
+                    vec![port(NetworkProtocol::Tcp, start, end)],
+                )],
+                Vec::new(),
+            );
+
+            EgressPlan::for_request(&req).expect_err("port 0 cannot be honored");
+        }
+    }
+
     /// The expansion ceiling exists so a pathological peer fails loudly instead
     /// of overflowing the restore transaction and installing nothing.
     #[test]
@@ -2006,6 +2087,107 @@ mod tests {
         assert!(
             error.contains("address blocks"),
             "the rejection should explain the expansion: {error}"
+        );
+    }
+
+    /// A rule is a cross product of blocks and ports, and the wire contract
+    /// bounds neither list, so a small policy can otherwise expand without
+    /// limit. The total ceiling caps what the whole policy may materialize.
+    #[test]
+    fn an_oversized_cross_product_is_refused() {
+        let ports: Vec<NetworkPort> = (0..MAX_EGRESS_RULES / 2)
+            .map(|n| port(NetworkProtocol::Tcp, Some(n as u16 + 1), None))
+            .collect();
+
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[]), peer("192.0.2.2/32", &[])],
+                ports,
+            )],
+            Vec::new(),
+        );
+
+        let error = EgressPlan::for_request(&req).expect_err("the product exceeds the ceiling");
+
+        assert!(
+            error.contains("firewall rules"),
+            "the rejection should explain the product: {error}"
+        );
+    }
+
+    /// The per-peer ceiling is reset for every peer, so it bounds one peer and
+    /// not the policy. The rule ceiling has to accumulate, or a caller reaches
+    /// the same expansion by splitting it across rules that each fit.
+    #[test]
+    fn the_rule_budget_is_a_total_across_rules() {
+        let two_thirds = || -> Vec<NetworkPort> {
+            (0..MAX_EGRESS_RULES * 2 / 3)
+                .map(|n| port(NetworkProtocol::Tcp, Some(n as u16 + 1), None))
+                .collect()
+        };
+        let one = || rule(vec![peer("192.0.2.1/32", &[])], two_thirds());
+        let two = || rule(vec![peer("192.0.2.2/32", &[])], two_thirds());
+
+        EgressPlan::for_request(&directional_rules_request(
+            NetworkAction::Deny,
+            vec![one()],
+            Vec::new(),
+        ))
+        .expect("either rule fits on its own");
+
+        EgressPlan::for_request(&directional_rules_request(
+            NetworkAction::Deny,
+            vec![one(), two()],
+            Vec::new(),
+        ))
+        .expect_err("together they exceed the ceiling");
+    }
+
+    /// The ceiling is a limit, not a margin: a policy that lands exactly on it
+    /// is still installed.
+    #[test]
+    fn a_policy_at_the_rule_budget_is_accepted() {
+        // The host-loopback drop is lowered ahead of the caller's rules, so it
+        // spends one of the budget.
+        let ports: Vec<NetworkPort> = (1..MAX_EGRESS_RULES)
+            .map(|n| port(NetworkProtocol::Tcp, Some(n as u16), None))
+            .collect();
+
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("192.0.2.1/32", &[])], ports)],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("a policy on the ceiling is enforceable");
+
+        assert_eq!(
+            plan.rules.len(),
+            MAX_EGRESS_RULES,
+            "the policy should fill the budget exactly"
+        );
+    }
+
+    /// `MAX_BLOCKS_PER_PEER` is reset for every peer, and the rule ceiling was
+    /// only consulted once every peer had been expanded. The peer count itself
+    /// is unbounded, so the budget has to stop the expansion rather than audit
+    /// it after the full address vector exists.
+    #[test]
+    fn peer_expansion_stops_at_the_budget() {
+        let mut peers: Vec<NetworkPeer> = (1..=8)
+            .map(|n| peer(&format!("192.0.2.{n}/32"), &[]))
+            .collect();
+        // Refused by the mapped-range guard, and last: reaching it would prove
+        // the expansion ran past the budget, since its refusal would be the
+        // one reported.
+        peers.push(peer("::/0", &[]));
+
+        let error = lower_peers(&peers, 4).expect_err("the peers alone exceed the budget");
+
+        assert!(
+            error.contains("firewall rules"),
+            "the budget should stop the expansion where it is exceeded: {error}"
         );
     }
 
@@ -2538,5 +2720,96 @@ mod tests {
             egress(&["-d 10.0.2.2/32 -j ACCEPT"], "ACCEPT"),
             "pre-0.8 configs keep reaching the host exactly as before"
         );
+    }
+
+    /// `NetworkCidr` has public fields and only its `FromStr` validates, so a
+    /// programmatic caller reaches the renderer with any prefix. Unchecked,
+    /// `width - prefix` underflowed and panicked.
+    #[test]
+    fn a_prefix_wider_than_its_family_is_rejected_rather_than_overflowing() {
+        for (address, prefix) in [("0.0.0.0", 33u8), ("10.0.0.0", 255), ("::", 129)] {
+            let req = directional_rules_request(
+                NetworkAction::Deny,
+                vec![NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: NetworkCidr {
+                            address: address.parse().unwrap(),
+                            prefix_length: prefix,
+                        },
+                        except: Vec::new(),
+                    }],
+                    ports: Vec::new(),
+                }],
+                Vec::new(),
+            );
+
+            let error = EgressPlan::for_request(&req)
+                .expect_err("an out-of-range prefix must be refused, not rendered");
+            assert!(
+                error.contains("wider than its address family"),
+                "unexpected message for {address}/{prefix}: {error}"
+            );
+        }
+    }
+
+    /// The check reads the *source* family: this rewrites to a v4 /33, which
+    /// would look in range once mapped but is out of range as written.
+    #[test]
+    fn an_out_of_range_prefix_is_caught_before_mapped_rewriting() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: NetworkCidr {
+                        address: "::ffff:0:0".parse().unwrap(),
+                        prefix_length: 129,
+                    },
+                    except: Vec::new(),
+                }],
+                ports: Vec::new(),
+            }],
+            Vec::new(),
+        );
+
+        let error = EgressPlan::for_request(&req).expect_err("129 is out of range for v6");
+        assert!(error.contains("wider than its address family"), "{error}");
+    }
+
+    /// An out-of-range prefix inside `except` takes the same path.
+    #[test]
+    fn an_out_of_range_except_prefix_is_rejected_too() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![NetworkRule {
+                to: vec![NetworkPeer {
+                    cidr: NetworkCidr {
+                        address: "10.0.0.0".parse().unwrap(),
+                        prefix_length: 8,
+                    },
+                    except: vec![NetworkCidr {
+                        address: "10.1.0.0".parse().unwrap(),
+                        prefix_length: 40,
+                    }],
+                }],
+                ports: Vec::new(),
+            }],
+            Vec::new(),
+        );
+
+        let error = EgressPlan::for_request(&req).expect_err("an except prefix is checked too");
+        assert!(error.contains("wider than its address family"), "{error}");
+    }
+
+    /// The widest legitimate prefix for each family still renders.
+    #[test]
+    fn a_host_prefix_at_the_family_width_still_renders() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("192.0.2.1/32", &[])], Vec::new())],
+            Vec::new(),
+        );
+
+        assert!(v4(&EgressPlan::for_request(&req).expect("/32 is in range"))
+            .contains(&"-d 192.0.2.1/32 -j ACCEPT".to_string()));
     }
 }

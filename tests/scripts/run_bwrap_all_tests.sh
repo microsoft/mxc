@@ -6,8 +6,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASSED=0
 FAILED=0
 SKIPPED=0
+# Skips that strict mode counts. Excludes tests CI deliberately runs elsewhere.
+STRICT_SKIPPED=0
 FAILURES=""
 SKIPS=""
+
+# This suite runs unprivileged, so a root-only test can only ever skip here.
+# run_ci_backend_tests.sh invokes those separately under sudo and turns *their*
+# skip into a failure, so counting the skip again would make strict mode
+# unsatisfiable.
+strict_exempt() {
+    case "$1" in
+    "Bubblewrap Inbound Deny") return 0 ;;
+    *) return 1 ;;
+    esac
+}
 
 # Check for Windows line endings in test scripts
 check_line_endings() {
@@ -54,6 +67,9 @@ run_test() {
         echo "SKIPPED: $name"
         SKIPPED=$((SKIPPED + 1))
         SKIPS="$SKIPS\n  - $name"
+        if ! strict_exempt "$name"; then
+            STRICT_SKIPPED=$((STRICT_SKIPPED + 1))
+        fi
     else
         echo "FAIL: $name"
         FAILED=$((FAILED + 1))
@@ -83,4 +99,21 @@ fi
 if [ $FAILED -gt 0 ]; then
     echo -e "Failures:$FAILURES"
     exit 1
+fi
+# Strict mode, for continuous integration. A developer box legitimately lacks
+# slirp4netns or outbound access to the external anchors and should be able to
+# run what it can, so a skip is only a warning there. On a runner provisioned
+# to execute this suite, a skip means a prerequisite silently disappeared, and
+# the gate would then go green while testing nothing -- which is how an
+# unenforced firewall shipped once already.
+if [ "${MXC_BWRAP_TESTS_REQUIRE_EXECUTION:-0}" != "0" ]; then
+    if [ "$PASSED" -eq 0 ]; then
+        echo "ERROR: strict mode: no test executed. Refusing to report success."
+        exit 1
+    fi
+    if [ "$STRICT_SKIPPED" -gt 0 ]; then
+        echo "ERROR: strict mode: $STRICT_SKIPPED test(s) skipped a prerequisite that this"
+        echo "environment is supposed to provide. Refusing to report success."
+        exit 1
+    fi
 fi

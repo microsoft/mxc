@@ -470,11 +470,20 @@ path is the gateway `10.0.2.2`, which maps onto the host's own loopback. That
 drop is lowered *ahead* of every caller rule, because the chain is first-match
 and a broad allow — a bare `0.0.0.0/0` included — would otherwise win and the
 deny would be decorative. An omitted `ingress` section enforces the same deny,
-since deny is the schema's default rather than an absence of policy. Proxy mode
-needs no equivalent: it opens the proxy endpoint alone and closes on `DROP`, so
-the rest of the gateway is already unreachable. IPv4 only — slirp gives the
-sandbox no IPv6 route to the host, so there is no V6 gateway to close. The
-legacy shape gains no such rule.
+since deny is the schema's default rather than an absence of policy. IPv4
+only — slirp gives the sandbox no IPv6 route to the host, so there is no V6
+gateway to close. The legacy shape gains no such rule.
+
+Proxy mode is the defined exception. The proxy is reached at the gateway
+`10.0.2.2:<port>`, which *is* host loopback, so its chain opens that single TCP
+endpoint and drops the rest of the gateway. That is the exception the 0.8
+contract sanctions: the endpoint named by `runtimeConfig.networkProxy` is
+allowed independently of `ingress.hostLoopback`, and no other host-loopback path
+is opened. A proxy config that states — or defaults to — `deny` therefore gets
+the posture it writes, since the deny still covers every host-loopback path but
+that endpoint. `ingress.hostLoopback` is not consulted there — `EgressPlan::for_proxy`
+builds that chain, not the directional builder that lowers the drop — but the
+observed result matches the contract regardless.
 
 The declaration and these refusals must ship together — declaring the inbound
 features without them would be a fail-open. A unit test asserts exactly that
@@ -514,9 +523,11 @@ path never writes, so it sits at its `Block` default on every directional
 request. Since the parser requires `egress.default: "deny"` with no direct
 rules for a runtime proxy, the guard refused every such config: the capability
 would have been declared but unusable. The guard now reads `defaultPolicy` only
-on the legacy shape, using the same `network_egress.is_some()` discriminator as
-`EgressPlan::for_request` and `ResolvedNetworkMode::from_request`. Real host
-lists are still refused in either shape.
+on the legacy shape, treating a request as directional when *either* directional
+section is present — the same discriminator `EgressPlan::for_request` and
+`ResolvedNetworkMode::from_request` use. Keying on `network_egress` alone was
+not enough: an ingress-only request still read the defaulted `Block` as a caller
+statement and was refused. Real host lists are still refused in either shape.
 
 Because the bits are a hand-written declaration with nothing deriving them from
 the fields the backend actually consumes, a bit that is simply never added is
