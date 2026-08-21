@@ -136,10 +136,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# A host-side listener stands in for "a destination the policy allows", reached
-# at slirp's gateway (10.0.2.2), which maps back to the host's loopback. A
-# local listener rather than an internet address keeps the allowed direction
-# deterministic on a runner with no outbound access.
+# A host-side listener, reached at slirp's gateway (10.0.2.2). This is *only*
+# the proxy endpoint for the parity section below.
+#
+# It used to double as an "allowed destination", and those tests passed for the
+# wrong reason: the gateway is the host's own loopback seen from the sandbox,
+# and `ingress.hostLoopback` -- which defaults to deny -- governs that path in
+# both directions. The allow assertions now use external anchors instead.
 mkfifo "$WORK_DIR/parent.pipe"
 exec 9<>"$WORK_DIR/parent.pipe"
 "$TEST_PROXY" --ready-file "$WORK_DIR/ready.port" --bind-address 127.0.0.1 \
@@ -154,58 +157,77 @@ for _ in $(seq 1 100); do
     fi
     sleep 0.1
 done
-ALLOWED_PORT="$(cat "$WORK_DIR/ready.port" 2>/dev/null || true)"
-if [ -z "$ALLOWED_PORT" ]; then
+LISTENER_PORT="$(cat "$WORK_DIR/ready.port" 2>/dev/null || true)"
+if [ -z "$LISTENER_PORT" ]; then
     cat "$WORK_DIR/listener.log"
     echo "FAIL: the host listener did not publish a port."
     exit 1
 fi
-echo "  host listener is on 127.0.0.1:$ALLOWED_PORT (10.0.2.2:$ALLOWED_PORT from the sandbox)"
+echo "  host listener is on 127.0.0.1:$LISTENER_PORT (10.0.2.2:$LISTENER_PORT from the sandbox)"
 
-# A drop only demonstrates enforcement if the same destination would otherwise
-# have been reachable. Establish that first, using the legacy path so the probe
-# cannot be broken by the directional code it exists to measure.
-PROBE_CONFIG="$WORK_DIR/reachability_probe.json"
-cat >"$PROBE_CONFIG" <<'PROBE'
+# The two external anchors the egress assertions are built on. An allow proves
+# the rule fired only if the destination is otherwise reachable, and a deny
+# proves enforcement only under the same condition -- hence two addresses, one
+# to allow and one to deny, each probed unfiltered first.
+ALLOW_ANCHOR="1.1.1.1"
+DENY_ANCHOR="9.9.9.9"
+
+# Probed through the legacy path, so the probe cannot be broken by the
+# directional code it exists to measure. Skips rather than fails when an anchor
+# is unreachable: the assertions would still pass, having proven nothing.
+probe_anchor() {
+    local address="$1"
+    local port="$2"
+    local subnet="$3"
+    local config="$WORK_DIR/reachability_probe_${address}_${port}.json"
+
+    cat >"$config" <<PROBE
 {
   "version": "0.8.0-alpha",
   "containerId": "CLI-Bubblewrap-Directional-Reachability-Probe",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1 && echo DENY_TARGET_REACHABLE; exit 0'"
+    "commandLine": "bash -c 'echo PROBE_WORKLOAD_STARTED; timeout 8 bash -c \"exec 3<>/dev/tcp/$address/$port\" >/dev/null 2>&1 && echo ANCHOR_REACHABLE; exit 0'"
   },
   "network": {
     "defaultPolicy": "allow",
     "enforcementMode": "firewall",
-    "allowedHosts": ["1.1.1.0/24"]
+    "allowedHosts": ["$subnet"]
   }
 }
 PROBE
-PROBE_RC=0
-PROBE_OUT="$("$LXC_EXEC" --experimental --allow-testing-features "$PROBE_CONFIG" 2>&1)" || PROBE_RC=$?
-if [ "$PROBE_RC" -ne 0 ]; then
-    echo "$PROBE_OUT"
-    echo "FAIL: reachability probe exited $PROBE_RC; the enforcement path itself is broken."
-    exit 1
-fi
-if ! grep -q PROBE_WORKLOAD_STARTED <<<"$PROBE_OUT"; then
-    echo "$PROBE_OUT"
-    echo "FAIL: reachability probe workload never ran (no start marker)."
-    exit 1
-fi
-if ! grep -q DENY_TARGET_REACHABLE <<<"$PROBE_OUT"; then
-    echo "SKIP: 1.1.1.1:443 is not reachable from an unfiltered sandbox on this host."
-    echo "      The deny assertions would pass without proving anything."
-    exit 77
-fi
-echo "  1.1.1.1:443 is reachable when allowed, so a drop is real evidence"
+
+    local rc=0
+    local out
+    out="$("$LXC_EXEC" --experimental --allow-testing-features "$config" 2>&1)" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo "$out"
+        echo "FAIL: reachability probe exited $rc; the enforcement path itself is broken."
+        exit 1
+    fi
+    if ! grep -q PROBE_WORKLOAD_STARTED <<<"$out"; then
+        echo "$out"
+        echo "FAIL: reachability probe workload never ran (no start marker)."
+        exit 1
+    fi
+    if ! grep -q ANCHOR_REACHABLE <<<"$out"; then
+        echo "SKIP: $address:$port is not reachable from an unfiltered sandbox on this host."
+        echo "      The assertions built on it would pass without proving anything."
+        exit 77
+    fi
+    echo "  $address:$port is reachable when allowed, so a verdict on it is real evidence"
+}
+
+probe_anchor "$ALLOW_ANCHOR" 443 "1.1.1.0/24"
+probe_anchor "$ALLOW_ANCHOR" 80 "1.1.1.0/24"
+probe_anchor "$DENY_ANCHOR" 443 "9.9.9.0/24"
 
 run_enforced() {
     local label="$1"
     local config="$2"
     shift 2
     echo "Running Bubblewrap directional test: $label..."
-    sed -e "s/{{ALLOWED_PORT}}/$ALLOWED_PORT/g" \
+    sed -e "s/{{LISTENER_PORT}}/$LISTENER_PORT/g" \
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
     if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1); then
@@ -228,7 +250,8 @@ run_enforced() {
 # The headline case. ALLOWED_DEST_OK is what fails if directional rules are
 # parsed but never programmed -- the sandbox would be offline, not filtered.
 run_enforced "directional cidr allow" "bubblewrap_network_directional_cidr.json" \
-    ALLOWED_DEST_OK DENIED_DEST_BLOCKED_OK LOOPBACK_EXEMPT_OK CAP_NET_ADMIN_DROPPED_OK
+    ALLOWED_DEST_OK DENIED_DEST_BLOCKED_OK HOST_LOOPBACK_BLOCKED_OK \
+    LOOPBACK_EXEMPT_OK CAP_NET_ADMIN_DROPPED_OK
 
 DIRECTIONAL_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' "$WORK_DIR/directional cidr allow.out" | tail -n 1)"
 if [ "$DIRECTIONAL_NETNS" = "$HOST_NETNS" ]; then
@@ -244,7 +267,7 @@ echo "  the sandbox ran in its own network namespace ($DIRECTIONAL_NETNS)"
 # that the surrounding space stayed open -- a subtraction that dropped too much
 # would fail on INCLUDED_DEST_OK rather than silently over-blocking.
 run_enforced "directional except carve-out" "bubblewrap_network_directional_except.json" \
-    INCLUDED_DEST_OK EXCLUDED_DEST_BLOCKED_OK
+    INCLUDED_DEST_OK EXCLUDED_DEST_BLOCKED_OK HOST_LOOPBACK_BLOCKED_OK
 
 # A ruleless deny needs no chain: it degenerates to --unshare-net, where the
 # absence of connectivity is the enforcement. Pinned because it is the one
@@ -253,10 +276,8 @@ run_enforced "directional except carve-out" "bubblewrap_network_directional_exce
 run_enforced "directional ruleless deny" "bubblewrap_network_directional_block.json" \
     EGRESS_BLOCKED_OK
 
-# Port narrowing. Written inline because the allowed port is only known at
-# runtime, and a `{{...}}` placeholder in a JSON number position would make the
-# committed config invalid JSON and fail schema validation.
-DENIED_PORT=$((ALLOWED_PORT == 65535 ? ALLOWED_PORT - 1 : ALLOWED_PORT + 1))
+# Port narrowing: one address, two ports, only one allowed. Both ports are
+# probed reachable above, so the denied one being closed is the rule working.
 PORT_CONFIG="$WORK_DIR/directional_ports.json"
 cat >"$PORT_CONFIG" <<PORTS
 {
@@ -264,15 +285,15 @@ cat >"$PORT_CONFIG" <<PORTS
   "containerId": "CLI-Bubblewrap-Directional-Ports",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'set -u; if ! timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/$ALLOWED_PORT\" >/dev/null 2>&1; then echo ALLOWED_PORT_UNREACHABLE; exit 1; fi; echo ALLOWED_PORT_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/$DENIED_PORT\" >/dev/null 2>&1; if [ \$? = 0 ]; then echo DENIED_PORT_LEAKED; exit 1; fi; echo DENIED_PORT_BLOCKED_OK'"
+    "commandLine": "bash -c 'set -u; if ! timeout 8 bash -c \"exec 3<>/dev/tcp/$ALLOW_ANCHOR/443\" >/dev/null 2>&1; then echo ALLOWED_PORT_UNREACHABLE; exit 1; fi; echo ALLOWED_PORT_OK; timeout 8 bash -c \"exec 3<>/dev/tcp/$ALLOW_ANCHOR/80\" >/dev/null 2>&1; if [ \$? = 0 ]; then echo DENIED_PORT_LEAKED; exit 1; fi; echo DENIED_PORT_BLOCKED_OK'"
   },
   "network": {
     "egress": {
       "default": "deny",
       "allow": [
         {
-          "to": [{ "cidr": "10.0.2.2/32" }],
-          "ports": [{ "protocol": "tcp", "port": $ALLOWED_PORT }]
+          "to": [{ "cidr": "$ALLOW_ANCHOR/32" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
         }
       ]
     },
@@ -313,7 +334,7 @@ echo "PASS: directional port narrowing"
 # would "fail" the direct-egress assertion by design and compare two different
 # modes rather than two spellings of one.
 #
-# The test proxy already running on 127.0.0.1:$ALLOWED_PORT doubles as the
+# The test proxy already running on 127.0.0.1:$LISTENER_PORT doubles as the
 # proxy here; the parser requires a loopback endpoint, and the backend
 # translates it to slirp's gateway on the way in.
 # Diagnostics go to stderr and the marks to a file, never to stdout through a
@@ -323,7 +344,7 @@ echo "PASS: directional port narrowing"
 run_parity() {
     local label="$1"
     local config="$2"
-    sed -e "s/{{PROXY_HOST}}/127.0.0.1/g" -e "s/{{PROXY_PORT}}/$ALLOWED_PORT/g" \
+    sed -e "s/{{PROXY_HOST}}/127.0.0.1/g" -e "s/{{PROXY_PORT}}/$LISTENER_PORT/g" \
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
     local rc=0

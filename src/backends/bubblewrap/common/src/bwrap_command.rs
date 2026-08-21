@@ -382,6 +382,19 @@ pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
      'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
      or remove the host policy.";
 
+/// Rejection text for a proxy combined with a directional egress rule set.
+///
+/// Distinct from [`BWRAP_EXTERNAL_PROXY_HOST_RULES`] because the two describe
+/// different mistakes: that one names the legacy host-list fields, none of
+/// which a directional caller has set. A caller told to remove `allowedHosts`
+/// when they wrote `network.egress` would have nothing to act on.
+pub const BWRAP_PROXY_DIRECTIONAL_EGRESS: &str =
+    "Bubblewrap: network.proxy cannot be combined with a directional network.egress rule set. \
+     A proxy resolves to proxy-only egress, whose chain opens the proxy endpoint alone and \
+     never reads network.egress, so the rules would be dropped in silence. Use \
+     network.egress.default='deny' with no allow/deny rules (the proxy-only posture), or \
+     remove network.proxy and express the policy with network.egress.";
+
 /// Validate-time twin of the parser's external-proxy host-list rejection.
 ///
 /// MXC applies the host lists itself only for the builtin test proxy; an
@@ -390,7 +403,34 @@ pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
 /// parser.
 pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     let proxy = &request.policy.network_proxy;
-    if !proxy.is_enabled() || proxy.builtin_test_server {
+    if !proxy.is_enabled() {
+        return None;
+    }
+
+    // Checked ahead of the builtin exemption because it binds to *every*
+    // enabled proxy. Both proxy flavors resolve to `ResolvedNetworkMode::
+    // ProxyOnly`, whose chain comes from `EgressPlan::for_proxy` and never
+    // reads `network_egress` -- so a directional rule set is dropped in
+    // silence either way. The exemption below is about host *lists*, which
+    // MXC does apply itself for the builtin proxy; nothing applies directional
+    // rules under a proxy, so the exemption must not extend to them.
+    //
+    // JSON configs cannot reach this (the parser constrains the same posture),
+    // which leaves programmatic callers: precisely who this twin exists for.
+    let directional_conflicts = request
+        .policy
+        .network_egress
+        .as_ref()
+        .is_some_and(|egress| {
+            egress.default != NetworkAction::Deny
+                || !egress.allow.is_empty()
+                || !egress.deny.is_empty()
+        });
+    if directional_conflicts {
+        return Some(BWRAP_PROXY_DIRECTIONAL_EGRESS);
+    }
+
+    if proxy.builtin_test_server {
         return None;
     }
     let has_host_rules =
@@ -405,24 +445,8 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     // and `ResolvedNetworkMode::from_request`, so all three agree on which
     // schema shape is in force.
     let legacy_shape = request.policy.network_egress.is_none();
-    // Any *other* directional egress is refused rather than waved through.
-    // A proxy resolves to `ProxyOnly`, whose chain comes from
-    // `EgressPlan::for_proxy` and never reads `network_egress` -- so a
-    // directional rule set combined with a proxy would be dropped in silence.
-    // JSON configs cannot reach here (the parser enforces the same posture),
-    // which leaves programmatic callers: precisely who this twin exists for.
-    let directional_conflicts = request
-        .policy
-        .network_egress
-        .as_ref()
-        .is_some_and(|egress| {
-            egress.default != NetworkAction::Deny
-                || !egress.allow.is_empty()
-                || !egress.deny.is_empty()
-        });
     let conflicts = has_host_rules
-        || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block)
-        || directional_conflicts;
+        || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block);
 
     conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
 }
@@ -1190,12 +1214,39 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            r.policy.network_egress = Some(unhonorable);
-            assert!(
-                external_proxy_host_rules_rejection(&r).is_some(),
+            r.policy.network_egress = Some(unhonorable.clone());
+            assert_eq!(
+                external_proxy_host_rules_rejection(&r),
+                Some(BWRAP_PROXY_DIRECTIONAL_EGRESS),
                 "a directional rule set combined with a proxy would be dropped in silence"
             );
+
+            // The builtin proxy takes the same chain from `for_proxy`, so the
+            // exemption it enjoys for host *lists* -- which MXC applies itself
+            // -- must not extend to directional rules, which nothing applies.
+            let mut builtin = r.clone();
+            builtin.policy.network_proxy.address = None;
+            builtin.policy.network_proxy.builtin_test_server = true;
+            assert_eq!(
+                external_proxy_host_rules_rejection(&builtin),
+                Some(BWRAP_PROXY_DIRECTIONAL_EGRESS),
+                "the builtin proxy drops directional rules just as silently"
+            );
         }
+
+        // The builtin proxy keeps its host-list exemption: that is the whole
+        // point of the flag, and narrowing it would be a behavior change.
+        r.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        r.policy.network_proxy.address = None;
+        r.policy.network_proxy.builtin_test_server = true;
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        assert!(
+            external_proxy_host_rules_rejection(&r).is_none(),
+            "MXC enforces host lists itself for the builtin proxy"
+        );
     }
 
     /// A directional egress policy must land on the one mode whose chains the

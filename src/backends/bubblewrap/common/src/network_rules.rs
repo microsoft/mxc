@@ -348,11 +348,25 @@ impl Block {
 
     /// A parsed CIDR as a normalized numeric block, plus the family it belongs
     /// to after IPv4-mapped rewriting.
-    fn from_cidr(cidr: &NetworkCidr) -> (RuleFamily, Self) {
+    ///
+    /// # Errors
+    ///
+    /// Rejects a sub-`/96` IPv6 block that swallows the IPv4-mapped range, for
+    /// the reason [`straddles_mapped_range`] gives. `RuleAddress::parse` makes
+    /// the same refusal on the legacy string path; both entry points into the
+    /// renderer must agree, or the directional shape becomes a way to install
+    /// the rule the legacy shape refuses.
+    fn from_cidr(cidr: &NetworkCidr) -> Result<(RuleFamily, Self), String> {
         let (family, address, prefix) = match cidr.address {
             IpAddr::V4(ip) => (RuleFamily::V4, IpAddr::V4(ip), cidr.prefix_length),
             IpAddr::V6(ip) => match mapped_v4_block(ip, cidr.prefix_length) {
                 Some((v4, bits)) => (RuleFamily::V4, IpAddr::V4(v4), bits),
+                None if covers_ipv4_mapped_range(ip, cidr.prefix_length) => {
+                    return Err(straddles_mapped_range(&format!(
+                        "{}/{}",
+                        cidr.address, cidr.prefix_length
+                    )))
+                }
                 None => (RuleFamily::V6, IpAddr::V6(ip), cidr.prefix_length),
             },
         };
@@ -363,7 +377,7 @@ impl Block {
         };
         let width = Self::width(family);
         let base = raw & !Self::host_mask(width - prefix);
-        (family, Self { base, prefix })
+        Ok((family, Self { base, prefix }))
     }
 
     /// Back to an address for rendering.
@@ -479,18 +493,18 @@ fn lower_peers(peers: &[NetworkPeer]) -> Result<Vec<RuleAddress>, String> {
 
     let mut addresses = Vec::new();
     for peer in peers {
-        let (family, block) = Block::from_cidr(&peer.cidr);
+        let (family, block) = Block::from_cidr(&peer.cidr)?;
 
         // An exclusion in the other family cannot overlap this peer, so it is
         // discarded rather than being compared across families, where the
         // numeric ordering would be meaningless.
-        let excepts: Vec<Block> = peer
-            .except
-            .iter()
-            .map(Block::from_cidr)
-            .filter(|(except_family, _)| *except_family == family)
-            .map(|(_, block)| block)
-            .collect();
+        let mut excepts = Vec::new();
+        for except in &peer.except {
+            let (except_family, block) = Block::from_cidr(except)?;
+            if except_family == family {
+                excepts.push(block);
+            }
+        }
 
         let mut blocks = Vec::new();
         let mut remaining = MAX_BLOCKS_PER_PEER;
@@ -624,6 +638,12 @@ impl EgressRule {
     /// block when the rule names no peer, so the line shape stays uniform.
     fn render(&self) -> String {
         let protocol = match self.port.protocol {
+            // ICMP is a different protocol number and a different iptables
+            // match on each family: `ip6tables` rejects `-p icmp` outright, so
+            // carrying the V4 token into the V6 table fails the whole restore
+            // and installs nothing. The 0.8 contract's `icmp` selector means
+            // "ICMP for this destination's family", which is what this renders.
+            Some("icmp") if self.address.family == RuleFamily::V6 => "-p icmpv6 ".to_string(),
             Some(protocol) => format!("-p {protocol} "),
             None => String::new(),
         };
@@ -707,34 +727,71 @@ impl EgressPlan {
     ///
     /// Propagates the selected builder's rejection.
     pub(crate) fn for_request(request: &ExecutionRequest) -> Result<Self, String> {
-        match request.policy.network_egress.as_ref() {
-            Some(egress) => Self::for_directional_policy(egress),
-            None => Self::for_policy(request),
+        // Either section present means the directional shape. The parser fills
+        // both in together, but losing the host-loopback drop is silent, so
+        // this does not depend on that invariant.
+        if request.policy.network_egress.is_none() && request.policy.network_ingress.is_none() {
+            return Self::for_policy(request);
         }
+
+        Self::for_directional_policy_with_ingress(
+            &request.policy.network_egress.clone().unwrap_or_default(),
+            // An absent ingress section still denies: `hostLoopback` defaults
+            // to `Deny`, so omitting it is not a way to opt out.
+            request
+                .policy
+                .network_ingress
+                .as_ref()
+                .map_or(NetworkAction::Deny, |ingress| ingress.host_loopback),
+        )
     }
 
-    /// The directional `network.egress` posture.
+    /// The directional posture, including the inbound section's host-loopback
+    /// control.
     ///
-    /// `egress.default` sets the terminal verdict for both families, matching
-    /// the legacy arm: a family with no rules of its own inherits the requested
-    /// posture rather than being left silently open or silently closed.
+    /// `ingress.hostLoopback` governs traffic in *both* directions, so denying
+    /// it has to close the container-to-host path as well -- under slirp that
+    /// path is the gateway, which maps onto the host's own loopback. The drop
+    /// is lowered ahead of every caller rule because the chain is first-match:
+    /// behind them, any `allow` covering the gateway (a bare `0.0.0.0/0`
+    /// included) would silently win.
     ///
-    /// Denies are lowered before allows, so an explicit deny beats a broader
-    /// allow on the first-match chain, per the contract's D4 -- the same
-    /// ordering the legacy arm uses.
+    /// IPv4 only: slirp gives the sandbox no IPv6 route to the host. Proxy
+    /// mode needs no equivalent -- `for_proxy` opens the proxy endpoint alone
+    /// and closes on `DROP`.
+    ///
+    /// `egress.default` sets the terminal verdict for both families, and
+    /// denies are lowered before allows so an explicit deny beats a broader
+    /// allow, per the contract's D4.
     ///
     /// # Errors
     ///
     /// Propagates an unrenderable rule: an `except` expansion that exceeds the
     /// per-peer block ceiling, an ICMP selector carrying a port, or an inverted
     /// port range.
-    fn for_directional_policy(egress: &NetworkEgressPolicy) -> Result<Self, String> {
+    fn for_directional_policy_with_ingress(
+        egress: &NetworkEgressPolicy,
+        host_loopback: NetworkAction,
+    ) -> Result<Self, String> {
         let terminal = match egress.default {
             NetworkAction::Allow => RuleVerdict::Accept,
             NetworkAction::Deny => RuleVerdict::Drop,
         };
 
         let mut rules = Vec::new();
+        // Ahead of the caller's rules: first-match means anything later cannot
+        // reopen it.
+        if host_loopback == NetworkAction::Deny {
+            rules.push(EgressRule {
+                verdict: RuleVerdict::Drop,
+                address: RuleAddress::from_block(
+                    RuleFamily::V4,
+                    IpAddr::V4(crate::proxy_network::SLIRP_HOST_GATEWAY_IP),
+                    32,
+                ),
+                port: PortSpec::ALL,
+            });
+        }
         for rule in &egress.deny {
             lower_rule(rule, RuleVerdict::Drop, &mut rules)?;
         }
@@ -1273,6 +1330,21 @@ mod tests {
         expected
     }
 
+    /// The V4 expectation for a *directional* plan.
+    ///
+    /// Every directional posture closes the container-to-host-loopback path,
+    /// which under slirp is the gateway, and does so ahead of the caller's
+    /// rules so nothing later can reopen it. Expressed as a helper so the
+    /// ordering is asserted once rather than restated in every test.
+    fn directional_egress(rules: &[&str], terminal: &str) -> Vec<String> {
+        let mut all = vec![HOST_LOOPBACK_DROP];
+        all.extend_from_slice(rules);
+        egress(&all, terminal)
+    }
+
+    /// The rule that closes the host-loopback path.
+    const HOST_LOOPBACK_DROP: &str = "-d 10.0.2.2/32 -j DROP";
+
     #[test]
     fn a_block_policy_closes_both_families_and_accepts_its_allowlist() {
         let plan = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["10.0.0.0/8"], &[]))
@@ -1365,7 +1437,7 @@ mod tests {
             }"#,
         );
 
-        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v4(&plan), directional_egress(&[], "DROP"));
         assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
@@ -1444,7 +1516,7 @@ mod tests {
         let plan = EgressPlan::for_request(&directional_egress_request(NetworkAction::Deny))
             .expect("a directional deny posture is enforceable");
 
-        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v4(&plan), directional_egress(&[], "DROP"));
         assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
@@ -1453,7 +1525,7 @@ mod tests {
         let plan = EgressPlan::for_request(&directional_egress_request(NetworkAction::Allow))
             .expect("a directional allow posture is enforceable");
 
-        assert_eq!(v4(&plan), egress(&[], "ACCEPT"));
+        assert_eq!(v4(&plan), directional_egress(&[], "ACCEPT"));
         assert_eq!(v6(&plan), egress(&[], "ACCEPT"));
     }
 
@@ -1468,7 +1540,7 @@ mod tests {
 
         let plan = EgressPlan::for_request(&req).expect("the directional posture is enforceable");
 
-        assert_eq!(v4(&plan), egress(&[], "DROP"));
+        assert_eq!(v4(&plan), directional_egress(&[], "DROP"));
         assert_eq!(v6(&plan), egress(&[], "DROP"));
     }
 
@@ -1541,6 +1613,7 @@ mod tests {
             v4(&plan),
             vec![
                 "-o lo -j ACCEPT",
+                HOST_LOOPBACK_DROP,
                 "-d 10.0.0.0/16 -j ACCEPT",
                 "-d 10.2.0.0/15 -j ACCEPT",
                 "-d 10.4.0.0/14 -j ACCEPT",
@@ -1642,6 +1715,7 @@ mod tests {
             v4(&plan),
             vec![
                 "-o lo -j ACCEPT",
+                HOST_LOOPBACK_DROP,
                 "-d 10.1.2.3/32 -j DROP",
                 "-d 10.0.0.0/8 -j ACCEPT",
                 "-j DROP",
@@ -1707,6 +1781,7 @@ mod tests {
             v4(&plan),
             vec![
                 "-o lo -j ACCEPT",
+                HOST_LOOPBACK_DROP,
                 "-p tcp -d 192.0.2.1/32 --dport 53 -j ACCEPT",
                 "-p udp -d 192.0.2.1/32 --dport 53 -j ACCEPT",
                 "-j DROP",
@@ -1735,6 +1810,7 @@ mod tests {
             v4(&plan),
             vec![
                 "-o lo -j ACCEPT",
+                HOST_LOOPBACK_DROP,
                 "-p tcp -d 192.0.2.1/32 --dport 80 -j ACCEPT",
                 "-p tcp -d 192.0.2.1/32 --dport 443 -j ACCEPT",
                 "-p tcp -d 198.51.100.0/24 --dport 80 -j ACCEPT",
@@ -1786,6 +1862,114 @@ mod tests {
             error.contains("icmp"),
             "the rejection should name it: {error}"
         );
+    }
+
+    /// `ip6tables` has no `icmp` protocol: it rejects the token, and because a
+    /// restore is one transaction, that failure installs *nothing* rather than
+    /// degrading to a partial policy. A `to`-less ICMP rule fans into both
+    /// families, so this is reachable from an ordinary config.
+    #[test]
+    fn an_icmp_rule_renders_icmpv6_in_the_v6_table() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                Vec::new(),
+                vec![port(NetworkProtocol::Icmp, None, None)],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("an ICMP rule is renderable");
+
+        assert!(
+            v4(&plan).iter().any(|line| line.starts_with("-p icmp ")),
+            "the V4 table keeps the V4 token: {:?}",
+            v4(&plan)
+        );
+        assert!(
+            v6(&plan).iter().any(|line| line.starts_with("-p icmpv6 ")),
+            "the V6 table needs icmpv6 or the restore fails: {:?}",
+            v6(&plan)
+        );
+        assert!(
+            !v6(&plan).iter().any(|line| line.starts_with("-p icmp ")),
+            "no V6 line may carry the V4-only token: {:?}",
+            v6(&plan)
+        );
+    }
+
+    /// An ICMP rule aimed at a V6 peer is the same hazard reached the other
+    /// way: the family comes from the destination rather than the fan-out.
+    #[test]
+    fn an_icmp_rule_to_a_v6_peer_renders_icmpv6() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("2001:db8::/32", &[])],
+                vec![port(NetworkProtocol::Icmp, None, None)],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("an ICMP rule is renderable");
+
+        assert!(
+            v6(&plan).contains(&"-p icmpv6 -d 2001:db8::/32 -j ACCEPT".to_string()),
+            "{:?}",
+            v6(&plan)
+        );
+    }
+
+    /// The directional shape must refuse the same straddling block the legacy
+    /// string path refuses.
+    ///
+    /// This was a real bypass: `Block::from_cidr` classified `::/0` as V6 and
+    /// installed it into `ip6tables` alone. Linux emits IPv4-mapped
+    /// destinations as IPv4 packets, so under `default: allow` a `deny ::/0`
+    /// rule — which reads as "deny everything" — never matched IPv4 traffic
+    /// and failed open. `RuleAddress::parse` had guarded this since before the
+    /// directional shape existed; the new entry point simply skipped it.
+    #[test]
+    fn a_directional_block_straddling_the_mapped_range_is_refused() {
+        for straddling in ["::/0", "::/64", "::ffff:0:0/95"] {
+            let (address, prefix) = straddling.split_once('/').expect("a CIDR");
+            let cidr = NetworkCidr {
+                address: address.parse().expect("an IPv6 address"),
+                prefix_length: prefix.parse().expect("a prefix"),
+            };
+            let req = directional_rules_request(
+                NetworkAction::Allow,
+                Vec::new(),
+                vec![rule(
+                    vec![NetworkPeer {
+                        cidr,
+                        except: Vec::new(),
+                    }],
+                    Vec::new(),
+                )],
+            );
+
+            let error = EgressPlan::for_request(&req)
+                .expect_err("a block that swallows the mapped range cannot be honored");
+            assert!(
+                error.contains("IPv4-mapped"),
+                "the rejection should name the hazard for '{straddling}': {error}"
+            );
+        }
+    }
+
+    /// The guard must not overreach: a V6 block that misses the mapped range
+    /// is ordinary IPv6 traffic and still has to render.
+    #[test]
+    fn a_directional_v6_block_clear_of_the_mapped_range_still_renders() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("2001:db8::/32", &[])], Vec::new())],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("an ordinary V6 block is renderable");
+        assert!(v6(&plan).contains(&"-d 2001:db8::/32 -j ACCEPT".to_string()));
     }
 
     /// An inverted range matches nothing, so it is refused rather than
@@ -2013,6 +2197,346 @@ mod tests {
             body.last().unwrap(),
             "-j DROP",
             "the terminal verdict closes the chain regardless: {body:?}"
+        );
+    }
+
+    /// A policy large enough to exceed one `iptables-restore` transaction.
+    ///
+    /// Nothing else in the suite crosses `RESTORE_PAYLOAD_BUDGET`, which left
+    /// both the mid-body split and the hooks-get-their-own-payload branch dead
+    /// in test -- and that is the path that exists to stop a hook going live
+    /// over a half-built chain.
+    fn oversized_plan() -> EgressPlan {
+        let blocked: Vec<String> = (0..2000)
+            .map(|index| format!("198.51.{}.{}/32", index / 256, index % 256))
+            .collect();
+        let refs: Vec<&str> = blocked.iter().map(String::as_str).collect();
+        EgressPlan::for_policy(&request(NetworkPolicy::Block, &[], &refs))
+            .expect("literal CIDRs are enforceable")
+    }
+
+    #[test]
+    fn a_large_policy_splits_across_restore_transactions() {
+        let payloads = payloads(&oversized_plan(), RuleFamily::V4);
+
+        assert!(
+            payloads.len() > 1,
+            "the policy must exceed one transaction for this test to mean anything"
+        );
+        for (index, payload) in payloads.iter().enumerate() {
+            assert!(
+                payload.len() <= RESTORE_PAYLOAD_BUDGET,
+                "payload {index} is over budget at {} bytes; nf_tables would reject the \
+                 whole table and install nothing",
+                payload.len()
+            );
+            assert!(
+                payload.starts_with("*filter\n"),
+                "payload {index} must open the table"
+            );
+            assert!(
+                payload.ends_with(COMMIT),
+                "payload {index} must be a closed transaction; an unterminated one applies nothing"
+            );
+        }
+    }
+
+    /// Chains may be declared once. A later payload re-declaring them would
+    /// flush the rules the earlier payloads just installed.
+    #[test]
+    fn only_the_first_payload_declares_the_chains() {
+        let payloads = payloads(&oversized_plan(), RuleFamily::V4);
+
+        assert!(
+            payloads[0].contains(&format!(":{EGRESS} -")),
+            "the first payload declares the chains: {}",
+            &payloads[0][..payloads[0].len().min(120)]
+        );
+        for (index, payload) in payloads.iter().enumerate().skip(1) {
+            assert!(
+                !payload.contains(&format!(":{EGRESS} -")),
+                "payload {index} re-declares {EGRESS}, which would flush what is already installed"
+            );
+        }
+    }
+
+    /// The invariant the split exists to protect: until the hooks are in, the
+    /// chain is not reachable, so a partial apply leaves the policy unhooked
+    /// rather than half-enforced.
+    #[test]
+    fn hooks_ride_only_in_the_final_payload() {
+        let payloads = payloads(&oversized_plan(), RuleFamily::V4);
+        let hook = format!("-A OUTPUT -j {EGRESS}");
+
+        for (index, payload) in payloads.iter().enumerate() {
+            let is_last = index + 1 == payloads.len();
+            assert_eq!(
+                payload.contains(&hook),
+                is_last,
+                "payload {index} of {} has the wrong hook posture: a hook in any earlier \
+                 transaction would point OUTPUT at a chain that is still being built",
+                payloads.len()
+            );
+        }
+    }
+
+    /// Every rule must survive the split, in order: the chain is first-match,
+    /// so a dropped or reordered rule is a policy change.
+    #[test]
+    fn splitting_preserves_every_rule_and_its_order() {
+        let plan = oversized_plan();
+        let split = payloads(&plan, RuleFamily::V4).concat();
+
+        let expected: Vec<String> = plan
+            .chain_lines(RuleFamily::V4)
+            .into_iter()
+            .map(|line| format!("-A {EGRESS} {line}"))
+            .collect();
+        let actual: Vec<String> = split
+            .lines()
+            .filter(|line| line.starts_with(&format!("-A {EGRESS} ")))
+            .map(str::to_string)
+            .collect();
+
+        assert_eq!(
+            actual, expected,
+            "the concatenated payloads must equal the unsplit chain body"
+        );
+    }
+
+    /// The destination blocks a rule set lowers to, for one family. The
+    /// host-loopback drop is skipped -- it is asserted on its own elsewhere.
+    fn destinations(plan: &EgressPlan, family: RuleFamily) -> Vec<String> {
+        plan.rules
+            .iter()
+            .filter(|rule| rule.address.family == family)
+            .map(|rule| rule.address.text.clone())
+            .filter(|text| text != "10.0.2.2/32")
+            .collect()
+    }
+
+    /// Subtracting a block from itself leaves nothing, so the rule must vanish
+    /// rather than degrade to its unexcluded parent -- which would install the
+    /// exact opposite of what was asked for.
+    #[test]
+    fn an_exclusion_equal_to_its_peer_removes_the_rule() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.0/24", &["192.0.2.0/24"])],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("a full exclusion is renderable");
+
+        assert!(
+            destinations(&plan, RuleFamily::V4).is_empty(),
+            "nothing remains of the peer: {:?}",
+            destinations(&plan, RuleFamily::V4)
+        );
+        assert_eq!(
+            v4(&plan).last().unwrap(),
+            "-j DROP",
+            "and the terminal verdict still closes the chain"
+        );
+    }
+    /// An exclusion outside its peer overlaps nothing, so the peer must survive
+    /// whole. Subtraction that mishandled the disjoint case would carve a hole
+    /// out of a block the caller never narrowed.
+    #[test]
+    fn a_disjoint_exclusion_leaves_the_peer_intact() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.0/24", &["203.0.113.0/24"])],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("a disjoint exclusion is renderable");
+
+        assert_eq!(destinations(&plan, RuleFamily::V4), vec!["192.0.2.0/24"]);
+    }
+
+    /// Multiple and nested exclusions exercise the recursion. The union of what
+    /// remains must be the peer minus every exclusion, with no overlaps.
+    #[test]
+    fn multiple_and_nested_exclusions_subtract_together() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer(
+                    "10.0.0.0/24",
+                    &["10.0.0.0/26", "10.0.0.128/25", "10.0.0.64/28"],
+                )],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("nested exclusions are renderable");
+        let covered = covered_addresses(&plan, RuleFamily::V4);
+
+        // 10.0.0.0/24 minus /26 (0-63), /25 (128-255) and /28 (64-79)
+        // leaves exactly 10.0.0.80 - 10.0.0.127.
+        let expected: Vec<u32> = (80..=127).map(|host| 0x0A000000 | host).collect();
+        assert_eq!(
+            covered, expected,
+            "the remaining blocks must be the peer minus every exclusion, exactly once"
+        );
+    }
+
+    /// Every address the plan's V4 rules cover, ascending, with duplicates kept
+    /// so an overlapping split is visible rather than hidden by a set.
+    fn covered_addresses(plan: &EgressPlan, family: RuleFamily) -> Vec<u32> {
+        let mut covered = Vec::new();
+        for text in destinations(plan, family) {
+            let (address, prefix) = text.split_once('/').expect("rendered as a CIDR");
+            let base: u32 = address
+                .parse::<Ipv4Addr>()
+                .expect("a V4 destination")
+                .into();
+            let prefix: u32 = prefix.parse().expect("a prefix");
+            let count = 1u64 << (32 - prefix);
+            covered.extend((0..count).map(|offset| base + offset as u32));
+        }
+        covered.sort_unstable();
+        covered
+    }
+
+    /// Subtraction is family-generic, but only IPv4 was covered. IPv6 uses the
+    /// same arithmetic over a 128-bit width, where an off-by-one in the width
+    /// handling would not show up in any IPv4 case.
+    #[test]
+    fn an_ipv6_exclusion_subtracts_from_its_peer() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("2001:db8::/32", &["2001:db8:8000::/33"])],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("an IPv6 exclusion is renderable");
+
+        assert_eq!(
+            destinations(&plan, RuleFamily::V6),
+            vec!["2001:db8::/33"],
+            "the surviving half is the peer's lower 33-bit block"
+        );
+    }
+
+    /// Addresses and ports form a cross product: each surviving block must
+    /// carry every port selector, or the carve-out would quietly widen or
+    /// narrow the service the rule names.
+    #[test]
+    fn a_port_scoped_exclusion_applies_to_every_surviving_block() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.0/24", &["192.0.2.128/25"])],
+                vec![port(NetworkProtocol::Tcp, Some(443), None)],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("a port-scoped exclusion is renderable");
+        let lines: Vec<String> = v4(&plan)
+            .into_iter()
+            .filter(|line| line.contains("-d ") && !line.contains("10.0.2.2"))
+            .collect();
+
+        assert_eq!(
+            lines,
+            vec!["-p tcp -d 192.0.2.0/25 --dport 443 -j ACCEPT".to_string()],
+            "the surviving block keeps the port selector"
+        );
+    }
+
+    /// `ingress.hostLoopback` is bidirectional per the 0.8 contract, so a deny
+    /// has to close container-to-host too -- under slirp, the gateway.
+    #[test]
+    fn a_directional_posture_closes_the_host_loopback_path() {
+        let plan = EgressPlan::for_request(&directional_egress_request(NetworkAction::Allow))
+            .expect("an allow posture is enforceable");
+
+        assert!(
+            v4(&plan).contains(&HOST_LOOPBACK_DROP.to_string()),
+            "even an open egress posture must close the host path: {:?}",
+            v4(&plan)
+        );
+    }
+
+    /// The ordering *is* the enforcement: the chain is first-match, so a drop
+    /// behind the caller's rules would lose to any allow covering the gateway.
+    #[test]
+    fn the_host_loopback_drop_outranks_a_covering_allow() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("0.0.0.0/0", &[])], Vec::new())],
+            Vec::new(),
+        );
+
+        let lines = v4(&EgressPlan::for_request(&req).expect("a bare allow is renderable"));
+        let drop = lines
+            .iter()
+            .position(|line| line == HOST_LOOPBACK_DROP)
+            .expect("the host path must be closed");
+        let allow = lines
+            .iter()
+            .position(|line| line == "-d 0.0.0.0/0 -j ACCEPT")
+            .expect("the caller's rule must still be installed");
+
+        assert!(
+            drop < allow,
+            "an allow-all placed first would reopen the host path: {lines:?}"
+        );
+    }
+
+    /// An omitted `ingress` section is not a way out: `hostLoopback` defaults
+    /// to deny, so absence must enforce it too.
+    #[test]
+    fn an_absent_ingress_section_still_closes_the_host_path() {
+        let mut req = directional_egress_request(NetworkAction::Allow);
+        req.policy.network_ingress = None;
+
+        let plan = EgressPlan::for_request(&req).expect("the posture is enforceable");
+
+        assert!(
+            v4(&plan).contains(&HOST_LOOPBACK_DROP.to_string()),
+            "{:?}",
+            v4(&plan)
+        );
+    }
+
+    /// Proxy mode needs no separate rule: the endpoint is the only thing open
+    /// and the chain closes on DROP. Asserted so that stays true.
+    #[test]
+    fn proxy_mode_opens_only_the_proxy_endpoint_on_the_gateway() {
+        let plan = EgressPlan::for_proxy(Ipv4Addr::new(10, 0, 2, 2), 3128);
+
+        assert_eq!(
+            v4(&plan),
+            egress(&["-p tcp -d 10.0.2.2 --dport 3128 -j ACCEPT"], "DROP"),
+            "anything else to the host must fall through to the terminal drop"
+        );
+    }
+
+    /// The legacy shape is untouched: no `ingress` section, and adding a drop
+    /// there would silently change behavior for 0.6/0.7 callers.
+    #[test]
+    fn the_legacy_shape_gains_no_host_loopback_rule() {
+        let plan = EgressPlan::for_policy(&request(NetworkPolicy::Allow, &["10.0.2.2/32"], &[]))
+            .expect("a legacy allowlist is enforceable");
+
+        assert_eq!(
+            v4(&plan),
+            egress(&["-d 10.0.2.2/32 -j ACCEPT"], "ACCEPT"),
+            "pre-0.8 configs keep reaching the host exactly as before"
         );
     }
 }

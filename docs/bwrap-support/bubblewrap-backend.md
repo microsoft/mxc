@@ -405,8 +405,14 @@ section.
   "network": {
     "egress": {
       "default": "deny",
-      "allow": [{ "address": "10.0.2.2/32", "protocol": "tcp", "ports": [443] }]
-    }
+      "allow": [
+        {
+          "to": [{ "cidr": "1.1.1.1/32" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
+        }
+      ]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
   }
 }
 ```
@@ -444,22 +450,48 @@ identically to the legacy default only because `NetworkPolicy::default()` and
 than rely on silently.
 
 **What the backend refuses.** Bubblewrap declares support for
-`egress.default`, `egress` rules, `ingress.default`, and `ingress.hostLoopback`.
-Declaring the two inbound features means the backend *understands* those
-fields — not that it honors both of their values. Only the deny posture is
-reachable, so the allow posture is refused rather than accepted and dropped on
-the floor:
+`egress.default`, `egress` rules, `ingress.default`, `ingress.hostLoopback`,
+and `runtimeProxy`. Declaring the two inbound features means the backend
+*understands* those fields — not that it honors both of their values. Only the
+deny posture is reachable, so the allow posture is refused rather than accepted
+and dropped on the floor:
 
 | Rejected | Why |
 |---|---|
 | `ingress.default: "allow"` | slirp4netns installs no route into the namespace, and the schema carries no port list with which to forward one. Nothing would arrive, so "allow" would be a lie |
-| `ingress.hostLoopback: "allow"` | the sandbox's loopback is its own namespace's, not the host's; there is nothing to grant |
+| `ingress.hostLoopback: "allow"` | the inbound half needs the same port forwarding `ingress.default: "allow"` lacks. Granting only the outbound half would honor half a bidirectional field under its full name |
+| directional `egress` rules combined with a proxy | a proxy resolves to the proxy-only posture, whose chain opens the proxy endpoint alone. The rules would be silently discarded, so they are refused instead. This holds for `builtinTestServer` too: its exemption covers legacy host *lists*, which MXC applies itself, and must not extend to directional rules, which nothing applies |
 | any directional section before 0.8 | the parser refuses it first; the backend keeps its own twin of the check for programmatic callers that build an `ExecutionRequest` directly and never pass through the parser |
+
+**What the deny postures actually do.** `ingress.default` installs the
+`MXC_INGRESS` chain on `INPUT`. `ingress.hostLoopback` is bidirectional per the
+0.8 contract, so its deny also has to close container-to-host: under slirp that
+path is the gateway `10.0.2.2`, which maps onto the host's own loopback. That
+drop is lowered *ahead* of every caller rule, because the chain is first-match
+and a broad allow — a bare `0.0.0.0/0` included — would otherwise win and the
+deny would be decorative. An omitted `ingress` section enforces the same deny,
+since deny is the schema's default rather than an absence of policy. Proxy mode
+needs no equivalent: it opens the proxy endpoint alone and closes on `DROP`, so
+the rest of the gateway is already unreachable. IPv4 only — slirp gives the
+sandbox no IPv6 route to the host, so there is no V6 gateway to close. The
+legacy shape gains no such rule.
 
 The declaration and these refusals must ship together — declaring the inbound
 features without them would be a fail-open. A unit test asserts exactly that
 pairing, driven through `validate()` rather than the gate function, so deleting
 the wiring fails the test.
+
+**Declaration alone is not evidence.** `hostLoopback` was declared, accepted,
+and completely unenforced for its whole first life: egress to `10.0.2.2` was
+open on every directional config, and the end-to-end suite used exactly that
+address as its "reachable" target — so the tests were passing *because of* the
+bug. Acceptance proved only that shared validation did not refuse the field.
+Each declared bit therefore carries an **enforcement probe** in
+`every_network_policy_support_bit_is_a_deliberate_decision`: the probe flips the
+field in a copy of the request and requires the rendered `iptables-restore`
+payload to change. A bit whose field can be flipped with no effect on the chain
+is over-declared and fails there. Reverting the host-loopback drop reproduces
+the original bug as a test failure.
 
 `runtimeProxy` is declared. The parser normalizes
 `runtimeConfig.networkProxy` into the same `policy.network_proxy` the legacy

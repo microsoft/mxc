@@ -465,21 +465,28 @@ Model 2 permits only the proxy endpoint.
 > requires `nf_conntrack`; the sandbox fails to launch without it rather than
 > running unenforced.
 >
-> Not yet covered: the `ingress` section exists in the 0.8 schema and parses
-> into `ContainerPolicy::network_ingress`, but Bubblewrap declares
-> `NetworkPolicySupport::LEGACY`, so a config carrying `ingress.default` or
-> `ingress.hostLoopback` is rejected in `validate` as an unsupported *backend
-> feature* — not as an unknown field. (Supplying `ingress` marks the request as
-> directional, so the message names `network.egress.default`.) The inbound
-> posture is instead derived from the existing `network.allowLocalNetwork`, and
-> at 0.8 that field is rejected outright when it is `true` on a
-> private-namespace mode (there is no inbound-only primitive to honor it with).
-> Deny is therefore the only reachable posture today; wiring `ingress` — and
-> declaring the matching support bits — is what will make `allow` expressible.
-> Inbound denial also does not currently depend on the `INPUT`
-> chain in practice: no port forwarding is configured, so nothing outside the
-> sandbox can reach in regardless. Schema 0.6/0.7 keeps the previous
-> warn-and-continue behavior.
+> Not yet covered: `ingress.default: "allow"` and `ingress.hostLoopback:
+> "allow"` are both rejected, because honoring either needs slirp port
+> forwarding and a port contract neither schema expresses. The legacy
+> `network.allowLocalNetwork: true` is rejected on a private-namespace mode for
+> the same reason. Deny is therefore the only reachable inbound posture today.
+>
+> Both deny postures are enforced. `ingress.default` installs the `INPUT`
+> chain described above. `ingress.hostLoopback` is bidirectional per this
+> contract, so its deny also closes the container-to-host direction: under
+> slirp that path is the gateway `10.0.2.2`, which maps onto the host's own
+> loopback, and a drop for it is lowered *ahead* of every caller rule so that a
+> broad allow — including a bare `0.0.0.0/0` — cannot reopen it on the
+> first-match chain. An omitted `ingress` section enforces the same deny, since
+> that is the schema's default rather than an absence of policy. Proxy mode
+> needs no equivalent rule: it opens the proxy endpoint alone and drops the
+> rest of the gateway, and a proxy can no longer be combined with directional
+> rules. IPv4 only — slirp gives the sandbox no IPv6 route to the host.
+>
+> Inbound denial does not currently depend on the `INPUT` chain in practice:
+> no port forwarding is configured, so nothing outside the sandbox can reach in
+> regardless. Schema 0.6/0.7 keeps the previous warn-and-continue behavior and
+> gains no host-loopback rule.
 > LXC is unaffected: it has a veth and runs privileged, and enforces as
 > described.
 
