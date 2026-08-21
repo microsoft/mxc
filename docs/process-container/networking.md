@@ -23,7 +23,7 @@ section 2 and is not equivalent to these guarantees.
   list and does not carry the proxy endpoint. The containment boundary is the absence of direct internet capability.
   Private-network traffic remains available in both directions when `ingress.default` is `"allow"`.
 
-The examples below use the proposed schema 0.8 network shape.
+The examples below use the schema 0.8 network shape.
 
 Windows exposes `privateNetworkClientServer` as one bidirectional AppContainer capability. ProcessContainer therefore
 requires `ingress.default: "allow"` before the container can communicate with private-network addresses. Enabling it
