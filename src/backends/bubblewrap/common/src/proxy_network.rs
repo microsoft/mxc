@@ -1155,33 +1155,80 @@ fn insert_hosts_bind(args: &mut Vec<String>, hosts_path: &str) -> Result<bool, S
     Ok(overrides)
 }
 
-pub(crate) fn probe_dependencies() -> Result<(), String> {
+/// What pulled this request into a private network namespace.
+///
+/// The dependency probe is shared by proxy-only egress and firewall
+/// enforcement, but the remedy it should suggest is not: telling a caller who
+/// set `enforcementMode: "firewall"` to "omit network.proxy" names a field they
+/// never set. Carries the caller's own words into every probe message.
+///
+/// The two are mutually exclusive — the parser rejects a proxy combined with a
+/// firewall mode — so a request always maps to exactly one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrivateNetworkUse {
+    ProxyOnlyEgress,
+    FirewallEnforcement,
+}
+
+impl PrivateNetworkUse {
+    /// The config element that made the private namespace necessary.
+    fn requirement(self) -> &'static str {
+        match self {
+            Self::ProxyOnlyEgress => "network.proxy",
+            Self::FirewallEnforcement => "network.enforcementMode='firewall'",
+        }
+    }
+
+    /// What the caller can drop to stop needing these dependencies.
+    fn remedy(self) -> &'static str {
+        match self {
+            Self::ProxyOnlyEgress => "omit network.proxy",
+            Self::FirewallEnforcement => "select a different network.enforcementMode",
+        }
+    }
+
+    /// The mechanism the installed rules implement.
+    fn mechanism(self) -> &'static str {
+        match self {
+            Self::ProxyOnlyEgress => "proxy-only egress",
+            Self::FirewallEnforcement => "firewall enforcement",
+        }
+    }
+}
+
+pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
     // Probing costs five subprocess spawns, and the host's tooling does not
     // change under a running process often enough to pay that on every
     // sandbox. Cache the *success* only: a failure is usually "the operator
     // has not installed slirp4netns yet", and caching that would keep failing
     // long after they did.
+    //
+    // Caching across use cases is safe because the probe asks the same
+    // questions either way -- only the wording of a failure differs, and
+    // failures are never cached.
     static PROBED: OnceLock<()> = OnceLock::new();
     if PROBED.get().is_some() {
         return Ok(());
     }
-    probe_dependencies_uncached()?;
+    probe_dependencies_uncached(use_case)?;
     let _ = PROBED.set(());
     Ok(())
 }
 
-fn probe_dependencies_uncached() -> Result<(), String> {
+fn probe_dependencies_uncached(use_case: PrivateNetworkUse) -> Result<(), String> {
+    let requirement = use_case.requirement();
     let mut slirp_command = Command::new("slirp4netns");
     slirp_command.arg("--version");
     let slirp = run_probe(slirp_command, "slirp4netns").map_err(|error| {
         format!(
-            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH: {error}. \
-             Install slirp4netns or omit network.proxy."
+            "Bubblewrap: {requirement} requires 'slirp4netns' on PATH: {error}. \
+             Install slirp4netns or {}.",
+            use_case.remedy()
         )
     })?;
     if !slirp.status.success() {
         return Err(format!(
-            "Bubblewrap: network.proxy requires a working slirp4netns installation \
+            "Bubblewrap: {requirement} requires a working slirp4netns installation \
              (slirp4netns --version exited with {})",
             slirp.status
         ));
@@ -1190,21 +1237,20 @@ fn probe_dependencies_uncached() -> Result<(), String> {
     let mut unshare_command = Command::new("unshare");
     unshare_command.arg("--help");
     let unshare = run_probe(unshare_command, "unshare").map_err(|error| {
-        format!("Bubblewrap: proxy networking requires util-linux 'unshare' on PATH: {error}")
+        format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
     })?;
     if !unshare.status.success()
         || !unshare.stdout.contains("--map-current-user")
         || !unshare.stdout.contains("--keep-caps")
     {
-        return Err(
-            "Bubblewrap: proxy networking requires util-linux unshare with \
+        return Err(format!(
+            "Bubblewrap: {requirement} requires util-linux unshare with \
              --map-current-user and --keep-caps support"
-                .into(),
-        );
+        ));
     }
 
-    // Proxy-only egress is programmed with these, so a host missing them must
-    // fail here rather than deep inside supervisor startup.
+    // The in-namespace rules are programmed with these, so a host missing them
+    // must fail here rather than deep inside supervisor startup.
     for (binary, probe, has_backend) in [
         ("nsenter", "--version", false),
         ("iptables", "--version", true),
@@ -1214,13 +1260,13 @@ fn probe_dependencies_uncached() -> Result<(), String> {
         command.arg(probe);
         let output = run_probe(command, binary).map_err(|error| {
             format!(
-                "Bubblewrap: network.proxy requires '{binary}' on PATH to enforce proxy-only \
-                 egress: {error}"
+                "Bubblewrap: {requirement} requires '{binary}' on PATH to enforce {}: {error}",
+                use_case.mechanism()
             )
         })?;
         if !output.status.success() {
             return Err(format!(
-                "Bubblewrap: network.proxy requires a working '{binary}' installation \
+                "Bubblewrap: {requirement} requires a working '{binary}' installation \
                  ({binary} {probe} exited with {})",
                 output.status
             ));
@@ -1228,7 +1274,12 @@ fn probe_dependencies_uncached() -> Result<(), String> {
         // Presence is not enough: the binary can work while its backend is one
         // this supervisor cannot drive.
         if has_backend {
-            iptables_backend_is_usable(binary, &output.stdout, Path::new(XTABLES_LOCK_PATH))?;
+            iptables_backend_is_usable(
+                binary,
+                &output.stdout,
+                Path::new(XTABLES_LOCK_PATH),
+                use_case,
+            )?;
         }
     }
     Ok(())
@@ -1246,7 +1297,12 @@ fn probe_dependencies_uncached() -> Result<(), String> {
 /// The banner alone cannot decide this: legacy *does* work where the lock is
 /// reachable (as root, or with a writable lock). So the backend picks the
 /// question, and for legacy the lock itself is tested.
-fn iptables_backend_is_usable(binary: &str, banner: &str, lock: &Path) -> Result<(), String> {
+fn iptables_backend_is_usable(
+    binary: &str,
+    banner: &str,
+    lock: &Path,
+    use_case: PrivateNetworkUse,
+) -> Result<(), String> {
     if banner.contains("nf_tables") {
         return Ok(());
     }
@@ -1256,15 +1312,17 @@ fn iptables_backend_is_usable(binary: &str, banner: &str, lock: &Path) -> Result
 
     // A pre-1.8 banner carries no marker at all; those builds are legacy-only.
     Err(format!(
-        "Bubblewrap: network.proxy requires an iptables backend the sandbox supervisor can \
+        "Bubblewrap: {} requires an iptables backend the sandbox supervisor can \
          drive without privilege, but '{binary}' resolves to the legacy backend ({}) and \
-         '{}' is not writable by this user. Proxy-only egress rules are installed by an \
+         '{}' is not writable by this user. The {} rules are installed by an \
          unprivileged supervisor in a user namespace, which keeps the caller's uid, so the \
          root-owned lock is unreachable and every rule would fail. Select the nf_tables \
          backend (for example: update-alternatives --set {binary} /usr/sbin/{binary}-nft), \
          or make '{}' writable.",
+        use_case.requirement(),
         banner.trim(),
         lock.display(),
+        use_case.mechanism(),
         lock.display()
     ))
 }
@@ -2486,7 +2544,8 @@ mod tests {
             iptables_backend_is_usable(
                 "iptables",
                 "iptables v1.8.10 (nf_tables)\n",
-                &unreachable_lock(&dir)
+                &unreachable_lock(&dir),
+                PrivateNetworkUse::ProxyOnlyEgress
             )
             .is_ok(),
             "the nf_tables backend takes no lock, so an unreachable lock must not refuse it"
@@ -2503,6 +2562,7 @@ mod tests {
             "iptables",
             "iptables v1.8.10 (legacy)\n",
             &unreachable_lock(&dir),
+            PrivateNetworkUse::ProxyOnlyEgress,
         )
         .expect_err("a legacy backend with an unreachable lock cannot install rules");
 
@@ -2510,6 +2570,68 @@ mod tests {
             error.contains("iptables") && error.contains("nf_tables"),
             "the error must name the binary and the backend to switch to: {error}"
         );
+    }
+
+    /// Firewall enforcement shares this probe with proxy-only egress, so a
+    /// missing dependency used to advise a caller to "omit network.proxy" --
+    /// a field a firewall-only request never set. The advice must name what
+    /// the caller actually configured.
+    #[test]
+    fn a_firewall_request_is_never_advised_about_the_proxy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = iptables_backend_is_usable(
+            "iptables",
+            "iptables v1.8.10 (legacy)\n",
+            &unreachable_lock(&dir),
+            PrivateNetworkUse::FirewallEnforcement,
+        )
+        .expect_err("a legacy backend with an unreachable lock cannot install rules");
+
+        assert!(
+            !error.contains("network.proxy"),
+            "a firewall-only request must not be told about a field it never set: {error}"
+        );
+        assert!(
+            error.contains("network.enforcementMode='firewall'"),
+            "the error must name what the caller configured: {error}"
+        );
+    }
+
+    /// The mirror image: the proxy wording must not drift to firewall terms.
+    #[test]
+    fn a_proxy_request_is_never_advised_about_the_enforcement_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let error = iptables_backend_is_usable(
+            "iptables",
+            "iptables v1.8.10 (legacy)\n",
+            &unreachable_lock(&dir),
+            PrivateNetworkUse::ProxyOnlyEgress,
+        )
+        .expect_err("a legacy backend with an unreachable lock cannot install rules");
+
+        assert!(
+            error.contains("network.proxy") && !error.contains("enforcementMode"),
+            "a proxy request must keep the proxy wording: {error}"
+        );
+    }
+
+    /// Every use case must produce a distinct, non-empty vocabulary -- an empty
+    /// or shared string would silently reintroduce the mismatch above.
+    #[test]
+    fn each_private_network_use_names_itself_distinctly() {
+        let proxy = PrivateNetworkUse::ProxyOnlyEgress;
+        let firewall = PrivateNetworkUse::FirewallEnforcement;
+
+        for (a, b) in [
+            (proxy.requirement(), firewall.requirement()),
+            (proxy.remedy(), firewall.remedy()),
+            (proxy.mechanism(), firewall.mechanism()),
+        ] {
+            assert!(!a.is_empty() && !b.is_empty(), "wording must not be empty");
+            assert_ne!(a, b, "the two use cases must not share wording");
+        }
     }
 
     /// Legacy is refused for being unable to take its lock, not for being
@@ -2521,7 +2643,13 @@ mod tests {
         fs::write(&lock, b"").expect("create lock");
 
         assert!(
-            iptables_backend_is_usable("iptables", "iptables v1.8.10 (legacy)\n", &lock).is_ok(),
+            iptables_backend_is_usable(
+                "iptables",
+                "iptables v1.8.10 (legacy)\n",
+                &lock,
+                PrivateNetworkUse::ProxyOnlyEgress
+            )
+            .is_ok(),
             "a legacy backend that can take its lock installs rules fine"
         );
     }
@@ -2545,8 +2673,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         assert!(
-            iptables_backend_is_usable("iptables", "iptables v1.6.1\n", &unreachable_lock(&dir))
-                .is_err(),
+            iptables_backend_is_usable(
+                "iptables",
+                "iptables v1.6.1\n",
+                &unreachable_lock(&dir),
+                PrivateNetworkUse::ProxyOnlyEgress
+            )
+            .is_err(),
             "a pre-1.8 build is legacy-only and must not be assumed usable"
         );
     }

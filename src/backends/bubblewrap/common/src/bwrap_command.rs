@@ -117,6 +117,25 @@ pub(crate) enum ResolvedNetworkMode {
     ProxyOnly,
 }
 
+/// Whether a schema version opts into the 0.8 network contract, under which a
+/// network element Bubblewrap cannot enforce is a hard error rather than a
+/// warning.
+///
+/// An absent version stays lenient: the parser accepts it, and programmatic
+/// callers who never set one are the pre-0.8 population. A malformed non-empty
+/// version is treated as strict instead of lenient -- the parser would reject
+/// it outright, so the only way one reaches here is a hand-built
+/// `ExecutionRequest` that skipped the parser, and a typo like `"0.8"` must not
+/// silently buy pre-0.8 leniency.
+pub fn schema_enforces_network_strictly(version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    semver::Version::parse(version)
+        .map(|parsed| (parsed.major, parsed.minor) >= (0, 8))
+        .unwrap_or(true)
+}
+
 /// Whether this schema opts into the 0.8 private network-namespace contract.
 ///
 /// Gates both the proxy path (`LegacyProxy` → `ProxyOnly`) and the firewall
@@ -125,7 +144,7 @@ pub(crate) enum ResolvedNetworkMode {
 /// is a behavior change for callers already running on 0.6/0.7, so it is
 /// introduced on the dev line rather than retrofitted.
 fn uses_private_network_contract(request: &ExecutionRequest) -> bool {
-    wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
+    schema_enforces_network_strictly(&request.schema_version)
 }
 
 impl ResolvedNetworkMode {
@@ -198,16 +217,47 @@ impl ResolvedNetworkMode {
 /// Whether this schema opts into rejecting network elements Bubblewrap cannot
 /// honor. Pre-0.8 callers keep the warning, so existing configs still run.
 fn rejects_unhonorable_network(request: &ExecutionRequest) -> bool {
-    wxc_common::config_parser::schema_enforces_network_strictly(&request.schema_version)
+    schema_enforces_network_strictly(&request.schema_version)
 }
 
-/// Validate-time twin of the parser's schema-0.8 unenforced-host-list gate.
+/// Rejection text for host lists no mechanism will enforce, on schema 0.8+.
+///
+/// Owned here rather than in the parser: this is a statement about what
+/// Bubblewrap can enforce, so it belongs with the backend that enforces it.
+pub const BWRAP_UNENFORCED_HOST_RULES: &str =
+    "Bubblewrap: network.allowedHosts and network.blockedHosts require an enforcement \
+     mechanism. With enforcementMode='capabilities' (the default) and no network.proxy, \
+     nothing applies them: the host lists suppress the --unshare-net full block, so the \
+     sandbox shares the host network namespace with no filtering at all. Set \
+     network.enforcementMode to 'firewall' to filter by address inside the sandbox's own \
+     network namespace, set network.proxy to enforce host filtering at the proxy layer, or \
+     drop the host lists to get the namespace-level block that defaultPolicy='block' applies \
+     on its own.";
+
+/// Rejection text for `allowLocalNetwork=false` under a shared namespace.
+pub const BWRAP_LOCAL_NETWORK_SHARED_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+     sandbox shares the host network namespace (defaultPolicy='allow'). \
+     The sandboxed process can still bind, listen and accept on host-local addresses. For \
+     an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
+     which applies --unshare-net.";
+
+/// Rejection text for `allowLocalNetwork=true` under a private namespace.
+pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+     network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
+     listener inside the sandbox is reachable only from within it, never from the host. \
+     Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
+     namespace.";
+
+/// Reject host lists that no mechanism will apply, on schema 0.8+.
 ///
 /// Host lists suppress the `Isolated` mode, so a mode that does not apply them
-/// leaves the sandbox on the host namespace unfiltered. The parser only sees
-/// JSON configs; a Rust caller can hand `mxc_engine` an `ExecutionRequest`
-/// directly and reach the runner without ever passing through it, so both
-/// paths must refuse it and share the message verbatim.
+/// leaves the sandbox on the host namespace unfiltered. This is the only layer
+/// that checks it: the parser validates structure, and every caller — CLI,
+/// SDK, FFI, or a Rust caller handing `mxc_engine` a hand-built
+/// `ExecutionRequest` — reaches a runner, while only JSON configs reach the
+/// parser.
 pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
     if !rejects_unhonorable_network(request) {
         return None;
@@ -217,9 +267,20 @@ pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'s
     let mode =
         ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
 
-    (has_host_rules && !mode.enforces_host_rules())
-        .then_some(wxc_common::config_parser::BWRAP_UNENFORCED_HOST_RULES)
+    (has_host_rules && !mode.enforces_host_rules()).then_some(BWRAP_UNENFORCED_HOST_RULES)
 }
+
+/// Rejection text for an external proxy combined with host lists.
+///
+/// Duplicated (verbatim) from the parser's pre-existing check of the same
+/// combination. The parser keeps its copy for JSON configs; this one covers
+/// callers who hand a runner an `ExecutionRequest` directly.
+pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
+    "Bubblewrap: an external network.proxy (url/localhost) cannot be combined with \
+     allowedHosts, blockedHosts, or defaultPolicy='block'. The external proxy is expected to \
+     enforce its own host policy; MXC does not forward host lists to it. Use \
+     'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
+     or remove the host policy.";
 
 /// Validate-time twin of the parser's external-proxy host-list rejection.
 ///
@@ -236,7 +297,7 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
         || !request.policy.blocked_hosts.is_empty()
         || request.policy.default_network_policy == NetworkPolicy::Block;
 
-    conflicts.then_some(wxc_common::config_parser::BWRAP_EXTERNAL_PROXY_HOST_RULES)
+    conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
 }
 
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
@@ -301,8 +362,8 @@ pub(crate) fn local_network_diagnostic_for_mode(
         request.policy.allow_local_network,
         network_mode.uses_private_netns(),
     ) {
-        (false, false) => Some(wxc_common::config_parser::BWRAP_LOCAL_NETWORK_SHARED_NS),
-        (true, true) => Some(wxc_common::config_parser::BWRAP_LOCAL_NETWORK_PRIVATE_NS),
+        (false, false) => Some(BWRAP_LOCAL_NETWORK_SHARED_NS),
+        (true, true) => Some(BWRAP_LOCAL_NETWORK_PRIVATE_NS),
         _ => None,
     }
 }
@@ -914,12 +975,56 @@ mod tests {
         assert!(external_proxy_host_rules_rejection(&r).is_none());
     }
 
-    /// The parser cannot depend on this crate, so it re-derives the namespace
-    /// choice. Drift between the two would let a config be accepted by one path
-    /// and refused by the other, so pin them together across the mode matrix.
+    // The predicate gates whether an unenforceable network element is a hard
+    // error or a warning, so a regression in it changes security behavior
+    // silently. Pinned directly rather than only through the call sites.
     #[test]
-    fn parser_private_netns_helper_matches_resolved_mode() {
+    fn strict_network_enforcement_starts_at_0_8() {
+        assert!(!schema_enforces_network_strictly("0.7.9"));
+        assert!(!schema_enforces_network_strictly("0.7.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0"));
+        assert!(schema_enforces_network_strictly("0.9.0"));
+    }
+
+    #[test]
+    fn strict_network_enforcement_holds_past_1_0() {
+        // A tuple compare, so a major bump must not wrap back to lenient.
+        assert!(schema_enforces_network_strictly("1.0.0"));
+        assert!(schema_enforces_network_strictly("2.3.4"));
+    }
+
+    #[test]
+    fn a_pre_release_label_does_not_lower_the_version() {
+        // semver orders 0.8.0-alpha *below* 0.8.0; comparing (major, minor)
+        // sidesteps that, which is the whole reason for the tuple.
+        assert!(
+            semver::Version::parse("0.8.0-alpha").unwrap()
+                < semver::Version::parse("0.8.0").unwrap()
+        );
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+    }
+
+    #[test]
+    fn an_absent_version_is_lenient_but_a_malformed_one_is_not() {
+        // Absent is the pre-0.8 programmatic caller: the parser accepts it, so
+        // it keeps its behavior. Malformed cannot come from the parser at all
+        // (it rejects these), so it is a hand-built request whose typo must not
+        // buy leniency.
+        assert!(!schema_enforces_network_strictly(""));
+        assert!(schema_enforces_network_strictly("x"));
+        assert!(schema_enforces_network_strictly("0.8"));
+        assert!(schema_enforces_network_strictly("0.7"));
+    }
+
+    /// `ResolvedNetworkMode` is now the only implementation of the namespace
+    /// choice — the parser's re-derived twin is gone — so the mode matrix is
+    /// pinned against explicit expectations rather than against a second copy
+    /// that could drift with it.
+    #[test]
+    fn the_resolved_mode_matches_the_namespace_it_claims_across_the_matrix() {
         for schema in ["", "0.7.0-alpha", "0.8.0-alpha"] {
+            let strict = schema == "0.8.0-alpha";
             for proxy in [false, true] {
                 for mode in [
                     NetworkEnforcementMode::Capabilities,
@@ -939,17 +1044,24 @@ mod tests {
                                 vec![]
                             };
 
-                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
-                            let helper = wxc_common::config_parser::bwrap_uses_private_netns(
-                                proxy,
-                                &r.policy.network_enforcement_mode,
-                                &r.policy.default_network_policy,
-                                hosts,
-                                &r.schema_version,
+                            // Private namespaces: proxy-only and firewall-
+                            // enforced are both 0.8-only, so either shape is
+                            // private exactly when the schema is strict. Plus
+                            // Isolated, the only pre-0.8 mode that unshares.
+                            let uses_firewall = matches!(
+                                mode,
+                                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
                             );
+                            let expected = if proxy || (uses_firewall && hosts) {
+                                strict
+                            } else {
+                                policy == NetworkPolicy::Block && !hosts
+                            };
+
+                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
                             assert_eq!(
                                 resolved.uses_private_netns(),
-                                helper,
+                                expected,
                                 "schema={schema} proxy={proxy} mode={mode:?} \
                                  policy={policy:?} hosts={hosts}"
                             );

@@ -148,6 +148,9 @@ impl RuleAddress {
             IpAddr::V4(ip) => (RuleFamily::V4, ip.to_string(), bits),
             IpAddr::V6(ip) => match mapped_v4_block(ip, bits) {
                 Some((v4, v4_bits)) => (RuleFamily::V4, v4.to_string(), v4_bits),
+                None if covers_ipv4_mapped_range(ip, bits) => {
+                    return Err(straddles_mapped_range(entry))
+                }
                 None => (RuleFamily::V6, ip.to_string(), bits),
             },
         };
@@ -163,14 +166,56 @@ impl RuleAddress {
 ///
 /// Linux puts a genuine IPv4 packet on the wire for a mapped destination, so an
 /// `ip6tables` rule naming one never matches: under `defaultPolicy: allow` a
-/// mapped `blockedHosts` entry would otherwise fail open. The LXC backend
-/// normalizes the same way, so a policy means the same thing on both.
+/// mapped `blockedHosts` entry would otherwise fail open. LXC normalizes
+/// literals and `/96`-or-longer CIDRs the same way, so those policies mean the
+/// same thing on both; it does not yet reject the straddling blocks below.
 ///
 /// The mapped range is the last 32 bits of `::ffff:0:0/96`, so an IPv6 prefix
 /// of `96 + n` is exactly an IPv4 prefix of `n`. A shorter prefix also covers
-/// addresses outside that range, which do travel as IPv6, so it stays IPv6.
+/// addresses outside that range, which do travel as IPv6, so it has no single
+/// IPv4 equivalent; [`covers_ipv4_mapped_range`] decides whether such a block
+/// is merely unrelated to the mapped range or straddles it.
 fn mapped_v4_block(ip: Ipv6Addr, bits: u8) -> Option<(Ipv4Addr, u8)> {
     Some((ip.to_ipv4_mapped()?, bits.checked_sub(96)?))
+}
+
+/// Whether a sub-`/96` block contains the whole IPv4-mapped range.
+///
+/// CIDR blocks nest or are disjoint, so a block shorter than `/96` either
+/// contains all of `::ffff:0:0/96` or misses it entirely — there is no partial
+/// overlap to split. That is why such a block cannot be projected onto a
+/// narrower IPv4 rule: its mapped half is always the entire IPv4 space.
+fn covers_ipv4_mapped_range(ip: Ipv6Addr, bits: u8) -> bool {
+    if bits >= 96 {
+        return false;
+    }
+    // `u128::MAX << 128` is undefined, so the /0 case is masked explicitly.
+    let mask = if bits == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(bits))
+    };
+    let mapped_base = u128::from(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0));
+    (u128::from(ip) & mask) == (mapped_base & mask)
+}
+
+/// The message for an IPv6 block that swallows the IPv4-mapped range.
+///
+/// Such a block cannot be honored as written. Its mapped half travels as IPv4,
+/// so an `ip6tables` rule never matches it — under `defaultPolicy: allow` a
+/// `blockedHosts` entry would fail open. Projecting it onto IPv4 instead would
+/// silently widen the rule to all of IPv4 (the mapped half of any sub-`/96`
+/// block is the whole space), turning `::/0` into "and every IPv4 address too".
+/// Neither reading is safe to guess, so the caller is asked to say which they
+/// meant.
+fn straddles_mapped_range(entry: &str) -> String {
+    format!(
+        "Bubblewrap: network rule '{entry}' is an IPv6 block shorter than /96 that contains the \
+         IPv4-mapped range '::ffff:0:0/96'. Addresses in that range travel as IPv4 packets, so an \
+         ip6tables rule would not match them and the rule would be silently unenforced. Write the \
+         IPv4 side explicitly instead: keep the IPv6 block for native IPv6 traffic and add the \
+         IPv4 block you intend (for example '0.0.0.0/0' to cover all of IPv4)."
+    )
 }
 
 /// The message for an address that is neither a literal nor a CIDR.
@@ -384,14 +429,53 @@ mod tests {
     }
 
     #[test]
-    fn a_prefix_shorter_than_the_mapped_range_stays_ipv6() {
-        // A /95 also covers addresses outside ::ffff:0:0/96, which do travel as
-        // IPv6, so it cannot be rewritten to a single IPv4 block.
-        let address = RuleAddress::parse("::ffff:0:0/95").expect("a v6 CIDR is valid");
+    fn a_prefix_shorter_than_the_mapped_range_is_rejected() {
+        // A /95 covers all of ::ffff:0:0/96, whose members travel as IPv4
+        // packets an ip6tables rule never sees. Keeping it on ip6tables would
+        // silently unenforce the mapped half (a fail-open for a deny rule under
+        // defaultPolicy 'allow'), and projecting it onto IPv4 would widen it to
+        // every IPv4 address. Neither is safe to guess, so it is refused.
+        let error = RuleAddress::parse("::ffff:0:0/95").expect_err("a straddling block is refused");
+        assert!(
+            error.contains("shorter than /96") && error.contains("::ffff:0:0/96"),
+            "the message should name the mapped range and the boundary: {error}"
+        );
+    }
+
+    #[test]
+    fn the_whole_ipv6_space_is_rejected_for_the_same_reason() {
+        // ::/0 is the case most likely to be written by hand, and the one where
+        // silently projecting onto IPv4 would be most surprising: "block all
+        // IPv6" would become "and all IPv4 too".
+        let error = RuleAddress::parse("::/0").expect_err("::/0 contains the mapped range");
+        assert!(
+            error.contains("shorter than /96"),
+            "unexpected message: {error}"
+        );
+    }
+
+    #[test]
+    fn a_sub_96_block_clear_of_the_mapped_range_stays_ipv6() {
+        // The rejection is scoped to blocks that actually contain the mapped
+        // range. Ordinary IPv6 CIDRs are unaffected, so native IPv6 filtering
+        // keeps working.
+        let address = RuleAddress::parse("2001:db8::/32").expect("a native v6 CIDR is valid");
         assert_eq!(address.family, RuleFamily::V6);
-        // Rust renders a mapped address in mixed notation, which ip6tables
-        // accepts; only the family matters for which table it lands in.
-        assert_eq!(address.text, "::ffff:0.0.0.0/95");
+        assert_eq!(address.text, "2001:db8::/32");
+
+        // Immediately below the mapped range and disjoint from it: a /95 pairs
+        // ::fffc/::fffd, while the mapped range sits in the ::fffe/::ffff pair.
+        let neighbour = RuleAddress::parse("::fffc:0:0/95").expect("a neighbouring block is valid");
+        assert_eq!(neighbour.family, RuleFamily::V6);
+    }
+
+    #[test]
+    fn the_mapped_range_itself_is_still_translated_not_rejected() {
+        // Exactly /96 is the boundary: it maps to 0.0.0.0/0 with no ambiguity,
+        // so it is translated rather than refused.
+        let address = RuleAddress::parse("::ffff:0:0/96").expect("the mapped range is valid");
+        assert_eq!(address.family, RuleFamily::V4);
+        assert_eq!(address.text, "0.0.0.0/0");
     }
 
     #[test]

@@ -117,9 +117,12 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // keeps the warning, so existing configs are unaffected. Sits with the
         // input checks so a host without bwrap is still told what is wrong.
         //
-        // The parser rejects both of these too, but only sees JSON configs; a
+        // This is the only layer that checks what Bubblewrap can enforce: the
+        // parser validates structure, and it only sees JSON configs, while a
         // Rust caller can build an `ExecutionRequest` and reach the runner
-        // directly, so the checks are repeated here rather than assumed.
+        // directly. (The external-proxy case is the exception — the parser has
+        // rejected that combination since before this backend gained its own
+        // validation, so both layers refuse it.)
         if let Some(reason) = bwrap_command::external_proxy_host_rules_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
@@ -186,7 +189,15 @@ impl SandboxBackend for BubblewrapScriptRunner {
             return Err(ScriptResponse::error(&err.to_string()));
         }
         if proxy_only || firewall_enforced {
-            if let Err(error) = proxy_network::probe_dependencies() {
+            // Proxy and firewall are mutually exclusive, so this names the one
+            // the caller actually asked for; the probe's advice is worded from
+            // it rather than always naming network.proxy.
+            let use_case = if proxy_only {
+                proxy_network::PrivateNetworkUse::ProxyOnlyEgress
+            } else {
+                proxy_network::PrivateNetworkUse::FirewallEnforcement
+            };
+            if let Err(error) = proxy_network::probe_dependencies(use_case) {
                 return Err(ScriptResponse::error(&error));
             }
         }

@@ -27,10 +27,20 @@ requiring root privileges or a container runtime.
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
   below that floor.
-- **Schema 0.8 proxy mode only:** `slirp4netns` installed and on PATH, plus
-  `nsenter`, `iptables`, and `ip6tables` for the proxy-only egress rules. None
-  are required when `network.proxy` is omitted or when a 0.6/0.7 policy uses
-  the legacy proxy behavior.
+- **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
+  plus `nsenter`, `iptables`, and `ip6tables` for the egress rules. These are
+  needed by **both** 0.8 modes that build a private network namespace — proxy
+  mode (`network.proxy`) and firewall enforcement
+  (`enforcementMode: "firewall"`), which share the same slirp-backed namespace
+  and the same dependency probe. None are required when neither applies: a
+  policy with no `network.proxy` and no 0.8 firewall enforcement, or a 0.6/0.7
+  policy using the legacy proxy and host-rule behavior.
+
+  > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
+  > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
+  > connectivity at all and the v6 rules exist to keep the unmatched family
+  > closed. An IPv6 destination is unreachable even when a rule allows it
+  > (see #955).
   ```bash
   # Debian/Ubuntu
   sudo apt install slirp4netns util-linux iptables
@@ -54,7 +64,7 @@ requiring root privileges or a container runtime.
   ```
   (A legacy backend is still accepted where the lock *is* writable — for
   example when running as root — since it works there.)
-  Proxy mode fails explicitly if any of these is unavailable; it never falls
+  Both modes fail explicitly if any of these is unavailable; neither ever falls
   back to sharing the host network namespace or to running without egress
   rules. The host must also provide the util-linux `unshare` command with
   `--map-current-user` and `--keep-caps`. No root is needed: `iptables` runs
@@ -239,9 +249,24 @@ Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
 naming it would never match and a `blockedHosts` entry under `defaultPolicy:
 allow` would fail open. A mapped CIDR is translated the same way — the mapped
 range is the last 32 bits of `::ffff:0:0/96`, so a `/96 + n` prefix becomes a
-v4 `/n`. A prefix shorter than `/96` also covers addresses outside that range,
-which do travel as IPv6, so it stays on `ip6tables`. The LXC backend normalizes
-identically, so the same policy means the same thing on both.
+v4 `/n`.
+
+An IPv6 block **shorter** than `/96` that contains `::ffff:0:0/96` is
+**rejected** rather than programmed. CIDR blocks nest or are disjoint, so such a
+block always swallows the mapped range whole, and neither available reading is
+safe to apply silently: leaving it on `ip6tables` unenforces the mapped half
+(the same fail-open the translation above exists to prevent), while projecting
+it onto IPv4 would always widen it to `0.0.0.0/0` — turning `blockedHosts:
+["::/0"]` from "block all IPv6" into "block all IPv4 as well". The rejection
+asks the caller to write the IPv4 side explicitly. Blocks that do not contain
+the mapped range, such as `2001:db8::/32`, are unaffected.
+
+> **Divergence from LXC.** LXC normalizes mapped literals and `/96`-or-longer
+> mapped CIDRs the same way, so those policies mean the same thing on both
+> backends. It does **not** yet reject the shorter straddling blocks — there,
+> such a rule stays on `ip6tables` and its mapped half goes unenforced. Until
+> LXC adopts the same check, a policy using one of those blocks is the one case
+> where the two backends differ.
 
 An explicit `blockedHosts` entry outranks any `allowedHosts` entry that covers
 it, including a broader CIDR: denies are installed ahead of allows in a
@@ -294,8 +319,9 @@ namespace choice alone decides the outcome:
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later — at config parse,
-and again in the runner for programmatic callers that bypass the parser — and
+Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later — in the backend's
+validation, which every caller passes through, so a programmatic
+`ExecutionRequest` is refused just like a JSON config — and
 emit a
 `WARNING:` line to the runner log at preflight on earlier schemas rather than
 failing silently. Windows (AppContainer's `privateNetworkClientServer`
@@ -540,9 +566,9 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec; proxy mode adds a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
+| Startup | Create → Start → Attach | Single `bwrap` exec; the 0.8 private-namespace modes (proxy and firewall enforcement) add a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
 | Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
