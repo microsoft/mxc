@@ -528,6 +528,13 @@ describe('createConfigFromPolicy', () => {
     );
   });
 
+  it('should omit the network block for schema 0.8 implicit default deny', () => {
+    const config = createConfigFromPolicy({ version: '0.8.0-alpha' });
+
+    assert.strictEqual(config.network, undefined);
+    assert.strictEqual(config.runtimeConfig, undefined);
+  });
+
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
 
@@ -637,10 +644,10 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
-    it('should derive ProcessContainer capabilities from schema 0.8 allow defaults', () => {
+    it('should derive ProcessContainer capabilities from schema 0.8 egress access', () => {
       mockWindows();
       try {
-        const config = createConfigFromPolicy({
+        const allowByDefault = createConfigFromPolicy({
           version: '0.8.0-alpha',
           network: {
             egress: { default: 'allow' },
@@ -648,9 +655,24 @@ describe('createConfigFromPolicy', () => {
           },
         });
 
-        assert.deepStrictEqual(config.processContainer!.capabilities, [
+        assert.deepStrictEqual(allowByDefault.processContainer!.capabilities, [
           'internetClient',
           'privateNetworkClientServer',
+        ]);
+
+        const allowByRule = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: {
+              default: 'deny',
+              allow: [{ to: [{ cidr: '203.0.113.0/24' }] }],
+            },
+            ingress: { default: 'deny' },
+          },
+        });
+
+        assert.deepStrictEqual(allowByRule.processContainer!.capabilities, [
+          'internetClient',
         ]);
       } finally {
         restore();

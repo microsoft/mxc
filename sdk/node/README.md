@@ -72,8 +72,12 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
 legacy `network.defaultPolicy`, `network.enforcementMode`,
 `network.allowLocalNetwork`, host-list, or `network.proxy` fields.
-`createConfigFromPolicy` continues to produce the legacy network shape; build a
-`ContainerConfig` directly when using the schema 0.8 directional shape.
+`createConfigFromPolicy` authors either shape according to the supplied policy
+version and fields. With schema 0.8, omitting all network fields leaves the
+`network` block out of the generated config; the native parser interprets that
+as directional default-deny for egress, ingress, and host loopback. See the
+[schema 0.8 networking specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+for the directional policy contract.
 
 **Platforms:**
 
