@@ -385,6 +385,86 @@ added in the same change that enables it.
 Legacy schemas are unaffected. Below `0.8.0-alpha`, proxy mode resolves to the
 shared host network namespace, where no chain of any kind is installed.
 
+#### Directional policy (`network.egress` / `network.ingress`)
+
+Schema `0.8.0-alpha` adds a directional network shape that replaces the
+`defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
+`egress` and `ingress` section. The two shapes are **mutually exclusive**: a
+config that mixes legacy and directional fields is a parse error, and one that
+uses directional fields on a pre-0.8 schema is refused by the parser with
+`network.egress, network.ingress, runtimeConfig, and processContainer.network
+require schema version 0.8 or later`.
+
+A config carrying *any* legacy field takes the legacy path described above and
+is byte-identical to what it was before directional support existed. This
+matters: the proxy-mode callers on 0.6/0.7 are unaffected by anything in this
+section.
+
+```json
+{
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "address": "10.0.2.2/32", "protocol": "tcp", "ports": [443] }]
+    }
+  }
+}
+```
+
+Egress lowers into the same private-namespace iptables chains the legacy
+firewall mode uses, so the enforcement properties are identical — supervisor
+holds `CAP_NET_ADMIN`, sandbox drops it, no root required, IP literals and
+CIDRs only. An `except` list on a rule is lowered by CIDR subtraction into the
+remaining covering blocks, so `allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set
+of accepts that provably omit the carve-out rather than an accept followed by a
+hoped-for later deny.
+
+**Mode selection.** Directional never resolves to the shared host namespace:
+
+| Directional policy | Resolved mode |
+|---|---|
+| proxy configured | proxy-only (unchanged; the proxy arm wins) |
+| ruleless `egress.default: "deny"` | isolated (`--unshare-net`) |
+| anything else — rules present, or `egress.default: "allow"` | firewall-enforced (private namespace) |
+
+An open outbound posture therefore becomes an accept-all chain **inside a
+private namespace**, not a shared host namespace. That is deliberate. The
+parser fills `network.ingress` unconditionally on the directional path —
+including when the config has no `network` section at all — and there is no
+`_specified` twin to distinguish a defaulted `ingress.default: "deny"` from a
+written one. Sharing the host namespace would leave that deny unenforceable,
+and it could not be refused without also refusing every legitimate "allow all
+outbound" config. Choosing the private namespace keeps the inbound half true
+for the cost of a slirp hop.
+
+A consequence worth knowing: on 0.8, a config with **no `network` section at
+all** selects the directional shape with a synthesized default-deny. It renders
+identically to the legacy default only because `NetworkPolicy::default()` and
+`NetworkAction::default()` both mean deny — a coincidence the tests pin rather
+than rely on silently.
+
+**What the backend refuses.** Bubblewrap declares support for
+`egress.default`, `egress` rules, `ingress.default`, and `ingress.hostLoopback`.
+Declaring the two inbound features means the backend *understands* those
+fields — not that it honors both of their values. Only the deny posture is
+reachable, so the allow posture is refused rather than accepted and dropped on
+the floor:
+
+| Rejected | Why |
+|---|---|
+| `ingress.default: "allow"` | slirp4netns installs no route into the namespace, and the schema carries no port list with which to forward one. Nothing would arrive, so "allow" would be a lie |
+| `ingress.hostLoopback: "allow"` | the sandbox's loopback is its own namespace's, not the host's; there is nothing to grant |
+| any directional section before 0.8 | the parser refuses it first; the backend keeps its own twin of the check for programmatic callers that build an `ExecutionRequest` directly and never pass through the parser |
+
+The declaration and these refusals must ship together — declaring the inbound
+features without them would be a fail-open. A unit test asserts exactly that
+pairing, driven through `validate()` rather than the gate function, so deleting
+the wiring fails the test.
+
+`runtimeProxy` and `proxyPeerIdentity` stay undeclared: the first has no
+Bubblewrap implementation, the second is a ProcessContainer concept. Shared
+validation refuses both here.
+
 ### Process Settings
 
 Standard `process` fields work as expected:

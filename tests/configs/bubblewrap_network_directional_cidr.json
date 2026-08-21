@@ -1,0 +1,18 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Directional-CIDR",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); if ! timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{ALLOWED_PORT}}\" >/dev/null 2>&1; then echo ALLOWED_DEST_UNREACHABLE; exit 1; fi; echo ALLOWED_DEST_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo DENIED_DEST_LEAKED; exit 1; fi; echo DENIED_DEST_BLOCKED_OK; timeout 4 bash -c \"exec 3<>/dev/tcp/127.0.0.1/9\" >/dev/null 2>&1; if [ $? = 124 ]; then echo LOOPBACK_DROPPED; exit 1; fi; echo LOOPBACK_EXEMPT_OK; capeff=$(grep \"^CapEff\" /proc/self/status | cut -f2); if [ $((0x$capeff & 0x1000)) -ne 0 ]; then echo CAP_NET_ADMIN_RETAINED; exit 1; fi; echo CAP_NET_ADMIN_DROPPED_OK'"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [{ "to": [{ "cidr": "10.0.2.2/32" }] }]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
