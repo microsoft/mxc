@@ -20,7 +20,6 @@ use wxc_common::models::{
 /// leaving every other field at its default.
 fn policy_with_proxy(host: &str, port: u16) -> ContainerPolicy {
     ContainerPolicy {
-        network_specified: true,
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
         network_proxy: ProxyConfig {
             address: Some(ProxyAddress::new(host.to_string(), port)),
@@ -354,7 +353,6 @@ fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
 #[test]
 fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
     let policy = ContainerPolicy {
-        network_specified: true,
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
         allowed_hosts: vec!["10.1.1.1".to_string()],
         ..Default::default()

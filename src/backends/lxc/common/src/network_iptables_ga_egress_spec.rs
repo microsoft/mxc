@@ -14,7 +14,6 @@ fn directional_policy(
     deny: Vec<NetworkRule>,
 ) -> ContainerPolicy {
     ContainerPolicy {
-        network_specified: true,
         network_mode_specified: true,
         network_egress: Some(NetworkEgressPolicy {
             default,
@@ -723,10 +722,7 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
 // would pass against a manager that had stopped emitting base rules at all.
 #[test]
 fn a_legacy_policy_still_opens_dns() {
-    let policy = ContainerPolicy {
-        network_specified: true,
-        ..Default::default()
-    };
+    let policy = ContainerPolicy::default();
     let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
 
     assert!(

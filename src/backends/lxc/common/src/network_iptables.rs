@@ -40,19 +40,7 @@ use wxc_common::models::{
 /// This asks what LXC does about a policy rather than what the policy is, which
 /// is why it lives beside the emitter it gates and not on the shared contract
 /// type. No other backend installs iptables chains from it.
-///
-/// A config that names no `network` section is not a config that asked to deny
-/// all egress, and `network_specified` is the only field that tells the two
-/// apart. The parser hands every network-less config a
-/// `Some(NetworkEgressPolicy::default())` whose action default is `Deny`, on
-/// the same path that leaves `default_network_policy` at `Block`. Without the
-/// guard both arms answer yes for a config that never mentioned networking, and
-/// every container installs chains nobody asked for.
 pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
-    if !policy.network_specified {
-        return false;
-    }
-
     policy.default_network_policy == NetworkPolicy::Block
         || !policy.allowed_hosts.is_empty()
         || !policy.blocked_hosts.is_empty()
@@ -71,11 +59,9 @@ pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
 /// container to new inbound connections the config asked to refuse. Anything
 /// gating the inbound chain has to ask this instead.
 ///
-/// Schema 0.8 needs no arm of its own here. It cannot carry `enforcementMode`,
-/// and `requires_firewall` already answers every directional policy that named
-/// a `network` section. The mode arm needs no guard of its own: a mode reaches
-/// anything other than its `Capabilities` default only from a `network`
-/// section, which is the same section `network_specified` records.
+/// Schema 0.8 needs no arm of its own here: it cannot carry `enforcementMode`,
+/// and its parser writes an egress section for every config, so
+/// `requires_firewall` already answers every directional policy.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
     requires_firewall(policy)
         || matches!(
@@ -3029,7 +3015,6 @@ mod tests {
     /// other field at its default.
     fn policy_requesting_mode(mode: NetworkEnforcementMode) -> ContainerPolicy {
         ContainerPolicy {
-            network_specified: true,
             network_enforcement_mode: mode,
             ..Default::default()
         }
@@ -4109,7 +4094,6 @@ mod tests {
 
     fn policy_with_hosts(allowed_hosts: &[&str], blocked_hosts: &[&str]) -> ContainerPolicy {
         ContainerPolicy {
-            network_specified: true,
             allowed_hosts: strings(allowed_hosts),
             blocked_hosts: strings(blocked_hosts),
             ..Default::default()
@@ -4611,7 +4595,6 @@ mod tests {
             let label = format!("{mode:?}");
 
             let restrictive = ContainerPolicy {
-                network_specified: true,
                 network_enforcement_mode: mode.clone(),
                 blocked_hosts: vec!["example.com".to_string()],
                 ..Default::default()
@@ -4622,7 +4605,6 @@ mod tests {
             );
 
             let permissive = ContainerPolicy {
-                network_specified: true,
                 network_enforcement_mode: mode,
                 default_network_policy: NetworkPolicy::Allow,
                 ..Default::default()
@@ -4641,7 +4623,6 @@ mod tests {
     #[test]
     fn a_stated_directional_egress_posture_requests_the_firewall_under_the_capabilities_default() {
         let policy = ContainerPolicy {
-            network_specified: true,
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
@@ -4656,40 +4637,12 @@ mod tests {
         );
     }
 
-    // The shape that put iptables chains in front of every container on the
-    // branch: a config with no `network` section is still handed a deny-all
-    // egress policy by the parser, on the same path that leaves
-    // `default_network_policy` at `Block`. Both arms answer yes to it, and
-    // none of it was asked for. Hosts without bridge netfilter then refuse the
-    // chain and the container never starts.
-    #[test]
-    fn a_config_naming_no_network_section_is_owed_no_firewall() {
-        let policy = ContainerPolicy {
-            network_egress: Some(NetworkEgressPolicy::default()),
-            ..Default::default()
-        };
-
-        assert!(
-            !policy.network_specified,
-            "fixture must model a config that named no network section"
-        );
-        assert!(
-            !requires_firewall(&policy),
-            "a config that never mentioned networking must not request the firewall"
-        );
-        assert!(
-            !installs_firewall(&policy),
-            "a config that never mentioned networking must not install chains"
-        );
-    }
-
     // The `Block` arm answers this policy too, but only because `Block` is the
     // parser's default for a field 0.8 never writes. Pinning the permissive
     // default here keeps the directional arm as the thing under test.
     #[test]
     fn a_legacy_policy_under_capabilities_is_still_owed_the_firewall() {
         let policy = ContainerPolicy {
-            network_specified: true,
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
@@ -4767,26 +4720,21 @@ mod tests {
     }
 
     /// A policy whose only distinguishing feature is its enforcement mode.
-    /// Restrictive by default: the policy names a network section and leaves
-    /// `default_network_policy` at `Block`, which is what makes the firewall
-    /// owed and runs the apply path.
+    /// Restrictive by default: `default_network_policy` is `Block`, so the
+    /// firewall is owed and the apply path runs.
     fn policy_with_enforcement_mode(
         network_enforcement_mode: NetworkEnforcementMode,
     ) -> ContainerPolicy {
         ContainerPolicy {
-            network_specified: true,
             network_enforcement_mode,
             ..Default::default()
         }
     }
 
-    /// A policy that names a network section and restricts nothing in it. The
-    /// gate skips two shapes -- this one, and a config carrying no network
-    /// section at all -- and keeping `network_specified` set here holds this
-    /// fixture on the first.
+    /// A policy that restricts nothing at all, which is now the only shape the
+    /// firewall gate skips.
     fn policy_requiring_no_firewall() -> ContainerPolicy {
         ContainerPolicy {
-            network_specified: true,
             default_network_policy: NetworkPolicy::Allow,
             ..Default::default()
         }

@@ -14,7 +14,6 @@ use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
 /// every other field at its default.
 fn policy_requesting(mode: NetworkEnforcementMode) -> ContainerPolicy {
     ContainerPolicy {
-        network_specified: true,
         network_enforcement_mode: mode,
         ..Default::default()
     }
