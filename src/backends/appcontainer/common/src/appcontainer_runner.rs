@@ -38,7 +38,7 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::diagnose_create_process_failure;
-use crate::network_policy::add_default_network_capabilities;
+use crate::network_policy_helpers::add_default_network_capabilities;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;

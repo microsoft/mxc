@@ -38,7 +38,7 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
-use crate::base_container_configuration::{
+use crate::base_container_helpers::{
     build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
 };
 use crate::capture_output::{
@@ -2977,7 +2977,7 @@ fn derive_sid_string_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_container_configuration::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
+    use crate::base_container_helpers::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
     use crate::job_object::to_job_object_uilimit_mask;
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
@@ -4002,6 +4002,52 @@ mod tests {
     }
 
     #[test]
+    fn build_process_security_environment_spec_splits_mixed_icmp_rules() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![NetworkRule {
+                to: Vec::new(),
+                ports: vec![
+                    NetworkPort {
+                        protocol: NetworkProtocol::Tcp,
+                        port: Some(443),
+                        end_port: None,
+                    },
+                    NetworkPort {
+                        protocol: NetworkProtocol::Icmp,
+                        port: None,
+                        end_port: None,
+                    },
+                ],
+            }],
+            deny: Vec::new(),
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let allow = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .and_then(|egress| egress.allow())
+            .expect("allow rules");
+
+        assert_eq!(allow.len(), 3);
+        assert_eq!(
+            allow.get(0).ports().unwrap().get(0).protocol(),
+            psec_layout::IpProtocol::tcp
+        );
+        assert_eq!(
+            allow.get(1).ports().unwrap().get(0).protocol(),
+            psec_layout::IpProtocol::icmpv4
+        );
+        assert_eq!(
+            allow.get(2).ports().unwrap().get(0).protocol(),
+            psec_layout::IpProtocol::icmpv6
+        );
+    }
+
+    #[test]
     fn process_security_environment_preference_is_schema_independent() {
         for version in ["", "0.6.0-alpha", "0.7.99", "0.8.0-alpha", "1.0.0"] {
             let request = ExecutionRequest {
@@ -4064,8 +4110,10 @@ mod tests {
     #[test]
     fn validate_rejects_conflicting_proxy_identity_paths() {
         let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
-        let mut request = ExecutionRequest::default();
-        request.dry_run = true;
+        let mut request = ExecutionRequest {
+            dry_run: true,
+            ..Default::default()
+        };
         request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,

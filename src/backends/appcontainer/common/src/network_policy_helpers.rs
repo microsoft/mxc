@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Shared ProcessContainer network-policy helpers.
+
 use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 pub(crate) const INTERNET_CLIENT_CAPABILITY: &str = "internetClient";

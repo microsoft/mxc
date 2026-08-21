@@ -14,7 +14,7 @@
 #[cfg(target_os = "windows")]
 pub mod appcontainer_runner;
 #[cfg(target_os = "windows")]
-mod base_container_configuration;
+mod base_container_helpers;
 #[cfg(target_os = "windows")]
 pub mod base_container_runner;
 #[cfg(target_os = "windows")]
@@ -34,7 +34,7 @@ pub mod launch_diagnostics;
 #[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
-mod network_policy;
+mod network_policy_helpers;
 #[cfg(target_os = "windows")]
 pub mod probe;
 #[cfg(target_os = "windows")]

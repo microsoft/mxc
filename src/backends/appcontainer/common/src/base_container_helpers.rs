@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! BaseContainer configuration and policy helpers.
+
 use process_security_environment_spec::process_security_environment_layout::{
     finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
     EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRuleT,
@@ -18,7 +20,7 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy::{add_default_network_capabilities, ensure_capability};
+use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
 
 pub(super) const LOOPBACK_NETWORK_CAPABILITY: &str = "loopbackNetwork";
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
@@ -177,87 +179,6 @@ fn allowed_appcontainer_peer(policy: &ContainerPolicy) -> Option<String> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum ExpandedProtocol {
-    Any,
-    Tcp,
-    Udp,
-    IcmpV4,
-    IcmpV6,
-}
-
-struct ExpandedPort {
-    protocol: ExpandedProtocol,
-    port: Option<u16>,
-    end_port: Option<u16>,
-}
-
-struct ExpandedRule {
-    destinations: Vec<NetworkPeer>,
-    ports: Vec<ExpandedPort>,
-}
-
-fn expand_endpoint_rules(rules: &[NetworkRule]) -> Vec<ExpandedRule> {
-    let mut expanded = Vec::new();
-    for rule in rules {
-        let ordinary_ports: Vec<_> = rule
-            .ports
-            .iter()
-            .filter(|port| port.protocol != NetworkProtocol::Icmp)
-            .map(|port| ExpandedPort {
-                protocol: match port.protocol {
-                    NetworkProtocol::Any => ExpandedProtocol::Any,
-                    NetworkProtocol::Tcp => ExpandedProtocol::Tcp,
-                    NetworkProtocol::Udp => ExpandedProtocol::Udp,
-                    NetworkProtocol::Icmp => unreachable!("ICMP ports are expanded separately"),
-                },
-                port: port.port,
-                end_port: port.end_port,
-            })
-            .collect();
-        if rule.ports.is_empty() || !ordinary_ports.is_empty() {
-            expanded.push(ExpandedRule {
-                destinations: rule.to.clone(),
-                ports: ordinary_ports,
-            });
-        }
-
-        let icmp_ports: Vec<&NetworkPort> = rule
-            .ports
-            .iter()
-            .filter(|port| port.protocol == NetworkProtocol::Icmp)
-            .collect();
-        if !icmp_ports.is_empty() {
-            for ipv4 in [true, false] {
-                let destinations: Vec<_> = rule
-                    .to
-                    .iter()
-                    .filter(|peer| peer.cidr.address.is_ipv4() == ipv4)
-                    .cloned()
-                    .collect();
-                if rule.to.is_empty() || !destinations.is_empty() {
-                    expanded.push(ExpandedRule {
-                        destinations,
-                        ports: icmp_ports
-                            .iter()
-                            .map(|port| ExpandedPort {
-                                protocol: if ipv4 {
-                                    ExpandedProtocol::IcmpV4
-                                } else {
-                                    ExpandedProtocol::IcmpV6
-                                },
-                                port: port.port,
-                                end_port: port.end_port,
-                            })
-                            .collect(),
-                    });
-                }
-            }
-        }
-    }
-    expanded
-}
-
 fn psec_subnet(cidr: &NetworkCidr) -> PsecIpSubnetT {
     let mut subnet = PsecIpSubnetT::default();
     subnet.address = Some(cidr.address.to_string());
@@ -265,42 +186,89 @@ fn psec_subnet(cidr: &NetworkCidr) -> PsecIpSubnetT {
     subnet
 }
 
-fn psec_endpoint_rules(rules: &[NetworkRule]) -> Vec<PsecEndpointRuleT> {
-    expand_endpoint_rules(rules)
+fn psec_destination_rule(peer: &NetworkPeer) -> PsecDestinationRuleT {
+    let mut destination = PsecDestinationRuleT::default();
+    destination.subnet = Some(Box::new(psec_subnet(&peer.cidr)));
+    destination.except =
+        (!peer.except.is_empty()).then(|| peer.except.iter().map(psec_subnet).collect());
+    destination
+}
+
+fn psec_port_rule(port: &NetworkPort, protocol: PsecIpProtocol) -> PsecPortRuleT {
+    let mut rule = PsecPortRuleT::default();
+    rule.protocol = protocol;
+    rule.port = port.port.unwrap_or(0);
+    rule.end_port = port.end_port.unwrap_or(0);
+    rule
+}
+
+fn psec_endpoint_rule<'a>(
+    destinations: impl IntoIterator<Item = &'a NetworkPeer>,
+    ports: Vec<PsecPortRuleT>,
+) -> PsecEndpointRuleT {
+    let destinations: Vec<_> = destinations
         .into_iter()
-        .map(|rule| {
-            let mut endpoint = PsecEndpointRuleT::default();
-            endpoint.destinations = (!rule.destinations.is_empty()).then(|| {
-                rule.destinations
-                    .iter()
-                    .map(|peer| {
-                        let mut destination = PsecDestinationRuleT::default();
-                        destination.subnet = Some(Box::new(psec_subnet(&peer.cidr)));
-                        destination.except = (!peer.except.is_empty())
-                            .then(|| peer.except.iter().map(psec_subnet).collect());
-                        destination
-                    })
-                    .collect()
-            });
-            endpoint.ports = (!rule.ports.is_empty()).then(|| {
-                rule.ports
-                    .iter()
-                    .map(|port| {
-                        let mut rule = PsecPortRuleT::default();
-                        rule.protocol = match port.protocol {
-                            ExpandedProtocol::Any => PsecIpProtocol::any,
-                            ExpandedProtocol::Tcp => PsecIpProtocol::tcp,
-                            ExpandedProtocol::Udp => PsecIpProtocol::udp,
-                            ExpandedProtocol::IcmpV4 => PsecIpProtocol::icmpv4,
-                            ExpandedProtocol::IcmpV6 => PsecIpProtocol::icmpv6,
-                        };
-                        rule.port = port.port.unwrap_or(0);
-                        rule.end_port = port.end_port.unwrap_or(0);
-                        rule
-                    })
-                    .collect()
-            });
-            endpoint
+        .map(psec_destination_rule)
+        .collect();
+    let mut endpoint = PsecEndpointRuleT::default();
+    endpoint.destinations = (!destinations.is_empty()).then_some(destinations);
+    endpoint.ports = (!ports.is_empty()).then_some(ports);
+    endpoint
+}
+
+fn psec_non_icmp_port(port: &NetworkPort) -> Option<PsecPortRuleT> {
+    let protocol = match port.protocol {
+        NetworkProtocol::Any => PsecIpProtocol::any,
+        NetworkProtocol::Tcp => PsecIpProtocol::tcp,
+        NetworkProtocol::Udp => PsecIpProtocol::udp,
+        NetworkProtocol::Icmp => return None,
+    };
+    Some(psec_port_rule(port, protocol))
+}
+
+fn psec_icmp_endpoint(rule: &NetworkRule, ipv4: bool) -> Option<PsecEndpointRuleT> {
+    let ports: Vec<_> = rule
+        .ports
+        .iter()
+        .filter(|port| port.protocol == NetworkProtocol::Icmp)
+        .map(|port| {
+            psec_port_rule(
+                port,
+                if ipv4 {
+                    PsecIpProtocol::icmpv4
+                } else {
+                    PsecIpProtocol::icmpv6
+                },
+            )
         })
-        .collect()
+        .collect();
+    if ports.is_empty() {
+        return None;
+    }
+
+    let destinations: Vec<_> = rule
+        .to
+        .iter()
+        .filter(|peer| peer.cidr.address.is_ipv4() == ipv4)
+        .collect();
+    if !rule.to.is_empty() && destinations.is_empty() {
+        return None;
+    }
+    Some(psec_endpoint_rule(destinations, ports))
+}
+
+fn psec_endpoint_rules(rules: &[NetworkRule]) -> Vec<PsecEndpointRuleT> {
+    let mut endpoints = Vec::new();
+    for rule in rules {
+        let ports: Vec<_> = rule.ports.iter().filter_map(psec_non_icmp_port).collect();
+        if rule.ports.is_empty() || !ports.is_empty() {
+            endpoints.push(psec_endpoint_rule(&rule.to, ports));
+        }
+        endpoints.extend(
+            [true, false]
+                .into_iter()
+                .filter_map(|ipv4| psec_icmp_endpoint(rule, ipv4)),
+        );
+    }
+    endpoints
 }
