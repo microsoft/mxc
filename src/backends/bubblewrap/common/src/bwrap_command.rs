@@ -393,9 +393,36 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     if !proxy.is_enabled() || proxy.builtin_test_server {
         return None;
     }
-    let conflicts = !request.policy.allowed_hosts.is_empty()
-        || !request.policy.blocked_hosts.is_empty()
-        || request.policy.default_network_policy == NetworkPolicy::Block;
+    let has_host_rules =
+        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
+    // `default_network_policy` is a legacy-shape field: the directional path
+    // never writes it, so it sits at its `Block` default whether or not the
+    // caller said anything about egress. Reading it as a caller statement
+    // would refuse every directional runtime proxy -- the one posture the
+    // parser already constrains to `egress.default='deny'` with no direct
+    // rules, which *is* proxy-only egress and carries no host lists that could
+    // be silently dropped. The discriminator matches `EgressPlan::for_request`
+    // and `ResolvedNetworkMode::from_request`, so all three agree on which
+    // schema shape is in force.
+    let legacy_shape = request.policy.network_egress.is_none();
+    // Any *other* directional egress is refused rather than waved through.
+    // A proxy resolves to `ProxyOnly`, whose chain comes from
+    // `EgressPlan::for_proxy` and never reads `network_egress` -- so a
+    // directional rule set combined with a proxy would be dropped in silence.
+    // JSON configs cannot reach here (the parser enforces the same posture),
+    // which leaves programmatic callers: precisely who this twin exists for.
+    let directional_conflicts = request
+        .policy
+        .network_egress
+        .as_ref()
+        .is_some_and(|egress| {
+            egress.default != NetworkAction::Deny
+                || !egress.allow.is_empty()
+                || !egress.deny.is_empty()
+        });
+    let conflicts = has_host_rules
+        || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block)
+        || directional_conflicts;
 
     conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
 }
@@ -1094,6 +1121,81 @@ mod tests {
         r.policy.network_proxy.builtin_test_server = true;
         r.policy.allowed_hosts = vec!["10.0.0.1".into()];
         assert!(external_proxy_host_rules_rejection(&r).is_none());
+    }
+
+    /// A directional runtime proxy must not trip the legacy host-list guard.
+    ///
+    /// `default_network_policy` is a legacy-shape field the directional path
+    /// never writes, so it sits at its `Block` default. Reading it as if the
+    /// caller had asked for `defaultPolicy='block'` refused *every* directional
+    /// runtime proxy -- which made `RUNTIME_PROXY` declarable but unusable,
+    /// since the parser requires exactly `egress.default='deny'` with no direct
+    /// rules for that field. The guard must still fire on the legacy shape, and
+    /// still fire on real host lists in either shape, so all three are pinned
+    /// here.
+    #[test]
+    fn a_directional_runtime_proxy_is_not_refused_by_the_legacy_host_list_guard() {
+        use wxc_common::models::{NetworkEgressPolicy, NetworkRule};
+
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
+
+        // Legacy shape, defaulted `Block`: still refused, as before.
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        assert!(
+            external_proxy_host_rules_rejection(&r).is_some(),
+            "the legacy shape must keep its refusal"
+        );
+
+        // Directional shape: the same defaulted `Block` is not a caller
+        // statement, so it must no longer refuse.
+        r.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        assert!(
+            external_proxy_host_rules_rejection(&r).is_none(),
+            "a directional proxy-only posture carries no host lists to drop"
+        );
+
+        // Real host lists are still refused even on the directional shape --
+        // the parser forbids the mix, so this only reaches a programmatic
+        // caller, which is exactly who this twin exists for.
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        assert!(
+            external_proxy_host_rules_rejection(&r).is_some(),
+            "host lists are never forwarded to an external proxy"
+        );
+        r.policy.allowed_hosts.clear();
+
+        // Directional egress that is *not* the proxy-only posture must fail
+        // closed. `ProxyOnly` builds its chain from `EgressPlan::for_proxy` and
+        // never reads `network_egress`, so accepting these would drop the
+        // requested rules in silence -- the same class of bug the host-list
+        // half of this guard prevents.
+        for unhonorable in [
+            NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            },
+            NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule::default()],
+                ..Default::default()
+            },
+            NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                deny: vec![NetworkRule::default()],
+                ..Default::default()
+            },
+        ] {
+            r.policy.network_egress = Some(unhonorable);
+            assert!(
+                external_proxy_host_rules_rejection(&r).is_some(),
+                "a directional rule set combined with a proxy would be dropped in silence"
+            );
+        }
     }
 
     /// A directional egress policy must land on the one mode whose chains the

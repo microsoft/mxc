@@ -296,4 +296,75 @@ for sentinel in ALLOWED_PORT_OK DENIED_PORT_BLOCKED_OK; do
 done
 echo "PASS: directional port narrowing"
 
+# ---------------------------------------------------------------------------
+# 3. legacy <-> directional proxy spelling parity
+# ---------------------------------------------------------------------------
+# Declaring RUNTIME_PROXY only says shared validation lets the directional
+# spelling through. What matters is that it lands on the same enforcement the
+# legacy spelling already gets: the parser normalizes
+# `runtimeConfig.networkProxy` into the same `policy.network_proxy`, so both
+# should resolve to the identical proxy-only posture. Both are therefore run
+# against the same workload and compared to each other rather than to a golden
+# string, which keeps the check precise without pinning it to chain formatting.
+#
+# Both sides are 0.8 on purpose. The variable under test is the *spelling*, not
+# the schema version: on 0.7 an external proxy resolves to the legacy shared-
+# host-network mode, which does no egress filtering at all, so a 0.7 baseline
+# would "fail" the direct-egress assertion by design and compare two different
+# modes rather than two spellings of one.
+#
+# The test proxy already running on 127.0.0.1:$ALLOWED_PORT doubles as the
+# proxy here; the parser requires a loopback endpoint, and the backend
+# translates it to slirp's gateway on the way in.
+# Diagnostics go to stderr and the marks to a file, never to stdout through a
+# command substitution: a `$(...)` capture would swallow the failure message
+# and its `exit` would only leave the subshell, turning a real failure into a
+# silent stop.
+run_parity() {
+    local label="$1"
+    local config="$2"
+    sed -e "s/{{PROXY_HOST}}/127.0.0.1/g" -e "s/{{PROXY_PORT}}/$ALLOWED_PORT/g" \
+        "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
+    local out
+    local rc=0
+    out=$("$LXC_EXEC" --experimental --allow-testing-features "$WORK_DIR/$config" 2>&1) || rc=$?
+    printf '%s\n' "$out" >"$WORK_DIR/$label.parity.out"
+    if [ "$rc" -ne 0 ]; then
+        printf '%s\n' "$out" >&2
+        echo "FAIL: legacy/directional proxy parity ($label returned $rc)" >&2
+        return 1
+    fi
+    grep -o 'PARITY_[A-Z_]*' <<<"$out" | sort -u >"$WORK_DIR/$label.marks"
+}
+
+echo "Running Bubblewrap directional test: legacy/directional proxy parity..."
+run_parity "legacy-spelling" "bubblewrap_network_proxy_parity_legacy.json" || exit 1
+run_parity "directional-spelling" "bubblewrap_network_directional_proxy.json" || exit 1
+LEGACY_MARKS="$(cat "$WORK_DIR/legacy-spelling.marks")"
+DIRECTIONAL_MARKS="$(cat "$WORK_DIR/directional-spelling.marks")"
+
+# Anchored, not just compared: two spellings that are broken in the same way
+# would agree with each other and prove nothing.
+EXPECTED_MARKS="$(printf '%s\n' \
+    PARITY_DIRECT_BLOCKED_OK \
+    PARITY_PROXIED_FETCH_OK \
+    PARITY_PROXY_ENV_OK \
+    PARITY_PROXY_REACHABLE_OK | sort -u)"
+
+if [ "$LEGACY_MARKS" != "$EXPECTED_MARKS" ]; then
+    cat "$WORK_DIR/legacy-spelling.parity.out"
+    echo "FAIL: the legacy proxy spelling did not reach the expected verdict."
+    echo "  expected: $(tr '\n' ' ' <<<"$EXPECTED_MARKS")"
+    echo "  actual:   $(tr '\n' ' ' <<<"$LEGACY_MARKS")"
+    exit 1
+fi
+if [ "$DIRECTIONAL_MARKS" != "$LEGACY_MARKS" ]; then
+    cat "$WORK_DIR/directional-spelling.parity.out"
+    echo "FAIL: the directional spelling did not enforce what the legacy spelling enforces."
+    echo "  legacy:      $(tr '\n' ' ' <<<"$LEGACY_MARKS")"
+    echo "  directional: $(tr '\n' ' ' <<<"$DIRECTIONAL_MARKS")"
+    exit 1
+fi
+echo "PASS: legacy/directional proxy parity"
+
 echo "All Bubblewrap directional network tests passed."

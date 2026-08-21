@@ -73,14 +73,22 @@ impl SandboxBackend for BubblewrapScriptRunner {
     /// `bwrap_command::directional_network_rejection` below. Declaring them
     /// without that refusal would be a fail-open, so the two belong together.
     ///
-    /// `RUNTIME_PROXY` and `PROXY_PEER_IDENTITY` stay undeclared: the first has
-    /// no Bubblewrap implementation, and the second is a ProcessContainer
-    /// concept. Shared validation refuses both on this backend.
+    /// `RUNTIME_PROXY` is declared because the parser normalizes
+    /// `runtimeConfig.networkProxy` into the same `policy.network_proxy` the
+    /// legacy `network.proxy` field feeds, pinned to loopback, and only under
+    /// the `egress.default='deny'` with no direct rules posture. That is
+    /// exactly `ResolvedNetworkMode::ProxyOnly`, which this backend already
+    /// enforces via the proxy's own private-namespace egress chain, so the 0.8
+    /// spelling reaches the identical enforcement as the 0.7 one.
+    ///
+    /// `PROXY_PEER_IDENTITY` stays undeclared: it is a ProcessContainer concept
+    /// with no Bubblewrap equivalent, so shared validation refuses it here.
     fn network_policy_support(&self) -> NetworkPolicySupport {
         NetworkPolicySupport::EGRESS_DEFAULT
             | NetworkPolicySupport::EGRESS_RULES
             | NetworkPolicySupport::INGRESS_DEFAULT
             | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
@@ -1024,6 +1032,159 @@ mod tests {
                  hostLoopback={host_loopback:?}: {}",
                 refusal.error_message
             );
+        }
+    }
+
+    /// Every `NetworkPolicySupport` bit must be a deliberate decision, proven
+    /// against a config the shared gate actually rules on.
+    ///
+    /// The bits are a hand-written declaration: nothing derives them from the
+    /// fields this backend really consumes, so a bit that was simply never
+    /// added reads exactly like one that was considered and refused. Both
+    /// produce the same clean rejection. That is how `RUNTIME_PROXY` stayed
+    /// undeclared while the backend had full proxy support the whole time --
+    /// no test could see the difference, because there was nothing to compare
+    /// the declaration against.
+    ///
+    /// This closes that gap from both sides. The union assertion means a newly
+    /// added bit fails here until someone categorizes it, so the decision can
+    /// no longer be made by omission. Each entry is then proven against a
+    /// request that exercises its field: declared bits must be accepted,
+    /// undeclared ones must be refused by name. Every probe is also run against
+    /// `ALL`, so a probe that stops reaching its gate fails loudly instead of
+    /// quietly passing for the wrong reason.
+    #[test]
+    fn every_network_policy_support_bit_is_a_deliberate_decision() {
+        use wxc_common::models::{
+            NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+        };
+
+        // A directional posture makes the gates that key off it fire.
+        fn directional() -> ExecutionRequest {
+            let mut request = base_request();
+            request.schema_version = "0.8.0-alpha".into();
+            request.policy.network_mode_specified = true;
+            request
+        }
+
+        let egress_only = || {
+            let mut request = directional();
+            request.policy.network_egress = Some(NetworkEgressPolicy::default());
+            request
+        };
+        let ingress_only = || {
+            let mut request = directional();
+            request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+            request
+        };
+
+        // (bit, declared, a request that exercises it, the field it names)
+        let decisions: [(NetworkPolicySupport, bool, ExecutionRequest, &str); 6] = [
+            (
+                NetworkPolicySupport::EGRESS_DEFAULT,
+                true,
+                egress_only(),
+                "network.egress.default",
+            ),
+            (
+                NetworkPolicySupport::EGRESS_RULES,
+                true,
+                {
+                    let mut request = egress_only();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        allow: vec![NetworkRule::default()],
+                        ..Default::default()
+                    });
+                    request
+                },
+                "network.egress allow/deny rules",
+            ),
+            (
+                NetworkPolicySupport::INGRESS_DEFAULT,
+                true,
+                ingress_only(),
+                "network.ingress.default",
+            ),
+            (
+                NetworkPolicySupport::HOST_LOOPBACK,
+                true,
+                ingress_only(),
+                "network.ingress.hostLoopback",
+            ),
+            (
+                // Declared: the parser normalizes `runtimeConfig.networkProxy`
+                // into the same `policy.network_proxy` the legacy field feeds,
+                // so it lands on machinery this backend already enforces.
+                NetworkPolicySupport::RUNTIME_PROXY,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        default: NetworkAction::Deny,
+                        ..Default::default()
+                    });
+                    request.policy.runtime_network_proxy_specified = true;
+                    request.policy.network_proxy = ProxyConfig {
+                        address: Some(ProxyAddress::new("127.0.0.1".to_string(), 3128)),
+                        builtin_test_server: false,
+                    };
+                    request
+                },
+                "runtimeConfig.networkProxy",
+            ),
+            (
+                // Undeclared: a ProcessContainer concept with no Bubblewrap
+                // equivalent, so shared validation must keep refusing it.
+                NetworkPolicySupport::PROXY_PEER_IDENTITY,
+                false,
+                {
+                    let mut request = base_request();
+                    request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+                    request
+                },
+                "processContainer.network.allowedProxyPeer",
+            ),
+        ];
+
+        // A bit added to `ALL` but not categorized above fails here.
+        let categorized = decisions
+            .iter()
+            .fold(NetworkPolicySupport::LEGACY, |acc, (bit, ..)| acc | *bit);
+        assert!(
+            categorized.contains(NetworkPolicySupport::ALL)
+                && NetworkPolicySupport::ALL.contains(categorized),
+            "a NetworkPolicySupport bit is missing from this table -- decide whether \
+             Bubblewrap declares it, and prove that decision with a probe here"
+        );
+
+        let support = BubblewrapScriptRunner::new().network_policy_support();
+
+        for (bit, declared, request, field) in decisions {
+            assert!(
+                validate_network_policy_support(&request, NetworkPolicySupport::ALL).is_ok(),
+                "the probe for {field} no longer reaches its gate, so it proves nothing"
+            );
+            assert_eq!(
+                support.contains(bit),
+                declared,
+                "the declaration for {field} disagrees with this table"
+            );
+
+            match validate_network_policy_support(&request, support) {
+                Ok(()) => assert!(declared, "{field} is accepted but recorded as undeclared"),
+                Err(error) => {
+                    assert!(
+                        !declared,
+                        "{field} is declared but was refused: {}",
+                        error.error_message
+                    );
+                    assert!(
+                        error.error_message.contains(field),
+                        "the refusal for {field} names something else: {}",
+                        error.error_message
+                    );
+                }
+            }
         }
     }
 

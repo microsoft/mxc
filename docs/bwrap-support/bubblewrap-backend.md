@@ -461,9 +461,38 @@ features without them would be a fail-open. A unit test asserts exactly that
 pairing, driven through `validate()` rather than the gate function, so deleting
 the wiring fails the test.
 
-`runtimeProxy` and `proxyPeerIdentity` stay undeclared: the first has no
-Bubblewrap implementation, the second is a ProcessContainer concept. Shared
-validation refuses both here.
+`runtimeProxy` is declared. The parser normalizes
+`runtimeConfig.networkProxy` into the same `policy.network_proxy` the legacy
+`network.proxy` field feeds, pinned to a loopback endpoint and accepted only
+alongside `egress.default: "deny"` with no direct rules. That is exactly the
+proxy-only posture this backend already enforces, so the 0.8 spelling reaches
+the identical enforcement as the 0.7 one rather than a second implementation.
+An end-to-end test runs both spellings against the same workload and compares
+their verdicts to each other, anchored to an expected result so that two
+identically-broken spellings cannot agree their way to a pass.
+
+`proxyPeerIdentity` stays undeclared: it is a ProcessContainer concept with no
+Bubblewrap equivalent, so shared validation refuses it here.
+
+Declaring the bit was necessary but not sufficient. The backend's
+`external_proxy_host_rules_rejection` guard — which stops an operator-supplied
+proxy from being combined with host lists MXC never forwards to it — also keyed
+off `defaultPolicy: "block"`. That is a *legacy-shape* field the directional
+path never writes, so it sits at its `Block` default on every directional
+request. Since the parser requires `egress.default: "deny"` with no direct
+rules for a runtime proxy, the guard refused every such config: the capability
+would have been declared but unusable. The guard now reads `defaultPolicy` only
+on the legacy shape, using the same `network_egress.is_some()` discriminator as
+`EgressPlan::for_request` and `ResolvedNetworkMode::from_request`. Real host
+lists are still refused in either shape.
+
+Because the bits are a hand-written declaration with nothing deriving them from
+the fields the backend actually consumes, a bit that is simply never added is
+indistinguishable from one that was considered and refused — both surface as
+the same clean rejection. `runtimeProxy` sat undeclared for exactly that
+reason while the proxy machinery behind it was already complete. A unit test
+now enumerates every `NetworkPolicySupport` bit and fails if a newly added one
+is left uncategorized, so the decision can no longer be made by omission.
 
 ### Process Settings
 
