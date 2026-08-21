@@ -134,9 +134,7 @@ Notes:
 
 ## Network policy
 
-This matrix describes the current schema 0.7 implementation. A checkmark for
-the AppContainer compatibility proxy means cooperative routing is available;
-it does not imply the planned schema 0.8 model-2 proxy-only guarantee.
+The release matrix describes the legacy schema 0.6/0.7 implementation.
 
 | Aspect | 23H2 | 24H2 | 25H2 | 25H2+ |
 |--------|:--:|:--:|:--:|:--:|
@@ -155,6 +153,22 @@ Notes:
 - The AppContainer compatibility path uses `winhttp-proxy-shim.exe`. It is not
   the forward-looking proxy architecture; support for the model-2 BaseContainer
   contract should replace this fallback in a separate change.
+
+Schema 0.8 support is selected by runtime contract rather than Windows release:
+
+| Schema 0.8 capability | PSEC | Legacy SBOX | AppContainer fallback |
+|---|:---:|:---:|:---:|
+| Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
+| Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ | ❌ |
+| `allowedProxyPeer` or `ingress.hostLoopback: "allow"` | ✅ | ❌ | ❌ |
+| `runtimeConfig.networkProxy` | ✅ | ❌ | ❌ |
+
+PSEC owns the WFP policy lifetime through workload completion. SBOX exposes no
+equivalent cleanup handle, so MXC never installs schema 0.8 WFP filters through
+that contract. The AppContainer fallback also rejects
+`egress.default: "deny"` with `ingress.default: "allow"` because
+`privateNetworkClientServer` is bidirectional and no schema 0.8 WFP filter is
+available there to block private-network egress.
 
 ## UI restrictions
 

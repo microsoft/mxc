@@ -35,7 +35,7 @@ narrows the outbound public and private destinations reachable through the grant
 |---|---|---|---|
 | `deny` | `deny` | None | Internet and private-network traffic are denied. |
 | `allow` | `deny` | `internetClient` | Internet outbound is allowed; private-network traffic is denied. |
-| `deny` | `allow` | `privateNetworkClientServer` | Outbound denied; private-network inbound allowed. |
+| `deny` | `allow` | `privateNetworkClientServer` | PSEC blocks outbound with WFP and permits private-network inbound. The AppContainer fallback rejects this combination because the capability is bidirectional. |
 | `allow` | `allow` | Both capabilities | Internet outbound and bidirectional private-network traffic are allowed. |
 
 This matrix covers the direction defaults without explicit internet egress rules or proxy mode.
@@ -251,24 +251,25 @@ through CPIS. SBOX is eligible only when it can represent the request without dr
 otherwise selection continues to AppContainer, where unsupported policy is rejected.
 
 SBOX retains its legacy network contract. It receives only the effective egress default and legacy `network.proxy`
-configuration; schema 0.8 allow/deny filters and `allowedProxyPeer` are never serialized into its FlatBuffer. A schema
-0.8 runtime proxy on an SBOX-only host is exposed cooperatively through proxy environment variables instead of the SBOX
-proxy field.
+configuration; schema 0.8 allow/deny filters, `allowedProxyPeer`, and host-loopback configuration are never serialized
+into its FlatBuffer. The SBOX creation API supplies no policy-lifetime handle or workload-completion cleanup contract,
+so MXC cannot safely install and later remove schema 0.8 WFP filters through that path. A valid schema 0.8 runtime proxy
+requires either peer identity or unrestricted host loopback and is therefore rejected when PSEC is unavailable.
 
 **Downlevel behavior:** When PSEC is unavailable, compatible requests use CPIS or the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
-downlevel weakening. Proxy-configured requests receive cooperative routing through environment variables; this
-compatibility behavior is not model 2 enforcement.
+downlevel weakening. Legacy proxy requests retain their existing compatibility behavior; schema 0.8 runtime proxy
+requests do not fall back because neither SBOX nor AppContainer can preserve their peer or host-loopback requirements.
 
-Outside that documented proxy compatibility path, the AppContainer fallback is selected only when its capability
-mapping preserves the request. Explicit egress rules, proxy peer identity, and host-loopback allow fail with a typed
-unsupported-policy error when PSEC cannot enforce them.
+The AppContainer fallback is selected only when its capability mapping preserves the request. Explicit egress rules,
+proxy peer identity, and host-loopback allow fail with a typed unsupported-policy error when PSEC cannot enforce them.
 
 ## 3. WFP enforcement
 
-PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime.
-Downlevel WFP installation, elevation, and cleanup are future work and are not part of the initial schema 0.8
+PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime. SBOX does not expose the
+equivalent teardown handle, so using it to install those filters could leave policy behind after the workload exits.
+Downlevel WFP installation, elevation, and reliable cleanup are future work and are not part of the initial schema 0.8
 downlevel support.
 
 WFP implements `egress` rules for public and private destinations. `internetClient` enables public-network access.

@@ -691,8 +691,8 @@ impl BaseContainerRunner {
     ///
     /// SBOX remains on its established contract: it supports legacy proxy only
     /// on query-less hosts and never receives schema 0.8 filters or peer
-    /// identity. A schema 0.8 runtime proxy can still use SBOX cooperatively
-    /// through child proxy environment variables.
+    /// identity. Schema 0.8 runtime proxy requests require PSEC because their
+    /// host-loopback or peer-identity posture cannot be represented by SBOX.
     fn legacy_sbox_compatible_with_request(
         request: &ExecutionRequest,
         queried_capabilities: Option<u64>,
@@ -701,7 +701,7 @@ impl BaseContainerRunner {
             return false;
         }
         if request.policy.runtime_network_proxy_specified {
-            return true;
+            return false;
         }
         if !request.policy.network_proxy.is_enabled() {
             return true;
@@ -2988,8 +2988,8 @@ mod tests {
     use sandbox_spec::base_container_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wxc_common::models::{
-        ClipboardPolicy, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy, NetworkPort,
-        NetworkProtocol, NetworkRule, ProxyConfig, UiPolicy,
+        ClipboardPolicy, ContainerPolicy, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy,
+        NetworkPort, NetworkProtocol, NetworkRule, ProxyConfig, UiPolicy,
     };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
@@ -3666,7 +3666,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_proxy_can_use_sbox_cooperatively_without_sbox_proxy_policy() {
+    fn runtime_proxy_environment_does_not_make_sbox_compatible() {
         let mut request = ExecutionRequest::default();
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
@@ -3675,7 +3675,7 @@ mod tests {
         };
         request.env = vec!["PATH=C:\\Windows".to_string()];
 
-        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
         ));
@@ -3894,26 +3894,36 @@ mod tests {
     }
 
     #[test]
-    fn build_process_security_environment_spec_preserves_proxy_url() {
-        let mut request = ExecutionRequest::default();
-        request.policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
-            builtin_test_server: false,
-        };
-        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
+    fn psec_proxy_and_direct_egress_forms_are_mutually_exclusive() {
+        for runtime_proxy_specified in [false, true] {
+            let mut request = ExecutionRequest::default();
+            request.policy.runtime_network_proxy_specified = runtime_proxy_specified;
+            request.policy.network_proxy = ProxyConfig {
+                address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+                builtin_test_server: false,
+            };
+            request.policy.allowed_proxy_peer = Some("Contoso.Proxy_12345".to_string());
 
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let network = spec.network_policy().expect("network policy");
+            assert_eq!(
+                network.proxy().and_then(|proxy| proxy.url()),
+                Some("http://127.0.0.1:8080")
+            );
+            assert_eq!(
+                network.allowed_appcontainer_peer(),
+                Some("Contoso.Proxy_12345")
+            );
+            assert!(network.egress().is_none());
+        }
+
+        let request = ExecutionRequest::default();
         let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
         let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
         let network = spec.network_policy().expect("network policy");
-        assert_eq!(
-            network.proxy().and_then(|proxy| proxy.url()),
-            Some("http://127.0.0.1:8080")
-        );
-        assert_eq!(
-            network.allowed_appcontainer_peer(),
-            Some("Contoso.Proxy_12345")
-        );
-        assert!(network.egress().is_none());
+        assert!(network.proxy().is_none());
+        assert!(network.egress().is_some());
     }
 
     fn request_with_rich_network_rules() -> ExecutionRequest {
@@ -4080,19 +4090,25 @@ mod tests {
     }
 
     #[test]
-    fn runtime_proxy_prefers_psec_but_can_fall_back_cooperatively() {
+    fn runtime_proxy_requires_psec() {
         let mut request = ExecutionRequest::default();
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
+        request.policy.network_egress =
+            Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
 
         assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
         assert!(
             !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
         );
-        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
         ));
@@ -4110,6 +4126,39 @@ mod tests {
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &filtered, None
         ));
+
+        filtered.policy.allowed_proxy_peer = None;
+        filtered.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Deny,
+            host_loopback: NetworkAction::Allow,
+        });
+        assert!(requires_psec_networking(&filtered.policy));
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &filtered, None
+        ));
+    }
+
+    #[test]
+    fn conflicting_proxy_identity_table() {
+        for allowed_proxy_peer in [false, true] {
+            for host_loopback in [NetworkAction::Deny, NetworkAction::Allow] {
+                let mut policy = ContainerPolicy {
+                    network_ingress: Some(wxc_common::models::NetworkIngressPolicy {
+                        default: NetworkAction::Allow,
+                        host_loopback,
+                    }),
+                    ..Default::default()
+                };
+                if allowed_proxy_peer {
+                    policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+                }
+
+                assert_eq!(
+                    has_conflicting_proxy_identity(&policy),
+                    allowed_proxy_peer && host_loopback == NetworkAction::Allow
+                );
+            }
+        }
     }
 
     #[test]

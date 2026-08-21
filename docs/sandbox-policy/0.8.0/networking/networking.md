@@ -342,9 +342,10 @@ already implemented.
 
 ### Process containers (Windows): GA target and compatibility behavior
 
-The model-2 guarantees below apply to ProcessContainer paths with OS-scoped
-proxy enforcement. The AppContainer compatibility fallback is cooperative and
-does not satisfy model 2; see the implementation doc for its limitations.
+The model-2 guarantees below require the PSEC ProcessContainer path with
+OS-scoped proxy enforcement. Legacy SBOX and the AppContainer fallback reject
+schema 0.8 runtime proxy requests because they cannot preserve the required
+peer-identity or host-loopback posture.
 
 **Connectivity models:**
 
@@ -360,11 +361,11 @@ does not satisfy model 2; see the implementation doc for its limitations.
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations |
+| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
-| Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
-| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration | Private network follows `ingress.default` |
+| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no `internetClient` capability. | |
+| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration | Private network follows `ingress.default`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |

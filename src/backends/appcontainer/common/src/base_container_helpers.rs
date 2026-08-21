@@ -20,7 +20,9 @@ use wxc_common::models::{
     NetworkPort, NetworkProtocol, NetworkRule,
 };
 
-use crate::network_policy_helpers::{add_default_network_capabilities, ensure_capability};
+use crate::network_policy_helpers::{
+    add_default_network_capabilities, ensure_capability, uses_network_capabilities,
+};
 
 pub(super) const LOOPBACK_NETWORK_CAPABILITY: &str = "networkLoopback";
 pub(super) const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
@@ -99,7 +101,10 @@ fn effective_capabilities(policy: &ContainerPolicy, include_host_loopback: bool)
         .cloned()
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
-    if include_host_loopback && unrestricted_host_loopback_allowed(policy) {
+    if include_host_loopback
+        && uses_network_capabilities(policy)
+        && unrestricted_host_loopback_allowed(policy)
+    {
         ensure_capability(&mut capabilities, LOOPBACK_NETWORK_CAPABILITY);
     }
     capabilities
@@ -131,6 +136,9 @@ fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPoli
 fn build_psec_network_policy(policy: &ContainerPolicy) -> PsecNetworkPolicy {
     let mut network = PsecNetworkPolicy::default();
     if policy.network_proxy.is_enabled() {
+        // Proxy and direct egress are mutually exclusive PSEC policy forms.
+        // The parser requires runtime proxy requests to use deny-by-default
+        // egress with no direct allow or deny rules.
         network.proxy = policy.network_proxy.address.as_ref().map(|address| {
             let mut proxy = PsecProxyInfo::default();
             proxy.url = Some(address.to_url());
