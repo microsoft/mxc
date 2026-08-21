@@ -697,6 +697,29 @@ impl BaseContainerRunner {
         )
     }
 
+    fn validate_resolved_network_contract(
+        request: &ExecutionRequest,
+        use_process_security_environment: bool,
+    ) -> Result<(), ScriptResponse> {
+        if use_process_security_environment
+            || Self::legacy_sbox_compatible_with_request(
+                request,
+                Self::query_sandbox_capabilities(),
+            )
+        {
+            return Ok(());
+        }
+
+        Err(ScriptResponse {
+            failure_phase: FailurePhase::BackendUnavailable,
+            ..ScriptResponse::error(
+                "the request requires process-security-environment networking; \
+                 the resolved legacy SBOX contract cannot preserve its explicit rules, \
+                 runtime proxy, proxy peer identity, or host-loopback policy",
+            )
+        })
+    }
+
     fn decode_sbox_proxy_contract(queried_capabilities: Option<u64>) -> SboxProxyContract {
         match queried_capabilities {
             None => SboxProxyContract::LegacyOrUnknown,
@@ -1143,6 +1166,7 @@ impl BaseContainerRunner {
 
         let capture_denials = request.policy.capture_denials.clone();
         let use_process_security_environment = self.uses_process_security_environment(&request);
+        Self::validate_resolved_network_contract(&request, use_process_security_environment)?;
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
             let bytes = build_sbox_spec(&request);
@@ -2064,6 +2088,7 @@ impl SandboxBackend for BaseContainerRunner {
             return Ok(());
         }
         let use_process_security_environment = self.uses_process_security_environment(request);
+        Self::validate_resolved_network_contract(request, use_process_security_environment)?;
         // BaseContainer's native PSEC/V2 capture seals its own ETL, so when it
         // is selected retainEtl is honored natively regardless of the guarded
         // provider's transfer capability (the native-capture exception).
@@ -3631,6 +3656,30 @@ mod tests {
             &request,
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY)
         ));
+    }
+
+    #[test]
+    fn resolved_sbox_contract_rejects_psec_only_networking_after_capture_probe_change() {
+        let mut request = request_with_rich_network_rules();
+        request.policy.capture_denials = Some(Default::default());
+
+        assert!(
+            BaseContainerRunner::validate_resolved_network_contract(&request, true).is_ok(),
+            "PSEC preserves the complete directional policy"
+        );
+        let error = BaseContainerRunner::validate_resolved_network_contract(&request, false)
+            .expect_err("a late PSEC-to-SBOX transition must fail closed");
+        assert_eq!(error.failure_phase, FailurePhase::BackendUnavailable);
+        assert!(error
+            .error_message
+            .contains("requires process-security-environment networking"));
+    }
+
+    #[test]
+    fn resolved_sbox_contract_accepts_compatible_networking() {
+        let request = ExecutionRequest::default();
+
+        assert!(BaseContainerRunner::validate_resolved_network_contract(&request, false).is_ok());
     }
 
     #[test]
