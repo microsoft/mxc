@@ -93,7 +93,7 @@ bind only the exact loopback address and port supplied to MXC.
 |---|---|---|---|
 | Packaged proxy | Package Family Name | `default: "allow"`; `hostLoopback: "deny"` | Package identity |
 | Unpackaged AppContainer | Profile | `default: "allow"`; `hostLoopback: "deny"` | AppContainer profile |
-| Unpackaged non-AppContainer | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
+| Unpackaged non-AppContainer (compatibility) | Omit | `default: "allow"`; `hostLoopback: "allow"` | None |
 
 All deployments retain the base Model 2 client policy. `allowedProxyPeer` adds proxy identity binding on top of the
 common WFP endpoint enforcement. The proxy endpoint is the loopback address and port in
@@ -102,8 +102,9 @@ client policy and package identity are the same; the enforcement table below sep
 
 `ingress.hostLoopback` is bidirectional. `allowedProxyPeer` authorizes a package family or AppContainer profile without
 opening general host-loopback access, so identity-scoped paths keep `hostLoopback: "deny"`. Only an unpackaged
-non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. That authorizes both
-host-loopback directions, but Model 2 WFP still restricts client-container egress to the configured proxy endpoint.
+non-AppContainer proxy lacks an accepted peer identity and requires `hostLoopback: "allow"`. This is a weaker
+compatibility deployment, not the shared policy's strict host-loopback-closure guarantee. It authorizes both
+host-loopback directions, although WFP still restricts client-container egress to the configured proxy endpoint.
 Host-loopback clients can reach listeners in the MXC client container.
 
 #### Identity-scoped proxy
@@ -113,7 +114,7 @@ Use the canonical [ProcessContainer schema 0.8 configuration](examples/0.8.0-sch
 Use the installed Package Family Name for a packaged proxy, regardless of whether it has AppContainer isolation. Use
 the AppContainer profile name for an unpackaged AppContainer proxy.
 
-#### Unpackaged non-AppContainer proxy
+#### Unpackaged non-AppContainer proxy (compatibility)
 
 An unpackaged non-AppContainer proxy has no package family or AppContainer profile identity:
 

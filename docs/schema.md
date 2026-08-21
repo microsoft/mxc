@@ -47,7 +47,10 @@ Direct egress rules and `runtimeConfig.networkProxy` select different
 connectivity models and cannot be combined. A ProcessContainer proxy requires
 `ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
 keep `hostLoopback: "deny"`; identity-less host proxies omit
-`allowedProxyPeer` and require `hostLoopback: "allow"`.
+`allowedProxyPeer` and require `hostLoopback: "allow"`. The identity-less route
+is a weaker compatibility deployment because it opens both host-loopback
+directions; it is not the strict proxy-endpoint exception defined by the shared
+model-2 policy.
 
 ```json
 {

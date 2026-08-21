@@ -115,9 +115,10 @@ rather than accept it with partial enforcement.
 When `runtimeConfig.networkProxy` is present, `hostLoopback: deny` remains valid
 and blocks every host-loopback path other than outbound connections to that
 exact proxy endpoint. This exception is part of model 2, not a general grant of
-host-loopback access. A backend that cannot make the proxy reachable without
-opening broader host-loopback access must reject model 2 rather than require
-`hostLoopback: allow` or silently weaken the policy.
+host-loopback access. An enforcing model-2 implementation must preserve that
+meaning or reject the configuration. A temporary compatibility path may require
+broader host-loopback access only when its backend section explicitly documents
+the weaker posture; such a path does not provide the strict model-2 guarantee.
 
 **Scope:**
 
@@ -202,13 +203,18 @@ No direct internet, loopback proxy only (more restrictive).
 }
 ```
 
-This backend-neutral example keeps general host-loopback and private-network
-access denied. `runtimeConfig.networkProxy` authorizes only outbound access to
-the exact proxy endpoint as the model-2 exception. Cooperating HTTP(S) clients
-are configured to use the proxy; clients that ignore the proxy settings are
-blocked from direct egress. Without runtime proxy configuration, the deny
-defaults form model 3. Backends may use different mechanisms to make the proxy
-reachable, but must preserve this policy meaning.
+This backend-neutral example expresses the portable model-2 policy intent:
+general host-loopback and private-network access remain denied, while
+`runtimeConfig.networkProxy` designates the exact outbound proxy endpoint for
+the model-2 exception. Cooperating HTTP(S) clients are configured to use the
+proxy; clients that ignore the proxy settings are blocked from direct egress.
+Without runtime proxy configuration, the deny defaults form model 3. Backends
+may use different mechanisms to make the proxy reachable. An enforcing path
+must preserve this meaning; a backend that cannot do so rejects the
+configuration unless its section below explicitly identifies a temporary,
+weaker compatibility posture. The example expresses the shared contract; the
+GA Scope by Backend section states whether each backend accepts this exact JSON
+or requires a documented backend-specific configuration.
 
 This schema follows container-ecosystem conventions (CIDR peers, egress/ingress, to/ports), modeled loosely on
 Kubernetes NetworkPolicy (the CNCF standard layered on CNI/OCI) rather than on platform firewall primitives. MXC keeps
@@ -315,6 +321,20 @@ the exact endpoint in `runtimeConfig.networkProxy` is the sole sanctioned except
 | Linux (LXC, Bubblewrap) | iptables permits only the proxy endpoint; proxy variables are routing hints. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
 
+**Backend implementation rule:** A backend implementing model 2:
+
+1. validates that `runtimeConfig.networkProxy` names an HTTP/S loopback endpoint with an explicit port;
+2. makes only that outbound endpoint reachable, or only its backend-specific translation when the sandbox has a
+   private network namespace;
+3. applies `ingress.hostLoopback` to every other container-to-host and host-to-container loopback path; and
+4. rejects the configuration if it cannot preserve those semantics.
+
+A backend-specific compatibility path may instead require a broader ingress
+setting only when its section documents both the required configuration and the
+resulting loss of isolation. Capability gates such as ProcessContainer's
+`ingress.default: "allow"` do not turn the proxy exception into general
+host-loopback permission.
+
 **Why localhost only:** Remote proxies introduce trust boundary issues (proxy on different machine = different security context). Localhost proxy simplifies GA implementation and ensures proxy is under the same administrative control as the sandbox.
 
 **Proxy environment-variable hygiene (all backends):** The sandbox starts with all HTTP(S)-related proxy environment variables cleared to empty (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `FTP_PROXY`, `NO_PROXY`, and their lowercase variants). The sandbox never inherits host or stale proxy settings. MXC sets these variables explicitly, and only to the configured loopback proxy, when a proxy is in use (model 2); in model 1 they remain empty.
@@ -344,6 +364,11 @@ AppContainer requires the bidirectional `privateNetworkClientServer` capability 
 flow in either direction. ProcessContainer therefore requires `ingress.default: "allow"` for outbound private-network
 access, after which `egress` rules apply to both public and private outbound destinations.
 
+This capability coupling is a backend mapping, not a change to the shared
+meaning of `ingress.default`. The ProcessContainer section identifies which
+proxy deployments retain strict endpoint scoping and which compatibility
+deployment additionally requires general host-loopback access.
+
 ### D8: Delegation from the invoking user
 
 **Decision:** Like the filesystem configuration, the network configuration is a delegation: the contained code receives no more network access than the invoking user could exercise themselves.
@@ -359,16 +384,21 @@ already implemented.
 
 ### Process containers (Windows): GA target and compatibility behavior
 
-The model-2 guarantees below apply to ProcessContainer paths with OS-scoped
-proxy enforcement. The AppContainer compatibility fallback is cooperative and
-does not satisfy model 2; see the implementation doc for its limitations.
+The strict host-loopback guarantee applies to the identity-scoped
+ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
+proxy path requires broader host-loopback access, and the AppContainer fallback
+is cooperative; both are explicitly documented compatibility behaviors rather
+than strict model-2 enforcement.
 
 **Connectivity models:**
 
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
   with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
-  AppContainer proxy uses its profile name. Proxy reachability is scoped to that peer and endpoint; it does not require
-  `ingress.default: "allow"` or `ingress.hostLoopback: "allow"`.
+  AppContainer proxy uses its profile name. Windows requires `ingress.default: "allow"` to grant the bidirectional
+  `privateNetworkClientServer` capability. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
+  endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and is the
+  documented compatibility path that requires `ingress.hostLoopback: "allow"`; it does not provide the strict
+  host-loopback-closure guarantee.
 - **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules.
   Private-network outbound also requires `ingress.default: "allow"` and remains subject to the same `egress` rules.
 - **Model 3:** Grants no `internetClient`, private-network capability, or loopback exemptions.
@@ -381,7 +411,7 @@ does not satisfy model 2; see the implementation doc for its limitations.
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
 | Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
-| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration and scoped peer access | The configured endpoint is the model-2 exception; other private network and host loopback follow `ingress` |
+| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less compatibility path requires `"allow"` |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
