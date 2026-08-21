@@ -38,6 +38,9 @@ use windows::Win32::System::Threading::{
 };
 use windows_core::{PCWSTR, PWSTR};
 
+use crate::base_container_configuration::{
+    build_psec_spec, build_sbox_spec, has_conflicting_proxy_identity, requires_psec_networking,
+};
 use crate::capture_output::{
     combine_capture_and_cleanup_results, combine_process_and_teardown_results,
     remove_internal_capture_file, unique_denials_output_paths, write_denials_document,
@@ -54,27 +57,15 @@ use crate::launch_diagnostics::{
 };
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
-use process_security_environment_spec::process_security_environment_layout::{
-    finish_process_security_environment_buffer, DestinationRuleT as PsecDestinationRuleT,
-    EndpointPolicyT as PsecEndpointPolicy, EndpointRuleT as PsecEndpointRuleT,
-    FilterAction as PsecFilterAction, IpProtocol as PsecIpProtocol, IpSubnetT as PsecIpSubnetT,
-    NetworkPolicyT as PsecNetworkPolicy, PortRuleT as PsecPortRuleT,
-    ProcessSecurityEnvironmentT as PsecProcessSecurityEnvironment, ProxyInfoT as PsecProxyInfo,
-    SchemaVersionT,
-};
-use sandbox_spec::base_container_layout::{
-    destination_ruleT, endpoint_policyT, endpoint_ruleT, finish_sandbox_spec_buffer, ip_subnetT,
-    port_ruleT, proxy_infoT, FilterAction as SboxFilterAction, IntegrityLevel,
-    IpProtocol as SboxIpProtocol, NetworkPolicyT as SboxNetworkPolicy, SandboxSpecT,
-};
+use sandbox_spec::base_container_layout::IntegrityLevel;
+use wxc_common::error::WxcError;
 use wxc_common::log_symbols::{
     EMOJI_ALLOWED, EMOJI_BLOCKED, EMOJI_NEUTRAL, EMOJI_SECTION, EMOJI_WARNING,
 };
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    CaptureDenialsErrorOutput, CaptureDenialsOutput, ContainerPolicy, ExecutionRequest,
-    FailurePhase, NetworkAction, NetworkCidr, NetworkEnforcementMode, NetworkPeer, NetworkPolicy,
-    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, SandboxOutputMetadata, ScriptResponse,
+    CaptureDenialsErrorOutput, CaptureDenialsOutput, ExecutionRequest, FailurePhase, ProxyAddress,
+    SandboxOutputMetadata, ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -91,9 +82,6 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
-
-const LOOPBACK_NETWORK_CAPABILITY: &str = "loopbackNetwork";
-const LOOPBACK_NETWORK_PEER: &str = "MXC-Loopback";
 
 /// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
 ///
@@ -114,6 +102,26 @@ fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
     }
     block.push(0);
     block
+}
+
+fn build_runtime_proxy_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>, WxcError> {
+    if !request.policy.runtime_network_proxy_specified {
+        return Ok(None);
+    }
+    let Some(address) = request.policy.network_proxy.address.as_ref() else {
+        return Ok(None);
+    };
+
+    let env = if request.env.is_empty() {
+        crate::appcontainer_runner::create_default_env_entries()?
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect()
+    } else {
+        request.env.clone()
+    };
+    let env = wxc_common::proxy_env::apply_cooperative_proxy_env(&env, &address.to_url());
+    Ok(Some(encode_env_block(&env)))
 }
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -272,6 +280,7 @@ fn is_proxy_fallback_unavailable(
     err == ERROR_NOT_SUPPORTED.0
         && !use_process_security_environment
         && request.policy.network_proxy.is_enabled()
+        && !request.policy.runtime_network_proxy_specified
 }
 
 fn learning_mode_api_not_implemented(error: &learning_mode_windows::LearningModeError) -> bool {
@@ -363,208 +372,6 @@ impl CapturePlatformSupport for RealCapturePlatformSupport {
     }
 }
 
-enum ResolvedNetworkPolicy<'a> {
-    Proxy(Option<&'a ProxyAddress>),
-    Egress,
-}
-
-#[derive(Clone, Copy)]
-enum ExpandedProtocol {
-    Any,
-    Tcp,
-    Udp,
-    IcmpV4,
-    IcmpV6,
-}
-
-struct ExpandedPort {
-    protocol: ExpandedProtocol,
-    port: Option<u16>,
-    end_port: Option<u16>,
-}
-
-struct ExpandedRule {
-    destinations: Vec<NetworkPeer>,
-    ports: Vec<ExpandedPort>,
-}
-
-fn expand_endpoint_rules(rules: &[NetworkRule]) -> Vec<ExpandedRule> {
-    let mut expanded = Vec::new();
-    for rule in rules {
-        let ordinary_ports: Vec<_> = rule
-            .ports
-            .iter()
-            .filter(|port| port.protocol != NetworkProtocol::Icmp)
-            .map(|port| ExpandedPort {
-                protocol: match port.protocol {
-                    NetworkProtocol::Any => ExpandedProtocol::Any,
-                    NetworkProtocol::Tcp => ExpandedProtocol::Tcp,
-                    NetworkProtocol::Udp => ExpandedProtocol::Udp,
-                    NetworkProtocol::Icmp => unreachable!(),
-                },
-                port: port.port,
-                end_port: port.end_port,
-            })
-            .collect();
-        if rule.ports.is_empty() || !ordinary_ports.is_empty() {
-            expanded.push(ExpandedRule {
-                destinations: rule.to.clone(),
-                ports: ordinary_ports,
-            });
-        }
-
-        let icmp_ports: Vec<&NetworkPort> = rule
-            .ports
-            .iter()
-            .filter(|port| port.protocol == NetworkProtocol::Icmp)
-            .collect();
-        if !icmp_ports.is_empty() {
-            for ipv4 in [true, false] {
-                let destinations: Vec<_> = rule
-                    .to
-                    .iter()
-                    .filter(|peer| peer.cidr.address.is_ipv4() == ipv4)
-                    .cloned()
-                    .collect();
-                if rule.to.is_empty() || !destinations.is_empty() {
-                    expanded.push(ExpandedRule {
-                        destinations,
-                        ports: icmp_ports
-                            .iter()
-                            .map(|port| ExpandedPort {
-                                protocol: if ipv4 {
-                                    ExpandedProtocol::IcmpV4
-                                } else {
-                                    ExpandedProtocol::IcmpV6
-                                },
-                                port: port.port,
-                                end_port: port.end_port,
-                            })
-                            .collect(),
-                    });
-                }
-            }
-        }
-    }
-    expanded
-}
-
-fn sbox_subnet(cidr: &NetworkCidr) -> ip_subnetT {
-    let mut subnet = ip_subnetT::default();
-    subnet.address = Some(cidr.address.to_string());
-    subnet.prefix_length = cidr.prefix_length;
-    subnet
-}
-
-fn sbox_endpoint_rules(rules: &[NetworkRule]) -> Vec<endpoint_ruleT> {
-    expand_endpoint_rules(rules)
-        .into_iter()
-        .map(|rule| {
-            let mut endpoint = endpoint_ruleT::default();
-            endpoint.destinations = if rule.destinations.is_empty() {
-                None
-            } else {
-                Some(
-                    rule.destinations
-                        .iter()
-                        .map(|peer| {
-                            let mut destination = destination_ruleT::default();
-                            destination.subnet = Some(Box::new(sbox_subnet(&peer.cidr)));
-                            destination.except = if peer.except.is_empty() {
-                                None
-                            } else {
-                                Some(peer.except.iter().map(sbox_subnet).collect())
-                            };
-                            destination
-                        })
-                        .collect(),
-                )
-            };
-            endpoint.ports = if rule.ports.is_empty() {
-                None
-            } else {
-                Some(
-                    rule.ports
-                        .iter()
-                        .map(|port| {
-                            let mut rule = port_ruleT::default();
-                            rule.protocol = match port.protocol {
-                                ExpandedProtocol::Any => SboxIpProtocol::any,
-                                ExpandedProtocol::Tcp => SboxIpProtocol::tcp,
-                                ExpandedProtocol::Udp => SboxIpProtocol::udp,
-                                ExpandedProtocol::IcmpV4 => SboxIpProtocol::icmpv4,
-                                ExpandedProtocol::IcmpV6 => SboxIpProtocol::icmpv6,
-                            };
-                            rule.port = port.port.unwrap_or(0);
-                            rule.end_port = port.end_port.unwrap_or(0);
-                            rule
-                        })
-                        .collect(),
-                )
-            };
-            endpoint
-        })
-        .collect()
-}
-
-fn psec_subnet(cidr: &NetworkCidr) -> PsecIpSubnetT {
-    let mut subnet = PsecIpSubnetT::default();
-    subnet.address = Some(cidr.address.to_string());
-    subnet.prefix_length = cidr.prefix_length;
-    subnet
-}
-
-fn psec_endpoint_rules(rules: &[NetworkRule]) -> Vec<PsecEndpointRuleT> {
-    expand_endpoint_rules(rules)
-        .into_iter()
-        .map(|rule| {
-            let mut endpoint = PsecEndpointRuleT::default();
-            endpoint.destinations = if rule.destinations.is_empty() {
-                None
-            } else {
-                Some(
-                    rule.destinations
-                        .iter()
-                        .map(|peer| {
-                            let mut destination = PsecDestinationRuleT::default();
-                            destination.subnet = Some(Box::new(psec_subnet(&peer.cidr)));
-                            destination.except = if peer.except.is_empty() {
-                                None
-                            } else {
-                                Some(peer.except.iter().map(psec_subnet).collect())
-                            };
-                            destination
-                        })
-                        .collect(),
-                )
-            };
-            endpoint.ports = if rule.ports.is_empty() {
-                None
-            } else {
-                Some(
-                    rule.ports
-                        .iter()
-                        .map(|port| {
-                            let mut rule = PsecPortRuleT::default();
-                            rule.protocol = match port.protocol {
-                                ExpandedProtocol::Any => PsecIpProtocol::any,
-                                ExpandedProtocol::Tcp => PsecIpProtocol::tcp,
-                                ExpandedProtocol::Udp => PsecIpProtocol::udp,
-                                ExpandedProtocol::IcmpV4 => PsecIpProtocol::icmpv4,
-                                ExpandedProtocol::IcmpV6 => PsecIpProtocol::icmpv6,
-                            };
-                            rule.port = port.port.unwrap_or(0);
-                            rule.end_port = port.end_port.unwrap_or(0);
-                            rule
-                        })
-                        .collect(),
-                )
-            };
-            endpoint
-        })
-        .collect()
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SboxProxyContract {
     LegacyOrUnknown,
@@ -596,9 +403,6 @@ impl Default for BaseContainerRunner {
     }
 }
 
-/// SandboxSpec FlatBuffer schema version embedded in every spec payload.
-const SANDBOX_SPEC_VERSION: &str = "0.1.0";
-
 /// Sandbox cleanup stub. The actual cleanup (DeleteAppContainerProfile, BFS
 /// policy removal, registry tracking deletion) is currently disabled because
 /// wxc-exec only tracks the main AppContainer process handle -- child processes
@@ -626,6 +430,16 @@ fn guarded_capture_started_too_late(
 impl BaseContainerRunner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[cfg(test)]
+    fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
+        build_psec_spec(request)
+    }
+
+    #[cfg(test)]
+    fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
+        build_sbox_spec(request)
     }
 
     #[cfg(test)]
@@ -765,7 +579,7 @@ impl BaseContainerRunner {
                 schema_version: "0.8.0-alpha".to_string(),
                 ..Default::default()
             };
-            let specification = Self::build_process_security_environment_spec(&request);
+            let specification = build_psec_spec(&request);
             SecurityEnvironmentApi::load()
                 .and_then(|api| api.create(&specification, PROCESS_SECURITY_ENVIRONMENT_FLAG_NONE))
                 .and_then(|environment| {
@@ -794,7 +608,7 @@ impl BaseContainerRunner {
             schema_version: "0.8.0-alpha".to_string(),
             ..Default::default()
         };
-        let specification = Self::build_process_security_environment_spec(&request);
+        let specification = build_psec_spec(&request);
         SecurityEnvironmentApi::load()
             .and_then(|security_environment_api| {
                 CaptureSession::begin(
@@ -875,24 +689,28 @@ impl BaseContainerRunner {
 
     /// Whether the request can use the legacy SBOX contract selected by MXC.
     ///
-    /// A successful support query identifies the capability-aware OS contract:
-    /// with `SANDBOX_CAP_NETWORK_PROXY` clear, proxy is unavailable; with it
-    /// set, proxy requires `allowed_appcontainer_peer` and an AppContainer-hosted
-    /// proxy. Identity-scoped proxy requests use that contract. Query-less builds
-    /// retain the older identity-less SBOX proxy behavior.
+    /// SBOX remains on its established contract: it supports legacy proxy only
+    /// on query-less hosts and never receives schema 0.8 filters or peer
+    /// identity. A schema 0.8 runtime proxy can still use SBOX cooperatively
+    /// through child proxy environment variables.
     fn legacy_sbox_compatible_with_request(
         request: &ExecutionRequest,
         queried_capabilities: Option<u64>,
     ) -> bool {
+        if requires_psec_networking(&request.policy) {
+            return false;
+        }
+        if request.policy.runtime_network_proxy_specified {
+            return true;
+        }
         if !request.policy.network_proxy.is_enabled() {
             return true;
         }
 
-        match Self::decode_sbox_proxy_contract(queried_capabilities) {
-            SboxProxyContract::LegacyOrUnknown => request.policy.allowed_proxy_peer.is_none(),
-            SboxProxyContract::Model2PeerIdentity => request.policy.allowed_proxy_peer.is_some(),
-            SboxProxyContract::Unavailable => false,
-        }
+        matches!(
+            Self::decode_sbox_proxy_contract(queried_capabilities),
+            SboxProxyContract::LegacyOrUnknown
+        )
     }
 
     fn decode_sbox_proxy_contract(queried_capabilities: Option<u64>) -> SboxProxyContract {
@@ -975,101 +793,6 @@ impl BaseContainerRunner {
         !is_api_not_implemented(err.0)
     }
 
-    fn resolved_network_policy(policy: &ContainerPolicy) -> ResolvedNetworkPolicy<'_> {
-        if policy.network_proxy.is_enabled() {
-            ResolvedNetworkPolicy::Proxy(policy.network_proxy.address.as_ref())
-        } else {
-            ResolvedNetworkPolicy::Egress
-        }
-    }
-
-    fn allowed_appcontainer_peer(policy: &ContainerPolicy) -> Option<String> {
-        if policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
-        {
-            Some(LOOPBACK_NETWORK_PEER.to_string())
-        } else {
-            policy.allowed_proxy_peer.clone()
-        }
-    }
-
-    // A BaseContainer network policy contains either proxy settings or an egress policy.
-    fn build_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
-        let mut network = SboxNetworkPolicy::default();
-        match Self::resolved_network_policy(policy) {
-            ResolvedNetworkPolicy::Proxy(address) => {
-                network.proxy = address.map(|address| {
-                    let mut proxy = proxy_infoT::default();
-                    proxy.url = Some(address.to_url());
-                    Box::new(proxy)
-                });
-            }
-            ResolvedNetworkPolicy::Egress => {
-                let egress_policy = policy.network_egress.clone().unwrap_or_else(|| {
-                    wxc_common::models::NetworkEgressPolicy {
-                        default: match policy.default_network_policy {
-                            NetworkPolicy::Allow => NetworkAction::Allow,
-                            NetworkPolicy::Block => NetworkAction::Deny,
-                        },
-                        ..Default::default()
-                    }
-                });
-                let mut egress = endpoint_policyT::default();
-                egress.default_action = match egress_policy.default {
-                    NetworkAction::Allow => SboxFilterAction::allow,
-                    NetworkAction::Deny => SboxFilterAction::deny,
-                };
-                egress.allow = (!egress_policy.allow.is_empty())
-                    .then(|| sbox_endpoint_rules(&egress_policy.allow));
-                egress.deny = (!egress_policy.deny.is_empty())
-                    .then(|| sbox_endpoint_rules(&egress_policy.deny));
-                network.egress = Some(Box::new(egress));
-            }
-        }
-        network.allowed_appcontainer_peer = Self::allowed_appcontainer_peer(policy);
-        network
-    }
-
-    fn build_process_security_environment_network_policy(
-        policy: &ContainerPolicy,
-    ) -> PsecNetworkPolicy {
-        let mut network = PsecNetworkPolicy::default();
-        match Self::resolved_network_policy(policy) {
-            ResolvedNetworkPolicy::Proxy(address) => {
-                network.proxy = address.map(|address| {
-                    let mut proxy = PsecProxyInfo::default();
-                    proxy.url = Some(address.to_url());
-                    Box::new(proxy)
-                });
-            }
-            ResolvedNetworkPolicy::Egress => {
-                let egress_policy = policy.network_egress.clone().unwrap_or_else(|| {
-                    wxc_common::models::NetworkEgressPolicy {
-                        default: match policy.default_network_policy {
-                            NetworkPolicy::Allow => NetworkAction::Allow,
-                            NetworkPolicy::Block => NetworkAction::Deny,
-                        },
-                        ..Default::default()
-                    }
-                });
-                let mut egress = PsecEndpointPolicy::default();
-                egress.default_action = match egress_policy.default {
-                    NetworkAction::Allow => PsecFilterAction::allow,
-                    NetworkAction::Deny => PsecFilterAction::deny,
-                };
-                egress.allow = (!egress_policy.allow.is_empty())
-                    .then(|| psec_endpoint_rules(&egress_policy.allow));
-                egress.deny = (!egress_policy.deny.is_empty())
-                    .then(|| psec_endpoint_rules(&egress_policy.deny));
-                network.egress = Some(Box::new(egress));
-            }
-        }
-        network.allowed_appcontainer_peer = Self::allowed_appcontainer_peer(policy);
-        network
-    }
-
     fn should_use_process_security_environment(
         request: &ExecutionRequest,
         psec_usable: bool,
@@ -1084,7 +807,7 @@ impl BaseContainerRunner {
     fn psec_policy_compatible(request: &ExecutionRequest, psec_supports_deny_paths: bool) -> bool {
         !request.policy.least_privilege_mode
             && (!request.policy.network_proxy.is_enabled()
-                || request.policy.network_egress.is_some())
+                || request.policy.runtime_network_proxy_specified)
             && (request.policy.denied_paths.is_empty() || psec_supports_deny_paths)
     }
 
@@ -1202,131 +925,6 @@ impl BaseContainerRunner {
             Self::is_process_security_environment_usable(),
             &RealCapturePlatformSupport,
         )
-    }
-
-    fn build_process_security_environment_spec(request: &ExecutionRequest) -> Vec<u8> {
-        let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-
-        let capabilities = Self::effective_capabilities(request);
-        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-            &wxc_common::ui_policy::resolve_ui_restrictions(
-                &request.policy.ui,
-                &request.policy.base_process_ui,
-            ),
-        ) as u64;
-
-        let mut spec = PsecProcessSecurityEnvironment::default();
-        spec.version = SchemaVersionT { major: 1, minor: 0 };
-        spec.capabilities = (!capabilities.is_empty()).then(|| capabilities.join(","));
-        spec.disallow_win32k_system_calls = request.policy.ui.disable;
-        spec.ui_restrictions = ui_restrictions;
-        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
-        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
-        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
-        spec.network_policy = Some(Box::new(
-            Self::build_process_security_environment_network_policy(&request.policy),
-        ));
-        let spec = spec.pack(&mut builder);
-        finish_process_security_environment_buffer(&mut builder, spec);
-        builder.finished_data().to_vec()
-    }
-
-    /// Build a FlatBuffer `SandboxSpec` from the container policy in the request.
-    ///
-    /// Maps `ContainerPolicy` and `UiPolicy` fields to the BaseContainer schema:
-    /// - `app_container` is always `true` (AppContainer is the base sandbox primitive)
-    /// - `least_privilege` from `policy.least_privilege_mode`
-    /// - `capabilities` from `policy.capabilities` (comma-joined)
-    /// - `fs_read_write` from `policy.readwrite_paths`
-    /// - `fs_read_only` from `policy.readonly_paths`
-    /// - `fs_deny` from `policy.denied_paths`
-    /// - `disallow_win32k_system_calls` from `ui.disable`
-    /// - `ui_restrictions` bitmask from `ui.to_ui_restrictions_bitmask()`
-    /// - `network_policy.egress.default_action` from `policy.default_network_policy` without proxy
-    /// - `network_policy.proxy.url` instead of `egress` when proxy config is enabled
-    fn build_sandbox_spec(request: &ExecutionRequest) -> Vec<u8> {
-        let mut builder = flatbuffers::FlatBufferBuilder::with_capacity(1024);
-
-        let caps = Self::effective_capabilities(request);
-        let ui_restrictions = crate::job_object::to_job_object_uilimit_mask(
-            &wxc_common::ui_policy::resolve_ui_restrictions(
-                &request.policy.ui,
-                &request.policy.base_process_ui,
-            ),
-        ) as u64;
-
-        let mut spec = SandboxSpecT::default();
-        spec.version = SANDBOX_SPEC_VERSION.to_string();
-        spec.app_container = true;
-        spec.disallow_win32k_system_calls = request.policy.ui.disable;
-        spec.ui_restrictions = ui_restrictions;
-        spec.least_privilege = request.policy.least_privilege_mode;
-        spec.capabilities = (!caps.is_empty()).then(|| caps.join(","));
-        spec.fs_read_write = Self::non_empty_paths(&request.policy.readwrite_paths);
-        spec.fs_read_only = Self::non_empty_paths(&request.policy.readonly_paths);
-        spec.network_policy = Some(Box::new(Self::build_network_policy(&request.policy)));
-        spec.integrity = IntegrityLevel::system_default;
-        spec.fs_deny = Self::non_empty_paths(&request.policy.denied_paths);
-        let spec = spec.pack(&mut builder);
-        finish_sandbox_spec_buffer(&mut builder, spec);
-        builder.finished_data().to_vec()
-    }
-
-    fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
-        (!paths.is_empty()).then(|| paths.to_vec())
-    }
-
-    fn needs_internet_client(request: &ExecutionRequest) -> bool {
-        let use_caps_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        use_caps_for_network
-            && request.policy.allows_network_egress()
-            && !request
-                .policy
-                .capabilities
-                .iter()
-                .any(|capability| capability == "internetClient")
-    }
-
-    fn effective_capabilities(request: &ExecutionRequest) -> Vec<String> {
-        // Match legacy AppContainer behaviour: when network enforcement uses
-        // capabilities and the default policy is Allow, ensure internetClient
-        // is present so the sandboxed process has network access.
-        let mut caps: Vec<_> = request
-            .policy
-            .capabilities
-            .iter()
-            .filter(|capability| !capability.is_empty())
-            .cloned()
-            .collect();
-        if Self::needs_internet_client(request) {
-            caps.push("internetClient".to_string());
-        }
-        if request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == NetworkAction::Allow)
-            && !caps
-                .iter()
-                .any(|capability| capability == "privateNetworkClientServer")
-        {
-            caps.push("privateNetworkClientServer".to_string());
-        }
-        if request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.host_loopback == NetworkAction::Allow)
-            && !caps
-                .iter()
-                .any(|capability| capability.eq_ignore_ascii_case(LOOPBACK_NETWORK_CAPABILITY))
-        {
-            caps.push(LOOPBACK_NETWORK_CAPABILITY.to_string());
-        }
-        caps
     }
 
     /// Log the contents of a built sandbox spec FlatBuffer for debug verification.
@@ -1563,7 +1161,7 @@ impl BaseContainerRunner {
         let use_process_security_environment = self.uses_process_security_environment(&request);
         let use_guarded_capture = capture_denials.is_some() && !use_process_security_environment;
         let spec_bytes = if !use_process_security_environment {
-            let bytes = Self::build_sandbox_spec(&request);
+            let bytes = build_sbox_spec(&request);
             Self::log_sandbox_spec(&bytes, logger);
             Some(bytes)
         } else {
@@ -1573,8 +1171,8 @@ impl BaseContainerRunner {
             let _ = writeln!(logger, "{EMOJI_SECTION} SECTION: captureDenials");
         }
 
-        let process_security_environment_spec = use_process_security_environment
-            .then(|| Self::build_process_security_environment_spec(&request));
+        let process_security_environment_spec =
+            use_process_security_environment.then(|| build_psec_spec(&request));
         if let Some(psec_spec) = process_security_environment_spec.as_ref() {
             let _ = writeln!(
                 logger,
@@ -1868,12 +1466,19 @@ impl BaseContainerRunner {
         // The one-shot API supplies its own default when this is NULL, but the
         // attribute-based CreateProcessW capture path must receive an explicit
         // clean block or it would inherit all wxc-exec process variables.
-        let env_block: Option<Vec<u16>> = if request.env.is_empty() {
+        let env_block: Option<Vec<u16>> = if let Some(env) = build_runtime_proxy_env_block(&request)
+            .map_err(|error| {
+                ScriptResponse::error(&format!(
+                    "failed to create the runtime proxy environment: {error}"
+                ))
+            })? {
+            Some(env)
+        } else if request.env.is_empty() {
             if use_process_security_environment {
                 let entries =
                     crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
                         ScriptResponse::error(&format!(
-                            "captureDenials failed to create a clean child environment: {error}"
+                            "failed to create a clean child environment: {error}"
                         ))
                     })?;
                 Some(crate::appcontainer_runner::encode_env_block(&entries))
@@ -2477,6 +2082,12 @@ impl SandboxBackend for BaseContainerRunner {
                 wxc_common::error::HOST_LISTS_NOT_SUPPORTED_MSG,
             ));
         }
+        if has_conflicting_proxy_identity(&request.policy) {
+            return Err(ScriptResponse::error(
+                "processContainer.network.allowedProxyPeer cannot be combined with \
+                 network.ingress.hostLoopback='allow'",
+            ));
+        }
         // Dry-run validates the schema and policy shape without selecting or
         // probing a host capture provider.
         if request.dry_run {
@@ -2514,15 +2125,6 @@ impl SandboxBackend for BaseContainerRunner {
             return Err(ScriptResponse::error(
                 "the process-security-environment path cannot be combined with \
                  processContainer.leastPrivilege because it does not support LPAC tokens",
-            ));
-        }
-        if use_process_security_environment
-            && request.policy.network_proxy.is_enabled()
-            && request.policy.network_egress.is_none()
-        {
-            return Err(ScriptResponse::error(
-                "the process-security-environment path cannot be combined with network.proxy \
-                 until it can supply the required proxy AppContainer peer identity",
             ));
         }
         if use_process_security_environment && !capture_denials {
@@ -3375,6 +2977,7 @@ fn derive_sid_string_from_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base_container_configuration::{LOOPBACK_NETWORK_CAPABILITY, LOOPBACK_NETWORK_PEER};
     use crate::job_object::to_job_object_uilimit_mask;
     use learning_mode_core::{
         AccessType, AnalysisResult, AnalyzeError, DenialsDocument, DeniedResource, ResourceType,
@@ -3382,7 +2985,10 @@ mod tests {
     use process_security_environment_spec::process_security_environment_layout as psec_layout;
     use sandbox_spec::base_container_layout;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use wxc_common::models::{ClipboardPolicy, ProxyConfig, UiPolicy};
+    use wxc_common::models::{
+        ClipboardPolicy, NetworkAction, NetworkCidr, NetworkPeer, NetworkPolicy, NetworkPort,
+        NetworkProtocol, NetworkRule, ProxyConfig, UiPolicy,
+    };
     use wxc_common::ui_policy::EffectiveUiRestrictions;
 
     #[test]
@@ -4003,7 +3609,7 @@ mod tests {
     }
 
     #[test]
-    fn sbox_proxy_compatibility_matches_the_advertised_contract() {
+    fn legacy_sbox_proxy_compatibility_remains_identityless() {
         let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
@@ -4025,7 +3631,7 @@ mod tests {
         assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request, None
         ));
-        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY)
         ));
@@ -4055,6 +3661,52 @@ mod tests {
             &request,
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX | SANDBOX_CAP_NETWORK_PROXY)
         ));
+    }
+
+    #[test]
+    fn runtime_proxy_can_use_sbox_cooperatively_without_sbox_proxy_policy() {
+        let mut request = ExecutionRequest::default();
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
+        ));
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        let network = spec.network_policy().expect("network policy");
+        assert!(network.proxy().is_none());
+        assert!(network.allowed_appcontainer_peer().is_none());
+
+        let environment = build_runtime_proxy_env_block(&request)
+            .expect("environment")
+            .expect("runtime proxy environment");
+        let rendered = String::from_utf16_lossy(&environment);
+        assert!(rendered.contains("HTTP_PROXY=http://127.0.0.1:8080"));
+        assert!(rendered.contains("HTTPS_PROXY=http://127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn sbox_omits_host_loopback_and_proxy_identity() {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+
+        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
+        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
+        assert_eq!(spec.capabilities(), Some("privateNetworkClientServer"));
+        assert!(spec
+            .network_policy()
+            .and_then(|policy| policy.allowed_appcontainer_peer())
+            .is_none());
     }
 
     #[test]
@@ -4377,6 +4029,56 @@ mod tests {
     }
 
     #[test]
+    fn runtime_proxy_prefers_psec_but_can_fall_back_cooperatively() {
+        let mut request = ExecutionRequest::default();
+        request.policy.runtime_network_proxy_specified = true;
+        request.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
+            builtin_test_server: false,
+        };
+
+        assert!(BaseContainerRunner::should_use_process_security_environment(&request, true, true));
+        assert!(
+            !BaseContainerRunner::should_use_process_security_environment(&request, false, true)
+        );
+        assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &request,
+            Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
+        ));
+    }
+
+    #[test]
+    fn directional_filters_and_proxy_identity_require_psec() {
+        let mut filtered = request_with_rich_network_rules();
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &filtered, None
+        ));
+
+        filtered.policy.network_egress = None;
+        filtered.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+        assert!(!BaseContainerRunner::legacy_sbox_compatible_with_request(
+            &filtered, None
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_conflicting_proxy_identity_paths() {
+        let runner = BaseContainerRunner::with_capture_factory(fake_capture_factory());
+        let mut request = ExecutionRequest::default();
+        request.dry_run = true;
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            host_loopback: NetworkAction::Allow,
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("proxy peer identity and host loopback are mutually exclusive");
+        assert!(error.error_message.contains("cannot be combined"));
+    }
+
+    #[test]
     fn proxy_uses_legacy_contract() {
         let mut request = ExecutionRequest::default();
         request.policy.network_proxy = ProxyConfig {
@@ -4503,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sandbox_spec_preserves_rich_network_rules() {
+    fn build_sandbox_spec_omits_directional_network_rules() {
         let request = request_with_rich_network_rules();
         let bytes = BaseContainerRunner::build_sandbox_spec(&request);
         let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
@@ -4512,31 +4214,16 @@ mod tests {
             .and_then(|policy| policy.egress())
             .expect("egress policy");
 
-        let allow = egress.allow().expect("allow rules");
-        assert_eq!(allow.len(), 2, "ICMP must expand by address family");
         assert_eq!(
-            allow.get(0).ports().unwrap().get(0).protocol(),
-            base_container_layout::IpProtocol::icmpv4
+            egress.default_action(),
+            base_container_layout::FilterAction::deny
         );
-        assert_eq!(
-            allow
-                .get(1)
-                .destinations()
-                .unwrap()
-                .get(0)
-                .subnet()
-                .unwrap()
-                .address(),
-            Some("2001:db8::")
-        );
-
-        let denied_port = egress.deny().unwrap().get(0).ports().unwrap().get(0);
-        assert_eq!(
-            denied_port.protocol(),
-            base_container_layout::IpProtocol::tcp
-        );
-        assert_eq!(denied_port.port(), 8000);
-        assert_eq!(denied_port.end_port(), 8080);
+        assert!(egress.allow().is_none());
+        assert!(egress.deny().is_none());
+        assert!(spec
+            .network_policy()
+            .and_then(|policy| policy.allowed_appcontainer_peer())
+            .is_none());
     }
 
     #[test]

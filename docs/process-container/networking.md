@@ -244,23 +244,29 @@ privileged context. Schema 0.8 selects the strongest
 usable process-creation contract through runtime probing.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
-probe succeed. Fall back temporarily to the legacy SBOX contract through CPIS when PSEC is unavailable, then to
-AppContainer when neither BaseContainer contract is usable. The MXC probe must account for the process network
-containment required by the request, just as it accounts for filesystem containment support.
+probe succeed. PSEC is the only ProcessContainer path that receives schema 0.8 egress filters, proxy peer identity, or
+host-loopback configuration because it owns the corresponding policy lifetime through workload completion. Fall back
+temporarily to the legacy SBOX contract through CPIS only when the request needs none of those PSEC-only features, then
+to AppContainer when neither compatible BaseContainer contract is usable.
 
-**Downlevel behavior:** When neither PSEC nor CPIS is available, MXC uses the AppContainer fallback.
+SBOX retains its legacy network contract. It receives only the effective egress default and legacy `network.proxy`
+configuration; schema 0.8 allow/deny filters and `allowedProxyPeer` are never serialized into its FlatBuffer. A schema
+0.8 runtime proxy on an SBOX-only host is exposed cooperatively through proxy environment variables instead of the SBOX
+proxy field.
+
+**Downlevel behavior:** When PSEC is unavailable, compatible requests use CPIS or the AppContainer fallback.
 `egress.default: "allow"` grants `internetClient`; `ingress.default: "allow"` grants the bidirectional
 `privateNetworkClientServer` capability. This is the documented ProcessContainer mapping on every tier, not a
 downlevel weakening. Proxy-configured requests receive cooperative routing through environment variables; this
 compatibility behavior is not model 2 enforcement.
 
 Outside that documented proxy compatibility path, the AppContainer fallback is selected only when its capability
-mapping preserves the request. Explicit egress rules, and private-network egress restrictions that require WFP, fail
-with a typed unsupported-policy error when no BaseContainer contract can enforce them.
+mapping preserves the request. Explicit egress rules, proxy peer identity, and host-loopback allow fail with a typed
+unsupported-policy error when PSEC cannot enforce them.
 
 ## 3. WFP enforcement
 
-The BaseContainer contracts apply outbound WFP filters in the OS's elevated context and own their lifetime.
+PSEC applies outbound WFP filters in the OS's elevated context and owns their lifetime.
 Downlevel WFP installation, elevation, and cleanup are future work and are not part of the initial schema 0.8
 downlevel support.
 

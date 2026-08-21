@@ -38,12 +38,11 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::network_policy::add_default_network_capabilities;
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, SandboxOutputMetadata, ScriptResponse,
-};
+use wxc_common::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -711,27 +710,7 @@ impl AppContainerScriptRunner {
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
         capabilities_to_add.push("AgenticAppContainer".to_string());
 
-        let use_capabilities_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_capabilities_for_network
-            && request.policy.allows_network_egress()
-            && !capabilities_to_add.iter().any(|c| c == "internetClient")
-        {
-            capabilities_to_add.push("internetClient".to_string());
-        }
-        if request
-            .policy
-            .network_ingress
-            .as_ref()
-            .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
-            && !capabilities_to_add
-                .iter()
-                .any(|c| c == "privateNetworkClientServer")
-        {
-            capabilities_to_add.push("privateNetworkClientServer".to_string());
-        }
+        add_default_network_capabilities(&request.policy, &mut capabilities_to_add);
 
         // --- Derive SIDs for each capability ---
         // `owned_capability_sids` owns the derived SIDs (freed on drop); it
