@@ -38,11 +38,13 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::network_policy_helpers::{allows_network_egress, denies_network_egress_by_default};
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, SandboxOutputMetadata, ScriptResponse,
+    ExecutionRequest, FailurePhase, NetworkAction, NetworkEnforcementMode, SandboxOutputMetadata,
+    ScriptResponse,
 };
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
@@ -716,7 +718,7 @@ impl AppContainerScriptRunner {
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
         );
         if use_capabilities_for_network
-            && request.policy.allows_network_egress()
+            && allows_network_egress(&request.policy)
             && !capabilities_to_add.iter().any(|c| c == "internetClient")
         {
             capabilities_to_add.push("internetClient".to_string());
@@ -1548,6 +1550,19 @@ impl SandboxBackend for AppContainerScriptRunner {
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.default == NetworkAction::Allow)
+            && denies_network_egress_by_default(&request.policy)
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.default='allow' cannot be combined with denied network egress \
+                 on the AppContainer fallback because privateNetworkClientServer grants \
+                 bidirectional private-network access",
+            ));
+        }
         if request.policy.allowed_proxy_peer.is_some() {
             return Err(ScriptResponse::error(
                 "processContainer.network.allowedProxyPeer requires a BaseContainer path",
@@ -2215,7 +2230,7 @@ mod tests {
     use learning_mode_core::AnalysisResult;
     use std::sync::Arc;
     use windows::Win32::Foundation::{ERROR_ACCESS_DISABLED_BY_POLICY, ERROR_CALL_NOT_IMPLEMENTED};
-    use wxc_common::models::{ExecutionRequest, FailurePhase};
+    use wxc_common::models::{ExecutionRequest, FailurePhase, NetworkAction};
     use wxc_common::sandbox_process::SandboxBackend;
 
     /// A fake [`GuardedCaptureFactory`] used only to exercise `validate()`'s
@@ -2495,6 +2510,42 @@ mod tests {
     fn validate_runner_accepts_empty_policy() {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
+        assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_ingress_allow_with_default_deny_egress() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not weaken default-deny private-network egress");
+        assert!(error
+            .error_message
+            .contains("privateNetworkClientServer grants bidirectional"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_ingress_and_egress_allow_defaults() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+
         assert!(runner.validate(&request).is_ok());
     }
 

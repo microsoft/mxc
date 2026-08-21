@@ -32,6 +32,8 @@ pub mod launch_diagnostics;
 #[cfg(target_os = "windows")]
 pub mod network_manager;
 #[cfg(target_os = "windows")]
+mod network_policy_helpers;
+#[cfg(target_os = "windows")]
 pub mod probe;
 #[cfg(target_os = "windows")]
 pub mod process_mitigation;

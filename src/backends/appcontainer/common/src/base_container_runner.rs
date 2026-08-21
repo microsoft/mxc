@@ -52,6 +52,7 @@ use crate::launch_diagnostics::{
     diagnose_create_process_failure, diagnose_environment_not_supported, diagnose_process_exit,
     is_environment_not_supported,
 };
+use crate::network_policy_helpers::allows_network_egress;
 use crate::proxy_coordinator::ProxyCoordinator;
 use crate::sandbox_tracking::{self, TrackingEntry};
 use process_security_environment_spec::process_security_environment_layout::{
@@ -1407,7 +1408,7 @@ impl BaseContainerRunner {
             NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
         );
         use_caps_for_network
-            && request.policy.allows_network_egress()
+            && allows_network_egress(&request.policy)
             && !request
                 .policy
                 .capabilities
