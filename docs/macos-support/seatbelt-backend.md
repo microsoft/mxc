@@ -202,7 +202,8 @@ rules does not matter: as noted above, an unfiltered allow cannot override it.
 
 #### Path resolution
 
-Policy paths are rewritten before they are emitted into the profile:
+Policy paths are resolved on the macOS host before they are emitted into the
+profile:
 
 1. A leading `~` / `~/…` is expanded against `$HOME`.
 2. Redundant lexical segments are collapsed: repeated separators (`//tmp`),
@@ -210,17 +211,18 @@ Policy paths are rewritten before they are emitted into the profile:
    as a config error rather than resolved — macOS resolves `..` physically,
    after following symlinks (`/tmp/..` is `/private`, not `/`), so resolving it
    lexically could silently point the rule somewhere else.
-3. A leading symlinked root path segment is rewritten to its real target:
-   `/etc`, `/tmp`, `/var` → `/private/…`, and `/home` →
-   `/System/Volumes/Data/home`.
+3. Every existing path prefix is canonicalized, following both root and
+   interior symlinks. If the final object does not exist yet, its normalized
+   absent tail is appended to the deepest existing canonical ancestor.
+4. Dangling symlinks, inaccessible prefixes, non-UTF-8 resolved paths, and
+   other paths that cannot be represented safely fail before the sandbox
+   launches.
 
 A `..` segment is rejected on this backend only. The shared config parser
 accepts it, so a cross-backend policy using `..` will fail on macOS and run
-elsewhere. That is intentional: the alternative is the failure mode this whole
-section exists to remove — the rule would be emitted, match nothing, and for
-`deniedPaths` fail open. Resolving `..` correctly needs `std::fs::canonicalize`
-against the live filesystem, which the profile builder deliberately avoids so it
-stays pure string generation, unit-testable on any host.
+elsewhere. That is intentional: a `..` in a not-yet-existing tail cannot be
+resolved physically, and resolving it lexically could select a different
+object than the kernel would after future symlinks are created.
 
 After resolution, the most-restrictive-wins precedence (`deny` > `readonly` >
 `readwrite`) is re-applied to the **resolved** paths. The shared config parser
@@ -230,20 +232,39 @@ survive it and collide only here. Seatbelt is last-match-wins and the read-write
 rule is emitted second, so without this the weaker grant would win and silently
 make a read-only path writable.
 
-Steps 2 and 3 are mandatory, not cosmetic. Those root entries are symlinks on macOS,
-and the kernel fully resolves a path before matching it against a profile
-filter — so a rule written against the unresolved path never matches and is
-silently dead. This applies to the automatic `$TMPDIR` grant too, which
-resolves to `/var/folders/…`. `/Users` needs no rewriting: it is a *firmlink*,
-not a symlink, so it is already the canonical path.
+Host resolution is mandatory, not cosmetic. The kernel fully resolves a path
+before matching it against a profile filter, so a rule written against an
+unresolved root or interior symlink never matches and is silently dead. For a
+`deniedPaths` entry, that would fail open and could expose a control socket
+beneath a broader read-write path. Resolution also covers the automatic
+`$TMPDIR` grant, whose ordinary spelling begins with `/var/folders/…`.
+For an allow entry, access is granted to the resolved target, so a
+`readwritePaths` or `readonlyPaths` entry that traverses a symlink grants access
+to what that symlink points at rather than to the unresolved spelling.
+
+`seatbelt.profileOverride` remains literal: when it is supplied, MXC does not
+resolve or interpret the ordinary filesystem policy because the override
+replaces the generated profile.
+
+Resolution is a point-in-time snapshot taken immediately before profile
+generation. Callers must not concurrently replace policy-path prefixes while a
+sandbox is starting, and absent-tail components must not later be introduced as
+symlinks. Seatbelt has no descriptor-relative profile primitive that can bind a
+rule permanently to an inode across such host-side namespace mutations.
+
+Unlike some mount-based backends, Seatbelt also fails the launch when any
+read-only or read-write policy path cannot be resolved safely. A dead allow
+would not grant access, but treating it as an error prevents a configuration
+from appearing to honor access that the generated profile cannot represent.
 
 #### UNIX-domain sockets
 
-Seatbelt matches AF_UNIX sockets by **path** — `bind()` under `network-bind`
-and `connect()` under `network-outbound` — while the `(local ip)` / `(remote
-ip)` filters used by the network policy cover IP sockets only. MXC therefore
-governs AF_UNIX sockets with the **filesystem** policy, not the network policy:
-both halves are permitted anywhere the sandbox may already create files.
+Seatbelt matches pathname AF_UNIX sockets by **path** — `bind()` under
+`network-bind` and `connect()` under `network-outbound` — while the `(local
+ip)` / `(remote ip)` filters used by the network policy cover IP sockets only.
+MXC therefore governs pathname AF_UNIX sockets with the **filesystem** policy,
+not the network policy: both halves are permitted anywhere the sandbox may
+already create files.
 
 This is deliberate. A socket is a filesystem object reachable only by processes
 that can traverse to its path, and Node toolchains (tsx, vite, esbuild, jest
@@ -270,6 +291,16 @@ Two asymmetries are intentional:
   sandbox could `connect()` to a pre-existing socket inside a denied subtree —
   a Docker, `ssh-agent` or `gpg-agent` socket is a control plane, so that would
   be an escape.
+
+Qualified forms on macOS are:
+
+- pathname `SOCK_STREAM` listeners and clients;
+- pathname `SOCK_DGRAM` endpoints;
+- unnamed `socketpair(AF_UNIX, SOCK_STREAM)`, which has no filesystem name and
+  requires no path grant.
+
+macOS does not implement Linux's abstract AF_UNIX namespace. Other socket
+types are not part of the current qualification claim.
 
 A baseline of read-only system paths (`/usr/lib`, `/usr/libexec`,
 `/usr/share`, `/System`, `/Library`, `/private/var/db/timezone`,

@@ -18,10 +18,17 @@
 #![cfg(target_os = "macos")]
 
 use std::fs;
+use std::io::{Read, Write};
+use std::os::unix::fs::symlink;
+use std::os::unix::net::{UnixDatagram, UnixListener};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 use serde_json::json;
-use wxc_e2e_tests::{has_platform_exec, run_platform_config_value};
+use wxc_e2e_tests::{has_platform_exec, run_platform_config_value, CommandResult};
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
 
@@ -44,6 +51,87 @@ fn unique_tempdir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("mxc-char-{tag}-{nanos}"));
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
+}
+
+fn unique_socket_dir(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = PathBuf::from("/private/tmp")
+        .join(format!("mxc-afunix-{}-{tag}-{nanos}", std::process::id()));
+    fs::create_dir_all(&dir).expect("create AF_UNIX temp dir");
+    dir
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn run_python_case(label: &str, script: &str, filesystem: serde_json::Value) -> CommandResult {
+    run_python_case_with_network(label, script, filesystem, "block")
+}
+
+fn run_python_case_with_network(
+    label: &str,
+    script: &str,
+    filesystem: serde_json::Value,
+    default_network_policy: &str,
+) -> CommandResult {
+    let mut cfg = config(label, &format!("python3 -c {}", shell_quote(script)));
+    cfg["process"]["timeout"] = json!(30000);
+    cfg["filesystem"] = filesystem;
+    cfg["network"] = json!({ "defaultPolicy": default_network_policy });
+    run_platform_config_value(label, &cfg, &[], None)
+}
+
+struct HostUnixListener {
+    stop: Arc<AtomicBool>,
+    thread: thread::JoinHandle<Option<Vec<u8>>>,
+}
+
+impl HostUnixListener {
+    fn start(path: &std::path::Path) -> Self {
+        let listener = UnixListener::bind(path).expect("bind host AF_UNIX listener");
+        listener
+            .set_nonblocking(true)
+            .expect("set host listener nonblocking");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_nonblocking(false)
+                        .expect("clear accepted socket nonblocking");
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(10)))
+                        .expect("set accepted socket read timeout");
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(10)))
+                        .expect("set accepted socket write timeout");
+                    let mut payload = vec![0; 32];
+                    let read = stream.read(&mut payload).expect("read host listener");
+                    payload.truncate(read);
+                    stream.write_all(b"pong").expect("write host listener");
+                    return Some(payload);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if thread_stop.load(Ordering::Relaxed) {
+                        return None;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("accept host AF_UNIX connection: {error}"),
+            }
+        });
+        Self { stop, thread }
+    }
+
+    fn finish(self) -> thread::Result<Option<Vec<u8>>> {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread.join()
+    }
 }
 
 #[test]
@@ -332,4 +420,341 @@ fn seatbelt_honors_uncanonicalized_var_readwrite_path() {
         dir.display(),
         result.combined_output()
     );
+}
+
+#[test]
+fn seatbelt_supports_pathname_unix_stream_and_datagram_sockets() {
+    if !has_platform_exec() {
+        return;
+    }
+    let dir = unique_socket_dir("roundtrip");
+    let stream_path = dir.join("stream.sock");
+    let server_path = dir.join("server.dgram");
+    let client_path = dir.join("client.dgram");
+    let script = format!(
+        r#"
+import socket
+stream_path = {stream_path:?}
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(stream_path)
+server.listen(1)
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(stream_path)
+connection, _ = server.accept()
+client.sendall(b"ping")
+assert connection.recv(32) == b"ping"
+connection.sendall(b"pong")
+assert client.recv(32) == b"pong"
+
+server_path = {server_path:?}
+client_path = {client_path:?}
+server_dgram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+client_dgram = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+server_dgram.bind(server_path)
+client_dgram.bind(client_path)
+client_dgram.sendto(b"ping", server_path)
+payload, peer = server_dgram.recvfrom(32)
+assert payload == b"ping"
+server_dgram.sendto(b"pong", peer)
+assert client_dgram.recv(32) == b"pong"
+print("CHAR_AF_UNIX_ROUNDTRIP")
+"#,
+        stream_path = stream_path.to_string_lossy(),
+        server_path = server_path.to_string_lossy(),
+        client_path = client_path.to_string_lossy(),
+    );
+    let result = run_python_case(
+        "seatbelt AF_UNIX roundtrip",
+        &script,
+        json!({ "readwritePaths": [dir.to_string_lossy()] }),
+    );
+    fs::remove_dir_all(&dir).expect("remove AF_UNIX roundtrip dir");
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "AF_UNIX roundtrip failed:\n{}",
+        result.combined_output()
+    );
+    assert!(result.combined_output().contains("CHAR_AF_UNIX_ROUNDTRIP"));
+}
+
+#[test]
+fn seatbelt_supports_unnamed_unix_socketpairs_without_path_grants() {
+    if !has_platform_exec() {
+        return;
+    }
+    let result = run_python_case(
+        "seatbelt AF_UNIX socketpair",
+        r#"
+import socket
+left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+left.sendall(b"ping")
+assert right.recv(32) == b"ping"
+right.sendall(b"pong")
+assert left.recv(32) == b"pong"
+print("CHAR_AF_UNIX_SOCKETPAIR")
+"#,
+        json!({}),
+    );
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "AF_UNIX socketpair failed:\n{}",
+        result.combined_output()
+    );
+    assert!(result.combined_output().contains("CHAR_AF_UNIX_SOCKETPAIR"));
+}
+
+#[test]
+fn seatbelt_blocks_host_unix_socket_through_readonly_and_denied_paths() {
+    if !has_platform_exec() {
+        return;
+    }
+    for (label, default_network_policy) in [
+        ("readonly-block", "block"),
+        ("readonly-allow", "allow"),
+        ("denied-block", "block"),
+        ("denied-allow", "allow"),
+    ] {
+        let root = unique_socket_dir(label);
+        let protected = root.join("protected");
+        fs::create_dir(&protected).expect("create protected socket dir");
+        let socket_path = protected.join("host.sock");
+        let listener = HostUnixListener::start(&socket_path);
+        let filesystem = if label.starts_with("readonly") {
+            json!({
+                "readwritePaths": [root.to_string_lossy()],
+                "readonlyPaths": [protected.to_string_lossy()]
+            })
+        } else {
+            json!({
+                "readwritePaths": [root.to_string_lossy()],
+                "deniedPaths": [protected.to_string_lossy()]
+            })
+        };
+        let script = format!(
+            r#"
+import errno
+import socket
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    client.connect({socket_path:?})
+except OSError as error:
+    assert error.errno in (errno.EPERM, errno.EACCES), error
+    print("CHAR_AF_UNIX_BLOCKED")
+else:
+    raise SystemExit("unexpected AF_UNIX connection")
+"#,
+            socket_path = socket_path.to_string_lossy(),
+        );
+        let result = run_python_case_with_network(
+            &format!("seatbelt AF_UNIX {label}"),
+            &script,
+            filesystem,
+            default_network_policy,
+        );
+        let received = listener.finish();
+        fs::remove_dir_all(&root).expect("remove protected socket dir");
+        let received = received.expect("join protected host listener");
+
+        assert_eq!(
+            result.code,
+            Some(0),
+            "{label} AF_UNIX policy failed:\n{}",
+            result.combined_output()
+        );
+        assert!(result.combined_output().contains("CHAR_AF_UNIX_BLOCKED"));
+        assert!(received.is_none(), "{label} socket received sandbox data");
+    }
+}
+
+#[test]
+fn seatbelt_connects_to_host_unix_socket_under_readwrite_path() {
+    if !has_platform_exec() {
+        return;
+    }
+    let root = unique_socket_dir("host-readwrite");
+    let socket_path = root.join("host.sock");
+    let listener = HostUnixListener::start(&socket_path);
+    let script = format!(
+        r#"
+import socket
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect({socket_path:?})
+client.sendall(b"ping")
+assert client.recv(32) == b"pong"
+print("CHAR_AF_UNIX_HOST_CONNECTED")
+"#,
+        socket_path = socket_path.to_string_lossy(),
+    );
+    let result = run_python_case(
+        "seatbelt AF_UNIX host readwrite",
+        &script,
+        json!({ "readwritePaths": [root.to_string_lossy()] }),
+    );
+    let received = listener.finish();
+    fs::remove_dir_all(&root).expect("remove host socket dir");
+    let received = received.expect("join readwrite host listener");
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "host AF_UNIX connection failed:\n{}",
+        result.combined_output()
+    );
+    assert!(result
+        .combined_output()
+        .contains("CHAR_AF_UNIX_HOST_CONNECTED"));
+    assert_eq!(received, Some(b"ping".to_vec()));
+}
+
+#[test]
+fn seatbelt_denied_unix_socket_survives_an_interior_symlink() {
+    if !has_platform_exec() {
+        return;
+    }
+    let root = unique_socket_dir("symlink-deny");
+    let real = root.join("real");
+    let protected = real.join("protected");
+    let alias = root.join("alias");
+    fs::create_dir_all(&protected).expect("create real protected socket dir");
+    symlink(&real, &alias).expect("create interior symlink");
+    let socket_path = protected.join("host.sock");
+    let alias_socket_path = alias.join("protected/host.sock");
+    let listener = HostUnixListener::start(&socket_path);
+    let script = format!(
+        r#"
+import errno
+import socket
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    client.connect({alias_socket_path:?})
+except OSError as error:
+    assert error.errno in (errno.EPERM, errno.EACCES), error
+    print("CHAR_AF_UNIX_SYMLINK_BLOCKED")
+else:
+    raise SystemExit("interior symlink bypassed deniedPaths")
+"#,
+        alias_socket_path = alias_socket_path.to_string_lossy(),
+    );
+    let result = run_python_case(
+        "seatbelt AF_UNIX symlink deny",
+        &script,
+        json!({
+            "readwritePaths": [real.to_string_lossy()],
+            "deniedPaths": [alias.join("protected").to_string_lossy()]
+        }),
+    );
+    let received = listener.finish();
+    fs::remove_dir_all(&root).expect("remove symlink socket dir");
+    let received = received.expect("join symlink host listener");
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "symlinked AF_UNIX deny failed:\n{}",
+        result.combined_output()
+    );
+    assert!(result
+        .combined_output()
+        .contains("CHAR_AF_UNIX_SYMLINK_BLOCKED"));
+    assert!(received.is_none(), "denied socket received sandbox data");
+}
+
+#[test]
+fn seatbelt_denied_path_blocks_unix_datagram_send() {
+    if !has_platform_exec() {
+        return;
+    }
+    let root = unique_socket_dir("denied-datagram");
+    let protected = root.join("protected");
+    fs::create_dir(&protected).expect("create protected datagram dir");
+    let socket_path = protected.join("host.dgram");
+    let listener = UnixDatagram::bind(&socket_path).expect("bind host AF_UNIX datagram");
+    listener
+        .set_read_timeout(Some(Duration::from_millis(250)))
+        .expect("set datagram read timeout");
+    let script = format!(
+        r#"
+import errno
+import socket
+client = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+try:
+    client.sendto(b"ping", {socket_path:?})
+except OSError as error:
+    assert error.errno in (errno.EPERM, errno.EACCES), error
+    print("CHAR_AF_UNIX_DGRAM_BLOCKED")
+else:
+    raise SystemExit("unexpected AF_UNIX datagram send")
+"#,
+        socket_path = socket_path.to_string_lossy(),
+    );
+    let result = run_python_case_with_network(
+        "seatbelt AF_UNIX denied datagram",
+        &script,
+        json!({
+            "readwritePaths": [root.to_string_lossy()],
+            "deniedPaths": [protected.to_string_lossy()]
+        }),
+        "allow",
+    );
+    let mut payload = [0; 32];
+    let received = listener.recv(&mut payload);
+    fs::remove_dir_all(&root).expect("remove denied datagram dir");
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "denied AF_UNIX datagram failed:\n{}",
+        result.combined_output()
+    );
+    assert!(result
+        .combined_output()
+        .contains("CHAR_AF_UNIX_DGRAM_BLOCKED"));
+    assert!(
+        matches!(
+            received,
+            Err(ref error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                )
+        ),
+        "denied datagram reached host listener: {received:?}"
+    );
+}
+
+#[test]
+fn seatbelt_unix_socket_path_grant_does_not_enable_tcp_bind() {
+    if !has_platform_exec() {
+        return;
+    }
+    let dir = unique_socket_dir("tcp-control");
+    let result = run_python_case(
+        "seatbelt AF_UNIX TCP control",
+        r#"
+import errno
+import socket
+listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    listener.bind(("127.0.0.1", 0))
+except OSError as error:
+    assert error.errno in (errno.EPERM, errno.EACCES), error
+    print("CHAR_TCP_STILL_BLOCKED")
+else:
+    raise SystemExit("AF_UNIX path grant widened TCP bind")
+"#,
+        json!({ "readwritePaths": [dir.to_string_lossy()] }),
+    );
+    fs::remove_dir_all(&dir).expect("remove TCP control dir");
+
+    assert_eq!(
+        result.code,
+        Some(0),
+        "AF_UNIX grant widened TCP:\n{}",
+        result.combined_output()
+    );
+    assert!(result.combined_output().contains("CHAR_TCP_STILL_BLOCKED"));
 }

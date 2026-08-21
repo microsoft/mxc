@@ -24,7 +24,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -39,7 +39,7 @@ use wxc_common::sandbox_process::{
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
 use wxc_common::validator::{validate_common, validate_network_policy_support};
 
-use crate::profile_builder::build_profile_with_proxy;
+use crate::profile_builder::{build_profile_with_proxy, resolve_policy_path};
 
 /// Env var keys the cooperative proxy manages. When a proxy is active these
 /// are stripped from the caller-supplied environment so sandboxed code cannot
@@ -130,6 +130,13 @@ impl SandboxBackend for SeatbeltScriptRunner {
         validate_common(request)?;
         self.validate(request)?;
 
+        // Seatbelt compares path filters against the kernel-resolved path.
+        // Resolve every existing host prefix before starting any helper or
+        // sandbox process so a deny expressed through an interior symlink
+        // cannot become a dead, fail-open profile rule.
+        let profile_request =
+            request_with_resolved_policy_paths(request).map_err(error_response)?;
+
         // Start the cooperative network proxy (if configured) before building
         // the profile and launching the child: the profile's proxy-reachability
         // rule is scoped to the proxy's *resolved* address (builtinTestServer
@@ -155,7 +162,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
         }
         // Build the Seatbelt profile now that the proxy address is resolved, so
         // the reachability rule can be scoped to the proxy's exact host + port.
-        let profile = build_profile_with_proxy(request, proxy.address()).map_err(error_response)?;
+        let profile =
+            build_profile_with_proxy(&profile_request, proxy.address()).map_err(error_response)?;
 
         // Determine launch method + GUI access from the seatbelt config.
         let launch_method = request
@@ -174,6 +182,99 @@ impl SandboxBackend for SeatbeltScriptRunner {
             LaunchMethod::Open => spawn_open(&profile, request, stdio, logger, proxy),
         }
     }
+}
+
+fn request_with_resolved_policy_paths(
+    request: &ExecutionRequest,
+) -> Result<ExecutionRequest, String> {
+    if request
+        .seatbelt
+        .as_ref()
+        .and_then(|config| config.profile_override.as_ref())
+        .is_some()
+    {
+        return Ok(request.clone());
+    }
+    let mut resolved = request.clone();
+    resolved.policy.readwrite_paths =
+        resolve_policy_paths("readwritePaths", &request.policy.readwrite_paths)?;
+    resolved.policy.readonly_paths =
+        resolve_policy_paths("readonlyPaths", &request.policy.readonly_paths)?;
+    resolved.policy.denied_paths =
+        resolve_policy_paths("deniedPaths", &request.policy.denied_paths)?;
+    Ok(resolved)
+}
+
+fn resolve_policy_paths(field: &str, paths: &[String]) -> Result<Vec<String>, String> {
+    paths
+        .iter()
+        .map(|path| {
+            resolve_policy_path_on_host(path).map_err(|error| {
+                format!(
+                    "Seatbelt filesystem.{field} path {path:?} cannot be resolved safely: {error}"
+                )
+            })
+        })
+        .collect()
+}
+
+/// Resolve symlinks in every existing prefix while retaining an absent tail.
+///
+/// `canonicalize` alone cannot handle a policy path for an object that the
+/// workload is expected to create. Once the first absent component is reached,
+/// no later component can currently be a symlink, so the remaining normalized
+/// tail can be appended without weakening the resulting filter.
+fn resolve_policy_path_on_host(path: &str) -> Result<String, String> {
+    let normalized = resolve_policy_path(path)?;
+    let path = Path::new(&normalized);
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_string());
+    }
+
+    let mut resolved = PathBuf::new();
+    let mut absent_tail = false;
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) => {
+                resolved.push(component.as_os_str());
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("path contains an unresolved '..' component".to_string());
+            }
+            Component::Normal(name) => {
+                resolved.push(name);
+                if absent_tail {
+                    continue;
+                }
+                match std::fs::canonicalize(&resolved) {
+                    Ok(canonical) => resolved = canonical,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        match std::fs::symlink_metadata(&resolved) {
+                            Ok(metadata) if metadata.file_type().is_symlink() => {
+                                return Err(format!(
+                                    "path traverses dangling symlink {resolved:?}"
+                                ));
+                            }
+                            Ok(_) => return Err(error.to_string()),
+                            Err(metadata_error)
+                                if metadata_error.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                absent_tail = true;
+                            }
+                            Err(metadata_error) => return Err(metadata_error.to_string()),
+                        }
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+        }
+    }
+
+    resolved
+        .to_str()
+        .map(str::to_string)
+        .ok_or_else(|| "resolved path is not valid UTF-8".to_string())
 }
 
 /// Exec launch path: fork → sandbox_init → exec `/bin/sh -c <script>`. With
@@ -822,6 +923,7 @@ fn cleanup_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
     use wxc_common::models::{ExecutionRequest, SeatbeltConfig};
 
     #[allow(clippy::field_reassign_with_default)]
@@ -830,6 +932,101 @@ mod tests {
         request.experimental_enabled = true;
         request.seatbelt = Some(SeatbeltConfig::default());
         request
+    }
+
+    fn unique_tempdir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("mxc-seatbelt-{tag}-{nanos}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn resolves_interior_symlinks_and_preserves_absent_tail() {
+        let root = unique_tempdir("resolve-symlink");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+
+        let resolved =
+            resolve_policy_path_on_host(&alias.join("future/socket").to_string_lossy()).unwrap();
+        assert_eq!(
+            Path::new(&resolved),
+            fs::canonicalize(&real).unwrap().join("future/socket")
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_dangling_symlink_policy_path() {
+        let root = unique_tempdir("dangling-symlink");
+        let alias = root.join("alias");
+        symlink(root.join("missing"), &alias).unwrap();
+
+        let error = resolve_policy_path_on_host(&alias.to_string_lossy()).unwrap_err();
+        assert!(error.contains("dangling symlink"), "{error}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn request_resolution_identifies_unresolvable_policy_field() {
+        let root = unique_tempdir("dangling-readwrite");
+        let alias = root.join("alias");
+        symlink(root.join("missing"), &alias).unwrap();
+
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec![alias.to_string_lossy().into_owned()];
+        let error = request_with_resolved_policy_paths(&request).unwrap_err();
+
+        assert!(error.contains("filesystem.readwritePaths"), "{error}");
+        assert!(error.contains(&format!("{alias:?}")), "{error}");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn resolved_paths_reapply_most_restrictive_precedence() {
+        let root = unique_tempdir("resolved-precedence");
+        let real = root.join("real");
+        let alias = root.join("alias");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &alias).unwrap();
+        let canonical = fs::canonicalize(&real)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        let mut request = base_request();
+        request.policy.readwrite_paths = vec![alias.to_string_lossy().into_owned()];
+        request.policy.readonly_paths = vec![real.to_string_lossy().into_owned()];
+        let resolved = request_with_resolved_policy_paths(&request).unwrap();
+        let profile = build_profile_with_proxy(&resolved, None).unwrap();
+
+        assert!(profile.contains(&format!(
+            "(deny file-write* network-bind network-outbound\n    (subpath \"{canonical}\")"
+        )));
+        assert!(!profile.contains(&format!(
+            "(allow file-read* file-write* network-bind network-outbound\n    (subpath \"{canonical}\")"
+        )));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_override_does_not_interpret_policy_paths() {
+        let mut request = base_request();
+        request.policy.denied_paths = vec!["relative/path".to_string()];
+        request.seatbelt.as_mut().unwrap().profile_override =
+            Some("(version 1)\n(allow default)\n".to_string());
+
+        let resolved = request_with_resolved_policy_paths(&request).unwrap();
+        assert_eq!(resolved.policy.denied_paths, request.policy.denied_paths);
     }
 
     #[test]
