@@ -413,7 +413,7 @@ they cannot preserve either posture.
 | IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
-| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no `internetClient` capability. | |
+| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
 | Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
