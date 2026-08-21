@@ -182,10 +182,10 @@ function buildProcessBaseContainerConfig(
     policy: SandboxPolicy,
 ): ContainerConfig {
     const capabilities: string[] = [];
-    if (policy.network?.allowOutbound) {
+    if (policy.network?.allowOutbound || policy.network?.egress?.default === 'allow') {
         capabilities.push("internetClient");
     }
-    if (policy.network?.allowLocalNetwork) {
+    if (policy.network?.allowLocalNetwork || policy.network?.ingress?.default === 'allow') {
         capabilities.push("privateNetworkClientServer");
     }
 

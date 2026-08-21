@@ -81,7 +81,7 @@ const config = createConfigFromPolicy({
   version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
-    ingress: { default: 'allow', hostLoopback: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'deny' },
   },
   runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
   processContainer: {

@@ -637,6 +637,26 @@ describe('createConfigFromPolicy', () => {
       }
     });
 
+    it('should derive ProcessContainer capabilities from schema 0.8 allow defaults', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'allow' },
+            ingress: { default: 'allow', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.deepStrictEqual(config.processContainer!.capabilities, [
+          'internetClient',
+          'privateNetworkClientServer',
+        ]);
+      } finally {
+        restore();
+      }
+    });
+
     it('should emit schema 0.8 runtime proxy and ProcessContainer peer settings', () => {
       mockWindows();
       try {
@@ -644,7 +664,7 @@ describe('createConfigFromPolicy', () => {
           version: '0.8.0-alpha',
           network: {
             egress: { default: 'deny' },
-            ingress: { default: 'allow', hostLoopback: 'allow' },
+            ingress: { default: 'allow', hostLoopback: 'deny' },
           },
           runtimeConfig: {
             networkProxy: 'http://127.0.0.1:8080',
@@ -658,7 +678,7 @@ describe('createConfigFromPolicy', () => {
 
         assert.deepStrictEqual(config.network, {
           egress: { default: 'deny' },
-          ingress: { default: 'allow', hostLoopback: 'allow' },
+          ingress: { default: 'allow', hostLoopback: 'deny' },
         });
         assert.deepStrictEqual(config.runtimeConfig, {
           networkProxy: 'http://127.0.0.1:8080',
@@ -666,6 +686,9 @@ describe('createConfigFromPolicy', () => {
         assert.deepStrictEqual(config.processContainer!.network, {
           allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
         });
+        assert.deepStrictEqual(config.processContainer!.capabilities, [
+          'privateNetworkClientServer',
+        ]);
       } finally {
         restore();
       }

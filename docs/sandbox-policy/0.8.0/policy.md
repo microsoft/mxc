@@ -84,6 +84,11 @@ but not both in one policy. `runtimeConfig.networkProxy` and
 `processContainer.network.allowedProxyPeer` select the directional format.
 Omitted permissions remain default-deny.
 
+For ProcessContainer authoring, `egress.default: "allow"` adds the
+`internetClient` capability and `ingress.default: "allow"` adds
+`privateNetworkClientServer`. An `allowedProxyPeer` is a scoped loopback grant,
+so it must not be combined with `ingress.hostLoopback: "allow"`.
+
 See [Schema updates from 0.7 to 0.8](networking/schema-updates.md) for field
 mappings and [Network configuration](networking/networking.md) for directional
 rule semantics.
@@ -103,7 +108,7 @@ const config = createConfigFromPolicy({
   },
   network: {
     egress: { default: 'deny' },
-    ingress: { default: 'allow', hostLoopback: 'allow' },
+    ingress: { default: 'allow', hostLoopback: 'deny' },
   },
   runtimeConfig: {
     networkProxy: 'http://127.0.0.1:8080',
