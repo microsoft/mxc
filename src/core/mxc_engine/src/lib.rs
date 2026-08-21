@@ -46,9 +46,9 @@ pub use platform::isolation_session_available;
 pub use platform::{platform_support, PlatformSupport};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
-    user_profile_policy, Containment, FilesystemPolicyResult, LxcSection, NetworkAction,
-    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-    NetworkProtocol, NetworkRuleSection, ProcessContainerNetworkSection, ProcessContainerSection,
+    user_profile_policy, Containment, FilesystemPolicyResult, NetworkAction, NetworkEgressSection,
+    NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
+    NetworkRuleSection, ProcessContainerNetworkSection, ProcessContainerSection,
     ProcessContainerUiIsolation, ProcessContainerUiSection, RuntimeConfigSection, SandboxPolicy,
     SandboxRequest, WslcSection,
 };

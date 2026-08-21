@@ -335,28 +335,23 @@ default):
 | Host    | Backend(s)                                      | Selected by             |
 |---------|-------------------------------------------------|-------------------------|
 | Linux   | Bubblewrap                                      | `Containment::Process`  |
-| Linux   | LXC                                             | `Containment::Lxc`      |
 | macOS   | Seatbelt                                        | `Containment::Process`  |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process` or `Containment::ProcessContainer` |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`     |
 
-Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight)
+Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC)
 returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the
 standalone executor binaries for those.
 
-LXC currently supports `run` only. `spawn_sandbox` returns
-`ErrorCode::UnsupportedContainment` because the LXC backend has no streaming
-implementation.
-
-### ProcessContainer and LXC authoring
+### ProcessContainer authoring
 
 Use the concrete containment variants when backend-specific settings are
 required. `Containment::Process` remains the portable host-default selection.
 
 ```rust,no_run
 use mxc_sdk::{
-    build_request_with_containment, Containment, LxcSection,
-    ProcessContainerSection, SandboxPolicy,
+    build_request_with_containment, Containment, ProcessContainerSection,
+    SandboxPolicy,
 };
 
 # let policy = SandboxPolicy {
@@ -374,14 +369,7 @@ let windows_request = build_request_with_containment(
     &Containment::ProcessContainer(process_container),
     None,
 )?;
-
-let lxc = LxcSection {
-    distribution: "ubuntu".to_string(),
-    release: "24.04".to_string(),
-};
-let linux_request =
-    build_request_with_containment(&policy, &Containment::Lxc(lxc), None)?;
-# let _ = (windows_request, linux_request);
+# let _ = windows_request;
 # Ok::<(), mxc_sdk::Error>(())
 ```
 

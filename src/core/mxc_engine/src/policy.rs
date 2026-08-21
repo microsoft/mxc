@@ -524,8 +524,6 @@ pub enum Containment {
     Process,
     /// Windows ProcessContainer backend with explicit backend settings.
     ProcessContainer(ProcessContainerSection),
-    /// Linux LXC backend with explicit distribution settings.
-    Lxc(LxcSection),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -533,24 +531,6 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
-}
-
-/// LXC distribution settings carried by [`Containment::Lxc`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LxcSection {
-    /// Linux distribution image.
-    pub distribution: String,
-    /// Distribution release.
-    pub release: String,
-}
-
-impl Default for LxcSection {
-    fn default() -> Self {
-        Self {
-            distribution: "alpine".to_string(),
-            release: "3.19".to_string(),
-        }
-    }
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -884,7 +864,7 @@ fn build_wire_config(
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
     let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
-        || matches!(containment, Containment::Lxc(_) | Containment::Wslc(_));
+        || matches!(containment, Containment::Wslc(_));
 
     let uses_directional_network = policy
         .network
@@ -950,7 +930,6 @@ fn build_wire_config(
             process_container,
             "processcontainer",
         ),
-        Containment::Lxc(lxc) => apply_lxc_backend(&mut config, lxc),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
     }
     Ok(config)
@@ -1000,19 +979,6 @@ fn apply_host_process_backend(
     {
         let _ = (policy, container_id);
     }
-}
-
-fn apply_lxc_backend(config: &mut serde_json::Value, lxc: &LxcSection) {
-    use serde_json::json;
-
-    config["containment"] = json!("lxc");
-    config["lxc"] = json!({
-        "distribution": lxc.distribution,
-        "release": lxc.release,
-    });
-
-    #[cfg(target_os = "linux")]
-    apply_linux_network_policy(config);
 }
 
 /// Apply the WSL Container backend fields — the Rust port of the SDK's
@@ -1580,11 +1546,10 @@ mod tests {
     }
 
     use super::{
-        build_request_with_containment, Containment, LxcSection, NetworkAction,
-        NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
-        NetworkProtocol, NetworkRuleSection, ProcessContainerNetworkSection,
-        ProcessContainerSection, ProcessContainerUiIsolation, ProcessContainerUiSection,
-        RuntimeConfigSection, WslcSection,
+        build_request_with_containment, Containment, NetworkAction, NetworkEgressSection,
+        NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
+        NetworkRuleSection, ProcessContainerNetworkSection, ProcessContainerSection,
+        ProcessContainerUiIsolation, ProcessContainerUiSection, RuntimeConfigSection, WslcSection,
     };
     use wxc_common::models::ContainmentBackend;
 
@@ -1768,34 +1733,6 @@ mod tests {
         );
         assert_eq!(request.inner.policy.allowed_hosts, ["example.com"]);
         assert!(request.inner.policy.network_egress.is_none());
-    }
-
-    #[test]
-    fn lxc_containment_maps_distribution_to_the_request() {
-        let lxc = LxcSection {
-            distribution: "ubuntu".to_string(),
-            release: "24.04".to_string(),
-        };
-        let request =
-            build_request_with_containment(&minimal_policy(), &Containment::Lxc(lxc), None)
-                .expect("build_request_with_containment");
-
-        assert_eq!(request.inner.containment, ContainmentBackend::Lxc);
-        assert_eq!(request.inner.lxc_config.distribution, "ubuntu");
-        assert_eq!(request.inner.lxc_config.release, "24.04");
-    }
-
-    #[test]
-    fn lxc_defaults_match_the_node_sdk() {
-        let request = build_request_with_containment(
-            &minimal_policy(),
-            &Containment::Lxc(LxcSection::default()),
-            None,
-        )
-        .expect("build_request_with_containment");
-
-        assert_eq!(request.inner.lxc_config.distribution, "alpine");
-        assert_eq!(request.inner.lxc_config.release, "3.19");
     }
 
     #[test]
