@@ -2486,6 +2486,42 @@ mod tests {
     }
 
     #[test]
+    fn validate_runner_rejects_egress_allow_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            allow: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress allow rules");
+        assert!(error.error_message.contains("allow/deny rules"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_egress_deny_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            deny: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress deny rules");
+        assert!(error.error_message.contains("allow/deny rules"));
+    }
+
+    #[test]
     fn validate_runner_rejects_capture_denials_on_appcontainer_fallback() {
         let runner = AppContainerScriptRunner::new();
         let mut request = ExecutionRequest::default();

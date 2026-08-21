@@ -3673,6 +3673,7 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
+        request.env = vec!["PATH=C:\\Windows".to_string()];
 
         assert!(BaseContainerRunner::legacy_sbox_compatible_with_request(
             &request,
@@ -3689,6 +3690,7 @@ mod tests {
             .expect("environment")
             .expect("runtime proxy environment");
         let rendered = String::from_utf16_lossy(&environment);
+        assert!(rendered.contains("PATH=C:\\Windows"));
         assert!(rendered.contains("HTTP_PROXY=http://127.0.0.1:8080"));
         assert!(rendered.contains("HTTPS_PROXY=http://127.0.0.1:8080"));
     }
