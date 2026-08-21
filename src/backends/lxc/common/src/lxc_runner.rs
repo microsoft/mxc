@@ -10,16 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{
-    ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
-};
+use wxc_common::models::{ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
-use crate::lxc_bindings::LxcContainer;
+use crate::lxc_bindings::{LxcContainer, NetInterfaceConfig};
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::NetworkIptablesManager;
+use crate::network_iptables::{requires_firewall, NetworkIptablesManager};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -55,6 +53,36 @@ impl LxcScriptRunner {
             format!("mxc-{}", uuid_simple())
         } else {
             self.container_id.clone()
+        }
+    }
+
+    /// Whether the pin hook can rename this container's interface before start.
+    ///
+    /// A nonzero exit from the hook aborts the start, so a shape it would
+    /// reject keeps the post-start path rather than becoming a new refusal.
+    fn pinnable_before_start(net: &NetInterfaceConfig) -> bool {
+        net.count == 1 && net.sole_kind.as_deref() == Some("veth")
+    }
+
+    /// Halt a container after a failure that happened once it was already
+    /// running, retaining its filtering if it could not be halted.
+    ///
+    /// A run that will not destroy the container -- `destroy_on_exit` off on
+    /// one it did not create -- otherwise returns while the container keeps
+    /// running, and the managers then drop their rules on the way out. The
+    /// result is a live container with its egress filtering removed, reported
+    /// to the caller as a failure. Preserving the policy when the stop fails
+    /// keeps the rules in place for whatever is still transmitting.
+    fn halt_after_failed_start(
+        &self,
+        container: &LxcContainer,
+        container_created: bool,
+        fw_manager: &mut NetworkIptablesManager,
+    ) {
+        if self.destroy_on_exit || container_created {
+            let _ = container.destroy();
+        } else if container.stop().is_err() {
+            fw_manager.set_preserve_policy(true);
         }
     }
 
@@ -100,11 +128,7 @@ impl LxcScriptRunner {
 
     /// Core execution logic.
     fn run_internal(&self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw) before building
-        // mounts. See `wxc_common::filesystem_object`. Only clone the request
-        // when an aliasing conflict actually needs tightening; an unresolvable
-        // path with deniedPaths present fails closed.
+        // tighten aliases of the same host object to the strictest intent (deny > ro > rw)
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
@@ -120,10 +144,7 @@ impl LxcScriptRunner {
             Ok(None) => request,
             Err(msg) => return ScriptResponse::error(&msg),
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents.
+        // reject any policy path the invoking user cannot access
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
             return ScriptResponse::error(&msg);
         }
@@ -137,18 +158,7 @@ impl LxcScriptRunner {
         }
 
         let container_name = self.resolve_container_name();
-        // Refuse a credential-bearing proxy URL here as well as at parse time.
-        // The parser guard only covers requests it built; `ExecutionRequest`
-        // and `ProxyAddress::from_url` are public, so a caller can hand this
-        // runner a policy the parser never saw. Below, `apply_proxy_env` sets
-        // HTTP(S)_PROXY to `to_url()`, which returns the original URL verbatim,
-        // and `build_attach_args_with_env_control` turns every environment
-        // entry into a `--set-var=KEY=VALUE` argument of the `lxc-attach`
-        // process this backend spawns (lxc_bindings.rs). A process's argv is
-        // readable through /proc/<pid>/cmdline by any local user for the
-        // lifetime of the command. The check sits ahead of container creation
-        // and firewall programming so a rejected request leaves no state
-        // behind.
+        // Credentials here would be visible to other local users.
         if let Some(url) = request
             .policy
             .network_proxy
@@ -157,24 +167,14 @@ impl LxcScriptRunner {
             .map(|address| address.to_url())
         {
             if wxc_common::proxy_env::proxy_url_has_credentials(&url) {
-                // Built from the redacted form so the rejection cannot become
-                // the leak it is rejecting.
                 return ScriptResponse::error(&format!(
-                    "LXC: network.proxy.url must not carry credentials ('{}'). LXC passes the \
-                     proxy URL to lxc-attach as a --set-var command-line argument, and process \
-                     arguments are world-readable through /proc/<pid>/cmdline, so the password \
-                     would be visible to every local user while the command runs. Use a proxy \
+                    "LXC: network.proxy.url must not carry credentials ('{}'). Use a proxy \
                      that does not require inline credentials, or supply them to the proxy \
                      itself rather than through the URL.",
                     wxc_common::proxy_env::redact_proxy_url(&url)
                 ));
             }
         }
-        // Make the name visible to the signal-cleanup watchdog so a fatal
-        // signal during create/start/attach still tears the container down —
-        // but only when the caller actually wants the container destroyed at
-        // exit. With `destroyOnExit = false` the normal completion path
-        // preserves the container, so the signal path must too.
         if self.destroy_on_exit {
             signal_cleanup::set_active(&container_name);
         }
@@ -200,8 +200,19 @@ impl LxcScriptRunner {
         let container = LxcContainer::new(&container_name, None);
         let mut container_created = false;
 
-        // Create the container if it doesn't exist
-        if !container.is_defined() {
+        // Create the container if it doesn't exist. A probe that could not run
+        // is not evidence of absence, so it aborts rather than creating a
+        // second container over a first one we simply failed to see.
+        let defined = match container.is_defined() {
+            Ok(defined) => defined,
+            Err(e) => {
+                return ScriptResponse::error(&format!(
+                    "Failed to determine whether the container exists: {}",
+                    e
+                ));
+            }
+        };
+        if !defined {
             let _ = writeln!(logger, "Creating LXC container...");
             if let Err(e) = container.create(&self.config.distribution, &self.config.release) {
                 return ScriptResponse::error(&format!("Failed to create container: {}", e));
@@ -222,8 +233,104 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        // Ensure the container is running so that the veth interface exists
-        if !container.is_running() {
+        // Ensure the container is running so that the veth interface exists. An
+        // unreadable probe aborts: starting a container that is already running
+        // is not harmless here, and neither is proceeding as though it were up.
+        let running = match container.is_running() {
+            Ok(running) => running,
+            Err(e) => {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to determine whether the container is running: {}",
+                    e
+                ));
+            }
+        };
+        let mut fw_manager = NetworkIptablesManager::new(&container_name);
+
+        // Read once, so the refusal below and the pin decision cannot disagree
+        // about the same container.
+        let net_config = if requires_firewall(&request.policy) {
+            match container.configured_net_interfaces() {
+                Ok(net) => Some(net),
+                Err(e) => {
+                    let _ = writeln!(logger, "Could not read the network config: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // The FORWARD hook matches a single veth, so traffic on any other
+        // interface never reaches the chain and the policy goes unenforced.
+        // A container with no usable veth already fails when the rules are
+        // applied, because nothing calls `allow_missing_veth_interface` on this
+        // path; one with several interfaces instead resolves the first and
+        // silently bypasses the rest, so it is refused here. A read that failed
+        // keeps the pre-existing behavior rather than turning an unreadable
+        // config into a new way to fail.
+        if let Some(net) = net_config.as_ref() {
+            if net.count > 1 {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Container {:?} has {} configured network interfaces; a firewall-enforced \
+                     network policy can only be applied to a container with a single interface, \
+                     because traffic on the others would bypass it",
+                    container_name, net.count,
+                ));
+            }
+        }
+
+        // Install egress before the container starts, so nothing inside it
+        // transmits during an interval MXC already reports as deny-all.
+        // iptables accepts a rule naming an interface that does not exist yet,
+        // so the name is pinned here and the interface catches up at start.
+        let mut egress_installed = false;
+        if !running && requires_firewall(&request.policy) {
+            let pinnable = net_config
+                .as_ref()
+                .map(Self::pinnable_before_start)
+                .unwrap_or(false);
+            if pinnable {
+                let veth = NetworkIptablesManager::deterministic_veth_name(&container_name);
+                if let Err(e) = container.ensure_veth_pin_hook(&veth) {
+                    if self.destroy_on_exit || container_created {
+                        let _ = container.destroy();
+                    }
+                    return ScriptResponse::error(&format!(
+                        "Failed to pin the container's network interface: {}",
+                        e
+                    ));
+                }
+                let _ = writeln!(logger, "Pinned veth interface before start: {}", veth);
+                fw_manager.set_veth_interface(&veth);
+                if self.destroy_on_exit {
+                    signal_cleanup::set_active_veth(&veth);
+                }
+                match fw_manager.apply_firewall_rules(&request.policy, logger) {
+                    Ok(true) => egress_installed = true,
+                    Ok(false) => {
+                        if self.destroy_on_exit || container_created {
+                            let _ = container.destroy();
+                        }
+                        return ScriptResponse::error("Failed to apply network firewall rules.");
+                    }
+                    Err(e) => {
+                        if self.destroy_on_exit || container_created {
+                            let _ = container.destroy();
+                        }
+                        return ScriptResponse::error(&format!("Network policy error: {}", e));
+                    }
+                }
+            }
+        }
+
+        if !running {
             let _ = writeln!(logger, "Starting LXC container...");
             if let Err(e) = container.start() {
                 if self.destroy_on_exit || container_created {
@@ -236,92 +343,94 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the config uses network features (firewall rules
-        // or allowed/blocked hosts), or when the container must reach a proxy.
-        let needs_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        ) || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.network_proxy.is_enabled();
-
-        if needs_network {
+        if requires_firewall(&request.policy) {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
         }
 
-        // Configure network rules
-        let mut fw_manager = NetworkIptablesManager::new(&container_name);
+        // Shapes the pre-start path could not pin: an already running
+        // container, several interfaces, or one the hook cannot rename.
+        if !egress_installed {
+            // Resolve the container's veth interface for scoped rules. The pin hook
+            // persists in a container's config, so a container this runner did not
+            // pin may still have been renamed by an earlier state-aware start; the
+            // container itself is the only thing that knows which.
+            let pinned = NetworkIptablesManager::deterministic_veth_name(&container_name);
+            let pin_hook_present = match container.has_veth_pin_hook(&pinned) {
+                Ok(present) => present,
+                Err(e) => {
+                    // Guessing here picks between two names, one of which filters
+                    // nothing. Report it and resolve nothing rather than scope the
+                    // rules to a name that may already be stale.
+                    let _ = writeln!(logger, "Could not read the veth pin hook: {}", e);
+                    self.halt_after_failed_start(&container, container_created, &mut fw_manager);
+                    return ScriptResponse::error(
+                        "Failed to resolve the container's network interface.",
+                    );
+                }
+            };
+            if let Some(veth) =
+                NetworkIptablesManager::live_veth_interface(&container_name, pin_hook_present)
+            {
+                let _ = writeln!(logger, "Resolved veth interface: {}", veth);
+                fw_manager.set_veth_interface(&veth);
+                if self.destroy_on_exit {
+                    // Tell the watchdog about the veth so signal-time cleanup
+                    // can also remove the FORWARD hook, not just the chain.
+                    signal_cleanup::set_active_veth(&veth);
+                }
+            }
+
+            match fw_manager.apply_firewall_rules(&request.policy, logger) {
+                Ok(true) => {}
+                Ok(false) => {
+                    self.halt_after_failed_start(&container, container_created, &mut fw_manager);
+                    return ScriptResponse::error("Failed to apply network firewall rules.");
+                }
+                Err(e) => {
+                    self.halt_after_failed_start(&container, container_created, &mut fw_manager);
+                    return ScriptResponse::error(&format!("Network policy error: {}", e));
+                }
+            }
+        }
+
+        // Until the container is up, a failure above must still tear down what
+        // the pre-start install put in place.
         fw_manager.set_preserve_policy(!self.cleanup_policy);
-
-        // Try to discover the container's veth interface for scoped rules
-        if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
-            let _ = writeln!(logger, "Discovered veth interface: {}", veth);
-            fw_manager.set_veth_interface(&veth);
-            if self.destroy_on_exit {
-                // Tell the watchdog about the veth so signal-time cleanup
-                // can also remove the FORWARD hook, not just the chain.
-                signal_cleanup::set_active_veth(&veth);
-            }
-        }
-
-        match fw_manager.apply_firewall_rules(&request.policy, logger) {
-            Ok(true) => {}
-            Ok(false) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error("Failed to apply network firewall rules.");
-            }
-            Err(e) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error(&format!("Network policy error: {}", e));
-            }
-        }
 
         // Configure inbound (ingress) network rules inside the container's own
         // netns. This is a separate, orthogonal chain from the egress rules
         // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
         // container's own iptables INPUT chain, reached with `nsenter`.
         //
-        // A firewall enforcement mode means the caller asked for the inbound
-        // deny chain. LXC enforces it inside the container's own netns, so it
-        // is useless without the init PID that lets us enter that netns — and
-        // the ingress manager cannot even be constructed without one.
-        let use_firewall = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
+        // Ingress installs unconditionally, so the init PID is mandatory for
+        // every start: LXC enters the container's netns through it, and the
+        // ingress manager cannot even be constructed without one.
 
-        // Kept in scope for post-execution cleanup; `None` when there is no
-        // netns PID and no firewall was requested (nothing to enforce).
-        let mut ingress_manager: Option<IngressManager> = None;
-
-        match container.init_pid() {
+        // Kept in scope for post-execution cleanup. A missing init PID returns
+        // below, so the match always yields the manager for a successful
+        // install on the path that continues.
+        let mut ingress_manager: Option<IngressManager> = match container.init_pid() {
             Some(pid) => {
                 let _ = writeln!(logger, "Container init PID: {}", pid);
-                if self.destroy_on_exit {
-                    // Tell the watchdog about the netns PID so signal-time
-                    // cleanup can remove the container's INPUT rules before it's
-                    // destroyed.
-                    signal_cleanup::set_active_pid(pid);
-                }
                 let mut mgr = IngressManager::new(&container_name, pid);
                 match mgr.apply_firewall_rules(&request.policy, logger) {
                     Ok(true) => {}
                     Ok(false) => {
-                        if self.destroy_on_exit || container_created {
-                            let _ = container.destroy();
-                        }
+                        self.halt_after_failed_start(
+                            &container,
+                            container_created,
+                            &mut fw_manager,
+                        );
                         return ScriptResponse::error(
                             "Failed to apply inbound network firewall rules.",
                         );
                     }
                     Err(e) => {
-                        if self.destroy_on_exit || container_created {
-                            let _ = container.destroy();
-                        }
+                        self.halt_after_failed_start(
+                            &container,
+                            container_created,
+                            &mut fw_manager,
+                        );
                         return ScriptResponse::error(&format!(
                             "Inbound network policy error: {}",
                             e
@@ -329,39 +438,30 @@ impl LxcScriptRunner {
                     }
                 }
                 // Every non-success arm above returns, so the apply call
-                // succeeded. Only now may the policy be marked for
-                // preservation: the flag also suppresses `Drop`, and a partial
-                // chain from a failed install must still be torn down. Success
-                // does not imply a chain exists — a non-firewall enforcement
-                // mode succeeds without installing one — but in that case no
-                // ownership flag is set and `Drop` has nothing to do either way.
+                // succeeded and the inbound chain now exists. Only now may the
+                // policy be marked for preservation: the flag also suppresses
+                // `Drop`, and a partial chain from a failed install must still be
+                // torn down.
                 mgr.set_preserve_policy(!self.cleanup_policy);
-                ingress_manager = Some(mgr);
-            }
-            None if use_firewall => {
-                // The run asked for a firewall but we could not find the
-                // container netns to enforce it in. There is no legitimate
-                // ingress-without-a-netns case: enforcing inbound requires
-                // entering the container's namespace, so running anyway would
-                // silently disable the requested inbound deny (a fail-open).
-                // Abort instead. This guard is specific to the LXC ingress
-                // path, which addresses its namespace by init PID; other
-                // backends reach their firewall handling through their own
-                // runners and never construct an `IngressManager`.
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error(
-                    "Failed to discover the container init PID; cannot enter the container \
-                     network namespace to enforce the requested inbound firewall. Aborting \
-                     rather than running with inbound enforcement silently disabled.",
-                );
+                Some(mgr)
             }
             None => {
-                // No firewall requested and no netns PID: nothing to enforce
-                // inbound, so no ingress chain is installed.
+                // Ingress installs unconditionally now, so a missing netns is
+                // always fatal. Enforcing inbound requires entering the
+                // container's namespace, so running anyway would silently
+                // disable the inbound deny (a fail-open). Abort instead. This
+                // guard is specific to the LXC ingress path, which addresses its
+                // namespace by init PID; other backends reach their firewall
+                // handling through their own runners and never construct an
+                // `IngressManager`.
+                self.halt_after_failed_start(&container, container_created, &mut fw_manager);
+                return ScriptResponse::error(
+                    "Failed to discover the container init PID; cannot enter the container \
+                     network namespace to enforce the inbound firewall. Aborting rather than \
+                     running with inbound enforcement silently disabled.",
+                );
             }
-        }
+        };
 
         let mut pinned = false;
 
@@ -376,7 +476,7 @@ impl LxcScriptRunner {
                 pin.ip()
             );
             let pin_outcome =
-                container.attach_run(&command, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT));
+                container.attach_run(&command, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT), None);
             let pin_error = match pin_outcome {
                 Ok((0, _, _)) => None,
 
@@ -409,12 +509,18 @@ impl LxcScriptRunner {
             // in place it keeps resolving a hostname to an address that only
             // some earlier policy authorized.
             let unpin = Self::build_hosts_unpin_command();
-            let stale_pin_error =
-                match container.attach_run(&unpin, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT)) {
-                    Ok((0, _, _)) => None,
-                    Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
-                    Err(e) => Some(e.to_string()),
-                };
+            let stale_pin_error = match container.attach_run(
+                &unpin,
+                "/",
+                &[],
+                true,
+                Some(HOSTS_COMMAND_TIMEOUT),
+                None,
+            ) {
+                Ok((0, _, _)) => None,
+                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
+                Err(e) => Some(e.to_string()),
+            };
 
             // Unlike the post-run removal, this one runs *before* the script, so
             // a failure still changes what the script would resolve. Refuse the
@@ -442,6 +548,12 @@ impl LxcScriptRunner {
             Some(Duration::from_millis(u64::from(request.script_timeout)))
         };
         let _ = writeln!(logger, "Executing script inside container...");
+        // Stamped so a timeout can reap what the script started.  The one-shot
+        // container is normally destroyed on exit, which reaps everything, but
+        // a run configured to leave it behind has the same persistence problem
+        // the state-aware path does.
+        let marker = crate::lxc_bindings::mint_exec_marker();
+
         let mut exec_env = request.env.clone();
         // Scrub every inherited proxy variable and, when the policy carries a
         // proxy, point HTTP(S)_PROXY at it.
@@ -456,6 +568,7 @@ impl LxcScriptRunner {
             &exec_env,
             true,
             timeout,
+            Some(&marker),
         );
 
         let response = match result {
@@ -473,12 +586,18 @@ impl LxcScriptRunner {
         // must not outlive that chain.
         if pinned && self.cleanup_policy {
             let unpin = Self::build_hosts_unpin_command();
-            let unpin_error =
-                match container.attach_run(&unpin, "/", &[], true, Some(HOSTS_COMMAND_TIMEOUT)) {
-                    Ok((0, _, _)) => None,
-                    Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
-                    Err(e) => Some(e.to_string()),
-                };
+            let unpin_error = match container.attach_run(
+                &unpin,
+                "/",
+                &[],
+                true,
+                Some(HOSTS_COMMAND_TIMEOUT),
+                None,
+            ) {
+                Ok((0, _, _)) => None,
+                Ok((code, _, _)) => Some(Self::hosts_command_failure("clearing", code)),
+                Err(e) => Some(e.to_string()),
+            };
 
             // The script has already run, so a failure here cannot change its
             // result and must not replace it.
@@ -680,6 +799,42 @@ fn uuid_simple() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_single_veth_can_be_pinned_before_start() {
+        let net = NetInterfaceConfig {
+            count: 1,
+            sole_kind: Some("veth".to_string()),
+        };
+        assert!(LxcScriptRunner::pinnable_before_start(&net));
+    }
+
+    #[test]
+    fn a_sole_interface_that_is_not_veth_is_left_to_the_post_start_path() {
+        let net = NetInterfaceConfig {
+            count: 1,
+            sole_kind: Some("macvlan".to_string()),
+        };
+        assert!(!LxcScriptRunner::pinnable_before_start(&net));
+    }
+
+    #[test]
+    fn a_container_with_no_interfaces_is_left_to_the_post_start_path() {
+        let net = NetInterfaceConfig {
+            count: 0,
+            sole_kind: None,
+        };
+        assert!(!LxcScriptRunner::pinnable_before_start(&net));
+    }
+
+    #[test]
+    fn a_container_with_several_interfaces_is_left_to_the_post_start_path() {
+        let net = NetInterfaceConfig {
+            count: 2,
+            sole_kind: None,
+        };
+        assert!(!LxcScriptRunner::pinnable_before_start(&net));
+    }
 
     #[test]
     fn uuid_simple_is_8_chars() {

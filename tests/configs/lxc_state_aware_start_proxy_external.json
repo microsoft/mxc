@@ -1,0 +1,7 @@
+{
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "network": {
+    "proxy": { "url": "http://127.0.0.1:3128" }
+  }
+}

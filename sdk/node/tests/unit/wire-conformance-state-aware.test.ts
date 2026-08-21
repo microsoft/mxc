@@ -46,12 +46,18 @@ import type {
   WslcExecConfig,
   WslcStopConfig,
   WslcDeprovisionConfig,
+  LxcProvisionConfig,
+  LxcStartConfig,
+  LxcExecConfig,
+  LxcStopConfig,
+  LxcDeprovisionConfig,
 } from '../../src/state-aware-types.js';
 
 import type {
   Phase as WirePhase,
   IsolationSessionProvisionPhase as WireProvisionPhase,
   WslcProvisionPhase as WireWslcProvisionPhase,
+  LxcProvisionPhase as WireLxcProvisionPhase,
 } from '../../src/generated/wire.js';
 
 import type {
@@ -84,8 +90,10 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 // `filesystem` is a lifted top-level wire field (like `network`): WSLc provision
 // surfaces it publicly but it maps to the envelope's top-level `filesystem`, not
 // under `experimental.wslc.provision`. Listing it here keeps the backend-key set
-// limited to genuinely per-phase wire fields.
-type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem';
+// limited to genuinely per-phase wire fields. `containerId` is lifted the same
+// way for every backend -- `CROSS_CUTTING_FIELDS` in `state-aware-helper.ts`
+// moves it to the envelope top level, so it never reaches a per-phase object.
+type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem' | 'containerId';
 
 type BackendKeys<C> = Exclude<keyof C, LiftedPhaseKey>;
 type WireKeys<W> = keyof StripIndex<W>;
@@ -172,6 +180,44 @@ type _WslcProvisionWireKeysNonVacuous = AssertTrue<
   Equivalent<WireKeys<WireWslcProvisionPhase>, 'image' | 'imageTarPath'>
 >;
 
+// --- LXC per-phase wire field-set conformance ------------------------------
+
+// LXC is the third state-aware backend, so the oracle must cover it too or a
+// wire-model change to the LXC surface would regenerate `wire.ts`, pass the
+// codegen gate, and leave the SDK silently lagging with no CI signal. LXC's
+// only per-phase wire object is provision (`distribution` / `release`); start,
+// exec, stop, and deprovision have wire associated type `()` and must expose no
+// backend-specific field. `filesystem`, `network`, and `containerId` are lifted
+// top-level wire fields (see `LiftedPhaseKey`).
+type _LxcProvisionPublicKeys = AssertTrue<
+  Equivalent<Exclude<BackendKeys<LxcProvisionConfig>, WireKeys<WireLxcProvisionPhase>>, never>
+>;
+type _LxcProvisionWireKeys = AssertTrue<
+  Equivalent<Exclude<WireKeys<WireLxcProvisionPhase>, BackendKeys<LxcProvisionConfig>>, never>
+>;
+type _LxcProvisionFieldValueTypes = AssertTrue<
+  Equivalent<
+    PublicFieldValues<LxcProvisionConfig>,
+    WireFieldValues<WireLxcProvisionPhase>
+  >
+>;
+
+type _LxcStartNoBackendKeys = AssertTrue<Equivalent<BackendKeys<LxcStartConfig>, never>>;
+type _LxcExecNoBackendKeys = AssertTrue<Equivalent<BackendKeys<LxcExecConfig>, never>>;
+type _LxcStopNoBackendKeys = AssertTrue<Equivalent<BackendKeys<LxcStopConfig>, never>>;
+type _LxcDeprovisionNoBackendKeys = AssertTrue<
+  Equivalent<BackendKeys<LxcDeprovisionConfig>, never>
+>;
+
+// Non-vacuity guards (see the isolation_session pins above): pin the derived key
+// sets so a derivation bug fails the oracle rather than silently disabling it.
+type _LxcProvisionKeysNonVacuous = AssertTrue<
+  Equivalent<BackendKeys<LxcProvisionConfig>, 'distribution' | 'release'>
+>;
+type _LxcProvisionWireKeysNonVacuous = AssertTrue<
+  Equivalent<WireKeys<WireLxcProvisionPhase>, 'distribution' | 'release'>
+>;
+
 // --- delegation to the one-shot oracle (documented, asserted) --------------
 
 // The per-phase configs must REUSE the public one-shot leaf types for their
@@ -180,6 +226,7 @@ type _WslcProvisionWireKeysNonVacuous = AssertTrue<
 // assertions fail if that ever happens.
 type _ExecProcessReuse = AssertTrue<Equivalent<IsolationSessionExecConfig['process'], ProcessConfig>>;
 type _WslcExecProcessReuse = AssertTrue<Equivalent<WslcExecConfig['process'], ProcessConfig>>;
+type _LxcExecProcessReuse = AssertTrue<Equivalent<LxcExecConfig['process'], ProcessConfig>>;
 
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type StateAwareWireConformanceAssertions = [
@@ -204,6 +251,16 @@ export type StateAwareWireConformanceAssertions = [
   _WslcProvisionKeysNonVacuous,
   _WslcProvisionWireKeysNonVacuous,
   _WslcExecProcessReuse,
+  _LxcProvisionPublicKeys,
+  _LxcProvisionWireKeys,
+  _LxcProvisionFieldValueTypes,
+  _LxcStartNoBackendKeys,
+  _LxcExecNoBackendKeys,
+  _LxcStopNoBackendKeys,
+  _LxcDeprovisionNoBackendKeys,
+  _LxcProvisionKeysNonVacuous,
+  _LxcProvisionWireKeysNonVacuous,
+  _LxcExecProcessReuse,
 ];
 
 test('public state-aware SDK types conform to the generated wire schema (compile-time)', () => {

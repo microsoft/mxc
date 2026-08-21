@@ -1,0 +1,7 @@
+{
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "network": {
+    "allowedHosts": []
+  }
+}

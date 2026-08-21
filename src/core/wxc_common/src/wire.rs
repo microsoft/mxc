@@ -586,6 +586,8 @@ pub struct Experimental {
     pub wslc: Option<Wslc>,
     /// IsolationSession backend config (Windows).
     pub isolation_session: Option<IsolationSession>,
+    /// LXC backend config (Linux).
+    pub lxc: Option<LxcExperimental>,
     /// Seatbelt backend config (pre-promotion alias).
     #[serde(alias = "macos_sandbox")]
     pub seatbelt: Option<Seatbelt>,
@@ -733,6 +735,36 @@ pub struct IsolationSessionProvisionPhase {
     /// An unpackaged application may pass any string. Carried inside the `sandboxId`
     /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
+}
+
+/// LXC backend config under the experimental surface. Carries only the
+/// per-phase state-aware nesting for the phases that take config
+/// (`provision`); the one-shot LXC surface is the stable top-level `lxc`
+/// section, so this type is named apart from it rather than shared with it.
+/// `start`, `exec`, `stop`, and `deprovision` take no per-phase config payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LxcExperimental {
+    /// State-aware provision-phase configuration.
+    pub provision: Option<LxcProvisionPhase>,
+}
+
+/// Provision-phase LXC configuration (state-aware lifecycle), nested under
+/// `experimental.lxc.provision`. Names the container image to create.
+///
+/// Filesystem mounts and network policy derive from the top-level `filesystem`
+/// and `network` sections, not from here. It is its own type rather than a
+/// shared one because a shared type would advertise its fields on every phase
+/// in the generated schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct LxcProvisionPhase {
+    /// Distribution image (e.g. `alpine`).
+    pub distribution: Option<String>,
+    /// Distribution release (e.g. `3.23`).
+    pub release: Option<String>,
 }
 
 /// JSON Schema generation from the wire model, gated behind `schema-gen` so

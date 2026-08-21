@@ -102,6 +102,20 @@ jobs:
             sudo apt-get install -y -qq lxc lxc-utils dnsmasq-base iptables bubblewrap slirp4netns
           displayName: Install LXC, Bubblewrap, and slirp4netns
 
+        # LXC enforces network policy from the policy itself, and the default is
+        # deny-all, so every LXC run installs an egress chain even when the
+        # request carries no network section.  A bridged veth only reaches
+        # FORWARD while br_netfilter delivers bridged packets to iptables, and
+        # without it the backend refuses to report success for a policy it
+        # cannot enforce.  Tolerated rather than required, because a hosted pool
+        # may forbid loading modules; when it does, the LXC tests fail exactly
+        # as they already would.
+        - script: |
+            sudo modprobe br_netfilter || echo "br_netfilter unavailable; LXC policy enforcement is unreachable on this pool"
+            sudo sysctl -w net.bridge.bridge-nf-call-iptables=1 || true
+            sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1 || true
+          displayName: Enable bridge netfilter
+
         - script: sudo MXC_SKIP_LXC_NETWORK_TESTS=1 MXC_DEBUG=${{ parameters.debug }} npm test
           workingDirectory: $(integrationDirectory)
           displayName: npm test (sudo, with LXC)

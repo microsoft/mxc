@@ -7,17 +7,14 @@
 //! # Decision table
 //!
 //! The netns PID is mandatory: [`IngressManager`] cannot be constructed without
-//! one, so there is no "no-PID" row. All cells assume
-//! `NetworkEnforcementMode::Firewall` unless stated otherwise, because
-//! `apply_firewall_rules` returns early with `Ok(true)` for `Capabilities` mode
-//! before reaching the permissive guard.
+//! one, so there is no "no-PID" row. Ingress installs unconditionally, so
+//! `enforcementMode` no longer changes the outcome -- only `allowLocalNetwork`
+//! does.
 //!
-//! | allow_local_network | enforcement mode | Required outcome | Source |
-//! |---------------------|------------------|------------------|--------|
-//! | false               | Firewall         | NOT refused      | guard is permissive-path only |
-//! | true                | Firewall         | REFUSED (Err)    | "apply_firewall_rules returns a clear not-yet-implemented error" |
-//! | true                | Both             | REFUSED (Err)    | Both ∈ firewall-using modes |
-//! | true                | Capabilities     | NOT refused      | early-return before guard; no firewall path |
+//! | allow_local_network | Required outcome | Source |
+//! |---------------------|------------------|--------|
+//! | false               | NOT refused (installs the inbound deny) | guard is permissive-path only |
+//! | true                | REFUSED (Err), whatever the mode        | "apply_firewall_rules returns a clear not-yet-implemented error" |
 
 use super::*;
 use wxc_common::logger::Mode;
@@ -64,14 +61,11 @@ fn make_logger() -> Logger {
 
 /// Build a policy that reaches the permissive guard.
 ///
-/// The guard is only reachable when `network_enforcement_mode` is `Firewall`
-/// or `Both`; `Capabilities` (the default) causes an early return before the
-/// guard.  Every fixture that must exercise the guard must set one of the
-/// firewall-using modes explicitly.
+/// The guard fires on `allow_local_network` alone; ingress installs
+/// regardless of `enforcementMode`, so the mode is left at its default here.
 fn firewall_policy(allow_local: bool) -> ContainerPolicy {
     ContainerPolicy {
         allow_local_network: allow_local,
-        network_enforcement_mode: NetworkEnforcementMode::Firewall,
         ..Default::default()
     }
 }
@@ -116,41 +110,51 @@ fn permissive_inbound_in_a_container_netns_is_refused_not_installed() {
     );
 }
 
-/// NetworkEnforcementMode::Both also uses the firewall path.  The permissive
-/// guard must refuse for Both too.
+/// The refusal must not depend on `enforcementMode`: ingress installs
+/// unconditionally, so `allowLocalNetwork` is refused whatever the mode. This
+/// is the observable form of "the mode is ignored" -- an explicit
+/// `capabilities`, which before this change returned early and skipped the
+/// guard entirely, must now refuse exactly as `firewall` does.
 #[test]
-fn permissive_inbound_in_both_mode_is_refused_not_installed() {
-    let policy = ContainerPolicy {
-        allow_local_network: true,
-        network_enforcement_mode: NetworkEnforcementMode::Both,
-        ..Default::default()
-    };
-    let mut mgr = IngressManager::new("test-container-refused-both", UNOCCUPIABLE_NETNS_PID);
-    let mut logger = make_logger();
+fn permissive_inbound_is_refused_whatever_the_enforcement_mode() {
+    for mode in [
+        NetworkEnforcementMode::Capabilities,
+        NetworkEnforcementMode::Firewall,
+        NetworkEnforcementMode::Both,
+    ] {
+        let mode_label = format!("{mode:?}");
+        let policy = ContainerPolicy {
+            allow_local_network: true,
+            network_enforcement_mode: mode,
+            ..Default::default()
+        };
+        let mut mgr = IngressManager::new("test-container-refused-modes", UNOCCUPIABLE_NETNS_PID);
+        let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, &mut logger);
+        let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
-    assert!(
-        result.is_err(),
-        "allow_local_network=true, mode=Both: expected Err, got {:?}",
-        result
-    );
-    let msg = result.unwrap_err();
-    assert!(
-        msg.contains("not yet implemented"),
-        "mode=Both: message must contain \"not yet implemented\", got: {:?}",
-        msg
-    );
-    assert!(
-        msg.contains("allowLocalNetwork"),
-        "mode=Both: message must contain \"allowLocalNetwork\", got: {:?}",
-        msg
-    );
-    assert!(
-        msg.contains("over-broad accept"),
-        "mode=Both: message must contain \"over-broad accept\", got: {:?}",
-        msg
-    );
+        assert!(
+            result.is_err(),
+            "allow_local_network=true, mode={mode_label}: expected Err, got {:?}",
+            result
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not yet implemented"),
+            "mode={mode_label}: message must contain \"not yet implemented\", got: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("allowLocalNetwork"),
+            "mode={mode_label}: message must contain \"allowLocalNetwork\", got: {:?}",
+            msg
+        );
+        assert!(
+            msg.contains("over-broad accept"),
+            "mode={mode_label}: message must contain \"over-broad accept\", got: {:?}",
+            msg
+        );
+    }
 }
 
 /// A refusal must not mark the manager as having applied rules, because
@@ -211,30 +215,4 @@ fn default_deny_with_netns_is_not_the_permissive_refusal() {
              not exercised.  Re-run on Linux to verify the happy path."
         );
     }
-}
-
-/// allow_local_network=true + NetworkEnforcementMode::Capabilities.
-///
-/// Capabilities mode returns early before the firewall path is entered; the
-/// permissive guard is never reached.  This catches anyone who hoists the guard
-/// above the enforcement-mode gate, which would break every capabilities-mode
-/// config.
-#[test]
-fn permissive_inbound_capabilities_mode_is_not_refused() {
-    let policy = ContainerPolicy {
-        allow_local_network: true,
-        network_enforcement_mode: NetworkEnforcementMode::Capabilities,
-        ..Default::default()
-    };
-    let mut mgr = IngressManager::new("test-container-perm-caps", UNOCCUPIABLE_NETNS_PID);
-    let mut logger = make_logger();
-
-    let result = mgr.apply_firewall_rules(&policy, &mut logger);
-
-    // Capabilities mode returns Ok(true) before the firewall path.
-    assert!(
-        result.is_ok(),
-        "allow_local_network=true, mode=Capabilities: expected early Ok, got {:?}",
-        result
-    );
 }

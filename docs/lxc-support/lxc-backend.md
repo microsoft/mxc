@@ -82,6 +82,49 @@ The `distribution` and `release` fields control which LXC template is used to cr
 | `debian` | `bookworm`, `trixie` | Stable, well-tested |
 | `fedora` | `39`, `40` | Modern packages |
 
+### State-aware lifecycle configuration
+
+The table above describes the **one-shot** surface, where the two fields sit in
+a top-level `lxc` section.  The state-aware lifecycle carries the same two
+fields in the backend's own sub-object instead, under
+`experimental.lxc.provision`, alongside the `provision` phase that consumes
+them:
+
+```json
+{
+    "phase": "provision",
+    "containment": "lxc",
+    "experimental": {
+        "lxc": {
+            "provision": {
+                "distribution": "alpine",
+                "release": "3.23"
+            }
+        }
+    }
+}
+```
+
+`provision` is the only phase that takes LXC-specific configuration.  `start`,
+`exec`, `stop`, and `deprovision` carry no `experimental.lxc` payload — they
+route by the `sandboxId` returned from `provision`, and their cross-cutting
+`filesystem` and `network` policy comes from the top-level sections.
+
+| Rule | Enforced by | Diagnostic when violated |
+|------|-------------|--------------------------|
+| Both `distribution` and `release` are required | runtime | `LXC distribution and release are required` |
+| `experimental.lxc.provision` must be present on the provision phase | runtime | `experimental.lxc.provision with distribution and release is required` |
+| Each field must be a string | schema and parser | ``Invalid configuration at `experimental.lxc.provision.distribution`: invalid type: ... expected a string`` |
+| Only one backend section may appear, and it must match `containment` | runtime | `Multiple containment backends configured: ... Only one backend section is allowed; remove the unused section(s)` |
+
+Both fields are optional in the wire model, exactly as they are in the one-shot
+`lxc` section, so the schema accepts a provision section that omits them and the
+backend is what refuses it.  That split is deliberate: the `experimental` block
+is intentionally permissive and the schema "is an editor/CI convenience, never
+the gate" (`docs/schema-codegen.md`), so requirements that a caller must satisfy
+live in the parser and the backend.  See `docs/versioning.md` for the
+single-backend-section rule and its graduation path.
+
 ### Process Environment and Working Directory
 
 The `process.cwd` and `process.env` fields from the standard schema are honored inside the container:
@@ -111,7 +154,12 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Both halves require `enforcementMode` to be `firewall` or `both`.  Under the default `capabilities` mode, MXC installs no iptables rules at all, so `defaultPolicy`, `allowedHosts`, and `blockedHosts` are parsed but never take effect.
+The egress half is installed whenever the policy requires firewall enforcement:
+`defaultPolicy` is `"block"` (including its default when omitted),
+`allowedHosts` or `blockedHosts` is non-empty, or `proxy` is enabled.  The
+ingress half is installed for every LXC run, regardless of that predicate.  LXC
+accepts `enforcementMode` but ignores its value; it does not disable policy
+enforcement.
 
 Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
@@ -220,13 +268,14 @@ Egress firewall state is torn down automatically with best-effort removal of the
 
 ### Inbound (ingress) policy
 
-Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
+Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory for every run. If MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
-The rows below describe the `firewall` and `both` enforcement modes. `networkEnforcementMode` defaults to `capabilities`, and under that mode the ingress path installs nothing at all — the same gate that skips the egress chains skips this one, so inbound is unfiltered and `allowLocalNetwork: true` is accepted rather than refused. Inbound default-deny is a property of the firewall enforcement modes, not of every LXC run.
+The rows below apply to every LXC run.  Inbound default-deny is unconditional;
+it does not depend on the egress policy or `enforcementMode`.
 
-| Policy (`networkEnforcementMode`: `firewall` or `both`) | Implementation |
+| Network policy | Implementation |
 |--------|---------------|
 | `allowLocalNetwork: false` (default) | Container `INPUT` chain drops new inbound connections |
 | `allowLocalNetwork: true` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
@@ -265,15 +314,8 @@ unreachable and the firewall rule would never match. `{ "builtinTestServer":
 true }` is rejected for the same reason, as is a `url` whose host is a loopback
 literal.
 
-Two further constraints are enforced at parse time, both rejections rather than
-silent corrections:
+One further constraint is enforced at parse time:
 
-- **`enforcementMode` must be `firewall` or `both`.** Under the default
-  `capabilities` mode no iptables rules are installed, so the proxy env vars
-  would be injected while direct egress stayed open — a config that reads as
-  deny-all-except-proxy and enforces neither half. MXC refuses it rather than
-  auto-promoting the mode, so a stated enforcement level is never silently
-  rewritten.
 - **The `url` must not carry credentials.** LXC passes the proxy URL to
   `lxc-attach` as a `--set-var` argument, and process arguments are
   world-readable through `/proc/<pid>/cmdline`, so inline `user:pass@` would be

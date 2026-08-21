@@ -336,7 +336,8 @@ const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
 /// experimental backend sections that don't match the selected
 /// `containment`. Add a new entry when promoting a backend to a top-level
 /// section or graduating one from experimental.
-const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] = &["windows_sandbox", "wslc", "isolation_session"];
+const KNOWN_EXPERIMENTAL_BACKENDS: &[&str] =
+    &["windows_sandbox", "wslc", "isolation_session", "lxc"];
 
 /// Validate that the schema version (semver) is supported by this binary.
 /// Compares major.minor only — patch and pre-release labels are ignored.
@@ -568,9 +569,12 @@ fn validate_experimental_backend_keys(
         return Ok(());
     };
 
-    let matching_key = containment
-        .and_then(|c| c.section_path())
-        .and_then(|path| path.strip_prefix("experimental."));
+    let matching_key = match containment {
+        Some(ContainmentBackend::Lxc) => Some("lxc"),
+        _ => containment
+            .and_then(|c| c.section_path())
+            .and_then(|path| path.strip_prefix("experimental.")),
+    };
 
     let present: Vec<&'static str> = KNOWN_EXPERIMENTAL_BACKENDS
         .iter()
@@ -916,7 +920,7 @@ fn convert_wire_config(
         process_container_network = ac.network;
     }
 
-    // Filesystem section
+    // Filesystem section.
     if let Some(fscfg) = cfg.filesystem {
         if let Some(v) = fscfg.denied_paths {
             policy.denied_paths = v;
@@ -1148,30 +1152,6 @@ fn convert_wire_config(
                        HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
                        'network.proxy.builtinTestServer: true' for port-scoped reachability \
                        under deny.";
-            logger.log_line(msg);
-            return Err(WxcError::ConfigParse(msg.to_string()));
-        }
-
-        // LXC is the inverse of the two guards above: it *does* have a
-        // privileged packet-filter layer, and that layer is the only thing that
-        // makes the proxy an exception rather than a suggestion. Under the
-        // default `Capabilities` mode `apply_firewall_rules` installs nothing,
-        // so the runner would inject HTTP(S)_PROXY while leaving direct egress
-        // wide open -- a config that reads as deny-all-except-proxy and
-        // enforces neither half. Reject it rather than auto-promoting, so the
-        // user's stated enforcement is never silently rewritten.
-        if containment == ContainmentBackend::Lxc
-            && policy.network_proxy.is_enabled()
-            && !matches!(
-                policy.network_enforcement_mode,
-                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-            )
-        {
-            let msg = "LXC: network.proxy requires network.enforcementMode='firewall' \
-                       or 'both'. Under the default 'capabilities' mode no iptables \
-                       rules are installed, so the proxy environment variables would be \
-                       injected while direct egress stayed unrestricted -- any client \
-                       that ignores HTTP_PROXY would bypass the proxy entirely.";
             logger.log_line(msg);
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
@@ -3715,10 +3695,10 @@ mod tests {
     #[test]
     fn proxy_accepted_with_lxc() {
         // LXC requires a routable proxy host: localhost/127.0.0.1 is the
-        // container loopback and unreachable, so use network.proxy.url.
-        // A firewall mode is required, because that is what makes the proxy an
-        // exception to deny-all rather than an unenforced suggestion.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"firewall"}}"#;
+        // container loopback and unreachable, so use network.proxy.url. A proxy
+        // makes the policy require the firewall, so LXC installs the rules that
+        // make it an exception to deny-all; no enforcementMode is needed.
+        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -3730,48 +3710,32 @@ mod tests {
     }
 
     #[test]
-    fn proxy_with_lxc_accepts_both_mode() {
-        // 'both' also installs the iptables rules, so it satisfies the guard.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"both"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
+    fn proxy_with_lxc_is_accepted_whatever_the_enforcement_mode() {
+        // The behavior change, seen through the parser: an LXC proxy used to be
+        // rejected unless enforcementMode was firewall/both. It is now accepted
+        // regardless -- omitted, capabilities, firewall, and both all parse to
+        // an enabled proxy, because the proxy alone drives the install.
+        for mode in [
+            r#""enforcementMode":"capabilities","#,
+            r#""enforcementMode":"firewall","#,
+            r#""enforcementMode":"both","#,
+            "",
+        ] {
+            let json = format!(
+                r#"{{"process":{{"commandLine":"x"}},"containment":"lxc","network":{{{}"proxy":{{"url":"http://proxy.example.com:8080"}}}}}}"#,
+                mode
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
 
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert!(req.policy.network_proxy.is_enabled());
-    }
-
-    #[test]
-    fn proxy_with_lxc_and_omitted_enforcement_mode_is_rejected() {
-        // enforcementMode defaults to 'capabilities', under which
-        // apply_firewall_rules installs nothing. Accepting this config would
-        // inject HTTP(S)_PROXY while leaving direct egress unrestricted, so
-        // anything ignoring the environment variables bypasses the proxy.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"}}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
-            "expected the LXC enforcement-mode rejection, got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn proxy_with_lxc_and_explicit_capabilities_mode_is_rejected() {
-        // Stating 'capabilities' explicitly is the same fail-open as omitting
-        // it, so it must be rejected identically rather than read as consent.
-        let json = r#"{"process":{"commandLine":"x"},"containment":"lxc","network":{"proxy":{"url":"http://proxy.example.com:8080"},"enforcementMode":"capabilities"}}"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        assert!(
-            format!("{}", err).contains("network.proxy requires network.enforcementMode"),
-            "expected the LXC enforcement-mode rejection, got: {}",
-            err
-        );
+            let req = load_request(&encoded, &mut logger, true).unwrap_or_else(|err| {
+                panic!("an LXC proxy must be accepted (mode fragment {mode:?}), got: {err}")
+            });
+            assert!(
+                req.policy.network_proxy.is_enabled(),
+                "mode fragment {mode:?}: the proxy must be enabled"
+            );
+        }
     }
 
     // The credential guard runs after `convert_wire_proxy`, so a
@@ -6451,6 +6415,33 @@ mod tests {
             msg.contains("experimental.wslc"),
             "error did not name the foreign section: {msg}"
         );
+    }
+
+    #[test]
+    fn state_aware_lxc_experimental_backend_key_is_accepted() {
+        let json = r#"{
+            "phase": "provision",
+            "containment": "lxc",
+            "experimental": {
+                "lxc": {"provision": {"distribution": "alpine", "release": "3.20"}}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let req = load_mxc_request(&encoded, &mut logger, true)
+            .expect("state-aware lxc config should parse");
+        match req {
+            MxcRequest::StateAware(p) => {
+                assert_eq!(p.phase, Phase::Provision);
+                assert_eq!(p.containment, Some(ContainmentBackend::Lxc));
+                assert!(p
+                    .experimental_raw
+                    .as_ref()
+                    .and_then(|v| v.get("lxc"))
+                    .is_some());
+            }
+            other => panic!("expected state-aware request, got {other:?}"),
+        }
     }
 
     // ---- Abstract-intent coverage ----

@@ -1,0 +1,12 @@
+{
+  "phase": "provision",
+  "containment": "lxc",
+  "experimental": {
+    "lxc": {
+      "provision": { "distribution": "alpine", "release": "3.23" }
+    },
+    "wslc": {
+      "provision": { "image": "ubuntu-24.04" }
+    }
+  }
+}

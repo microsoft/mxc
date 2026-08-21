@@ -180,6 +180,21 @@ jobs:
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
+      # LXC enforces network policy from the policy itself, and the default is
+      # deny-all, so every LXC run installs an egress chain even when the
+      # request carries no network section.  A bridged veth only reaches
+      # FORWARD while br_netfilter delivers bridged packets to iptables, and
+      # without it the backend refuses to report success for a policy it cannot
+      # enforce, so every LXC test fails at the backend probe.
+      - name: Enable bridge netfilter
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
         shell: bash

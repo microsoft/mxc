@@ -253,6 +253,7 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
         wslc: wslc.into_option().map(convert_wslc),
         isolation_session: None,
+        lxc: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
     }

@@ -1,0 +1,17 @@
+{
+  "phase": "provision",
+  "containment": "lxc",
+  "filesystem": {
+    "readonlyPaths": [
+      "/tmp/mxc_lxc_sa_ro"
+    ]
+  },
+  "experimental": {
+    "lxc": {
+      "provision": {
+        "distribution": "alpine",
+        "release": "3.23"
+      }
+    }
+  }
+}

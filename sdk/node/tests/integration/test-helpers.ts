@@ -277,6 +277,15 @@ export async function probeStateAwareRuntime<C extends StateAwareContainmentBack
           });
           return result.sandboxId;
         }
+        // lxc is not experimental, and its provision config has required
+        // members, so unlike the other arms it must pass one.
+        case 'lxc': {
+          const result = await provisionSandbox('lxc', {
+            distribution: 'alpine',
+            release: '3.23',
+          });
+          return result.sandboxId;
+        }
         default: {
           const unhandled: never = backend;
           throw new Error(`probeStateAwareRuntime: unhandled backend ${String(unhandled)}`);

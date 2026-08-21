@@ -77,6 +77,10 @@ run_test "LXC Network Bridge Fail-Closed" "$SCRIPT_DIR/run_lxc_network_bridge_fa
 run_test "LXC Inbound Default-Deny" "$SCRIPT_DIR/run_lxc_inbound_deny_test.sh"
 run_test "LXC Timeout" "$SCRIPT_DIR/run_lxc_timeout_test.sh"
 run_test "LXC Env+Cwd" "$SCRIPT_DIR/run_lxc_env_cwd_test.sh"
+run_test "LXC State-Aware Lifecycle" "$SCRIPT_DIR/run_lxc_state_aware_test.sh"
+run_test "LXC State-Aware Network Matrix" "$SCRIPT_DIR/run_lxc_state_aware_network_test.sh"
+run_test "LXC Conflicting Backends" "$SCRIPT_DIR/run_lxc_conflicting_backends_test.sh"
+run_test "LXC Experimental Provision Fields" "$SCRIPT_DIR/run_lxc_experimental_provision_fields_test.sh"
 
 echo "================================"
 echo "Results: $PASSED passed, $FAILED failed, $SKIPPED skipped"

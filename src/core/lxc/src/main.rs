@@ -6,10 +6,13 @@ use std::process;
 use std::time::Instant;
 
 use clap::Parser;
-use wxc_common::config_parser::load_request;
+use wxc_common::config_parser::{load_mxc_request, ParseError};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
+use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::handle_dry_run_exit;
+use wxc_common::state_aware_dispatch::DispatchOutcome;
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 use lxc_common::signal_cleanup;
@@ -95,9 +98,22 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
 
     let container = LxcContainer::new(name, None);
 
-    if !container.is_defined() {
-        logger.log_line(&format!("Container '{}' does not exist.", name));
-        return false;
+    match container.is_defined() {
+        Ok(true) => {}
+        Ok(false) => {
+            logger.log_line(&format!("Container '{}' does not exist.", name));
+            return false;
+        }
+        Err(e) => {
+            // An unanswered probe is not an answer of "absent".  The caller
+            // asked for the container to be gone, so try the destroy and let
+            // its outcome be the report rather than leaving a container behind
+            // on the strength of a question we could not ask.
+            logger.log_line(&format!(
+                "Could not determine whether container '{}' exists ({}); attempting delete anyway.",
+                name, e
+            ));
+        }
     }
 
     match container.destroy() {
@@ -110,6 +126,60 @@ fn delete_lxc_container(name: &str, logger: &mut Logger) -> bool {
             false
         }
     }
+}
+
+fn run_state_aware_main(
+    mut parsed: ParsedStateAwareRequest,
+    dry_run: bool,
+    experimental: bool,
+    testing_features: bool,
+    logger: &mut Logger,
+) -> ! {
+    parsed.request.experimental_enabled = experimental;
+    parsed.request.testing_features_enabled = testing_features;
+    parsed.request.dry_run = dry_run;
+
+    // Shares the `wxc` executor's telemetry / correlation-vector orchestration
+    // rather than calling dispatch directly, so a Linux lifecycle emits the same
+    // events, carries the same MS-CV, and installs the same crash hook.
+    let outcome = mxc_engine::run_state_aware_with_telemetry(parsed, dry_run, experimental, logger);
+
+    // Mirrors the wxc executor: on dispatch failure the error goes only to the
+    // auxiliary diagnostic sinks (log file / diagnostic pipe), never the primary
+    // buffer/stderr, so the client-facing error envelope below is not shadowed
+    // by a duplicate.
+    if let Err(error) = &outcome {
+        logger.log_diagnostic_line(&error.to_string());
+    }
+
+    let buffered = logger.get_buffer().to_string();
+    if !buffered.is_empty() {
+        eprint!("{}", buffered);
+    }
+    match outcome {
+        Ok(DispatchOutcome::Envelope(value)) => {
+            println!("{}", value);
+            process::exit(0);
+        }
+        Ok(DispatchOutcome::ExecCompleted { exit_code }) => process::exit(exit_code),
+        Err(e) => {
+            println!("{}", error_envelope_string(&e));
+            process::exit(1);
+        }
+    }
+}
+
+/// Serialise `error` to its JSON response-envelope string, including the
+/// last-resort fallback for when the envelope itself fails to serialise.
+///
+/// Every caller writes it to stdout, which the cross-backend contract (§7.3)
+/// reserves for the response envelope in every phase.
+fn error_envelope_string(error: &MxcError) -> String {
+    let envelope: ResponseEnvelope<()> = ResponseEnvelope::from_error(error);
+    serde_json::to_string(&envelope).unwrap_or_else(|_| {
+        r#"{"error":{"code":"backend_error","message":"failed to serialise error envelope"}}"#
+            .to_string()
+    })
 }
 
 fn main() {
@@ -168,11 +238,14 @@ fn main() {
         (String::new(), false)
     };
 
-    let mut logger = Logger::new(if cli.debug {
-        Mode::Console
-    } else {
-        Mode::Buffer
-    });
+    // Always buffered until the request is parsed. `--debug` selects console
+    // logging, which writes diagnostics straight to stdout -- but a state-aware
+    // request needs stdout to carry nothing but its JSON envelope, and config
+    // parsing emits warnings (overlapping path lists, a mount path missing on
+    // the host) through this logger before the phase is even known. Promoting
+    // to console only on the one-shot branch keeps `{ debug: true }` from
+    // corrupting the state-aware channel.
+    let mut logger = Logger::new(Mode::Buffer);
 
     if let Some(ref log_path) = cli.log_file {
         if let Err(e) = logger.enable_file_sink(std::path::Path::new(log_path)) {
@@ -195,14 +268,36 @@ fn main() {
     }
 
     // Load request
-    let mut request = match load_request(&config_data, &mut logger, is_base64) {
-        Ok(r) => r,
-        Err(_) => {
+    let request = match load_mxc_request(&config_data, &mut logger, is_base64) {
+        Ok(MxcRequest::OneShot(req)) => {
+            // One-shot owns stdout outright, so `--debug` streams there as it
+            // always has. Flush what was buffered while the phase was still
+            // unknown so the switch costs no output.
+            if cli.debug {
+                let buffered = logger.promote_to_console();
+                print!("{}", buffered);
+            }
+            req
+        }
+        Ok(MxcRequest::StateAware(parsed)) => run_state_aware_main(
+            parsed,
+            cli.dry_run,
+            cli.experimental,
+            cli.allow_testing_features,
+            &mut logger,
+        ),
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(e)) => {
+            println!("{}", error_envelope_string(&e));
+            eprint!("{}", logger.get_buffer());
             process::exit(1);
         }
     };
 
+    let mut request = request;
     request.experimental_enabled = cli.experimental;
     request.testing_features_enabled = cli.allow_testing_features;
     request.dry_run = cli.dry_run;

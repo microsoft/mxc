@@ -443,6 +443,87 @@ describe('execInSandboxAsync', { skip: platformSkip }, () => {
     );
   });
 
+  it('throws the typed MxcError on an LXC dispatch failure with diagnostics on stderr', async () => {
+    // Channel separation, per the cross-backend contract (§7.3): the executor
+    // flushes its buffered diagnostics to stderr and writes exactly one
+    // envelope to stdout. stderr is informational and is never parsed, so the
+    // buffer cannot shadow the envelope no matter how many lines it runs to.
+    const fake = fakeSpawn({
+      stdout: '{"error":{"code":"not_started","message":"sandbox is not started"}}\n',
+      stderr: 'lxc: preparing container\nlxc: policy validated\n',
+      exitCode: 1,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:prov-1' as SandboxId<'lxc'>;
+    await assert.rejects(
+      () => execInSandboxAsync(id, { process: { commandLine: 'echo' } }, testOptions()),
+      (err: unknown) => err instanceof MxcError && err.code === 'not_started',
+    );
+  });
+
+  it('returns an ExecResult when a script is killed by its timeout after streaming output', async () => {
+    // Characterization, not an endorsement. §7.3 models exec as "either the
+    // script's output (success) or exactly one envelope (failure)", but a
+    // timeout is a dispatch failure raised *after* the script has streamed, so
+    // stdout holds both and whole-string parsing matches neither. The caller
+    // still sees a nonzero exit, but not the typed reason for it.
+    //
+    // Every state-aware backend shares this: the executors all write the
+    // envelope to the same stdout the guest streamed to. Pinning it here means
+    // closing the contract gap has to be a deliberate change, not a silent one.
+    const fake = fakeSpawn({
+      stdout:
+        'partial output before the kill\n' +
+        '{"error":{"code":"backend_error","message":"Execution failed: script timed out after 5000ms"}}\n',
+      stderr: 'diagnostic: attaching to container\n',
+      exitCode: 3,
+    });
+    _setSpawnImpl(fake.spawn);
+    const id = 'lxc:abc' as SandboxId<'lxc'>;
+    const result = await execInSandboxAsync(
+      id,
+      { process: { commandLine: 'slow' } },
+      testOptions(),
+    );
+    assert.strictEqual(result.exitCode, 3);
+  });
+
+  it('does not read stderr as an envelope for backends that relay the guest there', async () => {
+    // The stderr fallback rests on LXC merging guest stderr into stdout, and
+    // that reasoning is backend-specific. Windows Sandbox forwards guest
+    // FrameKind::Stderr frames straight to this stream
+    // (backends/windows_sandbox/lifecycle/src/state_aware.rs:408-414), and the
+    // isolation-session exec relays the guest to wxc-exec's own stdout and
+    // stderr. On both, the last stderr line can be the script's own -- so a
+    // script that ends with envelope-shaped stderr and exits nonzero would be
+    // turned into a thrown MxcError rather than the result it actually is.
+    const stderrLookingLikeADispatchFailure =
+      '{"error":{"code":"not_started","message":"the script printed this itself"}}\n';
+
+    for (const id of [
+      'wsb:abc' as SandboxId<'windows_sandbox'>,
+      'iso:abc' as SandboxId<'isolation_session'>,
+    ]) {
+      const fake = fakeSpawn({
+        stdout: 'script output\n',
+        stderr: stderrLookingLikeADispatchFailure,
+        exitCode: 7,
+      });
+      _setSpawnImpl(fake.spawn);
+      const result = await execInSandboxAsync(
+        id as SandboxId<'windows_sandbox'>,
+        { process: { commandLine: 'noisy' } },
+        testOptions(),
+      );
+      assert.strictEqual(
+        result.exitCode,
+        7,
+        `${id} must return the script's result, not throw its stderr as a dispatch failure`,
+      );
+      assert.strictEqual(result.stderr, stderrLookingLikeADispatchFailure);
+    }
+  });
+
   it('closes the child stdin so a stdin-reading command sees EOF instead of hanging', async () => {
     // Regression for the buffered-exec hang: the Rust state-aware path waits
     // for stdin EOF before closing guest stdin, so spawnAndCollect must end()

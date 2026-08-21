@@ -20,13 +20,14 @@ export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
+export const CROSS_CUTTING_FIELDS = ['containerId', 'filesystem', 'network', 'ui', 'process'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
 // `sandboxId` produced by that backend. Each future state-aware backend
 // declares its own `<BACKEND>_ID_PREFIX` const here.
 export const ISOLATION_SESSION_ID_PREFIX = 'iso';
+export const LXC_ID_PREFIX = 'lxc';
 export const WINDOWS_SANDBOX_ID_PREFIX = 'wsb';
 export const WSLC_ID_PREFIX = 'wslc';
 
@@ -36,6 +37,7 @@ export const WSLC_ID_PREFIX = 'wslc';
 // global constant.
 const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> = {
   isolation_session: STATE_AWARE_VERSION,
+  lxc: STATE_AWARE_VERSION,
   windows_sandbox: STATE_AWARE_VERSION,
   wslc: WSLC_STATE_AWARE_VERSION,
 };
@@ -48,6 +50,7 @@ const DEFAULT_STATE_AWARE_VERSION: Record<StateAwareContainmentBackend, string> 
 // `malformed_id`.
 export const BACKEND_TO_PREFIX: Record<StateAwareContainmentBackend, string> = {
   isolation_session: ISOLATION_SESSION_ID_PREFIX,
+  lxc: LXC_ID_PREFIX,
   windows_sandbox: WINDOWS_SANDBOX_ID_PREFIX,
   wslc: WSLC_ID_PREFIX,
 };

@@ -1,0 +1,15 @@
+{
+  "phase": "provision",
+  "containment": "lxc",
+  "network": {
+    "defaultPolicy": "block"
+  },
+  "experimental": {
+    "lxc": {
+      "provision": {
+        "distribution": "alpine",
+        "release": "3.23"
+      }
+    }
+  }
+}

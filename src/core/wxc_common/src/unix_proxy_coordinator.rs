@@ -368,8 +368,8 @@ impl UnixProxyCoordinator {
 impl Drop for UnixProxyCoordinator {
     /// Silent best-effort cleanup if the coordinator is still active at
     /// drop time. **Never** writes to stderr or `Logger` because the drop
-    /// may run during panic unwinding and we must not corrupt the JSON
-    /// envelope on `lxc-exec`'s stderr.
+    /// may run during panic unwinding and we must not corrupt `lxc-exec`'s
+    /// JSON envelope.
     fn drop(&mut self) {
         if let Some(mut tp) = self.test_proxy.take() {
             let pid = tp.child.id();

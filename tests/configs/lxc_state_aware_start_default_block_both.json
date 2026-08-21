@@ -1,0 +1,8 @@
+{
+  "phase": "start",
+  "sandboxId": "__SANDBOX_ID__",
+  "network": {
+    "defaultPolicy": "block",
+    "enforcementMode": "both"
+  }
+}

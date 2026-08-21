@@ -968,10 +968,8 @@ describe('createConfigFromPolicy', () => {
     });
 
     it('should force enforcementMode=firewall when host filtering is requested', () => {
-      // The LXC runner only invokes iptables when network_enforcement_mode is
-      // Firewall|Both (see lxc_common::network_iptables). Without this stamp,
-      // the parser would default to Capabilities and allowedHosts/blockedHosts
-      // would be silently dropped on the floor.
+      // The stamp stays for parity with the other Linux backends; LXC now
+      // enforces from the policy, so it is no longer load-bearing here.
       const config = createConfigFromPolicy({
         version: '0.6.0-alpha',
         network: { allowOutbound: true, allowedHosts: ['example.com'] },

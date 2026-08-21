@@ -57,7 +57,7 @@
 use std::process::Command;
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ContainerPolicy, NetworkEnforcementMode};
+use wxc_common::models::ContainerPolicy;
 
 use crate::network_iptables::{
     ingress_chain_name_for, HostIpv6State, Ip6tablesStatus, NetworkIptablesManager,
@@ -158,7 +158,7 @@ pub struct IngressManager {
     /// `/proc/<pid>/net/if_inet6`, which names the same namespace by PID
     /// without entering it. A caller that cannot supply a PID must not
     /// construct an `IngressManager` at all. See `lxc_runner`, which aborts the
-    /// run when a firewall mode is requested but no init PID can be found.
+    /// run when no init PID can be found.
     netns_pid: u32,
     /// Per-resource ownership. What we actually created or hooked, tracked
     /// separately per family, so teardown attempts only the operations this run
@@ -505,17 +505,8 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // Skip if network enforcement doesn't use a firewall.
-        let use_firewall = matches!(
-            policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
-        if !use_firewall {
-            logger.log_line(
-                "Network enforcement mode does not use firewall, skipping ingress chain.",
-            );
-            return Ok(true);
-        }
+        // Gating this on the egress policy would stop installing an inbound
+        // deny for a permissive-egress config that gets one today.
 
         // Permissive host-loopback inbound (`allowLocalNetwork: true`) is not
         // yet implementable safely. Scoping it to host loopback needs a schema
@@ -675,9 +666,9 @@ impl IngressManager {
     /// Instead we *force* a known state: remove every INPUT reference (there
     /// may be more than one), then flush and delete any existing chain. This
     /// reuses the same over-approximating teardown planner and executor as
-    /// `force_cleanup` ("assume everything might exist"), so install-time reset
-    /// and ownership teardown share one shape. A genuinely absent rule or chain
-    /// is a no-op; any real failure aborts install fail-closed.
+    /// ownership teardown ("assume everything might exist"), so install-time
+    /// reset and ownership teardown share one shape. A genuinely absent rule or
+    /// chain is a no-op; any real failure aborts install fail-closed.
     fn reset_family(
         &mut self,
         family: IpFamily,
@@ -1006,47 +997,6 @@ impl IngressManager {
             StepKind::Flush => {}
             StepKind::Delete => self.clear_created(step.family),
         }
-    }
-
-    /// Best-effort cleanup of iptables state when the owning [`IngressManager`]
-    /// instance isn't reachable (e.g. signal-time cleanup from the watchdog
-    /// thread). We do not know which resources a prior run installed, so this
-    /// assumes all of them and lets teardown over-approximate: a genuinely
-    /// absent chain or hook is treated as an already-removed no-op. The caller
-    /// supplies the container's init PID, which it only has while the netns
-    /// still exists — once the container is gone there is nothing to remove, so
-    /// the caller simply does not call this. The result is ignored: this path is
-    /// best-effort by nature.
-    pub fn force_cleanup(container_name: &str, netns_pid: u32, logger: &mut Logger) {
-        let mut runner = NsenterRunner;
-        Self::force_cleanup_with(container_name, netns_pid, &mut runner, logger);
-    }
-
-    /// The body of [`Self::force_cleanup`] against an injectable
-    /// [`CommandRunner`] — the real path passes [`NsenterRunner`]; tests pass a
-    /// runner that captures the planned argv without spawning. Constructs the
-    /// over-approximating manager and runs teardown; the result is ignored
-    /// because this path is best-effort by nature.
-    fn force_cleanup_with(
-        container_name: &str,
-        netns_pid: u32,
-        runner: &mut dyn CommandRunner,
-        logger: &mut Logger,
-    ) {
-        let mut mgr = Self::for_full_reset(container_name, netns_pid);
-        let _ = mgr.remove_firewall_rules_with(runner, logger);
-    }
-
-    /// A manager that assumes every resource might exist, for over-approximating
-    /// cleanup where we do not know what a dead run installed. Used by
-    /// [`Self::force_cleanup`].
-    fn for_full_reset(container_name: &str, netns_pid: u32) -> Self {
-        let mut mgr = Self::new(container_name, netns_pid);
-        mgr.v4_chain_created = true;
-        mgr.v6_chain_created = true;
-        mgr.v4_hooked = true;
-        mgr.v6_hooked = true;
-        mgr
     }
 
     /// Build the full argv for running `binary args...` inside this container's
@@ -1879,12 +1829,12 @@ mod tests {
         );
     }
 
-    /// A firewall-mode policy with `allowLocalNetwork: true`.
-    fn permissive_firewall_policy() -> ContainerPolicy {
+    /// A policy with `allowLocalNetwork: true`. Ingress ignores
+    /// `enforcementMode`, so the mode is left at its default.
+    fn permissive_policy() -> ContainerPolicy {
         ContainerPolicy {
             allow_local_network: true,
             default_network_policy: NetworkPolicy::Block,
-            network_enforcement_mode: NetworkEnforcementMode::Firewall,
             ..Default::default()
         }
     }
@@ -1900,7 +1850,7 @@ mod tests {
         // The PID value is irrelevant: the refusal precedes every use of it.
         for pid in [1u32, 42u32, 999_999u32] {
             let mut mgr = IngressManager::new("permissive-container", pid);
-            let result = mgr.apply_firewall_rules(&permissive_firewall_policy(), &mut logger);
+            let result = mgr.apply_firewall_rules(&permissive_policy(), &mut logger);
             assert!(
                 result.is_err(),
                 "allowLocalNetwork: true must be refused (pid={pid})"
@@ -1962,11 +1912,10 @@ mod tests {
         assert_eq!(tail, want, "the wrapped command args must be preserved");
     }
 
-    /// The teardown path (used by `remove_firewall_rules`, `Drop`, and
-    /// `force_cleanup`) must also route every command through `nsenter`, and
-    /// only against the manager's own chain. Assert the actual planned argv
-    /// rather than just the pure helper: a command that skips `nsenter` would
-    /// execute against the host's tables.
+    /// The teardown path (used by `remove_firewall_rules` and `Drop`) must also
+    /// route every command through `nsenter`, and only against the manager's own
+    /// chain. Assert the actual planned argv rather than just the pure helper: a
+    /// command that skips `nsenter` would execute against the host's tables.
     #[test]
     fn teardown_commands_are_nsenter_prefixed_and_chain_scoped() {
         let pid = 4242u32;
@@ -2057,82 +2006,6 @@ mod tests {
         // the real nsenter path.
         mgr.v4_chain_created = false;
         mgr.v4_hooked = false;
-    }
-
-    /// `force_cleanup` must actually run — over the injectable runner — so a
-    /// regression inside it fails this test, and it must plan to remove *all*
-    /// resources (it cannot know what a dead run installed). Assert the real
-    /// commands `force_cleanup_with` issues: every one nsenter-scoped to the
-    /// container netns, naming only our chain, unhook before flush before
-    /// delete, for both families. A no-leftover script (everything reports
-    /// already-absent) lets cleanup complete without error.
-    #[test]
-    fn force_cleanup_removes_all_resources_via_nsenter() {
-        let pid = 9001u32;
-        let container = "force-cleanup-container";
-        let chain = IngressManager::new(container, pid).chain_name().to_string();
-        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-
-        let mut runner = FakeRunner {
-            calls: Vec::new(),
-            respond: |argv: &[String]| match verb(argv) {
-                "-D" => Err(absent_rule()),
-                _ => Err(absent_chain()),
-            },
-        };
-
-        IngressManager::force_cleanup_with(container, pid, &mut runner, &mut logger);
-
-        // Six commands: unhook + flush + delete, per family.
-        assert_eq!(
-            runner.calls.len(),
-            6,
-            "force_cleanup must issue all six teardown commands, got {:?}",
-            runner.calls
-        );
-
-        // Every command is nsenter-scoped and names only our chain.
-        for argv in &runner.calls {
-            assert_eq!(
-                &argv[..4],
-                &[
-                    "nsenter".to_string(),
-                    "-t".to_string(),
-                    pid.to_string(),
-                    "-n".to_string(),
-                ],
-                "force_cleanup command must be nsenter-scoped to the netns: {argv:?}"
-            );
-            assert!(
-                argv[4] == "iptables" || argv[4] == "ip6tables",
-                "force_cleanup command must target a packet-filter binary: {argv:?}"
-            );
-            assert!(
-                argv.iter().any(|a| a == &chain),
-                "force_cleanup command must name our chain '{chain}': {argv:?}"
-            );
-        }
-
-        // Both families are covered.
-        for binary in ["iptables", "ip6tables"] {
-            assert!(
-                runner.calls.iter().any(|a| a[4] == binary),
-                "force_cleanup must cover {binary}"
-            );
-        }
-
-        // Per family: unhook (-D) before flush (-F) before delete (-X).
-        for binary in ["iptables", "ip6tables"] {
-            let idx = |v: &str| {
-                runner
-                    .calls
-                    .iter()
-                    .position(|a| a[4] == binary && verb(a) == v)
-                    .unwrap_or_else(|| panic!("{binary} {v} command missing"))
-            };
-            assert!(idx("-D") < idx("-F"), "{binary}: unhook must precede flush");
-            assert!(idx("-F") < idx("-X"), "{binary}: flush must precede delete");
-        }
     }
 
     /// The pure builder must return the chain *body* and the `INPUT` *hook* as

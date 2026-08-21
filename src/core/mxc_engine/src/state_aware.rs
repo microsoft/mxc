@@ -94,6 +94,11 @@ pub fn run_state_aware(
             let mut runner = isolation_session_common::IsolationSessionRunner::new();
             wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
         }
+        #[cfg(target_os = "linux")]
+        wxc_common::models::ContainmentBackend::Lxc => {
+            let mut runner = lxc_common::state_aware::LxcStateAwareRunner::new();
+            wxc_common::state_aware_dispatch::dispatch_state_aware(&mut runner, parsed, dry_run)
+        }
         #[cfg(all(target_os = "windows", feature = "wslc"))]
         wxc_common::models::ContainmentBackend::Wslc => {
             let mut runner = wslc_common::WslcStateAwareRunner::new();
@@ -150,10 +155,51 @@ pub fn exec_state_aware(
         wxc_common::models::ContainmentBackend::IsolationSession => {
             Err(isolation_session_unavailable())
         }
-        _ => Err(MxcError::unsupported_phase(format!(
-            "backend {:?} does not implement the state-aware lifecycle",
-            backend
-        ))),
+        _ => Err(exec_unsupported_error(&backend)),
+    }
+}
+
+/// The error returned when a backend cannot serve a **streaming** exec.
+///
+/// Two distinct situations reach here and the caller needs to tell them apart:
+///
+/// - The backend has no state-aware lifecycle at all, so nothing about it works
+///   through these APIs.
+/// - The backend does implement the lifecycle ([`run_state_aware`] dispatches
+///   provision/start/exec/stop/deprovision for it) but has no streaming
+///   [`SandboxProcess`], so only this one API is unavailable.
+///
+/// LXC is the second case. Reporting it as "does not implement the state-aware
+/// lifecycle" sent callers off to debug a provision path that works fine, so
+/// the message names the real gap and points at the API that does work.
+fn exec_unsupported_error(backend: &wxc_common::models::ContainmentBackend) -> MxcError {
+    if backend_has_state_aware_lifecycle(backend) {
+        MxcError::unsupported_phase(format!(
+            "backend {backend:?} implements the state-aware lifecycle but not streaming exec; \
+             use the non-streaming exec phase instead"
+        ))
+    } else {
+        MxcError::unsupported_phase(format!(
+            "backend {backend:?} does not implement the state-aware lifecycle"
+        ))
+    }
+}
+
+/// Whether `backend` has a `StatefulSandboxBackend` impl wired into
+/// [`run_state_aware`] on this target. Kept next to that `match` so the two stay
+/// in step — a backend added there without being added here would be described
+/// by the wrong error.
+fn backend_has_state_aware_lifecycle(backend: &wxc_common::models::ContainmentBackend) -> bool {
+    match backend {
+        #[cfg(target_os = "windows")]
+        wxc_common::models::ContainmentBackend::WindowsSandbox => true,
+        #[cfg(all(target_os = "windows", feature = "isolation_session"))]
+        wxc_common::models::ContainmentBackend::IsolationSession => true,
+        #[cfg(all(target_os = "windows", feature = "wslc"))]
+        wxc_common::models::ContainmentBackend::Wslc => true,
+        #[cfg(target_os = "linux")]
+        wxc_common::models::ContainmentBackend::Lxc => true,
+        _ => false,
     }
 }
 
@@ -396,6 +442,32 @@ mod tests {
 
         assert_eq!(error.code, MxcErrorCode::BackendUnavailable);
         assert!(error.message.contains("experimental"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn exec_error_distinguishes_missing_streaming_from_missing_lifecycle() {
+        // LXC dispatches the lifecycle but has no streaming SandboxProcess. The
+        // old blanket message sent callers off to debug a provision path that
+        // works, so the two cases must read differently.
+        let lxc = exec_unsupported_error(&ContainmentBackend::Lxc);
+        assert_eq!(lxc.code, MxcErrorCode::UnsupportedPhase);
+        assert!(
+            lxc.message.contains("not streaming exec"),
+            "expected the streaming-specific message, got {:?}",
+            lxc.message
+        );
+        assert!(!lxc.message.contains("does not implement"));
+
+        let bwrap = exec_unsupported_error(&ContainmentBackend::Bubblewrap);
+        assert_eq!(bwrap.code, MxcErrorCode::UnsupportedPhase);
+        assert!(
+            bwrap
+                .message
+                .contains("does not implement the state-aware lifecycle"),
+            "expected the no-lifecycle message, got {:?}",
+            bwrap.message
+        );
     }
 
     #[test]
