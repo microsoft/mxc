@@ -22,6 +22,9 @@ use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
 /// low-cardinality and free of call parameters so it can be grouped in
 /// telemetry.
 pub(super) mod op {
+    pub(crate) const CO_INCREMENT_MTA_USAGE: &str = "Com.CoIncrementMTAUsage";
+    pub(crate) const CO_GET_APARTMENT_TYPE: &str = "Com.CoGetApartmentType";
+
     pub(crate) const ACTIVATE: &str = "IsoSessionOps.ActivateInstance";
     /// The app-scoped provisioning overload, preferred when the host advertises
     /// `IsoSessionFeature::AppScopedRegistration`.
@@ -280,6 +283,26 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
         Some(message),
         None,
     ))
+}
+
+/// The refusal for a caller already in a single-threaded apartment.
+///
+/// The operation and HRESULT are synthetic: the apartment query succeeded, and
+/// no API returned this code.
+pub(super) fn sta_refusal(code: u32) -> IsolationSessionError {
+    IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
+        op::CO_GET_APARTMENT_TYPE,
+        Some(code),
+        Some(
+            "this thread is in a single-threaded apartment, where the lifecycle deadlocks"
+                .to_string(),
+        ),
+        Some(
+            "Call from a multi-threaded apartment; a UI application must marshal this onto a \
+             background thread."
+                .to_string(),
+        ),
+    )))
 }
 
 /// Whether an `ERROR_NOT_FOUND` from this operation means "the sandbox is
@@ -809,6 +832,8 @@ mod tests {
     #[test]
     fn operation_constants_are_qualified_and_parameter_free() {
         for value in [
+            op::CO_INCREMENT_MTA_USAGE,
+            op::CO_GET_APARTMENT_TYPE,
             op::ACTIVATE,
             op::ADD_USER,
             op::START_SESSION,
@@ -826,7 +851,8 @@ mod tests {
         ] {
             assert!(
                 value.starts_with("IsoSessionOps.")
-                    || value.starts_with("IsoSessionProcessOptions."),
+                    || value.starts_with("IsoSessionProcessOptions.")
+                    || value.starts_with("Com."),
                 "unqualified: {value}"
             );
             assert!(!value.contains('('), "carries parameters: {value}");
