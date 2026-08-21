@@ -106,7 +106,7 @@ any — it actually enforces; a backend that hasn't declared support for a
 given field rejects a config that sets it. **Seatbelt (macOS) is currently
 the only backend with that support implemented** (`EGRESS_DEFAULT`,
 `INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` — see
-[`docs/macos-support/seatbelt-backend.md`](macos-support/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy));
+[`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy));
 other backends are expected to add their own declarations as separate
 follow-up work. On Seatbelt, `runtimeConfig.networkProxy` covers only the
 loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);

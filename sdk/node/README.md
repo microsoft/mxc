@@ -204,7 +204,7 @@ console.log(result.stdout);
 | `processcontainer` | `process` | Windows | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
 | `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
 | `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
-| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |
+| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |

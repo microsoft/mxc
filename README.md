@@ -278,7 +278,7 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
-| [docs/macos-support/seatbelt-backend.md](docs/macos-support/seatbelt-backend.md) | Seatbelt backend (macOS) |
+| [docs/seatbelt/seatbelt-backend.md](docs/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |
 | [docs/windows-sandbox/windows-sandbox.md](docs/windows-sandbox/windows-sandbox.md) | Windows Sandbox backend |
 | [docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md](docs/state-aware-lifecycle/mxc-state-aware-sandbox-api.md) | State-aware sandbox lifecycle API |
 | [docs/telemetry/telemetry.md](docs/telemetry/telemetry.md) | TraceLogging telemetry architecture |

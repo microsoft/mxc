@@ -1223,21 +1223,24 @@ mod tests {
         }
     }
 
-    // Mirror the TypeScript SDK by accepting `allowedHosts` with or without
-    // `allowOutbound`, even though Seatbelt cannot enforce the host list.
+    // Seatbelt has no per-host filtering primitive, so an allowlist under a
+    // deny default is unenforceable and is rejected rather than silently
+    // degraded to allow-all outbound.
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_allowed_hosts_without_outbound_is_accepted() {
-        // The SDK accepts allowedHosts without allowOutbound on Seatbelt, so the
-        // Rust port must too (the guard only applies to Windows ProcessContainer).
+    fn macos_allowed_hosts_without_outbound_is_rejected() {
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         });
+        let err = build_request(&policy, None).expect_err(
+            "macOS must reject an unenforceable allowlist under a deny default \
+             rather than silently allowing all outbound",
+        );
         assert!(
-            build_request(&policy, None).is_ok(),
-            "macOS must accept allowedHosts without allowOutbound, matching the SDK"
+            format!("{err}").contains("allowedHosts cannot be combined with defaultPolicy='block'"),
+            "unexpected error message: {err}"
         );
     }
 

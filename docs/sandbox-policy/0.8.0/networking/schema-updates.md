@@ -143,4 +143,4 @@ Backend-specific migration can require an additional acknowledgment without chan
 | Backend | Configuration |
 |---|---|
 | ProcessContainer | [Schema 0.8 proxy configuration](../../../process-container/examples/0.8.0-schema.md) |
-| Seatbelt (macOS) | [Schema 0.8 configuration](../../../macos-support/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)
+| Seatbelt (macOS) | [Schema 0.8 configuration](../../../seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)

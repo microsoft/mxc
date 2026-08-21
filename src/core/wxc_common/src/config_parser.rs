@@ -1175,6 +1175,38 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
+        // Seatbelt has no per-host network primitive: the sandbox profile's
+        // `(remote ...)` filter accepts only `*` / `localhost`, so a hostname
+        // allowlist cannot be expressed at all. Under a deny default that makes
+        // `allowedHosts` a fail-open -- the caller asked for "deny everything
+        // except these hosts" and the only expressible approximations are
+        // allow-all (the inverse of the request) or deny-all (silently dropping
+        // the allowlist). `blockedHosts` is already rejected outright by the
+        // runner for exactly this reason; this closes the `allowedHosts` half.
+        //
+        // The one configuration that can still honor a host list is the MXC-run
+        // builtin test proxy, which filters hosts itself (see
+        // `UnixProxyCoordinator::start`) while the profile keeps its deny
+        // baseline plus a port-scoped reachability rule for the proxy. Host
+        // lists are NOT forwarded to an external (`url` / `localhost`) proxy,
+        // so that form stays rejected -- mirroring the Bubblewrap guard below.
+        if containment == ContainmentBackend::Seatbelt
+            && !policy.allowed_hosts.is_empty()
+            && policy.default_network_policy == NetworkPolicy::Block
+            && !policy.network_proxy.builtin_test_server
+        {
+            let msg = "Seatbelt: allowedHosts cannot be combined with \
+                       defaultPolicy='block'. macOS Seatbelt has no per-host network \
+                       filtering primitive, so the allowlist cannot be enforced and \
+                       would degrade to allow-all outbound -- the inverse of the \
+                       requested policy. Use 'network.proxy.builtinTestServer: true' \
+                       (testing only) for MXC-enforced host filtering, remove \
+                       allowedHosts to keep the deny, or use defaultPolicy='allow' if \
+                       unrestricted egress is intended.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
         // LXC is the inverse of the two guards above: it *does* have a
         // privileged packet-filter layer, and that layer is the only thing that
         // makes the proxy an exception rather than a suggestion. Under the
@@ -3175,7 +3207,12 @@ mod tests {
 
     #[test]
     fn network_hosts() {
+        // Pinned to processcontainer: this covers generic host-list parsing,
+        // and the platform-default containment on macOS (Seatbelt) rejects
+        // allowedHosts under the default 'block' policy since it has no
+        // per-host filtering primitive.
         let json = r#"{
+            "containment": "processcontainer",
             "process": {"commandLine": "print('test')"},
             "network": {
                 "allowedHosts": ["example.com", "api.trusted.com"],
@@ -4202,6 +4239,100 @@ mod tests {
             "unexpected error message: {}",
             msg
         );
+    }
+
+    #[test]
+    fn allowed_hosts_with_seatbelt_and_default_block_is_rejected() {
+        // Seatbelt has no per-host filtering primitive, so an allowlist under a
+        // deny default cannot be enforced and previously degraded to allow-all
+        // outbound — the inverse of the requested policy.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Seatbelt: allowedHosts cannot be combined with defaultPolicy='block'"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn allowed_hosts_with_seatbelt_and_builtin_test_proxy_is_accepted() {
+        // The builtin test proxy filters the host list itself, so the
+        // combination is enforceable and stays accepted.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "proxy": {"builtinTestServer": true}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
+        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
+    }
+
+    #[test]
+    fn allowed_hosts_with_seatbelt_and_external_proxy_is_rejected() {
+        // Host lists are not forwarded to an external proxy (see
+        // UnixProxyCoordinator::start), so this shape is unenforceable too.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "block",
+                "allowedHosts": ["api.github.com"],
+                "proxy": {"localhost": 8080}
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let err = load_request(&encoded, &mut logger, true).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("Seatbelt: allowedHosts cannot be combined with defaultPolicy='block'"),
+            "unexpected error message: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn allowed_hosts_with_seatbelt_and_default_allow_is_accepted() {
+        // Under 'allow' the allowlist is a no-op superset of the stated
+        // default, not a weakening, so it stays accepted.
+        let json = r#"{
+            "version": "0.7.0-alpha",
+            "containment": "seatbelt",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "defaultPolicy": "allow",
+                "allowedHosts": ["api.github.com"]
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
     }
 
     #[test]

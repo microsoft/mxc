@@ -292,18 +292,33 @@ fn write_network_rules(
                 write_proxy_reachability_rules(out, address);
             }
         }
+        (false, true) => {
+            // An allowlist under a deny default must never *widen* the posture
+            // to allow-all: that would be the inverse of the requested policy.
+            // `config_parser` rejects this combination outright unless the
+            // MXC-run builtin test proxy is in play, in which case the proxy
+            // itself enforces the host list and the profile's job is just to
+            // keep the deny baseline plus port-scoped proxy reachability, so
+            // the proxy is the only egress path.
+            out.push_str(";; --- network: default-deny; allowedHosts enforced by the proxy, not\n");
+            out.push_str(";;     the profile (Seatbelt cannot filter by host) ---\n");
+            if let Some(address) = proxy_address {
+                write_proxy_reachability_rules(out, address);
+            }
+        }
         (true, false) => {
             out.push_str(";; --- network: outbound allowed (any host) ---\n");
             write_outbound_allow_rules(out);
         }
-        (_, true) => {
+        (true, true) => {
             // Seatbelt only accepts `*` or `localhost` in `(remote ...)` filters —
-            // per-hostname filtering isn't possible, so allowedHosts degrades to
-            // allow-all outbound as a best-effort.
+            // per-hostname filtering isn't possible. The default is already
+            // allow-all here, so the allowlist is a no-op superset rather than a
+            // weakening, and allow-all remains the honest rendering.
             out.push_str(
                 ";; --- network: allowedHosts requested but Seatbelt cannot filter by host;\n",
             );
-            out.push_str(";;     allowing all outbound as best-effort ---\n");
+            out.push_str(";;     default is already allow, so all outbound stays allowed ---\n");
             write_outbound_allow_rules(out);
         }
     }
@@ -774,15 +789,32 @@ mod tests {
     }
 
     #[test]
-    fn block_with_allowed_hosts_emits_allowlist() {
+    fn block_with_allowed_hosts_never_widens_to_allow_all() {
+        // `allowedHosts` under a deny default must not flip the profile to
+        // allow-all outbound — that would be the inverse of the requested
+        // policy. `config_parser` rejects this combination unless the builtin
+        // test proxy enforces the list, so the profile keeps its deny baseline.
         let mut r = req();
         r.policy.default_network_policy = NetworkPolicy::Block;
         r.policy.allowed_hosts = vec!["api.github.com".into(), "registry.npmjs.org".into()];
         let p = build_profile(&r).unwrap();
-        assert!(p.contains("(allow network-outbound)"));
-        assert!(p.contains("Seatbelt cannot filter by host"));
+        assert!(!p.contains("(allow network-outbound)"));
+        assert!(p.contains("enforced by the proxy"));
         // Should NOT have per-host remote rules.
         assert!(!p.contains("(remote"));
+    }
+
+    #[test]
+    fn block_with_allowed_hosts_and_proxy_keeps_deny_plus_proxy_reachability() {
+        // The builtin-test-proxy case: the proxy filters the host list, so the
+        // profile must stay deny-all except port-scoped proxy reachability.
+        let mut r = req();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        r.policy.allowed_hosts = vec!["api.github.com".into()];
+        let address = ProxyAddress::new("127.0.0.1".into(), 8080);
+        let p = build_profile_with_proxy(&r, Some(&address)).unwrap();
+        assert!(!p.contains("(allow network-outbound)"));
+        assert!(p.contains("8080"));
     }
 
     #[test]
