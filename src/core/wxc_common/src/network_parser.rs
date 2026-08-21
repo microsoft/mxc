@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 use crate::error::WxcError;
 use crate::models::{
-    unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction, NetworkCidr,
-    NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
-    NetworkRule, ProxyAddress, ProxyConfig,
+    host_is_canonical_loopback, unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction,
+    NetworkCidr, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort,
+    NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig,
 };
 use crate::wire;
 
@@ -67,8 +67,12 @@ enum NetworkFormat {
     Directional,
 }
 
-/// Returns whether a proxy host names a loopback address.
-pub(crate) fn host_is_loopback(host: &str) -> bool {
+/// Any address in `127.0.0.0/8`, plus `::1` and `localhost`.
+///
+/// Use this to *reject* a host (LXC treats all of `127/8` as the container's
+/// own namespace loopback). Breadth is fail-safe here: a wider match rejects
+/// more. To *admit* a host, use [`crate::models::host_is_canonical_loopback`].
+pub(crate) fn host_is_any_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
@@ -335,7 +339,7 @@ fn apply_directional_network(
             .as_ref()
             .map(ProxyAddress::host)
             .unwrap_or_default();
-        if !runtime_proxy_host_is_supported(host) {
+        if !host_is_canonical_loopback(host) {
             return Err(WxcError::ConfigParse(
                 "runtimeConfig.networkProxy must use localhost, 127.0.0.1, or [::1]".to_string(),
             ));
@@ -365,16 +369,6 @@ fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), Wxc
         ));
     }
     Ok(())
-}
-
-fn runtime_proxy_host_is_supported(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    matches!(
-        unbracket_host(host).parse::<IpAddr>(),
-        Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)) | Ok(IpAddr::V6(Ipv6Addr::LOCALHOST))
-    )
 }
 
 fn convert_action(action: wire::NetworkAction) -> NetworkAction {

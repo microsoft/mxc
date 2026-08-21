@@ -577,6 +577,28 @@ pub fn unbracket_host(host: &str) -> &str {
         .unwrap_or(host)
 }
 
+/// Only `127.0.0.1` and `::1`, plus `localhost`; bracketed or not, any case.
+///
+/// Use this to *admit* a proxy host. The accept-set is exactly what Seatbelt's
+/// `(remote ip "localhost:<port>")` enforces — measured, not assumed: under
+/// that rule `127.0.0.1` and `::1` connect while `127.0.0.2` gets `EPERM`.
+/// Matching `127.0.0.0/8` here would admit a proxy the sandbox then blocks.
+///
+/// Shared by the parser gate, the Seatbelt policy check, and the profile
+/// builder; if they disagree, a host one layer admits another sends down the
+/// wrong branch. For the reject-side question use
+/// `network_parser::host_is_any_loopback`.
+pub fn host_is_canonical_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches!(
+        unbracket_host(host).parse::<std::net::IpAddr>(),
+        Ok(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+            | Ok(std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST))
+    )
+}
+
 /// Proxy configuration parsed from the `network.proxy` JSON field.
 #[derive(Debug, Default, Clone)]
 pub struct ProxyConfig {
@@ -1173,6 +1195,51 @@ impl ScriptResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_proxy_host_accepts_every_canonical_spelling() {
+        for host in [
+            "127.0.0.1",
+            "::1",
+            "[::1]",
+            "0:0:0:0:0:0:0:1",
+            "[0:0:0:0:0:0:0:1]",
+            "localhost",
+            "LOCALHOST",
+            "LocalHost",
+        ] {
+            assert!(
+                host_is_canonical_loopback(host),
+                "{host:?} should be recognized as a loopback proxy host"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_proxy_host_rejects_non_loopback_and_lookalikes() {
+        for host in [
+            "proxy.corp.example",
+            "10.0.0.5",
+            "[2001:db8::1]",
+            "2001:db8::1",
+            "0.0.0.0",
+            "",
+            // Lookalikes that must not be mistaken for the loopback name.
+            "localhost.evil.com",
+            "notlocalhost",
+            "localhost.",
+            // Outside the two canonical addresses the Seatbelt profile can
+            // express, even though they are inside 127.0.0.0/8.
+            "127.0.0.2",
+            // IPv4-mapped IPv6 is not the IPv6 loopback address.
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                !host_is_canonical_loopback(host),
+                "{host:?} should not be recognized as a loopback proxy host"
+            );
+        }
+    }
 
     #[test]
     fn directional_network_defaults_deny() {

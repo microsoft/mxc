@@ -24,6 +24,7 @@ mod network_parser;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
+pub mod seatbelt_policy;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;

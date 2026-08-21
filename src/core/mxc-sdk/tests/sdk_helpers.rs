@@ -151,13 +151,20 @@ fn build_request_host_rules_require_outbound() {
         capture_denials: None,
     };
 
-    // Unix backends accept host rules without `allowOutbound`; only Windows
-    // ProcessContainer requires it. Either way this must not panic.
+    // Linux accepts host rules without `allowOutbound`. Windows
+    // ProcessContainer requires it, and Seatbelt (the macOS default) rejects
+    // the combination outright since it cannot filter by host. Either way this
+    // must not panic.
     let result = build_request(&policy, None);
-    if cfg!(any(target_os = "linux", target_os = "macos")) {
+    if cfg!(target_os = "linux") {
         assert!(
             result.is_ok(),
-            "Linux/macOS accept host rules without allowOutbound (matching the SDK)"
+            "Linux accepts host rules without allowOutbound (matching the SDK)"
+        );
+    } else if cfg!(target_os = "macos") {
+        assert!(
+            result.is_err(),
+            "Seatbelt rejects allowedHosts under a deny default (cannot filter by host)"
         );
     } else {
         assert!(
