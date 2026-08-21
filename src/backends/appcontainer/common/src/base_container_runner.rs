@@ -4097,8 +4097,7 @@ mod tests {
             address: Some(ProxyAddress::new("127.0.0.1".to_string(), 8080)),
             builtin_test_server: false,
         };
-        request.policy.network_egress =
-            Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
             default: NetworkAction::Allow,
             host_loopback: NetworkAction::Allow,
