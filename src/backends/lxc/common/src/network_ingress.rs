@@ -1242,6 +1242,7 @@ mod tests {
         host_loopback: NetworkAction,
     ) -> ContainerPolicy {
         ContainerPolicy {
+            network_specified: true,
             network_mode_specified: true,
             network_ingress: Some(NetworkIngressPolicy {
                 default,
