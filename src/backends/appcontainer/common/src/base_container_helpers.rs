@@ -33,11 +33,11 @@ pub(super) fn requires_psec_networking(policy: &ContainerPolicy) -> bool {
         .as_ref()
         .is_some_and(|egress| !egress.allow.is_empty() || !egress.deny.is_empty())
         || policy.allowed_proxy_peer.is_some()
-        || host_loopback_allowed(policy)
+        || unrestricted_host_loopback_allowed(policy)
 }
 
 pub(super) fn has_conflicting_proxy_identity(policy: &ContainerPolicy) -> bool {
-    policy.allowed_proxy_peer.is_some() && host_loopback_allowed(policy)
+    policy.allowed_proxy_peer.is_some() && unrestricted_host_loopback_allowed(policy)
 }
 
 pub(super) fn build_psec_spec(request: &ExecutionRequest) -> Vec<u8> {
@@ -99,7 +99,7 @@ fn effective_capabilities(policy: &ContainerPolicy, include_host_loopback: bool)
         .cloned()
         .collect();
     add_default_network_capabilities(policy, &mut capabilities);
-    if include_host_loopback && host_loopback_allowed(policy) {
+    if include_host_loopback && unrestricted_host_loopback_allowed(policy) {
         ensure_capability(&mut capabilities, LOOPBACK_NETWORK_CAPABILITY);
     }
     capabilities
@@ -164,7 +164,7 @@ fn effective_egress_default(policy: &ContainerPolicy) -> NetworkAction {
     )
 }
 
-fn host_loopback_allowed(policy: &ContainerPolicy) -> bool {
+fn unrestricted_host_loopback_allowed(policy: &ContainerPolicy) -> bool {
     policy
         .network_ingress
         .as_ref()
@@ -172,7 +172,7 @@ fn host_loopback_allowed(policy: &ContainerPolicy) -> bool {
 }
 
 fn allowed_appcontainer_peer(policy: &ContainerPolicy) -> Option<String> {
-    if host_loopback_allowed(policy) {
+    if unrestricted_host_loopback_allowed(policy) {
         Some(LOOPBACK_NETWORK_PEER.to_string())
     } else {
         policy.allowed_proxy_peer.clone()
