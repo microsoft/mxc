@@ -27,10 +27,20 @@ requiring root privileges or a container runtime.
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
   below that floor.
-- **Schema 0.8 proxy mode only:** `slirp4netns` installed and on PATH, plus
-  `nsenter`, `iptables`, and `ip6tables` for the proxy-only egress rules. None
-  are required when `network.proxy` is omitted or when a 0.6/0.7 policy uses
-  the legacy proxy behavior.
+- **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
+  plus `nsenter`, `iptables`, and `ip6tables` for the egress rules. These are
+  needed by **both** 0.8 modes that build a private network namespace — proxy
+  mode (`network.proxy`) and firewall enforcement
+  (`enforcementMode: "firewall"`), which share the same slirp-backed namespace
+  and the same dependency probe. None are required when neither applies: a
+  policy with no `network.proxy` and no 0.8 firewall enforcement, or a 0.6/0.7
+  policy using the legacy proxy and host-rule behavior.
+
+  > `ip6tables` is required to *deny* IPv6, not to carry it. slirp4netns is
+  > launched without `--enable-ipv6`, so the sandbox namespace has no IPv6
+  > connectivity at all and the v6 rules exist to keep the unmatched family
+  > closed. An IPv6 destination is unreachable even when a rule allows it
+  > (see #955).
   ```bash
   # Debian/Ubuntu
   sudo apt install slirp4netns util-linux iptables
@@ -54,7 +64,7 @@ requiring root privileges or a container runtime.
   ```
   (A legacy backend is still accepted where the lock *is* writable — for
   example when running as root — since it works there.)
-  Proxy mode fails explicitly if any of these is unavailable; it never falls
+  Both modes fail explicitly if any of these is unavailable; neither ever falls
   back to sharing the host network namespace or to running without egress
   rules. The host must also provide the util-linux `unshare` command with
   `--map-current-user` and `--keep-caps`. No root is needed: `iptables` runs
@@ -213,27 +223,83 @@ reach in. Runs fully unprivileged.
 }
 ```
 
-**Per-host filtering** (`allowedHosts`/`blockedHosts`) — shares the host
-network namespace and applies iptables rules via `NetworkIptablesManager`
-(the same approach used by the LXC backend). **Requires root** for
-iptables.
+**Per-host filtering** (`allowedHosts`/`blockedHosts`) — the behavior
+depends on the schema version, because 0.8 replaced a path that did not
+actually filter.
 
-> **IPv4 only.** Host names are resolved to IPv4 addresses only; AAAA
-> records and IPv6 literals are silently dropped because `iptables` (the
-> IPv4 tool) cannot accept IPv6 destinations. A host with only AAAA
-> records is effectively unreachable under firewall mode. For dual-stack
-> hosts, use proxy mode (below) instead.
+**Schema 0.8+ — enforced.** `enforcementMode: "firewall"` puts the sandbox in
+the same private, slirp-backed network namespace proxy mode uses, and programs
+the rules into *that* namespace from a supervisor holding `CAP_NET_ADMIN`
+inside an unprivileged user namespace. **No root required**, and the sandbox
+cannot undo the rules: it drops `CAP_NET_ADMIN` before the workload starts.
+
+Rule addresses must be **IP literals or CIDR blocks**; a DNS name is rejected
+at validation time rather than resolved on the caller's behalf. The backend
+does not resolve, because the sandbox resolves names itself and a lookup that
+disagreed with the one behind the rules would hand the workload an address the
+chain never authorized. An IPv6 rule programs `ip6tables`, but the sandbox's
+namespace has no IPv6 connectivity today — slirp4netns is launched without
+`--enable-ipv6` — so an allowed IPv6 destination stays unreachable regardless
+of the rule (see #955). The terminal verdict of the unmatched family still
+follows `defaultPolicy`, so a v4-only allowlist under `block` does not leave
+IPv6 open.
+
+An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
+Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
+naming it would never match and a `blockedHosts` entry under `defaultPolicy:
+allow` would fail open. A mapped CIDR is translated the same way — the mapped
+range is the last 32 bits of `::ffff:0:0/96`, so a `/96 + n` prefix becomes a
+v4 `/n`.
+
+An IPv6 block **shorter** than `/96` that contains `::ffff:0:0/96` is
+**rejected** rather than programmed. CIDR blocks nest or are disjoint, so such a
+block always swallows the mapped range whole, and neither available reading is
+safe to apply silently: leaving it on `ip6tables` unenforces the mapped half
+(the same fail-open the translation above exists to prevent), while projecting
+it onto IPv4 would always widen it to `0.0.0.0/0` — turning `blockedHosts:
+["::/0"]` from "block all IPv6" into "block all IPv4 as well". The rejection
+asks the caller to write the IPv4 side explicitly. Blocks that do not contain
+the mapped range, such as `2001:db8::/32`, are unaffected.
+
+> **Divergence from LXC.** LXC normalizes mapped literals and `/96`-or-longer
+> mapped CIDRs the same way, so those policies mean the same thing on both
+> backends. It does **not** yet reject the shorter straddling blocks — there,
+> such a rule stays on `ip6tables` and its mapped half goes unenforced. Until
+> LXC adopts the same check, a policy using one of those blocks is the one case
+> where the two backends differ.
+
+An explicit `blockedHosts` entry outranks any `allowedHosts` entry that covers
+it, including a broader CIDR: denies are installed ahead of allows in a
+first-match chain.
 
 ```json
 {
   "network": {
     "defaultPolicy": "block",
     "enforcementMode": "firewall",
-    "allowedHosts": ["api.github.com"],
-    "blockedHosts": ["evil.example.com"]
+    "allowedHosts": ["10.0.2.2/32", "203.0.113.0/24"],
+    "blockedHosts": ["10.0.2.2"]
   }
 }
 ```
+
+**Schema 0.7 and earlier — accepted but not enforced.** The legacy path shares
+the host network namespace and applies rules to the *host* via
+`NetworkIptablesManager`, which **requires root**. Unprivileged, the request
+fails closed rather than running unfiltered: `spawn_bwrap` returns the
+`apply_firewall_rules` error before `bwrap` is spawned, so no workload runs.
+The unenforced case is the *privileged* one — the rules install on the host's
+chains, which the sandbox does not traverse, so they filter nothing while
+appearing to succeed. This is retained unchanged for existing callers and is
+the reason enforcement is 0.8+ only. Names are accepted on this path and
+resolved to IPv4 only.
+
+> **Legacy path, IPv4 only.** On schema ≤ 0.7, host names are resolved to
+> IPv4 addresses only; AAAA records and IPv6 literals are silently dropped
+> because `iptables` (the IPv4 tool) cannot accept IPv6 destinations. A host
+> with only AAAA records is effectively unreachable. Moving to 0.8 programs
+> `ip6tables` as well, but does not make such a host reachable while the
+> sandbox namespace has no IPv6 (see #955); use proxy mode (below) instead.
 
 **Full allow** (`defaultPolicy: "allow"`, no host lists) — the sandbox
 shares the host network namespace with no restrictions.
@@ -252,15 +318,27 @@ namespace choice alone decides the outcome:
 
 | `allowLocalNetwork` | Namespace | Result |
 |---------------------|-----------|--------|
-| `false` (default) | private (`--unshare-net`, including 0.8 proxy mode) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
+| `false` (default) | private (`--unshare-net`; isolated, plus 0.8 proxy and firewall modes) | Honored at the sandbox boundary — nothing outside can reach in. `bind()`/`listen()` still succeed on the sandbox's own loopback, so its processes can talk to each other; that is already inside the caller's trust boundary |
 | `false` | shared with host | **Not honored** — the process can bind/listen on host-local addresses |
 | `true` | private (`--unshare-net`) | **Partially honored** — the listener is reachable only from inside the sandbox |
 | `true` | shared with host | Honored |
 
-Rows 2 and 3 emit a `WARNING:` line to the runner log at preflight rather
-than failing silently. Windows (AppContainer's `privateNetworkClientServer`
+Rows 2 and 3 are rejected on schema `0.8.0-alpha` and later — in the backend's
+validation, which every caller passes through, so a programmatic
+`ExecutionRequest` is refused just like a JSON config — and
+emit a
+`WARNING:` line to the runner log at preflight on earlier schemas rather than
+failing silently. Windows (AppContainer's `privateNetworkClientServer`
 capability) and macOS (Seatbelt's `(allow network-inbound (local ip))`)
 enforce the field at the syscall level; this divergence is Linux-specific.
+
+Row 2 is keyed on the value, not on whether the caller wrote the field.
+`false` is the schema's default *and* a deny, so an omitted `allowLocalNetwork`
+is still a request for inbound denial and is rejected the same way: a bare
+`defaultPolicy: "allow"` does not silently opt out of the deny it inherits.
+Callers who want the shared namespace acknowledge the exposure with
+`allowLocalNetwork: true` (row 4), the same acknowledgment IsolationSession
+requires for this field.
 
 ### Process Settings
 
@@ -459,9 +537,10 @@ request fails if its private namespace cannot be configured.
   - IPv6-only proxy hostnames are rejected, matching the IPv6 egress denial.
 - **Mutually exclusive with iptables enforcement**: setting
   `network.proxy` together with `network.enforcementMode` of `"firewall"`
-  or `"both"` is rejected at config-parse time. (The rejection message cites a
-  root requirement that proxy mode has since disproved; see the firewall
-  section.)
+  or `"both"` is rejected at config-parse time. Both postures build the same
+  private namespace, so the combination is ambiguous rather than impossible —
+  it is refused because there is no defined precedence between an endpoint pin
+  and a rule list, not because of any privilege requirement.
 - **External proxy delegates policy**: when `network.proxy` uses
   `localhost: <port>` or `url: <url>` (not `builtinTestServer`), the
   external proxy is responsible for any host filtering. The runner does
@@ -499,9 +578,9 @@ resolution.
 |--------|-----|------------|
 | Privileges | Root required | Unprivileged (user namespaces) |
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
-| Startup | Create → Start → Attach | Single `bwrap` exec; proxy mode adds a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
+| Startup | Create → Start → Attach | Single `bwrap` exec; the 0.8 private-namespace modes (proxy and firewall enforcement) add a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
 | Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; proxy mode also needs `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables` and `ip6tables` on the `nf_tables` backend |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**
@@ -536,10 +615,12 @@ Test configs are in `tests/configs/bubblewrap_*.json`.
   and `/usr/local` are invisible unless explicitly listed in
   `readonlyPaths` / `readwritePaths`. There is no separate rootfs — the
   visible paths are bind-mounted from the host.
-- **Network filtering** — per-host `allowedHosts`/`blockedHosts` is best
-  done via the cooperative env-var **network proxy** (no privilege
-  required, see above). The legacy iptables path
-  (`network.enforcementMode: "firewall"` / `"both"`) still works but
-  requires root and is mutually exclusive with the proxy.
+- **Network filtering** — per-host `allowedHosts`/`blockedHosts` is enforced
+  natively on schema 0.8+ via `network.enforcementMode: "firewall"`, with
+  **no privilege required** (rules are programmed inside the sandbox's own
+  namespace; addresses must be IP literals or CIDRs). The cooperative env-var
+  **network proxy** remains the option when you need name-based rules. On
+  schema ≤ 0.7 the firewall path targets the *host* and requires root; it is
+  retained for compatibility but does not filter unprivileged.
 - **No state-aware lifecycle** — Bubblewrap implements `ScriptRunner` only
   (one-shot), not `StatefulSandboxBackend`

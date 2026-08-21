@@ -51,6 +51,34 @@ run_one "builtin proxy"    "bubblewrap_network_proxy_builtin.json"    "PROXY_OK"
 run_one "proxy allowlist"  "bubblewrap_network_proxy_allowlist.json"  "BLOCKED_OK"
 run_one "proxy blocklist"  "bubblewrap_network_proxy_blocklist.json"  "BLOCKED_OK"
 
+# Regression: host lists alongside a proxy at 0.8 once suppressed --unshare-net
+# while the proxy was only cooperative env vars, so `curl --noproxy '*'` walked
+# straight out to a destination the allowlist never named. Proxy mode now
+# confines egress to the proxy endpoint, so the direct attempt must fail while
+# the proxy path still works.
+echo "Running Bubblewrap proxy host-rules egress test..."
+HOST_NETNS="$(readlink /proc/self/ns/net)"
+if ! HOSTRULES_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_host_rules.json" 2>&1); then
+    echo "$HOSTRULES_OUT"
+    echo "FAIL: proxy host-rules egress (lxc-exec returned non-zero)"
+    exit 1
+fi
+for sentinel in DIRECT_EGRESS_BLOCKED_OK PROXY_PATH_OK; do
+    if ! grep -q "$sentinel" <<<"$HOSTRULES_OUT"; then
+        echo "$HOSTRULES_OUT"
+        echo "FAIL: proxy host-rules egress (sentinel '$sentinel' not found)"
+        exit 1
+    fi
+done
+HOSTRULES_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' <<<"$HOSTRULES_OUT" | tail -n 1)"
+if [ -z "$HOSTRULES_NETNS" ] || [ "$HOSTRULES_NETNS" = "$HOST_NETNS" ]; then
+    echo "$HOSTRULES_OUT"
+    echo "FAIL: proxy host-rules egress (host lists suppressed the private namespace)"
+    exit 1
+fi
+echo "PASS: proxy host-rules egress"
+
 echo "Running Bubblewrap private proxy namespace test..."
 HOST_NETNS="$(readlink /proc/self/ns/net)"
 if ! NAMESPACE_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \

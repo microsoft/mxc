@@ -40,6 +40,8 @@ run_test "Bubblewrap Most-Specific Path" "$SCRIPT_DIR/run_bwrap_most_specific_te
 run_test "Bubblewrap Denied Masking" "$SCRIPT_DIR/run_bwrap_denied_masking_test.sh"
 run_test "Bubblewrap Network Block" "$SCRIPT_DIR/run_bwrap_network_test.sh"
 run_test "Bubblewrap Network Proxy" "$SCRIPT_DIR/run_bwrap_network_proxy_test.sh"
+run_test "Bubblewrap Network Firewall" "$SCRIPT_DIR/run_bwrap_firewall_test.sh"
+run_test "Bubblewrap allowLocalNetwork" "$SCRIPT_DIR/run_bwrap_localnet_test.sh"
 run_test "Linux Process Default" "$SCRIPT_DIR/run_linux_process_default_test.sh"
 
 echo "================================"

@@ -545,6 +545,17 @@ fn validate_process_container_proxy_policy(
     policy: &ContainerPolicy,
     proxy_enabled: bool,
 ) -> Result<(), WxcError> {
+    if policy
+        .allowed_proxy_peer
+        .as_deref()
+        .is_some_and(|peer| peer.eq_ignore_ascii_case("MXC-Loopback"))
+    {
+        return Err(WxcError::ConfigParse(
+            "processContainer.network.allowedProxyPeer must not use the reserved \
+             'MXC-Loopback' identity"
+                .to_string(),
+        ));
+    }
     if policy.allowed_proxy_peer.is_some() && !proxy_enabled {
         return Err(WxcError::ConfigParse(
             "processContainer.network.allowedProxyPeer requires runtimeConfig.networkProxy"

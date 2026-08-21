@@ -7,6 +7,12 @@ use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode,
 
 pub(crate) const INTERNET_CLIENT_CAPABILITY: &str = "internetClient";
 pub(crate) const PRIVATE_NETWORK_CAPABILITY: &str = "privateNetworkClientServer";
+const POLICY_OWNED_NETWORK_CAPABILITIES: [&str; 4] = [
+    INTERNET_CLIENT_CAPABILITY,
+    "internetClientServer",
+    PRIVATE_NETWORK_CAPABILITY,
+    "networkLoopback",
+];
 
 pub(crate) fn allows_network_egress(policy: &ContainerPolicy) -> bool {
     policy.network_egress.as_ref().map_or(
@@ -39,6 +45,14 @@ pub(crate) fn add_default_network_capabilities(
     policy: &ContainerPolicy,
     capabilities: &mut Vec<String>,
 ) {
+    if policy.network_egress.is_some() || policy.network_ingress.is_some() {
+        capabilities.retain(|capability| {
+            !POLICY_OWNED_NETWORK_CAPABILITIES
+                .iter()
+                .any(|owned| capability.eq_ignore_ascii_case(owned))
+        });
+    }
+
     let uses_capabilities = uses_network_capabilities(policy);
     if uses_capabilities && allows_network_egress(policy) {
         ensure_capability(capabilities, INTERNET_CLIENT_CAPABILITY);
@@ -129,6 +143,57 @@ mod tests {
             vec![
                 INTERNET_CLIENT_CAPABILITY.to_string(),
                 PRIVATE_NETWORK_CAPABILITY.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn directional_networking_replaces_caller_owned_network_capabilities() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                ..Default::default()
+            }),
+            network_ingress: Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                host_loopback: NetworkAction::Deny,
+            }),
+            ..Default::default()
+        };
+        let mut capabilities = vec![
+            "InternetClient".to_string(),
+            "internetClientServer".to_string(),
+            "PRIVATEnetworkCLIENTserver".to_string(),
+            "NetworkLoopback".to_string(),
+            "registryRead".to_string(),
+        ];
+
+        add_default_network_capabilities(&policy, &mut capabilities);
+
+        assert_eq!(
+            capabilities,
+            vec![
+                "registryRead".to_string(),
+                PRIVATE_NETWORK_CAPABILITY.to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_networking_preserves_caller_owned_network_capabilities() {
+        let policy = ContainerPolicy::default();
+        let mut capabilities = vec![
+            INTERNET_CLIENT_CAPABILITY.to_string(),
+            "networkLoopback".to_string(),
+        ];
+
+        add_default_network_capabilities(&policy, &mut capabilities);
+
+        assert_eq!(
+            capabilities,
+            vec![
+                INTERNET_CLIENT_CAPABILITY.to_string(),
+                "networkLoopback".to_string()
             ]
         );
     }

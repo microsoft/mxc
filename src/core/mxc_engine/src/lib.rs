@@ -52,7 +52,9 @@ pub use policy::{
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 pub use run::{resolve_runner, run, ResolvedRunner};
-pub use state_aware::{exec_state_aware_json, run_state_aware, run_state_aware_json};
+pub use state_aware::{
+    exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
+};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::sandbox_process::{SandboxProcess, StreamCloser};

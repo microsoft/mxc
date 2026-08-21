@@ -116,7 +116,7 @@ fn non_empty_paths(paths: &[String]) -> Option<Vec<String>> {
 
 fn build_legacy_sbox_network_policy(policy: &ContainerPolicy) -> SboxNetworkPolicy {
     let mut network = SboxNetworkPolicy::default();
-    if policy.network_proxy.is_enabled() && !policy.runtime_network_proxy_specified {
+    if policy.network_proxy.is_enabled() {
         network.proxy = policy.network_proxy.address.as_ref().map(|address| {
             let mut proxy = proxy_infoT::default();
             proxy.url = Some(address.to_url());

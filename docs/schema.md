@@ -47,7 +47,10 @@ Direct egress rules and `runtimeConfig.networkProxy` select different
 connectivity models and cannot be combined. A ProcessContainer proxy requires
 `ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
 keep `hostLoopback: "deny"`; identity-less host proxies omit
-`allowedProxyPeer` and require `hostLoopback: "allow"`.
+`allowedProxyPeer` and require `hostLoopback: "allow"`. The identity-less route
+is a weaker development/testing compatibility deployment because it opens both
+host-loopback directions; it is not the strict proxy-endpoint exception
+defined by the shared model-2 policy.
 
 ```json
 {
@@ -113,6 +116,13 @@ cannot mix both formats in one request.
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
+        "allowedHosts": ["203.0.113.0/24"],
+        "blockedHosts": ["203.0.113.7"],   // Denies outrank allows, including broader CIDRs
+                                           // Under bubblewrap at schema 0.8+ with
+                                           //  enforcementMode "firewall", entries must be IP
+                                           //  literals or CIDR blocks: DNS names are rejected at
+                                           //  validation time rather than resolved. Use proxy
+                                           //  mode for hostname-based control.
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
@@ -372,7 +382,7 @@ schema:
     // level, exactly as in a one-shot request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
     // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" } } }
+    //   "experimental": { "isolation_session": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } } }
 }
 ```
 

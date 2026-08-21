@@ -83,45 +83,29 @@ use windows::Win32::System::Threading::{
     ResumeThread, CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
 };
 
-/// Serialize `KEY=VALUE` pairs into a double-null-terminated UTF-16 environment block.
-///
-/// Entries are sorted case-insensitively by key as required by `CreateProcessW`.
-fn encode_env_block(env_vars: &[String]) -> Vec<u16> {
-    let mut entries: Vec<(&str, &str)> =
-        env_vars.iter().filter_map(|e| e.split_once('=')).collect();
-
-    entries.sort_by(|(a, _), (b, _)| a.to_ascii_uppercase().cmp(&b.to_ascii_uppercase()));
-
-    let mut block = Vec::new();
-    for (key, value) in &entries {
-        for ch in format!("{}={}", key, value).encode_utf16() {
-            block.push(ch);
-        }
-
-        block.push(0);
-    }
-    block.push(0);
-    block
-}
-
-fn build_runtime_proxy_env_block(request: &ExecutionRequest) -> Result<Option<Vec<u16>>, WxcError> {
-    if !request.policy.runtime_network_proxy_specified {
-        return Ok(None);
-    }
-    let Some(address) = request.policy.network_proxy.address.as_ref() else {
-        return Ok(None);
-    };
-
-    let env = if request.env.is_empty() {
-        crate::appcontainer_runner::create_default_env_entries()?
-            .into_iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect()
+fn build_child_env_block(
+    request: &ExecutionRequest,
+    use_process_security_environment: bool,
+) -> Result<Option<Vec<u16>>, WxcError> {
+    let proxy_address = if request.policy.runtime_network_proxy_specified {
+        request.policy.network_proxy.address.as_ref()
     } else {
-        request.env.clone()
+        None
     };
-    let env = wxc_common::proxy_env::apply_cooperative_proxy_env(&env, &address.to_url());
-    Ok(Some(encode_env_block(&env)))
+
+    let entries = if request.env.is_empty() {
+        if !use_process_security_environment && proxy_address.is_none() {
+            return Ok(None);
+        }
+        let mut entries = crate::appcontainer_runner::create_default_env_entries()?;
+        if let Some(address) = proxy_address {
+            crate::appcontainer_runner::inject_proxy_vars(&mut entries, address);
+        }
+        entries
+    } else {
+        crate::appcontainer_runner::build_explicit_entries(&request.env, proxy_address)
+    };
+    Ok(Some(crate::appcontainer_runner::encode_env_block(&entries)))
 }
 
 /// Function pointer type matching `Experimental_CreateProcessInSandbox` from processmodel.dll.
@@ -1466,28 +1450,12 @@ impl BaseContainerRunner {
         // The one-shot API supplies its own default when this is NULL, but the
         // attribute-based CreateProcessW capture path must receive an explicit
         // clean block or it would inherit all wxc-exec process variables.
-        let env_block: Option<Vec<u16>> = if let Some(env) = build_runtime_proxy_env_block(&request)
-            .map_err(|error| {
+        let env_block =
+            build_child_env_block(&request, use_process_security_environment).map_err(|error| {
                 ScriptResponse::error(&format!(
-                    "failed to create the runtime proxy environment: {error}"
+                    "failed to create a clean child environment: {error}"
                 ))
-            })? {
-            Some(env)
-        } else if request.env.is_empty() {
-            if use_process_security_environment {
-                let entries =
-                    crate::appcontainer_runner::create_default_env_entries().map_err(|error| {
-                        ScriptResponse::error(&format!(
-                            "failed to create a clean child environment: {error}"
-                        ))
-                    })?;
-                Some(crate::appcontainer_runner::encode_env_block(&entries))
-            } else {
-                None
-            }
-        } else {
-            Some(encode_env_block(&request.env))
-        };
+            })?;
 
         let env_ptr = env_block
             .as_ref()
@@ -3666,7 +3634,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_proxy_environment_does_not_make_sbox_compatible() {
+    fn runtime_proxy_does_not_make_sbox_compatible_and_builds_psec_environment() {
         let mut request = ExecutionRequest::default();
         request.policy.runtime_network_proxy_specified = true;
         request.policy.network_proxy = ProxyConfig {
@@ -3680,13 +3648,7 @@ mod tests {
             Some(SANDBOX_CAP_CREATE_PROCESS_IN_SANDBOX)
         ));
 
-        let bytes = BaseContainerRunner::build_sandbox_spec(&request);
-        let spec = base_container_layout::root_as_sandbox_spec(&bytes).unwrap();
-        let network = spec.network_policy().expect("network policy");
-        assert!(network.proxy().is_none());
-        assert!(network.allowed_appcontainer_peer().is_none());
-
-        let environment = build_runtime_proxy_env_block(&request)
+        let environment = build_child_env_block(&request, true)
             .expect("environment")
             .expect("runtime proxy environment");
         let rendered = String::from_utf16_lossy(&environment);
@@ -4060,6 +4022,95 @@ mod tests {
             allow.get(2).ports().unwrap().get(0).protocol(),
             psec_layout::IpProtocol::icmpv6
         );
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_limits_icmp_to_destination_family() {
+        for (cidr, expected_protocol) in [
+            ("10.0.0.0/8", psec_layout::IpProtocol::icmpv4),
+            ("2001:db8::/32", psec_layout::IpProtocol::icmpv6),
+        ] {
+            let (address, prefix_length) = cidr.split_once('/').unwrap();
+            let mut request = ExecutionRequest::default();
+            request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule {
+                    to: vec![NetworkPeer {
+                        cidr: NetworkCidr {
+                            address: address.parse().unwrap(),
+                            prefix_length: prefix_length.parse().unwrap(),
+                        },
+                        except: Vec::new(),
+                    }],
+                    ports: vec![NetworkPort {
+                        protocol: NetworkProtocol::Icmp,
+                        port: None,
+                        end_port: None,
+                    }],
+                }],
+                deny: Vec::new(),
+            });
+
+            let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+            let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+            let allow = spec
+                .network_policy()
+                .and_then(|policy| policy.egress())
+                .and_then(|egress| egress.allow())
+                .expect("allow rules");
+
+            assert_eq!(allow.len(), 1, "{cidr} must emit one ICMP family");
+            assert_eq!(
+                allow.get(0).ports().unwrap().get(0).protocol(),
+                expected_protocol
+            );
+        }
+    }
+
+    #[test]
+    fn build_process_security_environment_spec_preserves_all_port_destinations() {
+        let peer = NetworkPeer {
+            cidr: NetworkCidr {
+                address: "10.0.0.0".parse().unwrap(),
+                prefix_length: 8,
+            },
+            except: Vec::new(),
+        };
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            allow: vec![NetworkRule {
+                to: vec![peer.clone()],
+                ports: Vec::new(),
+            }],
+            deny: vec![NetworkRule {
+                to: vec![peer],
+                ports: Vec::new(),
+            }],
+        });
+
+        let bytes = BaseContainerRunner::build_process_security_environment_spec(&request);
+        let spec = psec_layout::root_as_process_security_environment(&bytes).unwrap();
+        let egress = spec
+            .network_policy()
+            .and_then(|policy| policy.egress())
+            .expect("egress policy");
+
+        for rule in [
+            egress.allow().unwrap().get(0),
+            egress.deny().unwrap().get(0),
+        ] {
+            assert!(rule.ports().is_none(), "empty ports means all ports");
+            assert_eq!(
+                rule.destinations()
+                    .unwrap()
+                    .get(0)
+                    .subnet()
+                    .unwrap()
+                    .address(),
+                Some("10.0.0.0")
+            );
+        }
     }
 
     #[test]

@@ -176,7 +176,7 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
 /// proxy env vars (stripping any pre-existing proxy vars first).
-fn build_explicit_entries(
+pub(crate) fn build_explicit_entries(
     env_vars: &[String],
     proxy_address: Option<&wxc_common::models::ProxyAddress>,
 ) -> Vec<(String, String)> {
@@ -198,7 +198,10 @@ fn build_explicit_entries(
 
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
-fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+pub(crate) fn inject_proxy_vars(
+    entries: &mut Vec<(String, String)>,
+    addr: &wxc_common::models::ProxyAddress,
+) {
     entries.retain(|(key, _)| {
         !PROXY_VAR_NAMES
             .iter()

@@ -40,6 +40,7 @@ const REQUIRED_ENTRY_POINTS = [
   "mxc_error_detail_free",
   "mxc_string_free",
   "mxc_version",
+  "mxc_state_aware_exec_attached",
 ];
 
 // Remove any stale copy so we prove codegen actually (re)produces it.
