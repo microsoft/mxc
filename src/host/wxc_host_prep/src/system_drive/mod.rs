@@ -41,9 +41,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
+use wxc_common::filesystem_dacl::{apply_explicit_ace, revoke_specific_aces_for_sid};
 use wxc_common::filesystem_dacl::{
-    apply_explicit_ace, revoke_specific_aces_for_sid, scan_explicit_aces_for_sid, AceType,
-    DaclError,
+    apply_explicit_ace_no_propagation, revoke_specific_aces_for_sid_no_propagation,
+    scan_explicit_aces_for_sid, AceType, DaclError,
 };
 
 /// Well-known SID for the AppContainer "ALL APPLICATION PACKAGES" group.
@@ -212,7 +214,7 @@ fn apply_all(path: &Path) -> Result<(), PrepError> {
         }
 
         println!("  + {name:<45} ({sid})");
-        apply_explicit_ace(path, sid, STAT_ACCESS_MASK, AceType::Allow, false)?;
+        apply_explicit_ace_no_propagation(path, sid, STAT_ACCESS_MASK, AceType::Allow, false)?;
     }
     Ok(())
 }
@@ -223,8 +225,13 @@ fn apply_all(path: &Path) -> Result<(), PrepError> {
 /// "ALL APPLICATION PACKAGES":(R)`) are preserved.
 fn revoke_all(path: &Path) -> Result<(), PrepError> {
     for (name, sid) in TRUSTEES {
-        let removed =
-            revoke_specific_aces_for_sid(path, sid, STAT_ACCESS_MASK, AceType::Allow, false)?;
+        let removed = revoke_specific_aces_for_sid_no_propagation(
+            path,
+            sid,
+            STAT_ACCESS_MASK,
+            AceType::Allow,
+            false,
+        )?;
         if removed > 0 {
             println!("  - {name:<45} ({sid}) [{removed} ACE(s) removed]");
         } else {
