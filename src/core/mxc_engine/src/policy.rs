@@ -561,6 +561,7 @@ pub struct CaptureDenialsSection {
 /// concrete backend when you specifically need it, and prefer
 /// [`Containment::Process`] otherwise.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Containment {
     /// Abstract "OS-native process isolation" intent, resolved per host:
     /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
@@ -573,6 +574,11 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
+    /// IsolationSession backend: a Windows isolated user session.
+    ///
+    /// Not served by [`crate::spawn`]; reach it through the state-aware
+    /// lifecycle.
+    IsolationSession,
 }
 
 /// WSL Container settings, mirroring the SDK's `experimental.wslc` config
@@ -774,9 +780,6 @@ impl SandboxRequest {
     /// Enable (or disable) experimental features for this request — the
     /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
     /// executor's `--experimental` flag.
-    ///
-    /// Experimental backends (today: [`Containment::Wslc`]) refuse to spawn
-    /// unless this is set, so the gate stays fail-closed.
     pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
         self.inner.experimental_enabled = enabled;
         self
@@ -935,6 +938,9 @@ fn build_wire_config(
     match containment {
         Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
+        Containment::IsolationSession => {
+            config["containment"] = serde_json::json!("isolation_session");
+        }
     }
     Ok(config)
 }
@@ -1734,6 +1740,79 @@ mod tests {
             err.message.contains("per-host egress filtering"),
             "got: {}",
             err.message
+        );
+    }
+
+    /// The canonical unrestricted-network acknowledgment the IsolationSession
+    /// backend requires: outbound allowed, local network allowed, no host
+    /// rules, no proxy.
+    fn isolation_session_network() -> NetworkSection {
+        NetworkSection {
+            allow_outbound: true,
+            allow_local_network: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn isolation_session_names_the_backend_and_carries_no_section() {
+        // The one-shot surface takes no backend configuration at all, so the
+        // wire config must name the backend and add nothing else — unlike
+        // WSLc, which also writes an `experimental.wslc` block.
+        let policy = policy_with_network(isolation_session_network());
+        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
+            .expect("build_wire_config");
+        assert_eq!(config["containment"], "isolation_session");
+        assert!(
+            config.get("experimental").is_none(),
+            "IsolationSession takes no backend configuration, got: {config}"
+        );
+    }
+
+    #[test]
+    fn isolation_session_carries_the_unrestricted_network_acknowledgment() {
+        // The backend accepts *only* this shape and refuses an absent policy,
+        // so the SDK types must be able to express it.
+        let policy = policy_with_network(isolation_session_network());
+        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
+            .expect("build_wire_config");
+        assert_eq!(config["network"]["defaultPolicy"], "allow");
+        assert_eq!(config["network"]["allowLocalNetwork"], true);
+        assert_eq!(
+            config["network"]["allowedHosts"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            config["network"]["blockedHosts"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            config["network"].get("proxy").is_none(),
+            "no proxy expected"
+        );
+    }
+
+    #[test]
+    fn isolation_session_is_not_experimental_enabled_by_default() {
+        // Selecting an experimental backend must not silently satisfy the
+        // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
+        let policy = policy_with_network(isolation_session_network());
+        let mut request =
+            build_request_with_containment(&policy, &Containment::IsolationSession, None)
+                .expect("build_request_with_containment");
+        assert!(!request.inner.experimental_enabled);
+        request.set_experimental(true);
+        assert!(request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn isolation_session_selects_the_backend() {
+        let policy = policy_with_network(isolation_session_network());
+        let request = build_request_with_containment(&policy, &Containment::IsolationSession, None)
+            .expect("build_request_with_containment");
+        assert_eq!(
+            request.inner.containment,
+            ContainmentBackend::IsolationSession
         );
     }
 }
