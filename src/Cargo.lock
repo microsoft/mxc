@@ -1485,6 +1485,7 @@ version = "0.7.0"
 dependencies = [
  "libc",
  "mxc_engine",
+ "serde_json",
  "wxc_common",
 ]
 

@@ -3,7 +3,7 @@ name = "mxc-sdk"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Importable library for starting MXC sandboxes in-process (no pty, streaming stdio)."
+description = "Importable library for starting MXC sandboxes in-process, with streaming stdio."
 
 [lib]
 name = "mxc_sdk"
@@ -11,6 +11,9 @@ path = "src/lib.rs"
 
 [features]
 default = []
+
+# IsolationSession backend (Windows only, experimental).
+isolation_session = ["mxc_engine/isolation_session"]
 # WSL Container backend (Windows only, experimental). Forwards to the engine,
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
