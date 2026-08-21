@@ -20,6 +20,42 @@ concurrency story, and error mapping.
 - Mapping from the OS-side service's HRESULTs to the wire-format `MxcError`
   codes.
 
+### In-process callers reach the same lifecycle
+
+The Rust SDK (`mxc-sdk`) and the C ABI over it (`mxc_ffi`), each with an
+`isolation_session` feature, take the same phases and the same request JSON as
+`wxc-exec`; only the entry point differs.
+
+| Phase | `wxc-exec` | In-process |
+|---|---|---|
+| provision / start / stop / deprovision | `wxc-exec --config …` | `mxc_sdk::run_state_aware_json`, `mxc_state_aware` |
+| exec, attached to the caller's stdio | `wxc-exec --config …` | `mxc_sdk::exec_attached`, `mxc_state_aware_exec_attached` |
+| exec, caller drives the pipes | *(no CLI equivalent)* | `mxc_sdk::exec_sandbox`, `mxc_state_aware_exec` |
+
+Requirements on an in-process caller:
+
+- **Both stdout and stdin must be terminals**, or the attached exec path
+  refuses. On a terminal it allocates a pseudo-console inside the sandbox, so an
+  embedding console application gets a working interactive shell. Use the
+  streaming entry point for a workload with no terminal.
+- **Only one attached exec at a time per process.** A second concurrent call is
+  refused.
+- **An attached exec takes over this process's console for its duration**:
+  raw VT, so no echo, no line input, and keystrokes — `Ctrl-C` included — go to
+  the sandboxed workload rather than to this process. Restored on return.
+- **`start` cannot run from Session 0.** `StartSessionAsync` fails with
+  *"requires an interactive session"* (`0x80040233`), so a caller running as a
+  service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
+  `provision` succeeds first and mints an OS account that must be deprovisioned.
+- **A caller in a single-threaded apartment is refused**, with
+  `RPC_E_CHANGED_MODE` as the native code. Any other caller enters a
+  multi-threaded apartment held for the manager's lifetime and balanced on drop.
+  A UI application must marshal onto a background thread.
+  `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
+
+The **one-shot** surface is not reachable in-process: `mxc_sdk::run` and
+`spawn_sandbox` return `unsupported_containment`.
+
 ### Out of scope (for v1)
 
 - **Explicit `AbortSignal` plumbing.** v1 cancellation is OS-level: the
@@ -360,9 +396,9 @@ concurrent provisions are independent and all succeed.
 
 ### Multiple exec calls against the same sandbox
 
-The runner's `exec` impl blocks for an **executor** consumer: it reuses the
+The runner's `exec` impl blocks for an **`Executor`** consumer: it reuses the
 one-shot `create_process` path, and that call runs until the agent process
-exits and the relay drains. For an **in-process** consumer it starts the
+exits and the relay drains. For a **`Library`** consumer it starts the
 process and returns without waiting, handing back the live pipe handles and a
 waiter, so the caller decides when to block. Either way, two concurrent exec
 calls against the same `sandboxId` are not coordinated by MXC; the OS-side
@@ -445,7 +481,7 @@ semantic error channel, and **only** for non-provision operations.
 
 State-aware exec (and other phases) use OS-level cancellation in v1:
 
-- The SDK kills the `wxc-exec` process via process termination.
+- On the `wxc-exec` route, cancellation is process termination.
 - The agent process's pipes EOF, the relay threads exit.
 - The OS-side service's per-process timer (set from
   `process.timeout`) reaps the agent if the runner does not. On the
@@ -460,9 +496,9 @@ State-aware exec (and other phases) use OS-level cancellation in v1:
   agent process before returning.
 
 `ExecHandle.terminator` is a no-op closure on the IsolationSession path
-when the consumer is the executor binary, which reuses the one-shot
+when the consumer is `Executor`, which reuses the one-shot
 `create_process` synchronously and so has no mid-flight cancellation
-seam. For an in-process consumer the backend instead starts the process
+seam. For a `Library` consumer the backend instead starts the process
 without waiting and returns a terminator that calls
 `IsoSessionProcess::Terminate()`, alongside the real pipe handles and a
 waiter that blocks on exit.
@@ -502,7 +538,7 @@ An exited process is never routed through the shutdown ladder, which reads only 
 and so cannot tell a `259` exit from a live process. The adapter maps
 `TimedOut` onto `ErrorKind::TimedOut`, which is what
 `mxc_sdk::Sandbox::wait` reads as `WaitOutcome::TimedOut`. That outcome
-is reachable only for an in-process consumer: the executor has no
+is reachable only for a `Library` consumer: the `Executor` arm has no
 timeout field in `ScriptResponse` to report one through, so the executor
 arm keeps reporting `Exited`.
 
@@ -514,10 +550,9 @@ still park that waiter by either of
 two routes — in its leading `WaitForExit` (INFINITE when the caller
 supplied no timeout), or, when a timeout was supplied, in the graceful
 ladder's tier 3, which is `Terminate` followed by an INFINITE
-`WaitForExit(0)`. Neither is certain to stall: tier 1 ends a child that
-exits on stdin EOF once the caller has dropped its own duplicate of the
-write end, and tier 3's `Terminate` is a fresh attempt that may land
-where the first did not. The narrow claim is that nothing bounds the
+`WaitForExit(0)`. Neither is certain to stall: tier 3's `Terminate` is a
+fresh attempt that may land where the first did not. The narrow claim is
+that nothing bounds the
 join if the process does survive. The terminator is now fallible end to
 end, so a *refused* kill is reported and the join is skipped; bounding
 the join after an *accepted* kill that never took effect is future work,

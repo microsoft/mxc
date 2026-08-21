@@ -26,3 +26,10 @@ isolation_session = ["mxc-sdk/isolation_session"]
 # gate (scripts/check-dotnet-bindings-codegen.js) builds with this feature to
 # regenerate the committed bindings.
 dotnetsdk = ["dep:csbindgen"]
+
+[[example]]
+name = "attached_console_ffi"
+required-features = ["isolation_session"]
+
+[build-dependencies]
+csbindgen = { version = "1", optional = true }
