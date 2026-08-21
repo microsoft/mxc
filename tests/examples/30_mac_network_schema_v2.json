@@ -3,7 +3,7 @@
     "version": "0.8.0-alpha",
     "containment": "seatbelt",
     "process": {
-        "commandLine": "echo 'Testing schema-0.8 network policy...' && echo '' && echo 'Test 1: Connecting through the loopback proxy...' && curl -s --max-time 5 -x http://127.0.0.1:8080 https://api.github.com/zen && echo '' && echo '  SUCCESS' && echo '' && echo 'Test 2: Connecting directly (should be blocked, egress.default is deny)...' && curl -s --max-time 5 --noproxy '*' https://example.com > /dev/null 2>&1 && echo '  ERROR: Should not have connected!' || echo '  SUCCESS: Direct connection blocked as expected' && echo '' && echo 'Schema-0.8 network policy test complete!'",
+        "commandLine": "echo 'Testing schema-0.8 network policy...'; echo ''; rc=0; echo 'Test 1: Connecting through the loopback proxy...'; if curl -s --max-time 5 -x http://127.0.0.1:8080 https://api.github.com/zen; then echo ''; echo '  SUCCESS'; else echo '  ERROR: Proxied request failed (is a proxy listening on 127.0.0.1:8080?)'; rc=1; fi; echo ''; echo 'Test 2: Connecting directly (should be blocked, egress.default is deny)...'; if curl -s --max-time 5 --noproxy '*' https://example.com > /dev/null 2>&1; then echo '  ERROR: Should not have connected!'; rc=1; else echo '  SUCCESS: Direct connection blocked as expected'; fi; echo ''; if [ $rc -eq 0 ]; then echo 'Schema-0.8 network policy test complete!'; else echo 'Schema-0.8 network policy test FAILED'; fi; exit $rc",
         "timeout": 30000
     },
     "filesystem": {
