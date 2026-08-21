@@ -67,6 +67,8 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
+<a id="schema-080-networking"></a>
+
 **Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
@@ -76,19 +78,55 @@ the legacy wire shape. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete authoring shape.
 
+**Mode 1 — direct egress with L3/L4 filtering:**
+
 ```typescript
-const config = createConfigFromPolicy({
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
+
+const directConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: {
+      default: 'deny',
+      allow: [{
+        to: [{ cidr: '192.0.2.0/24' }],
+        ports: [{ protocol: 'tcp', port: 443 }],
+      }],
+    },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+});
+directConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(directConfig);
+```
+
+**Mode 2 — deny direct egress and use an identity-less loopback HTTP/S proxy:**
+
+```typescript
+const proxyConfig = createConfigFromPolicy({
   version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
-    ingress: { default: 'allow', hostLoopback: 'deny' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
   },
   runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
-  processContainer: {
-    network: { allowedProxyPeer: 'Contoso.Proxy_1234567890abc' },
-  },
 });
+proxyConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(proxyConfig);
 ```
+
+Mode 2's `hostLoopback: 'allow'` is the identity-less proxy posture. A
+ProcessContainer request also needs `ingress.default: 'allow'` because Windows
+uses the bidirectional `privateNetworkClientServer` capability for this path;
+`egress.default: 'deny'` still blocks direct internet access. A
+ProcessContainer identity-scoped proxy instead uses `hostLoopback: 'deny'` and
+`processContainer.network.allowedProxyPeer`; see the
+[ProcessContainer 0.8 proxy example](https://github.com/microsoft/mxc/blob/main/docs/process-container/examples/0.8.0-schema.md).
+See the [networking specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+for all three connectivity modes and backend-specific support.
 
 **Platforms:**
 

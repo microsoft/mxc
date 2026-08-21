@@ -43,6 +43,42 @@ For a more comprehensive list of examples, look in the examples\ directory.
 }
 ```
 
+### Schema 0.8 Directional Network Policy
+
+Schema 0.8 adds a directional format with explicit egress CIDR, protocol, and
+port rules plus separate ingress defaults:
+
+```json
+{
+  "version": "0.8.0-alpha",
+  "containment": "process",
+  "process": {
+    "commandLine": "echo schema 0.8 directional network example"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "192.0.2.0/24" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
+```
+
+See
+[`tests/examples/30_network_0_8_directional.json`](../tests/examples/30_network_0_8_directional.json)
+for the complete config and
+[`sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
+for network modes and backend support.
+
 ### Network Proxy
 
 Route process-container traffic through a localhost proxy. Supported with the
