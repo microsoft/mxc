@@ -245,9 +245,10 @@ usable process-creation contract through runtime probing.
 
 **Preferred selection:** Use PSEC (`CreateProcessSecurityEnvironment`) when its complete export set and runtime support
 probe succeed. PSEC is the only ProcessContainer path that receives schema 0.8 egress filters, proxy peer identity, or
-host-loopback configuration because it owns the corresponding policy lifetime through workload completion. Fall back
-temporarily to the legacy SBOX contract through CPIS only when the request needs none of those PSEC-only features, then
-to AppContainer when neither compatible BaseContainer contract is usable.
+host-loopback configuration because it owns the corresponding policy lifetime through workload completion. When PSEC
+is unavailable or incompatible with another requested policy, fall back temporarily to the legacy SBOX contract
+through CPIS. SBOX is eligible only when it can represent the request without dropping PSEC-only networking features;
+otherwise selection continues to AppContainer, where unsupported policy is rejected.
 
 SBOX retains its legacy network contract. It receives only the effective egress default and legacy `network.proxy`
 configuration; schema 0.8 allow/deny filters and `allowedProxyPeer` are never serialized into its FlatBuffer. A schema
