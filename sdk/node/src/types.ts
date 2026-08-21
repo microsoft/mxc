@@ -426,13 +426,13 @@ export type SandboxPolicy = {
   };
   /** Network access restrictions. All flags default to false (no network access). */
   network?: {
-      /** Whether to allow outbound connections to the Internet. (default: false) */
+      /** Whether to allow outbound connections to the Internet. (default: false) Legacy network field. */
       allowOutbound?: boolean;
-      /** Whether to allow connections to local networks. (default: false) */
+      /** Whether to allow connections to local networks. (default: false) Legacy network field. */
       allowLocalNetwork?: boolean;
-      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. */
+      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. Legacy network field. */
       allowedHosts?: string[];
-      /** Hosts to block even when outbound is allowed. Requires allowOutbound. */
+      /** Hosts to block even when outbound is allowed. Requires allowOutbound. Legacy network field. */
       blockedHosts?: string[];
       /**
        * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
@@ -444,6 +444,7 @@ export type SandboxPolicy = {
        * rejects it unless `allowTestingFeatures: true` is set in
        * SandboxSpawnOptions (which maps to the native
        * `--allow-testing-features` flag).
+       * Legacy network field.
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
       /** Schema 0.8 outbound network policy. Cannot be combined with legacy network fields. */
