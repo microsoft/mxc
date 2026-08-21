@@ -3,8 +3,8 @@
 
 //! `mxc-sdk` — an importable library for starting MXC sandboxes in-process.
 //!
-//! Build a [`policy::SandboxRequest`] from a [`policy::SandboxPolicy`] with
-//! [`policy::build_request`], then either:
+//! Build a [`SandboxRequest`] from a [`SandboxPolicy`] with [`build_request`],
+//! then either:
 //!
 //! - hand it to [`run`] to run the sandboxed process **to completion** and get
 //!   its captured stdout/stderr and exit outcome in one call, or
@@ -15,8 +15,7 @@
 //! process runs **without ever allocating a pty**.
 //!
 //! ```no_run
-//! use mxc_sdk::{run, WaitOutcome};
-//! use mxc_sdk::policy::{build_request, SandboxPolicy};
+//! use mxc_sdk::{build_request, run, SandboxPolicy, WaitOutcome};
 //!
 //! // Turn a policy into a request, fill in the command, and run it.
 //! let policy = SandboxPolicy {
@@ -41,31 +40,29 @@
 //! ## Backend support
 //!
 //! The selected backend is driven by the `containment` field in the request:
-//! [`policy::build_request`] resolves the host's native one, and
-//! [`policy::build_request_with_containment`] takes an explicit
-//! [`policy::Containment`] — the
+//! [`build_request`] resolves the host's native one, and
+//! [`build_request_with_containment`] takes an explicit [`Containment`] — the
 //! same choice the TypeScript SDK makes with
 //! `createConfigFromPolicy(policy, containment)`.
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
-//! | Bubblewrap | Linux | [`policy::Containment::Process`] |
-//! | Seatbelt | macOS | [`policy::Containment::Process`] |
-//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`policy::Containment::Process`] or [`policy::Containment::ProcessContainer`] |
-//! | LXC | Linux | [`policy::Containment::Lxc`] |
-//! | WSLC (WSL Container) | Windows | [`policy::Containment::Wslc`] |
+//! | Bubblewrap | Linux | [`Containment::Process`] |
+//! | Seatbelt | macOS | [`Containment::Process`] |
+//! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] or [`Containment::ProcessContainer`] |
+//! | LXC | Linux | [`Containment::Lxc`] |
+//! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
-//! [`policy::Containment::ProcessContainer`] and [`policy::Containment::Lxc`]
-//! carry their
+//! [`Containment::ProcessContainer`] and [`Containment::Lxc`] carry their
 //! backend-specific authoring sections. Schema 0.8 directional network values
-//! are available through [`policy::network`] while the legacy fields remain
-//! available for schema 0.6/0.7 policies.
+//! are available through [`policy::NetworkSection`] while the legacy fields
+//! remain available for schema 0.6/0.7 policies.
 //! LXC currently supports [`run`] only; [`spawn_sandbox`] returns
 //! [`ErrorCode::UnsupportedContainment`] because the LXC backend has no
 //! streaming implementation.
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
-//! [`policy::SandboxRequest::set_experimental(true)`](policy::SandboxRequest::set_experimental)
+//! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
 //! on the request. Its container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
@@ -96,10 +93,7 @@
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
 //! ```no_run
-//! use mxc_sdk::run;
-//! use mxc_sdk::policy::{
-//!     build_request_with_containment, Containment, SandboxPolicy, WslcSection,
-//! };
+//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
 //!
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
@@ -153,19 +147,22 @@ mod sandbox;
 
 pub use mxc_engine::policy;
 pub use mxc_engine::{
-    available_backends, platform_support, AvailableBackend, BackendCapability, Error, ErrorCode,
-    PlatformSupport,
+    available_backends, available_tools_policy, build_request, build_request_with_containment,
+    platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
+    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, LxcSection,
+    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
+    ProcessContainerNetworkSection, ProcessContainerSection, ProcessContainerUiIsolation,
+    ProcessContainerUiSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
-use policy::SandboxRequest;
 
 pub use sandbox::{
     CaptureDenialsErrorOutput, CaptureDenialsOutput, Output, Sandbox, SandboxOutputMetadata,
     StreamCloser, WaitOutcome,
 };
 
-/// Spawn a sandbox from a [`policy::SandboxRequest`] built by
-/// [`policy::build_request`] (with the command, and any working directory /
-/// env, filled in).
+/// Spawn a sandbox from a [`SandboxRequest`] built by [`build_request`] (with
+/// the command, and any working directory / env, filled in).
 ///
 /// Returns a [`Sandbox`] handle for live bidirectional stdio and termination;
 /// no pty is allocated. Any stdout/stderr stream the caller does not `take_*` is
@@ -174,8 +171,8 @@ pub fn spawn_sandbox(request: SandboxRequest) -> Result<Sandbox, Error> {
     mxc_engine::spawn(&request).map(Sandbox::new)
 }
 
-/// Run a sandbox from a [`policy::SandboxRequest`] **to completion**, capturing
-/// its output.
+/// Run a sandbox from a [`SandboxRequest`] **to completion**, capturing its
+/// output.
 ///
 /// A convenience over [`spawn_sandbox`] + [`Sandbox::wait_with_output`]: it
 /// spawns the sandboxed process, waits for it to exit (honouring the request's

@@ -12,21 +12,24 @@
 //!   crate supports (Seatbelt, Bubblewrap, ProcessContainer) — so callers no
 //!   longer need the TypeScript SDK to build a spawnable config.
 
-pub mod network;
-pub mod process_container;
+mod network;
+mod process_container;
 
 #[cfg(target_os = "linux")]
 use network::has_host_rules;
-use network::{proxy_to_wire, NetworkSection};
-#[cfg(test)]
-use network::{
+use network::proxy_to_wire;
+#[doc(inline)]
+pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
-    NetworkPortSection, NetworkProtocol, NetworkRuleSection, ProxySpec, RuntimeConfigSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
+    RuntimeConfigSection,
 };
 use process_container::apply as apply_process_container_backend;
-use process_container::{ProcessContainerNetworkSection, ProcessContainerSection};
-#[cfg(test)]
-use process_container::{ProcessContainerUiIsolation, ProcessContainerUiSection};
+#[doc(inline)]
+pub use process_container::{
+    ProcessContainerNetworkSection, ProcessContainerSection, ProcessContainerUiIsolation,
+    ProcessContainerUiSection,
+};
 
 use std::borrow::Cow;
 use std::collections::HashSet;

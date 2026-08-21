@@ -5,15 +5,13 @@
 //!
 //! Seatbelt-specific cases run only on macOS. The library exposes only the
 //! streaming API, so "run to completion" here means build a request via
-//! [`policy::build_request`](mxc_sdk::policy::build_request), `spawn_sandbox`,
-//! read the (untaken)
+//! [`build_request`], `spawn_sandbox`, read the (untaken)
 //! stdout/stderr, then [`wait`](mxc_sdk::Sandbox::wait) for the exit code —
 //! the same path the consumer drives.
 
-use mxc_sdk::policy::{build_request, SandboxPolicy, SandboxRequest};
-use mxc_sdk::ErrorCode;
+use mxc_sdk::{build_request, ErrorCode, SandboxPolicy};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-use mxc_sdk::{spawn_sandbox, WaitOutcome};
+use mxc_sdk::{spawn_sandbox, SandboxRequest, WaitOutcome};
 
 /// A Seatbelt request exposing `/tmp` read-write, with the given command and
 /// timeout (ms; `0` == run until exit).
