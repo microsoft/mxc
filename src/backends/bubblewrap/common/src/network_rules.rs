@@ -31,7 +31,8 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use wxc_common::models::{
-    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy,
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkCidr, NetworkEgressPolicy,
+    NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule,
 };
 
 /// Which `iptables` binary carries a rule.
@@ -199,6 +200,30 @@ impl RuleAddress {
             text: format!("{canonical}/{bits}"),
         })
     }
+
+    /// The block matching every address in `family`.
+    ///
+    /// A directional rule with no `to` matches both families ("Omission matches
+    /// both IP families"), which `iptables` expresses as the family's widest
+    /// block rather than an absent `-d`.
+    fn any(family: RuleFamily) -> Self {
+        let text = match family {
+            RuleFamily::V4 => "0.0.0.0/0",
+            RuleFamily::V6 => "::/0",
+        };
+        Self {
+            family,
+            text: text.to_string(),
+        }
+    }
+
+    /// Render one numeric block back to its canonical CIDR text.
+    fn from_block(family: RuleFamily, address: IpAddr, prefix: u8) -> Self {
+        Self {
+            family,
+            text: format!("{address}/{prefix}"),
+        }
+    }
 }
 
 /// An IPv4-mapped CIDR as its IPv4 equivalent, when it has one.
@@ -272,29 +297,346 @@ fn name_rejected(entry: &str) -> String {
     )
 }
 
+/// A destination block in numeric form, so exclusions can be computed on it.
+///
+/// `base` is always the block's first address, so comparisons are plain integer
+/// ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Block {
+    base: u128,
+    prefix: u8,
+}
+
+/// Ceiling on the blocks one peer may expand into.
+///
+/// Subtracting an exclusion splits the surrounding block once per prefix level,
+/// so a `/32` removed from a `/8` is 24 blocks and a deep IPv6 exclusion is
+/// bounded by 128. Several exclusions add up, and each block becomes a rule in
+/// every port the rule names, so an unbounded expansion could outgrow the
+/// restore transaction. Failing loudly beats installing a partial policy.
+const MAX_BLOCKS_PER_PEER: usize = 256;
+
+impl Block {
+    fn width(family: RuleFamily) -> u8 {
+        match family {
+            RuleFamily::V4 => 32,
+            RuleFamily::V6 => 128,
+        }
+    }
+
+    /// Mask covering the low `bits` bits, saturating at the full width.
+    fn host_mask(bits: u8) -> u128 {
+        if bits >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << bits) - 1
+        }
+    }
+
+    /// The block's last address.
+    fn last(self, width: u8) -> u128 {
+        self.base | Self::host_mask(width - self.prefix)
+    }
+
+    fn contains(self, other: Self, width: u8) -> bool {
+        self.base <= other.base && other.last(width) <= self.last(width)
+    }
+
+    fn intersects(self, other: Self, width: u8) -> bool {
+        self.base <= other.last(width) && other.base <= self.last(width)
+    }
+
+    /// A parsed CIDR as a normalized numeric block, plus the family it belongs
+    /// to after IPv4-mapped rewriting.
+    fn from_cidr(cidr: &NetworkCidr) -> (RuleFamily, Self) {
+        let (family, address, prefix) = match cidr.address {
+            IpAddr::V4(ip) => (RuleFamily::V4, IpAddr::V4(ip), cidr.prefix_length),
+            IpAddr::V6(ip) => match mapped_v4_block(ip, cidr.prefix_length) {
+                Some((v4, bits)) => (RuleFamily::V4, IpAddr::V4(v4), bits),
+                None => (RuleFamily::V6, IpAddr::V6(ip), cidr.prefix_length),
+            },
+        };
+
+        let raw = match address {
+            IpAddr::V4(ip) => u32::from(ip) as u128,
+            IpAddr::V6(ip) => u128::from(ip),
+        };
+        let width = Self::width(family);
+        let base = raw & !Self::host_mask(width - prefix);
+        (family, Self { base, prefix })
+    }
+
+    /// Back to an address for rendering.
+    fn address(self, family: RuleFamily) -> IpAddr {
+        match family {
+            RuleFamily::V4 => IpAddr::V4(Ipv4Addr::from(self.base as u32)),
+            RuleFamily::V6 => IpAddr::V6(Ipv6Addr::from(self.base)),
+        }
+    }
+}
+
+/// `block` minus `excepts`, as the smallest set of whole CIDR blocks.
+///
+/// `iptables` has no per-rule exclusion: a rule matches one destination block,
+/// and there is no way to say "this block but not that one" in a single rule.
+/// The alternative of emitting a preceding `DROP` for each exclusion would be
+/// wrong in both directions -- it would leak into *later* rules, and it inverts
+/// the meaning entirely for a `deny` rule, where an exclusion must *not* become
+/// a drop. Subtracting the blocks instead keeps the rule's meaning local and
+/// order-independent, which is what the contract describes.
+///
+/// # Errors
+///
+/// Returns a caller-facing message when the expansion exceeds
+/// [`MAX_BLOCKS_PER_PEER`].
+fn subtract_blocks(
+    block: Block,
+    excepts: &[Block],
+    family: RuleFamily,
+    out: &mut Vec<Block>,
+    remaining: &mut usize,
+) -> Result<(), String> {
+    let width = Block::width(family);
+
+    if excepts.iter().any(|e| e.contains(block, width)) {
+        return Ok(());
+    }
+
+    if !excepts.iter().any(|e| e.intersects(block, width)) {
+        if *remaining == 0 {
+            return Err(format!(
+                "Bubblewrap: a network.egress peer expands into more than {MAX_BLOCKS_PER_PEER} \
+                 address blocks once its 'except' entries are removed. Narrow the peer's CIDR or \
+                 use fewer exclusions."
+            ));
+        }
+        *remaining -= 1;
+        out.push(block);
+        return Ok(());
+    }
+
+    // Intersecting but not contained, so part of the block survives. A single
+    // address cannot reach here: it is either contained or disjoint.
+    if block.prefix >= width {
+        return Ok(());
+    }
+
+    let child_prefix = block.prefix + 1;
+    let step = Block::host_mask(width - child_prefix) + 1;
+    for base in [block.base, block.base + step] {
+        subtract_blocks(
+            Block {
+                base,
+                prefix: child_prefix,
+            },
+            excepts,
+            family,
+            out,
+            remaining,
+        )?;
+    }
+    Ok(())
+}
+
+/// Expand one directional rule into the `iptables` rules it becomes.
+///
+/// A rule is a cross product: every destination block it resolves to, in every
+/// protocol/port selector it names. Both halves mean "everything" when omitted,
+/// which the wire contract states for `to` ("Omission matches both IP
+/// families") and `ports` ("Omission matches all").
+fn lower_rule(
+    rule: &NetworkRule,
+    verdict: RuleVerdict,
+    out: &mut Vec<EgressRule>,
+) -> Result<(), String> {
+    let addresses = lower_peers(&rule.to)?;
+    let ports = lower_ports(&rule.ports)?;
+
+    for address in &addresses {
+        for port in &ports {
+            out.push(EgressRule {
+                verdict,
+                address: address.clone(),
+                port: *port,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The destination blocks a rule's peers resolve to, exclusions removed.
+///
+/// # Errors
+///
+/// Propagates an `except` expansion that exceeds the per-peer ceiling.
+fn lower_peers(peers: &[NetworkPeer]) -> Result<Vec<RuleAddress>, String> {
+    if peers.is_empty() {
+        return Ok(vec![
+            RuleAddress::any(RuleFamily::V4),
+            RuleAddress::any(RuleFamily::V6),
+        ]);
+    }
+
+    let mut addresses = Vec::new();
+    for peer in peers {
+        let (family, block) = Block::from_cidr(&peer.cidr);
+
+        // An exclusion in the other family cannot overlap this peer, so it is
+        // discarded rather than being compared across families, where the
+        // numeric ordering would be meaningless.
+        let excepts: Vec<Block> = peer
+            .except
+            .iter()
+            .map(Block::from_cidr)
+            .filter(|(except_family, _)| *except_family == family)
+            .map(|(_, block)| block)
+            .collect();
+
+        let mut blocks = Vec::new();
+        let mut remaining = MAX_BLOCKS_PER_PEER;
+        subtract_blocks(block, &excepts, family, &mut blocks, &mut remaining)?;
+        addresses.extend(
+            blocks
+                .into_iter()
+                .map(|block| RuleAddress::from_block(family, block.address(family), block.prefix)),
+        );
+    }
+    Ok(addresses)
+}
+
+/// The protocol/port selectors a rule names.
+///
+/// # Errors
+///
+/// Rejects an inverted range, an end without a start, and a port on ICMP --
+/// each of which describes traffic no `iptables` rule can match, so silently
+/// dropping the qualifier would install a broader rule than asked for.
+fn lower_ports(ports: &[NetworkPort]) -> Result<Vec<PortSpec>, String> {
+    if ports.is_empty() {
+        return Ok(vec![PortSpec::ALL]);
+    }
+
+    let mut specs = Vec::new();
+    for port in ports {
+        let range = match (port.port, port.end_port) {
+            (Some(start), Some(end)) if end < start => {
+                return Err(format!(
+                    "Bubblewrap: network.egress port range {start}-{end} ends before it starts."
+                ));
+            }
+            (Some(start), Some(end)) => Some((start, end)),
+            (Some(start), None) => Some((start, start)),
+            (None, Some(end)) => {
+                return Err(format!(
+                    "Bubblewrap: network.egress endPort {end} needs a matching port."
+                ));
+            }
+            (None, None) => None,
+        };
+
+        match port.protocol {
+            NetworkProtocol::Tcp => specs.push(PortSpec {
+                protocol: Some("tcp"),
+                range,
+            }),
+            NetworkProtocol::Udp => specs.push(PortSpec {
+                protocol: Some("udp"),
+                range,
+            }),
+            NetworkProtocol::Icmp => {
+                if range.is_some() {
+                    return Err(
+                        "Bubblewrap: network.egress protocol 'icmp' carries no ports, so a port \
+                         selector cannot be honored. Drop the port, or name 'tcp'/'udp'."
+                            .to_string(),
+                    );
+                }
+                specs.push(PortSpec {
+                    protocol: Some("icmp"),
+                    range: None,
+                });
+            }
+            // Ports exist only for TCP and UDP, so `any` with a port narrows to
+            // those two rather than widening to every protocol on that number.
+            NetworkProtocol::Any => match range {
+                None => specs.push(PortSpec::ALL),
+                Some(range) => {
+                    specs.push(PortSpec {
+                        protocol: Some("tcp"),
+                        range: Some(range),
+                    });
+                    specs.push(PortSpec {
+                        protocol: Some("udp"),
+                        range: Some(range),
+                    });
+                }
+            },
+        }
+    }
+    Ok(specs)
+}
+
+/// Which traffic a rule narrows to, beyond its destination address.
+///
+/// Both halves are optional because the 0.8 contract makes them optional:
+/// `ports` omitted "matches all", and `protocol` defaults to `any`. Absent
+/// means the match expression is left off entirely rather than guessed, so a
+/// rule that names no protocol filters none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct PortSpec {
+    /// `-p` value, or `None` to match every protocol.
+    protocol: Option<&'static str>,
+    /// Inclusive `--dport` range, or `None` to match every port.
+    ///
+    /// A single port is held as `(n, n)` so rendering has one path.
+    range: Option<(u16, u16)>,
+}
+
+impl PortSpec {
+    /// Match everything: no `-p`, no `--dport`.
+    const ALL: Self = Self {
+        protocol: None,
+        range: None,
+    };
+
+    /// One TCP port, as the proxy endpoint needs.
+    fn tcp_port(port: u16) -> Self {
+        Self {
+            protocol: Some("tcp"),
+            range: Some((port, port)),
+        }
+    }
+}
+
 /// One installed rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EgressRule {
     verdict: RuleVerdict,
     address: RuleAddress,
     /// Protocol and destination port, when the rule narrows to one service.
-    /// Only the proxy endpoint uses it; policy host lists carry no port.
-    port: Option<(&'static str, u16)>,
+    port: PortSpec,
 }
 
 impl EgressRule {
     /// The rule's `iptables-restore` line, without the leading `-A <chain>`.
+    ///
+    /// The destination is always written, using the family's "any address"
+    /// block when the rule names no peer, so the line shape stays uniform.
     fn render(&self) -> String {
-        match self.port {
-            Some((protocol, port)) => format!(
-                "-p {} -d {} --dport {} -j {}",
-                protocol,
-                self.address.text,
-                port,
-                self.verdict.target()
-            ),
-            None => format!("-d {} -j {}", self.address.text, self.verdict.target()),
-        }
+        let protocol = match self.port.protocol {
+            Some(protocol) => format!("-p {protocol} "),
+            None => String::new(),
+        };
+        let dport = match self.port.range {
+            Some((start, end)) if start == end => format!(" --dport {start}"),
+            Some((start, end)) => format!(" --dport {start}:{end}"),
+            None => String::new(),
+        };
+        format!(
+            "{protocol}-d {}{dport} -j {}",
+            self.address.text,
+            self.verdict.target()
+        )
     }
 }
 
@@ -339,7 +681,7 @@ impl EgressPlan {
                     family: RuleFamily::V4,
                     text: ip.to_string(),
                 },
-                port: Some(("tcp", port)),
+                port: PortSpec::tcp_port(port),
             }],
             v4_terminal: RuleVerdict::Drop,
             v6_terminal: RuleVerdict::Drop,
@@ -377,24 +719,31 @@ impl EgressPlan {
     /// the legacy arm: a family with no rules of its own inherits the requested
     /// posture rather than being left silently open or silently closed.
     ///
+    /// Denies are lowered before allows, so an explicit deny beats a broader
+    /// allow on the first-match chain, per the contract's D4 -- the same
+    /// ordering the legacy arm uses.
+    ///
     /// # Errors
     ///
-    /// Rejects `allow`/`deny` rules, which this backend does not yet program.
+    /// Propagates an unrenderable rule: an `except` expansion that exceeds the
+    /// per-peer block ceiling, an ICMP selector carrying a port, or an inverted
+    /// port range.
     fn for_directional_policy(egress: &NetworkEgressPolicy) -> Result<Self, String> {
-        if !egress.allow.is_empty() || !egress.deny.is_empty() {
-            return Err(
-                "network.egress allow/deny rules are not supported by the Bubblewrap backend"
-                    .to_string(),
-            );
-        }
-
         let terminal = match egress.default {
             NetworkAction::Allow => RuleVerdict::Accept,
             NetworkAction::Deny => RuleVerdict::Drop,
         };
 
+        let mut rules = Vec::new();
+        for rule in &egress.deny {
+            lower_rule(rule, RuleVerdict::Drop, &mut rules)?;
+        }
+        for rule in &egress.allow {
+            lower_rule(rule, RuleVerdict::Accept, &mut rules)?;
+        }
+
         Ok(Self {
-            rules: Vec::new(),
+            rules,
             v4_terminal: terminal,
             v6_terminal: terminal,
         })
@@ -423,14 +772,14 @@ impl EgressPlan {
             rules.push(EgressRule {
                 verdict: RuleVerdict::Drop,
                 address: RuleAddress::parse(entry)?,
-                port: None,
+                port: PortSpec::ALL,
             });
         }
         for entry in &policy.allowed_hosts {
             rules.push(EgressRule {
                 verdict: RuleVerdict::Accept,
                 address: RuleAddress::parse(entry)?,
-                port: None,
+                port: PortSpec::ALL,
             });
         }
 
@@ -1136,22 +1485,343 @@ mod tests {
         assert_eq!(v6(&dispatched), v6(&direct));
     }
 
-    /// Rules are not programmed yet, so they must be refused rather than
-    /// silently dropped -- a dropped deny rule is a fail-open.
-    #[test]
-    fn directional_egress_rules_are_refused_until_they_are_programmed() {
-        let mut req = directional_egress_request(NetworkAction::Deny);
-        req.policy
+    /// Build a directional request carrying `allow`/`deny` rules.
+    fn directional_rules_request(
+        default: NetworkAction,
+        allow: Vec<NetworkRule>,
+        deny: Vec<NetworkRule>,
+    ) -> ExecutionRequest {
+        let mut req = directional_egress_request(default);
+        let egress = req
+            .policy
             .network_egress
             .as_mut()
-            .expect("the request carries an egress section")
-            .deny = vec![NetworkRule::default()];
+            .expect("the request carries an egress section");
+        egress.allow = allow;
+        egress.deny = deny;
+        req
+    }
 
-        let error = EgressPlan::for_request(&req).expect_err("unprogrammed rules must be refused");
+    fn peer(cidr: &str, except: &[&str]) -> NetworkPeer {
+        NetworkPeer {
+            cidr: cidr.parse().expect("the test CIDR parses"),
+            except: except
+                .iter()
+                .map(|entry| entry.parse().expect("the test CIDR parses"))
+                .collect(),
+        }
+    }
+
+    fn rule(peers: Vec<NetworkPeer>, ports: Vec<NetworkPort>) -> NetworkRule {
+        NetworkRule { to: peers, ports }
+    }
+
+    fn port(protocol: NetworkProtocol, port: Option<u16>, end_port: Option<u16>) -> NetworkPort {
+        NetworkPort {
+            protocol,
+            port,
+            end_port,
+        }
+    }
+
+    /// `iptables` cannot exclude a sub-block inside a rule, so an `except` is
+    /// lowered as CIDR subtraction. The result must cover the peer exactly:
+    /// every address the caller allowed and none they excluded.
+    #[test]
+    fn an_exclusion_expands_into_the_surrounding_blocks() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("10.0.0.0/8", &["10.1.0.0/16"])], Vec::new())],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the exclusion is renderable");
+
+        assert_eq!(
+            v4(&plan),
+            vec![
+                "-o lo -j ACCEPT",
+                "-d 10.0.0.0/16 -j ACCEPT",
+                "-d 10.2.0.0/15 -j ACCEPT",
+                "-d 10.4.0.0/14 -j ACCEPT",
+                "-d 10.8.0.0/13 -j ACCEPT",
+                "-d 10.16.0.0/12 -j ACCEPT",
+                "-d 10.32.0.0/11 -j ACCEPT",
+                "-d 10.64.0.0/10 -j ACCEPT",
+                "-d 10.128.0.0/9 -j ACCEPT",
+                "-j DROP",
+            ],
+            "the excluded /16 must be absent and the rest of the /8 covered"
+        );
+    }
+
+    /// The subtraction is the part most likely to be subtly wrong, so this
+    /// checks it against ground truth rather than against a hand-written block
+    /// list: every address in a small space is classified independently and
+    /// compared with what the emitted blocks actually match.
+    #[test]
+    fn the_exclusion_math_matches_address_by_address() {
+        let excluded: std::collections::HashSet<u32> = (0xC000_0210..=0xC000_021F).collect();
+
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.0/24", &["192.0.2.16/28"])],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("the exclusion is renderable");
+
+        let blocks: Vec<(u32, u8)> = v4(&plan)
+            .iter()
+            .filter_map(|line| line.strip_prefix("-d "))
+            .filter_map(|line| line.split(" -j").next())
+            .map(|cidr| {
+                let (address, prefix) = cidr.split_once('/').expect("rendered as a CIDR");
+                (
+                    u32::from(address.parse::<Ipv4Addr>().expect("an IPv4 block")),
+                    prefix.parse::<u8>().expect("a numeric prefix"),
+                )
+            })
+            .collect();
+
+        for address in 0xC000_0200u32..=0xC000_02FF {
+            let matched = blocks.iter().any(|(base, prefix)| {
+                let shift = 32 - u32::from(*prefix);
+                // A /0 would shift by 32, which is undefined for u32.
+                shift == 32 || (address >> shift) == (base >> shift)
+            });
+            assert_eq!(
+                matched,
+                !excluded.contains(&address),
+                "{} classified wrongly",
+                Ipv4Addr::from(address)
+            );
+        }
+    }
+
+    /// The inversion guard. An `except` inside a *deny* rule must shrink what
+    /// is dropped; lowering it as a preceding DROP -- the obvious shortcut --
+    /// would drop exactly the addresses the caller carved out.
+    #[test]
+    fn an_exclusion_inside_a_deny_rule_is_not_itself_denied() {
+        let req = directional_rules_request(
+            NetworkAction::Allow,
+            Vec::new(),
+            vec![rule(vec![peer("10.0.0.0/8", &["10.1.0.0/16"])], Vec::new())],
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the exclusion is renderable");
 
         assert!(
-            error.contains("allow/deny rules"),
-            "the rejection should name the unsupported field: {error}"
+            !v4(&plan).iter().any(|line| line.contains("10.1.0.0/16")),
+            "the carved-out block must not appear as a drop: {:?}",
+            v4(&plan)
+        );
+        assert!(
+            v4(&plan).contains(&"-d 10.0.0.0/16 -j DROP".to_string()),
+            "the rest of the peer must still be dropped: {:?}",
+            v4(&plan)
+        );
+    }
+
+    /// D4: an explicit deny beats a broader allow, which on a first-match chain
+    /// means every deny is emitted ahead of every allow.
+    #[test]
+    fn denies_are_emitted_before_allows() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("10.0.0.0/8", &[])], Vec::new())],
+            vec![rule(vec![peer("10.1.2.3/32", &[])], Vec::new())],
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the rules are renderable");
+
+        assert_eq!(
+            v4(&plan),
+            vec![
+                "-o lo -j ACCEPT",
+                "-d 10.1.2.3/32 -j DROP",
+                "-d 10.0.0.0/8 -j ACCEPT",
+                "-j DROP",
+            ]
+        );
+    }
+
+    /// "Omission matches both IP families", so a rule with no peers must reach
+    /// both chains rather than silently applying to neither.
+    #[test]
+    fn a_rule_without_peers_covers_both_families() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                Vec::new(),
+                vec![port(NetworkProtocol::Tcp, Some(443), None)],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the rule is renderable");
+
+        assert!(v4(&plan).contains(&"-p tcp -d 0.0.0.0/0 --dport 443 -j ACCEPT".to_string()));
+        assert!(v6(&plan).contains(&"-p tcp -d ::/0 --dport 443 -j ACCEPT".to_string()));
+    }
+
+    /// A port range renders as one `--dport a:b` rather than fanning out into a
+    /// rule per port, which would multiply against the peer list.
+    #[test]
+    fn a_port_range_renders_as_a_single_match() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[])],
+                vec![port(NetworkProtocol::Tcp, Some(8000), Some(8080))],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the range is renderable");
+
+        assert!(
+            v4(&plan).contains(&"-p tcp -d 192.0.2.1/32 --dport 8000:8080 -j ACCEPT".to_string())
+        );
+    }
+
+    /// Ports exist only for TCP and UDP, so `any` carrying one narrows to those
+    /// two. Emitting no `-p` would open every protocol on that number.
+    #[test]
+    fn an_any_protocol_port_narrows_to_tcp_and_udp() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[])],
+                vec![port(NetworkProtocol::Any, Some(53), None)],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the selector is renderable");
+
+        assert_eq!(
+            v4(&plan),
+            vec![
+                "-o lo -j ACCEPT",
+                "-p tcp -d 192.0.2.1/32 --dport 53 -j ACCEPT",
+                "-p udp -d 192.0.2.1/32 --dport 53 -j ACCEPT",
+                "-j DROP",
+            ]
+        );
+    }
+
+    /// A rule is a cross product of its peers and its ports.
+    #[test]
+    fn peers_and_ports_fan_out_together() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[]), peer("198.51.100.0/24", &[])],
+                vec![
+                    port(NetworkProtocol::Tcp, Some(80), None),
+                    port(NetworkProtocol::Tcp, Some(443), None),
+                ],
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the rule is renderable");
+
+        assert_eq!(
+            v4(&plan),
+            vec![
+                "-o lo -j ACCEPT",
+                "-p tcp -d 192.0.2.1/32 --dport 80 -j ACCEPT",
+                "-p tcp -d 192.0.2.1/32 --dport 443 -j ACCEPT",
+                "-p tcp -d 198.51.100.0/24 --dport 80 -j ACCEPT",
+                "-p tcp -d 198.51.100.0/24 --dport 443 -j ACCEPT",
+                "-j DROP",
+            ]
+        );
+    }
+
+    /// An IPv6 peer belongs to the v6 chain, and an IPv4-mapped one is rewritten
+    /// to v4 -- Linux puts a real IPv4 packet on the wire for a mapped address,
+    /// so an `ip6tables` rule naming one would never match.
+    #[test]
+    fn a_mapped_peer_is_programmed_into_the_v4_chain() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![
+                    peer("::ffff:192.0.2.0/120", &[]),
+                    peer("2001:db8::/32", &[]),
+                ],
+                Vec::new(),
+            )],
+            Vec::new(),
+        );
+
+        let plan = EgressPlan::for_request(&req).expect("the peers are renderable");
+
+        assert!(v4(&plan).contains(&"-d 192.0.2.0/24 -j ACCEPT".to_string()));
+        assert!(v6(&plan).contains(&"-d 2001:db8::/32 -j ACCEPT".to_string()));
+    }
+
+    /// ICMP has no ports, so a port selector on it describes traffic no rule can
+    /// match. Dropping the qualifier silently would install a wider rule.
+    #[test]
+    fn an_icmp_port_selector_is_refused() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[])],
+                vec![port(NetworkProtocol::Icmp, Some(8), None)],
+            )],
+            Vec::new(),
+        );
+
+        let error = EgressPlan::for_request(&req).expect_err("an ICMP port cannot be honored");
+
+        assert!(
+            error.contains("icmp"),
+            "the rejection should name it: {error}"
+        );
+    }
+
+    /// An inverted range matches nothing, so it is refused rather than
+    /// installed as a rule that silently never fires.
+    #[test]
+    fn an_inverted_port_range_is_refused() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("192.0.2.1/32", &[])],
+                vec![port(NetworkProtocol::Tcp, Some(9000), Some(80))],
+            )],
+            Vec::new(),
+        );
+
+        EgressPlan::for_request(&req).expect_err("an inverted range cannot be honored");
+    }
+
+    /// The expansion ceiling exists so a pathological peer fails loudly instead
+    /// of overflowing the restore transaction and installing nothing.
+    #[test]
+    fn an_oversized_exclusion_expansion_is_refused() {
+        let excepts: Vec<String> = (0..64).map(|n| format!("10.{n}.0.1/32")).collect();
+        let borrowed: Vec<&str> = excepts.iter().map(String::as_str).collect();
+
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(vec![peer("10.0.0.0/8", &borrowed)], Vec::new())],
+            Vec::new(),
+        );
+
+        let error = EgressPlan::for_request(&req).expect_err("the expansion exceeds the ceiling");
+
+        assert!(
+            error.contains("address blocks"),
+            "the rejection should explain the expansion: {error}"
         );
     }
 
