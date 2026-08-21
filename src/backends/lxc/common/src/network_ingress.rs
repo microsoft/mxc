@@ -2841,7 +2841,9 @@ mod tests {
     /// nothing outbound: `enforcementMode: "firewall"`, `defaultPolicy:
     /// "allow"`, no host lists, no proxy. `allowLocalNetwork` defaults to
     /// false, and that inbound deny is the whole of what this config asks for.
-    fn legacy_firewall_mode_with_permissive_egress(mode: NetworkEnforcementMode) -> ContainerPolicy {
+    fn legacy_firewall_mode_with_permissive_egress(
+        mode: NetworkEnforcementMode,
+    ) -> ContainerPolicy {
         ContainerPolicy {
             network_enforcement_mode: mode,
             default_network_policy: NetworkPolicy::Allow,
@@ -2855,7 +2857,10 @@ mod tests {
     // the fail-open direction.
     #[test]
     fn a_firewall_mode_config_with_nothing_to_restrict_outbound_still_installs_the_inbound_chain() {
-        for mode in [NetworkEnforcementMode::Firewall, NetworkEnforcementMode::Both] {
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
             let label = format!("{mode:?}");
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
@@ -2877,7 +2882,8 @@ mod tests {
     // skipping it is correct rather than dangerous.
     #[test]
     fn a_config_that_asks_for_no_firewall_at_all_installs_no_inbound_chain() {
-        let policy = legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
+        let policy =
+            legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
             !policy.installs_firewall(),
