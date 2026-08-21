@@ -35,7 +35,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Proxy identity E2E tests require an elevated PowerShell session.'
 }
 
-Add-Type -TypeDefinition @'
+if (-not ([System.Management.Automation.PSTypeName]'MxcProxyActivation').Type) {
+    Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 
@@ -64,6 +65,9 @@ public static class MxcProxyActivation
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern uint GetLengthSid(IntPtr sid);
 
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr FreeSid(IntPtr sid);
+
     [DllImport("kernel32.dll")]
     private static extern IntPtr LocalFree(IntPtr memory);
 
@@ -85,7 +89,7 @@ public static class MxcProxyActivation
             Marshal.Copy(sid, bytes, 0, bytes.Length);
             return new System.Security.Principal.SecurityIdentifier(bytes, 0).Value;
         }
-        finally { LocalFree(sid); }
+        finally { FreeSid(sid); }
     }
 }
 
@@ -165,6 +169,9 @@ public static class MxcUnpackagedAppContainer
 
     [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool ConvertStringSidToSid(string text, out IntPtr sid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr FreeSid(IntPtr sid);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool InitializeProcThreadAttributeList(
@@ -273,7 +280,7 @@ public static class MxcUnpackagedAppContainer
             }
             if (securityCapabilities != IntPtr.Zero)
                 Marshal.FreeHGlobal(securityCapabilities);
-            if (appContainerSid != IntPtr.Zero) LocalFree(appContainerSid);
+            if (appContainerSid != IntPtr.Zero) FreeSid(appContainerSid);
             if (capabilityArray != IntPtr.Zero) Marshal.FreeHGlobal(capabilityArray);
             if (privateNetwork != IntPtr.Zero) LocalFree(privateNetwork);
             if (internetClient != IntPtr.Zero) LocalFree(internetClient);
@@ -281,28 +288,33 @@ public static class MxcUnpackagedAppContainer
     }
 }
 '@
+}
 
 function Wait-Proxy {
     param([int]$Port)
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $lastError = $null
     do {
+        $client = [Net.Sockets.TcpClient]::new()
         try {
-            $client = [Net.Sockets.TcpClient]::new()
             $client.Connect('127.0.0.1', $Port)
-            $client.Dispose()
             return
-        } catch {
+        } catch [Net.Sockets.SocketException] {
+            $lastError = $_.Exception.Message
             Start-Sleep -Milliseconds 250
+        } finally {
+            $client.Dispose()
         }
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "Proxy did not listen on 127.0.0.1:$Port"
+    throw "Proxy did not listen on 127.0.0.1:$Port. Last socket error: $lastError"
 }
 
 function Invoke-Client {
     param(
         [Parameter(Mandatory)][string]$Name,
         [string]$AllowedPeer,
-        [ValidateSet('allow', 'deny')][string]$HostLoopback = 'deny'
+        [ValidateSet('allow', 'deny')][string]$HostLoopback = 'deny',
+        [switch]$ExpectFailure
     )
 
     $clientCommand = 'powershell.exe -NoProfile -Command "$h=New-Object -ComObject ' +
@@ -326,6 +338,12 @@ function Invoke-Client {
     $configPath = Join-Path $testRoot "$Name.json"
     $config | ConvertTo-Json -Depth 10 | Set-Content $configPath -Encoding utf8
     & $wxc --config $configPath
+    if ($ExpectFailure) {
+        if ($LASTEXITCODE -eq 0) {
+            throw "$Name unexpectedly succeeded"
+        }
+        return
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "$Name client failed with exit code $LASTEXITCODE"
     }
@@ -344,6 +362,10 @@ function Start-PackagedProxy {
     $process = Get-Process -Id $pidValue
     $script:processes += $process
     Wait-Proxy $proxyPort
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw "Packaged proxy $PackageName exited before becoming ready"
+    }
     return $package.PackageFamilyName
 }
 
@@ -351,6 +373,10 @@ function Start-UnpackagedProxy {
     $process = Start-Process $proxy -ArgumentList '--port', $proxyPort, '--standalone' -PassThru
     $script:processes += $process
     Wait-Proxy $proxyPort
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'Unpackaged full-trust proxy exited before becoming ready'
+    }
 }
 
 New-Item -ItemType Directory $testRoot -Force | Out-Null
@@ -363,7 +389,10 @@ try {
         Add-AppxPackage $packagePath
     }
 
+    $wrongPeer = (Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.FullTrust').PackageFamilyName
     $peer = Start-PackagedProxy 'Microsoft.MXC.TestProxy.AppContainer'
+    Invoke-Client -Name 'packaged-appcontainer-wrong-peer' -AllowedPeer $wrongPeer `
+        -ExpectFailure
     Invoke-Client -Name 'packaged-appcontainer' -AllowedPeer $peer
     $processes[-1] | Stop-Process -Force
     $processes[-1].WaitForExit()
@@ -373,22 +402,25 @@ try {
     $processes[-1] | Stop-Process -Force
     $processes[-1].WaitForExit()
 
-    $profile = $appContainerProfile
     $proxyPid = [MxcUnpackagedAppContainer]::Launch(
-        $profile,
+        $appContainerProfile,
         $proxy,
         "--port $proxyPort --standalone"
     )
     $process = Get-Process -Id $proxyPid
     $processes += $process
-    $profileSid = [MxcProxyActivation]::DeriveSid($profile)
+    $profileSid = [MxcProxyActivation]::DeriveSid($appContainerProfile)
     $rule = "MXC proxy test $PID appcontainer"
     New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
         -Protocol TCP -LocalPort $proxyPort -Program $proxy -Package $profileSid | Out-Null
     $firewallRules += $rule
 
     Wait-Proxy $proxyPort
-    Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $profile
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'Unpackaged AppContainer proxy exited before becoming ready'
+    }
+    Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $appContainerProfile
     $process | Stop-Process -Force
     $process.WaitForExit()
 
@@ -407,7 +439,10 @@ try {
     foreach ($rule in $firewallRules) {
         Remove-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
     }
-    Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.*' | Remove-AppxPackage -ErrorAction SilentlyContinue
+    Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.AppContainer' |
+        Remove-AppxPackage -ErrorAction SilentlyContinue
+    Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.FullTrust' |
+        Remove-AppxPackage -ErrorAction SilentlyContinue
     if ($trustedCertificate) {
         Remove-Item "Cert:\CurrentUser\TrustedPeople\$($trustedCertificate.Thumbprint)" `
             -Force -ErrorAction SilentlyContinue
