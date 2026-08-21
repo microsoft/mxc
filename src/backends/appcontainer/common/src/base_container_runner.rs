@@ -2084,8 +2084,10 @@ impl SandboxBackend for BaseContainerRunner {
         }
         if has_conflicting_proxy_identity(&request.policy) {
             return Err(ScriptResponse::error(
-                "processContainer.network.allowedProxyPeer cannot be combined with \
-                 network.ingress.hostLoopback='allow'",
+                "processContainer.network.allowedProxyPeer grants loopback access only to the \
+                 specified peer and cannot be combined with \
+                 network.ingress.hostLoopback='allow', which grants unrestricted host-loopback \
+                 access",
             ));
         }
         // Dry-run validates the schema and policy shape without selecting or
@@ -4123,7 +4125,12 @@ mod tests {
         let error = runner
             .validate(&request)
             .expect_err("proxy peer identity and host loopback are mutually exclusive");
-        assert!(error.error_message.contains("cannot be combined"));
+        assert_eq!(
+            error.error_message,
+            "processContainer.network.allowedProxyPeer grants loopback access only to the \
+             specified peer and cannot be combined with \
+             network.ingress.hostLoopback='allow', which grants unrestricted host-loopback access"
+        );
     }
 
     #[test]
