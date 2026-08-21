@@ -126,6 +126,21 @@ cannot mix both formats in one request.
                                            //  The chain hooks FORWARD, so traffic addressed to the
                                            //  bridge gateway itself is delivered locally via INPUT
                                            //  and is outside what this chain governs.
+                                           // Under Bubblewrap on schema 0.8+ the proxy is likewise
+                                           //  enforced, in the sandbox's own network namespace:
+                                           //  egress is dropped except the proxy endpoint, and DNS
+                                           //  is not opened. A url-form hostname is resolved on the
+                                           //  host and pinned into the sandbox's /etc/hosts, since
+                                           //  the sandbox has no resolver of its own. `localhost`,
+                                           //  127.0.0.0/8 and the wildcards 0.0.0.0 / :: are
+                                           //  rewritten to the slirp gateway; `::1` is rejected,
+                                           //  because an IPv6-loopback listener cannot accept the
+                                           //  IPv4 connection that gateway produces. Because the
+                                           //  pin outranks every filesystem mount, a `deniedPaths`
+                                           //  entry covering /etc/hosts is rejected rather than
+                                           //  silently overridden. On schema
+                                           //  0.6/0.7 Bubblewrap keeps the cooperative-only
+                                           //  behavior (no egress rules).
     },
 
     "ui": {

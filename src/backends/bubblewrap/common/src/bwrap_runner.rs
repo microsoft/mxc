@@ -112,13 +112,18 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
-        // Proxy-only networking rewrites the configured endpoint to slirp's
-        // host gateway and then opens exactly that address in the egress
-        // chain. Both steps can reject an endpoint (an IPv6 loopback the
-        // gateway cannot reach, a routable IPv6 literal the IPv4-only rules
-        // cannot express, a zero port). Running them here means the caller
-        // learns at policy time instead of after a namespace, a slirp instance
-        // and a rule set have already been built and torn down.
+        // Proxy-only networking derives the sandbox-visible endpoint from the
+        // configured one and then opens exactly that address in the egress
+        // chain. That step can reject an endpoint outright (an IPv6 loopback
+        // the gateway cannot reach, a routable or IPv6-only endpoint the
+        // IPv4-only rules cannot express, a zero port), and those verdicts
+        // follow from the configured address alone, so they are reported here
+        // instead of after a proxy has been started.
+        //
+        // A hostname is deliberately left to `run`: its verdict needs a lookup,
+        // and the answer is the pin the sandbox is given, so resolving here
+        // would either resolve twice or pin an address the egress chain never
+        // opened.
         //
         // The builtin test server has no address until it is started (the
         // parser leaves a port-0 placeholder), so its endpoint stays on the
@@ -128,11 +133,15 @@ impl SandboxBackend for BubblewrapScriptRunner {
                 == ResolvedNetworkMode::ProxyOnly;
         if proxy_only && !request.policy.network_proxy.builtin_test_server {
             if let Some(address) = request.policy.network_proxy.address.as_ref() {
-                let egress = proxy_network::sandbox_proxy_address(address)
-                    .and_then(|translated| proxy_network::ProxyEgress::from_address(&translated));
-                if let Err(error) = egress {
+                if let Err(error) = proxy_network::SandboxProxy::check_without_resolving(address) {
                     return Err(ScriptResponse::error(&error));
                 }
+                if let Err(error) =
+                    proxy_network::check_hosts_pin_against_policy(address, &request.policy)
+                {
+                    return Err(ScriptResponse::error(&error));
+                }
+                // Repeated in `spawn` against the normalized policy.
             }
         }
 
@@ -208,8 +217,35 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
             None => request,
         };
+        // The masks are built from the list above, not from the one the caller
+        // wrote, so the pin conflict has to be judged against it too.
+        if let Err(msg) = check_pin_against_denied_hosts(request) {
+            return Err(ScriptResponse::error(&msg));
+        }
         let child = self.spawn_bwrap(request, &plan.files, logger, stdio)?;
         Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+    }
+}
+
+/// Reject a hostname proxy pin that would defeat a denied `/etc/hosts`.
+///
+/// Runs in both `validate` (against the policy as written, so the caller hears
+/// about it early) and `spawn` (against the normalized policy, which is what
+/// the masks are built from). One is not enough: `resolve_denied_paths`
+/// rewrites `/etc/../etc/hosts` -- or any symlinked spelling -- to
+/// `/etc/hosts`, which the written form never matches, and the pin is spliced
+/// after every policy mount, so it hands back the file the policy masked.
+fn check_pin_against_denied_hosts(request: &ExecutionRequest) -> Result<(), String> {
+    let proxy_only =
+        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
+            == ResolvedNetworkMode::ProxyOnly;
+    // The builtin test server is never a hostname, so it is never pinned.
+    if !proxy_only || request.policy.network_proxy.builtin_test_server {
+        return Ok(());
+    }
+    match request.policy.network_proxy.address.as_ref() {
+        Some(address) => proxy_network::check_hosts_pin_against_policy(address, &request.policy),
+        None => Ok(()),
     }
 }
 
@@ -247,10 +283,10 @@ impl BubblewrapScriptRunner {
         }
 
         let network_mode = ResolvedNetworkMode::from_request(request, proxy.is_active());
-        let sandbox_proxy_address = if network_mode == ResolvedNetworkMode::ProxyOnly {
+        let sandbox_proxy = if network_mode == ResolvedNetworkMode::ProxyOnly {
             match proxy.address() {
-                Some(address) => match proxy_network::sandbox_proxy_address(address) {
-                    Ok(address) => Some(address),
+                Some(address) => match proxy_network::SandboxProxy::resolve(address) {
+                    Ok(resolved) => Some(resolved),
                     Err(error) => {
                         proxy.stop(logger);
                         return Err(ScriptResponse::error(&error));
@@ -266,34 +302,24 @@ impl BubblewrapScriptRunner {
         } else {
             None
         };
-        let proxy_address = sandbox_proxy_address.as_ref().or_else(|| proxy.address());
+        let proxy_address = sandbox_proxy
+            .as_ref()
+            .map(|resolved| resolved.address())
+            .or_else(|| proxy.address());
 
-        let mut proxy_network = if network_mode == ResolvedNetworkMode::ProxyOnly {
+        let mut proxy_network = match sandbox_proxy.as_ref() {
             // The workload dials the sandbox-visible address, so that is what
             // the egress rule must open.
-            let egress = match sandbox_proxy_address
-                .as_ref()
-                .ok_or_else(|| {
-                    "Bubblewrap: proxy-only networking requires a resolved proxy address"
-                        .to_string()
-                })
-                .and_then(proxy_network::ProxyEgress::from_address)
-            {
-                Ok(egress) => egress,
-                Err(error) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(&error));
-                }
-            };
-            match proxy_network::ProxyNetworkNamespace::start(&egress, logger) {
-                Ok(network) => Some(network),
-                Err(error) => {
-                    proxy.stop(logger);
-                    return Err(ScriptResponse::error(&error));
+            Some(resolved) => {
+                match proxy_network::ProxyNetworkNamespace::start(resolved.egress(), logger) {
+                    Ok(network) => Some(network),
+                    Err(error) => {
+                        proxy.stop(logger);
+                        return Err(ScriptResponse::error(&error));
+                    }
                 }
             }
-        } else {
-            None
+            None => None,
         };
 
         // 2. Build the bwrap argument vector. `denied_files` is the file-mask
@@ -311,7 +337,7 @@ impl BubblewrapScriptRunner {
             network_mode,
         );
         let mut network_startup = match proxy_network.as_ref() {
-            Some(network) => match network.configure_bwrap(&mut args) {
+            Some(network) => match network.configure_bwrap(&mut args, logger) {
                 Ok(startup) => Some(startup),
                 Err(error) => {
                     stop_proxy_network(&mut proxy_network, logger);
@@ -878,7 +904,7 @@ mod tests {
 
     /// Proxy-only mode rewrites the endpoint to slirp's gateway and opens
     /// exactly that address, so an endpoint neither step can express has to be
-    /// refused at policy time -- not after a namespace and rule set were built.
+    /// refused at policy time -- before a proxy is started.
     #[test]
     fn validate_rejects_an_ipv6_loopback_proxy_endpoint_before_the_environment_probe() {
         let mut req = base_request();
@@ -970,6 +996,111 @@ mod tests {
             !message.contains("non-zero proxy port"),
             "the builtin proxy's placeholder port must not be validated as an \
              operator-supplied endpoint: {message}"
+        );
+    }
+
+    /// A hostname endpoint is reached by pinning it over `/etc/hosts`, and the
+    /// pin outranks every policy mount -- so a policy that denies the file must
+    /// refuse the combination rather than silently hand the file back.
+    #[test]
+    fn validate_rejects_a_hostname_proxy_that_would_defeat_a_denied_hosts_file() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.denied_paths = vec!["/etc/hosts".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        let runner = BubblewrapScriptRunner::new();
+        let err = runner.validate(&req).unwrap_err();
+
+        assert!(
+            err.error_message.contains("deniedPaths"),
+            "the conflict must be refused at policy time: {}",
+            err.error_message
+        );
+    }
+
+    /// `validate` compares the denied paths as written, so a spelling that only
+    /// becomes `/etc/hosts` after normalization slips past it. `spawn` builds
+    /// the masks from the normalized list, so the mask lands on `/etc/hosts`
+    /// and the pin -- spliced after every policy mount -- then hands the file
+    /// back. Regression test: the check must also see the normalized policy.
+    #[test]
+    fn a_dotdot_spelling_of_a_denied_hosts_file_still_refuses_the_pin() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        // As written, this matches nothing the check looks for.
+        req.policy.denied_paths = vec!["/etc/../etc/hosts".into()];
+        assert!(
+            check_pin_against_denied_hosts(&req).is_ok(),
+            "precondition: the written form is not recognized"
+        );
+
+        // Normalized -- what `spawn` actually builds the masks from.
+        let mut normalized = req.clone();
+        normalized.policy.denied_paths = vec!["/etc/hosts".into()];
+        let err = check_pin_against_denied_hosts(&normalized)
+            .expect_err("the normalized policy must refuse the pin");
+        assert!(err.contains("deniedPaths"), "{err}");
+    }
+
+    /// The rejection is scoped to endpoints that actually produce a pin. An IP
+    /// literal is reached without touching `/etc/hosts`, so denying the file
+    /// stays compatible -- and that is the escape hatch the message offers.
+    #[test]
+    fn validate_accepts_an_ip_proxy_endpoint_alongside_a_denied_hosts_file() {
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.denied_paths = vec!["/etc/hosts".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.1.2.3".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        let runner = BubblewrapScriptRunner::new();
+        let message = runner
+            .validate(&req)
+            .err()
+            .map(|err| err.error_message)
+            .unwrap_or_default();
+
+        assert!(
+            !message.contains("deniedPaths"),
+            "an endpoint that needs no pin must not inherit the rejection: {message}"
+        );
+    }
+
+    /// Legacy proxy mode shares the host's network, never translates the
+    /// endpoint and never pins a name, so the same policy has to stay
+    /// acceptable there -- rejecting it would break callers already on 0.6/0.7.
+    #[test]
+    fn validate_leaves_a_legacy_schema_hosts_denial_untouched() {
+        let mut req = base_request();
+        req.schema_version = "0.7.0-alpha".into();
+        req.policy.denied_paths = vec!["/etc/hosts".into()];
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("proxy.example.com".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        let runner = BubblewrapScriptRunner::new();
+        let message = runner
+            .validate(&req)
+            .err()
+            .map(|err| err.error_message)
+            .unwrap_or_default();
+
+        assert!(
+            !message.contains("deniedPaths"),
+            "legacy proxy mode pins nothing, so it must not inherit the \
+             private-namespace rejection: {message}"
         );
     }
 
