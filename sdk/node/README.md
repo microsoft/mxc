@@ -67,13 +67,26 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
-**Schema 0.8 directional networking:** Config-based requests may use
+**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.defaultPolicy`, `network.enforcementMode`,
-`network.allowLocalNetwork`, host-list, or `network.proxy` fields.
-`createConfigFromPolicy` continues to produce the legacy network shape; build a
-`ContainerConfig` directly when using the schema 0.8 directional shape.
+legacy `network.allowOutbound`, `network.allowLocalNetwork`, host-list, or
+`network.proxy` policy fields. Schema 0.6 and 0.7 policies continue to produce
+the legacy wire shape.
+
+```typescript
+const config = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: { default: 'deny' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+  runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+  processContainer: {
+    network: { allowedProxyPeer: 'Contoso.Proxy_1234567890abc' },
+  },
+});
+```
 
 **Platforms:**
 

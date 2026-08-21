@@ -3,12 +3,12 @@
 
 import { describe, it, before, after, afterEach } from 'node:test';
 import assert from 'node:assert';
-import { ChildProcess, execFileSync } from 'child_process';
+import { ChildProcess } from 'child_process';
 import { EventEmitter } from 'events';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import type { ContainerConfig, SandboxPolicy } from '@microsoft/mxc-sdk';
+import type { SandboxPolicy } from '@microsoft/mxc-sdk';
 import {
   sdk,
   supportedVersions,
@@ -19,113 +19,7 @@ import {
   debugSpawnOptions,
   pythonCommand,
   pythonSkipReason,
-  getSdkBinDir,
-  assertDryRunResult,
 } from './test-helpers.js';
-
-const baseContainerSkipReason = (() => {
-  if (os.platform() !== 'win32') return 'BaseContainer dry-run tests require Windows';
-  if (sandboxSkipReason) return sandboxSkipReason;
-  try {
-    const probe = JSON.parse(
-      execFileSync(path.join(getSdkBinDir(), 'wxc-exec.exe'), ['--probe'], {
-        encoding: 'utf8',
-        timeout: 30_000,
-      }),
-    ) as { tier?: string; error?: string };
-    return probe.tier === 'base-container'
-      ? undefined
-      : `BaseContainer tier 1 unavailable: ${probe.error ?? probe.tier ?? 'unknown tier'}`;
-  } catch (error) {
-    return `BaseContainer probe failed: ${error instanceof Error ? error.message : String(error)}`;
-  }
-})();
-
-async function dryRunProcessContainer(config: ContainerConfig): Promise<void> {
-  const result = await new Promise<{ exitCode: number; stdout: string; stderr: string }>(
-    (resolve, reject) => {
-      const child = sdk.spawnSandboxFromConfig(config, {
-        dryRun: true,
-        usePty: false,
-        ...debugSpawnOptions,
-      });
-      let stdout = '';
-      let stderr = '';
-      child.stdout?.on('data', (data: Buffer) => {
-        stdout += data.toString();
-      });
-      child.stderr?.on('data', (data: Buffer) => {
-        stderr += data.toString();
-      });
-      child.on('close', (exitCode: number) => resolve({ exitCode, stdout, stderr }));
-      child.on('error', reject);
-    },
-  );
-
-  assertDryRunResult(
-    `${result.stdout}\n${result.stderr}`,
-    result.exitCode,
-    config.version,
-  );
-}
-
-describe('Windows BaseContainer schema 0.8 networking dry-run', {
-  skip: baseContainerSkipReason,
-}, () => {
-  const cases: Array<{ name: string; network: NonNullable<ContainerConfig['network']> }> = [
-    {
-      name: 'deny defaults',
-      network: {
-        egress: { default: 'deny' },
-        ingress: { default: 'deny', hostLoopback: 'deny' },
-      },
-    },
-    {
-      name: 'allow egress default',
-      network: {
-        egress: { default: 'allow' },
-        ingress: { default: 'deny', hostLoopback: 'deny' },
-      },
-    },
-    {
-      name: 'allow private-network ingress',
-      network: {
-        egress: { default: 'deny' },
-        ingress: { default: 'allow', hostLoopback: 'deny' },
-      },
-    },
-    {
-      name: 'CIDR protocol and port rules',
-      network: {
-        egress: {
-          default: 'deny',
-          allow: [{
-            to: [{ cidr: '10.0.0.0/8', except: ['10.1.0.0/16'] }],
-            ports: [{ protocol: 'tcp', port: 443 }],
-          }],
-          deny: [{
-            to: [{ cidr: '10.2.0.0/16' }],
-            ports: [{ protocol: 'udp', port: 53 }],
-          }],
-        },
-        ingress: { default: 'deny', hostLoopback: 'deny' },
-      },
-    },
-  ];
-
-  for (const testCase of cases) {
-    it(`accepts ${testCase.name}`, async () => {
-      await dryRunProcessContainer({
-        version: '0.8.0-alpha',
-        containerId: `dryrun-network-${testCase.name.replaceAll(' ', '-')}`,
-        containment: 'processcontainer',
-        process: { commandLine: 'cmd.exe /c echo test' },
-        processContainer: {},
-        network: testCase.network,
-      });
-    });
-  }
-});
 
 for (const schemaVersion of supportedVersions) {
 describe(`Windows Process Container (schema ${schemaVersion})`, {

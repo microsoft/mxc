@@ -371,7 +371,20 @@ describe('buildSandboxPayload', () => {
         };
         assert.throws(
           () => buildSandboxPayload('print(42)', policy, undefined, undefined, 'microvm'),
-          { message: /does not support network policy/ },
+          { message: /does not support network configuration/ },
+        );
+        assert.throws(
+          () => buildSandboxPayload(
+            'print(42)',
+            {
+              version: '0.8.0-alpha',
+              runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+            },
+            undefined,
+            undefined,
+            'microvm',
+          ),
+          { message: /does not support network configuration/ },
         );
       } finally {
         restore();
@@ -492,6 +505,29 @@ describe('createConfigFromPolicy', () => {
     assert.strictEqual(config.process!.timeout, 30000);
   });
 
+  it('should reject schema 0.8 directional fields on older schemas', () => {
+    assert.throws(
+      () => createConfigFromPolicy({
+        version: '0.7.0-alpha',
+        network: { egress: { default: 'deny' } },
+      }),
+      { message: /does not support network\.egress/ },
+    );
+  });
+
+  it('should reject mixed legacy and directional network fields', () => {
+    assert.throws(
+      () => createConfigFromPolicy({
+        version: '0.8.0-alpha',
+        network: {
+          allowOutbound: true,
+          egress: { default: 'deny' },
+        },
+      }),
+      { message: /cannot mix/ },
+    );
+  });
+
   describe('Windows', () => {
     let originalPlatform: PropertyDescriptor | undefined;
 
@@ -554,6 +590,110 @@ describe('createConfigFromPolicy', () => {
           network: { proxy: { url: 'http://localhost:8080' } },
         });
         assert.deepStrictEqual(url.network!.proxy, { url: 'http://localhost:8080' });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should emit schema 0.8 directional rules through the policy authoring API', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: {
+              default: 'deny',
+              allow: [{
+                to: [{ cidr: '10.0.0.0/8', except: ['10.1.0.0/16'] }],
+                ports: [{ protocol: 'tcp', port: 443 }],
+              }],
+              deny: [{
+                to: [{ cidr: '10.2.0.0/16' }],
+                ports: [{ protocol: 'udp', port: 53 }],
+              }],
+            },
+            ingress: { default: 'deny', hostLoopback: 'deny' },
+          },
+        });
+
+        assert.deepStrictEqual(config.network, {
+          egress: {
+            default: 'deny',
+            allow: [{
+              to: [{ cidr: '10.0.0.0/8', except: ['10.1.0.0/16'] }],
+              ports: [{ protocol: 'tcp', port: 443 }],
+            }],
+            deny: [{
+              to: [{ cidr: '10.2.0.0/16' }],
+              ports: [{ protocol: 'udp', port: 53 }],
+            }],
+          },
+          ingress: { default: 'deny', hostLoopback: 'deny' },
+        });
+        assert.strictEqual(config.network!.defaultPolicy, undefined);
+        assert.strictEqual(config.network!.enforcementMode, undefined);
+      } finally {
+        restore();
+      }
+    });
+
+    it('should emit schema 0.8 runtime proxy and ProcessContainer peer settings', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.8.0-alpha',
+          network: {
+            egress: { default: 'deny' },
+            ingress: { default: 'allow', hostLoopback: 'allow' },
+          },
+          runtimeConfig: {
+            networkProxy: 'http://127.0.0.1:8080',
+          },
+          processContainer: {
+            network: {
+              allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+            },
+          },
+        });
+
+        assert.deepStrictEqual(config.network, {
+          egress: { default: 'deny' },
+          ingress: { default: 'allow', hostLoopback: 'allow' },
+        });
+        assert.deepStrictEqual(config.runtimeConfig, {
+          networkProxy: 'http://127.0.0.1:8080',
+        });
+        assert.deepStrictEqual(config.processContainer!.network, {
+          allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+        });
+      } finally {
+        restore();
+      }
+    });
+
+    it('should preserve schema 0.7 legacy network mapping', () => {
+      mockWindows();
+      try {
+        const config = createConfigFromPolicy({
+          version: '0.7.0-alpha',
+          network: {
+            allowOutbound: true,
+            allowLocalNetwork: true,
+          },
+        });
+
+        assert.deepStrictEqual(config.network, {
+          defaultPolicy: 'allow',
+          allowLocalNetwork: true,
+          allowedHosts: undefined,
+          blockedHosts: undefined,
+          proxy: undefined,
+          enforcementMode: 'capabilities',
+        });
+        assert.deepStrictEqual(config.processContainer!.capabilities, [
+          'internetClient',
+          'privateNetworkClientServer',
+        ]);
       } finally {
         restore();
       }

@@ -10,10 +10,10 @@
  * mode. Learning-mode capability names are reserved and must not be supplied
  * directly in `processContainer.capabilities`.
  *
- * Schema `0.8.0-alpha` config-based requests may use directional
+ * Schema `0.8.0-alpha` policies may use directional
  * `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
- * `processContainer.network.allowedProxyPeer`. These fields cannot be mixed
- * with the legacy network fields produced by `createConfigFromPolicy`.
+ * `processContainer.network.allowedProxyPeer` through `createConfigFromPolicy`.
+ * These fields cannot be mixed with legacy network fields.
  *
  * @example
  * ```typescript
