@@ -42,7 +42,9 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::{validate_common, validate_network_policy_support};
+use wxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
@@ -61,6 +63,26 @@ impl BubblewrapScriptRunner {
 }
 
 impl SandboxBackend for BubblewrapScriptRunner {
+    /// Bubblewrap programs the directional 0.8 posture into iptables chains in
+    /// the sandbox's own network namespace, so it enforces the outbound default,
+    /// the allow/deny rules, and both inbound fields.
+    ///
+    /// `INGRESS_DEFAULT` and `HOST_LOOPBACK` declare that the backend
+    /// *understands* those fields, not that it honors both of their values:
+    /// only the deny posture is reachable, and the allow posture is refused by
+    /// `bwrap_command::directional_network_rejection` below. Declaring them
+    /// without that refusal would be a fail-open, so the two belong together.
+    ///
+    /// `RUNTIME_PROXY` and `PROXY_PEER_IDENTITY` stay undeclared: the first has
+    /// no Bubblewrap implementation, and the second is a ProcessContainer
+    /// concept. Shared validation refuses both on this backend.
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::EGRESS_RULES
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
         // User-input validation runs before the environmental `bwrap`
@@ -130,6 +152,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
             return Err(ScriptResponse::error(reason));
         }
         if let Some(reason) = bwrap_command::local_network_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
+        if let Some(reason) = bwrap_command::directional_network_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
 
@@ -946,6 +971,60 @@ mod tests {
             builtin_test_server: false,
         };
         req
+    }
+
+    /// Every declared feature must be matched by a backend-local refusal of
+    /// the values it cannot honor.
+    ///
+    /// Declaring `INGRESS_DEFAULT`/`HOST_LOOPBACK` tells shared validation to
+    /// stop checking those fields. That is the point — it is what lets the
+    /// honorable deny posture through — but it also means an unsupported value
+    /// now reaches the runner unchallenged. This asserts both halves at once:
+    /// shared validation waves the allow posture through *because* of the
+    /// declaration, and the backend gate is what stops it. Delete either half
+    /// and this fails, which is the fail-open the two-part change exists to
+    /// prevent.
+    #[test]
+    fn every_declared_inbound_feature_has_a_backend_refusal_behind_it() {
+        use wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
+
+        use crate::bwrap_command::{BWRAP_HOST_LOOPBACK_ALLOW, BWRAP_INGRESS_DEFAULT_ALLOW};
+
+        let runner = BubblewrapScriptRunner::new();
+        let support = runner.network_policy_support();
+
+        for (default, host_loopback) in [
+            (NetworkAction::Allow, NetworkAction::Deny),
+            (NetworkAction::Deny, NetworkAction::Allow),
+        ] {
+            let mut request = base_request();
+            request.schema_version = "0.8.0-alpha".into();
+            request.policy.network_egress = Some(NetworkEgressPolicy::default());
+            request.policy.network_ingress = Some(NetworkIngressPolicy {
+                default,
+                host_loopback,
+            });
+
+            assert!(
+                validate_network_policy_support(&request, support).is_ok(),
+                "shared validation should defer to the declaration \
+                 (default={default:?} hostLoopback={host_loopback:?})"
+            );
+            // Through `validate`, not the gate function directly: this must
+            // also fail if the gate is written but never wired in. The
+            // rejection sits ahead of the `bwrap` probe, so the verdict is the
+            // same on a host without bwrap installed.
+            let refusal = runner
+                .validate(&request)
+                .expect_err("the backend must refuse what the declaration stopped checking");
+            assert!(
+                refusal.error_message == BWRAP_INGRESS_DEFAULT_ALLOW
+                    || refusal.error_message == BWRAP_HOST_LOOPBACK_ALLOW,
+                "unexpected refusal for default={default:?} \
+                 hostLoopback={host_loopback:?}: {}",
+                refusal.error_message
+            );
+        }
     }
 
     #[test]
