@@ -161,7 +161,7 @@ impl ProcessContainerCapability {
     pub fn new(value: String) -> Result<Self, String> {
         if value.contains(',') {
             return Err(
-                "capability must not contain a comma; provide multiple capabilities as separate array entries"
+                "capability must not contain a comma; provide multiple capabilities as separate array entries, for example [\"internetClient\", \"privateNetworkClientServer\"]"
                     .to_string(),
             );
         }
