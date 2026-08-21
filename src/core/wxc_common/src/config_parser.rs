@@ -5224,29 +5224,6 @@ mod tests {
     }
 
     #[test]
-    fn schema_v08_rejects_reserved_proxy_peer_identity() {
-        let json = r#"{
-            "version": "0.8.0-alpha",
-            "containment": "processcontainer",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "egress": {"default": "deny"},
-                "ingress": {"default": "allow", "hostLoopback": "deny"}
-            },
-            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
-            "processContainer": {
-                "network": {"allowedProxyPeer": "mxc-loopback"}
-            }
-        }"#;
-
-        let error = match load_mxc(json) {
-            Err(ParseError::OneShot(error)) => error.to_string(),
-            other => panic!("expected one-shot config error, got {other:?}"),
-        };
-        assert!(error.contains("must not use the reserved 'MXC-Loopback' identity"));
-    }
-
-    #[test]
     fn schema_v08_parses_identityless_processcontainer_proxy() {
         let json = r#"{
             "version": "0.8.0-alpha",

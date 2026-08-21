@@ -595,5 +595,28 @@ fn validate_process_container_proxy_policy(
 }
 
 #[cfg(test)]
+mod proxy_policy_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_loopback_peer_identity_is_rejected_case_insensitively() {
+        let policy = ContainerPolicy {
+            allowed_proxy_peer: Some("mxc-loopback".to_string()),
+            ..Default::default()
+        };
+
+        let error = validate_process_container_proxy_policy(&policy, true).unwrap_err();
+        match error {
+            WxcError::ConfigParse(message) => assert_eq!(
+                message,
+                "processContainer.network.allowedProxyPeer must not use the reserved \
+                 'MXC-Loopback' identity"
+            ),
+            other => panic!("expected config error, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
 #[path = "network_parser_loopback_spec_tests.rs"]
 mod loopback_spec_tests;
