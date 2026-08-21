@@ -17,7 +17,7 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::NetworkIptablesManager;
+use crate::network_iptables::{installs_firewall, NetworkIptablesManager};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -236,7 +236,7 @@ impl LxcScriptRunner {
 
         // Wait for network only when the run installs a firewall, or when the
         // container must reach a proxy. Both questions are `installs_firewall`.
-        let needs_network = request.policy.installs_firewall();
+        let needs_network = installs_firewall(&request.policy);
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -284,7 +284,7 @@ impl LxcScriptRunner {
         // lets us enter that netns — and the ingress manager cannot even be
         // constructed without one. This has to be the same question the ingress
         // gate asks, or a run skips the guard and then skips the chain.
-        let use_firewall = request.policy.installs_firewall();
+        let use_firewall = installs_firewall(&request.policy);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).

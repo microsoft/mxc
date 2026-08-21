@@ -60,7 +60,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::network_iptables::{
-    ingress_chain_name_for, HostIpv6State, Ip6tablesStatus, NetworkIptablesManager,
+    ingress_chain_name_for, installs_firewall, HostIpv6State, Ip6tablesStatus,
+    NetworkIptablesManager,
 };
 
 /// IP family an inbound chain is being built for.
@@ -546,7 +547,7 @@ impl IngressManager {
         // Not `requires_firewall`: that answers whether the *egress* chain has
         // a rule to carry, and a firewall-mode config with permissive egress
         // has none while still asking for the inbound deny this chain is.
-        if !policy.installs_firewall() {
+        if !installs_firewall(policy) {
             logger.log_line(
                 "Network policy installs no firewall (permissive default, no host lists, \
                  no proxy, no firewall enforcement mode, no directional posture); \
@@ -1230,6 +1231,7 @@ mod permissive_spec_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network_iptables::requires_firewall;
     use wxc_common::models::{
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
@@ -2865,12 +2867,12 @@ mod tests {
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
             assert!(
-                !policy.requires_firewall(),
+                !requires_firewall(&policy),
                 "{label}: this config is only interesting while it has no egress rule to \
                  carry; if that changes the test no longer covers the inbound gate"
             );
             assert!(
-                policy.installs_firewall(),
+                installs_firewall(&policy),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
                  deny chain even with nothing to restrict outbound"
             );
@@ -2886,7 +2888,7 @@ mod tests {
             legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
-            !policy.installs_firewall(),
+            !installs_firewall(&policy),
             "a policy naming no firewall mode, no posture, no hosts and no proxy has \
              nothing inbound to enforce"
         );
@@ -2902,7 +2904,7 @@ mod tests {
         policy.network_egress = Some(Default::default());
 
         assert!(
-            policy.installs_firewall(),
+            installs_firewall(&policy),
             "a 0.8 config states its posture with no enforcementMode to name, so the \
              inbound chain has to follow from the posture itself"
         );

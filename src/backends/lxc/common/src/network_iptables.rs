@@ -14,9 +14,61 @@ use std::process::Command;
 use sha2::{Digest, Sha256};
 use wxc_common::logger::Logger;
 use wxc_common::models::{
-    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkPeer, NetworkPolicy,
-    NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress, ProxyHostPin,
+    ContainerPolicy, NetworkAction, NetworkCidr, NetworkEgressPolicy, NetworkEnforcementMode,
+    NetworkPeer, NetworkPolicy, NetworkPort, NetworkProtocol, NetworkRule, ProxyAddress,
+    ProxyHostPin,
 };
+
+/// True when this policy describes anything the egress firewall has to carry,
+/// in either schema.
+///
+/// Deliberately keyed on what the policy *says* rather than on
+/// `network.enforcementMode`. The mode is a request for enforcement and this is
+/// the question of whether enforcement is owed, and answering the second with
+/// the first lets a policy that restricts egress start with an open chain
+/// because it never named a mode. A caller may get more enforcement than the
+/// mode asked for, never less.
+///
+/// The directional arm is what admits schema 0.8, which has no mode to name:
+/// the parser rejects `enforcementMode` beside `egress`/`ingress`, so every
+/// directional policy carries the `Capabilities` default. The arm is written
+/// out rather than left to the `Block` arm to cover it, because `Block` covers
+/// it only by being the parser's default for a field 0.8 never writes — an
+/// `egress.default: allow` config would stop being enforced the day that
+/// default changed.
+///
+/// This asks what LXC does about a policy rather than what the policy is, which
+/// is why it lives beside the emitter it gates and not on the shared contract
+/// type. No other backend installs iptables chains from it.
+pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
+    policy.default_network_policy == NetworkPolicy::Block
+        || !policy.allowed_hosts.is_empty()
+        || !policy.blocked_hosts.is_empty()
+        || policy.network_proxy.is_enabled()
+        || policy.network_egress.is_some()
+}
+
+/// True when the run installs firewall chains at all, which is a wider question
+/// than [`requires_firewall`].
+///
+/// The two differ on one shape: `enforcementMode: firewall` (or `both`) with a
+/// permissive egress default and no host lists. Outbound, that policy has no
+/// rule to install, so skipping the chain costs nothing and `requires_firewall`
+/// correctly answers no. Inbound, the chain *is* the policy — its default deny
+/// is what keeps `allowLocalNetwork: false` true — so skipping opens the
+/// container to new inbound connections the config asked to refuse. Anything
+/// gating the inbound chain has to ask this instead.
+///
+/// Schema 0.8 needs no arm of its own here: it cannot carry `enforcementMode`,
+/// and its parser writes an egress section for every config, so
+/// `requires_firewall` already answers every directional policy.
+pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
+    requires_firewall(policy)
+        || matches!(
+            policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        )
+}
 
 /// One destination the container is allowed to reach when the policy routes
 /// egress through a cooperative proxy: an address the proxy host resolved to,
@@ -2025,7 +2077,7 @@ impl NetworkIptablesManager {
         // an enabled proxy, so a proxied policy can no longer reach this skip
         // and report success while the runner injects HTTP(S)_PROXY into a
         // container whose egress was never restricted.
-        if !policy.requires_firewall() {
+        if !requires_firewall(policy) {
             logger.log_line(
                 "Network policy requires no egress firewall (permissive default, no host \
                  lists, no proxy, no directional posture); skipping iptables.",
@@ -4548,7 +4600,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                restrictive.requires_firewall(),
+                requires_firewall(&restrictive),
                 "{label}: a policy that restricts egress is owed the firewall"
             );
 
@@ -4558,7 +4610,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(
-                !permissive.requires_firewall(),
+                !requires_firewall(&permissive),
                 "{label}: a policy that restricts nothing is owed no firewall"
             );
         }
@@ -4579,7 +4631,7 @@ mod tests {
         };
 
         assert!(
-            policy.requires_firewall(),
+            requires_firewall(&policy),
             "a stated 0.8 egress posture must request the firewall even though \
              enforcementMode is absent from the 0.8 schema and defaults to capabilities"
         );
@@ -4600,7 +4652,7 @@ mod tests {
         };
 
         assert!(
-            policy.requires_firewall(),
+            requires_firewall(&policy),
             "a 0.7 policy naming blocked hosts is owed the firewall whatever mode it \
              names; the engine rewrites the mode to firewall when host rules arrive \
              without a proxy, but nothing rejects this shape and a hand-built \
@@ -4629,7 +4681,7 @@ mod tests {
         };
 
         assert!(
-            policy.requires_firewall(),
+            requires_firewall(&policy),
             "a proxied policy must never reach the firewall skip, whatever enforcement \
              mode it names or defaults to"
         );
@@ -4647,7 +4699,7 @@ mod tests {
         };
 
         assert!(
-            policy.requires_firewall(),
+            requires_firewall(&policy),
             "an address-free proxy is still a proxy and must not be silently unenforced"
         );
     }
