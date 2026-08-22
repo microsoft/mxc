@@ -35,6 +35,10 @@ jobs:
   steps:
     - checkout: self
 
+    # The post-job SBOM generator inspects the Rust workspace. Configure Cargo
+    # for the internal feed so network isolation does not send it to crates.io.
+    - template: Cargo.Setup.Private.yml@self
+
     - task: UseNode@1
       displayName: Use Node.js 20
       inputs:
