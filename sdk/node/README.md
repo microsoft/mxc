@@ -84,9 +84,8 @@ for the complete authoring shape.
 
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
-internet access and supplies a loopback HTTP/S proxy endpoint for cooperating
-clients. Backend-specific requirements determine how that proxy endpoint is
-made reachable.
+internet access and supplies a loopback HTTP/S proxy endpoint. Backend-specific
+requirements determine how that proxy endpoint is made reachable.
 
 **Simple model 1 example — direct egress with L3/L4 filtering:**
 
