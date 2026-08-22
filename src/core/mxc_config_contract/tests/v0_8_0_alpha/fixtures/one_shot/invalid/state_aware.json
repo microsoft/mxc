@@ -1,0 +1,8 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "exec",
+  "sandboxId": "example:12345678",
+  "process": {
+    "commandLine": "echo state-aware"
+  }
+}

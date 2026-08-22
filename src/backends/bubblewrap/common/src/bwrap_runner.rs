@@ -42,7 +42,9 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::{validate_common, validate_network_policy_support};
+use wxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
 
 use crate::{
     bwrap_command::{self, ResolvedNetworkMode},
@@ -61,6 +63,34 @@ impl BubblewrapScriptRunner {
 }
 
 impl SandboxBackend for BubblewrapScriptRunner {
+    /// Bubblewrap programs the directional 0.8 posture into iptables chains in
+    /// the sandbox's own network namespace, so it enforces the outbound default,
+    /// the allow/deny rules, and both inbound fields.
+    ///
+    /// `INGRESS_DEFAULT` and `HOST_LOOPBACK` declare that the backend
+    /// *understands* those fields, not that it honors both of their values:
+    /// only the deny posture is reachable, and the allow posture is refused by
+    /// `bwrap_command::directional_network_rejection` below. Declaring them
+    /// without that refusal would be a fail-open, so the two belong together.
+    ///
+    /// `RUNTIME_PROXY` is declared because the parser normalizes
+    /// `runtimeConfig.networkProxy` into the same `policy.network_proxy` the
+    /// legacy `network.proxy` field feeds, pinned to loopback, and only under
+    /// the `egress.default='deny'` with no direct rules posture. That is
+    /// exactly `ResolvedNetworkMode::ProxyOnly`, which this backend already
+    /// enforces via the proxy's own private-namespace egress chain, so the 0.8
+    /// spelling reaches the identical enforcement as the 0.7 one.
+    ///
+    /// `PROXY_PEER_IDENTITY` stays undeclared: it is a ProcessContainer concept
+    /// with no Bubblewrap equivalent, so shared validation refuses it here.
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::EGRESS_RULES
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
         // User-input validation runs before the environmental `bwrap`
@@ -132,6 +162,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
         if let Some(reason) = bwrap_command::local_network_rejection(request) {
             return Err(ScriptResponse::error(reason));
         }
+        if let Some(reason) = bwrap_command::directional_network_rejection(request) {
+            return Err(ScriptResponse::error(reason));
+        }
 
         // Proxy-only networking derives the sandbox-visible endpoint from the
         // configured one and then opens exactly that address in the egress
@@ -177,7 +210,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::FirewallEnforced;
         if firewall_enforced {
-            if let Err(error) = network_rules::EgressPlan::for_policy(request) {
+            if let Err(error) = network_rules::EgressPlan::for_request(request) {
                 return Err(ScriptResponse::error(&error));
             }
         }
@@ -376,7 +409,7 @@ impl BubblewrapScriptRunner {
             // endpoint. There is no hostname to pin because rule addresses are
             // literals and CIDRs only.
             None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
-                let plan = match network_rules::EgressPlan::for_policy(request) {
+                let plan = match network_rules::EgressPlan::for_request(request) {
                     Ok(plan) => plan,
                     Err(error) => {
                         proxy.stop(logger);
@@ -948,6 +981,345 @@ mod tests {
         req
     }
 
+    /// Every declared feature must be matched by a backend-local refusal of
+    /// the values it cannot honor.
+    ///
+    /// Declaring `INGRESS_DEFAULT`/`HOST_LOOPBACK` tells shared validation to
+    /// stop checking those fields. That is the point — it is what lets the
+    /// honorable deny posture through — but it also means an unsupported value
+    /// now reaches the runner unchallenged. This asserts both halves at once:
+    /// shared validation waves the allow posture through *because* of the
+    /// declaration, and the backend gate is what stops it. Delete either half
+    /// and this fails, which is the fail-open the two-part change exists to
+    /// prevent.
+    #[test]
+    fn every_declared_inbound_feature_has_a_backend_refusal_behind_it() {
+        use wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy};
+
+        use crate::bwrap_command::{BWRAP_HOST_LOOPBACK_ALLOW, BWRAP_INGRESS_DEFAULT_ALLOW};
+
+        let runner = BubblewrapScriptRunner::new();
+        let support = runner.network_policy_support();
+
+        for (default, host_loopback) in [
+            (NetworkAction::Allow, NetworkAction::Deny),
+            (NetworkAction::Deny, NetworkAction::Allow),
+        ] {
+            let mut request = base_request();
+            request.schema_version = "0.8.0-alpha".into();
+            request.policy.network_egress = Some(NetworkEgressPolicy::default());
+            request.policy.network_ingress = Some(NetworkIngressPolicy {
+                default,
+                host_loopback,
+            });
+
+            assert!(
+                validate_network_policy_support(&request, support).is_ok(),
+                "shared validation should defer to the declaration \
+                 (default={default:?} hostLoopback={host_loopback:?})"
+            );
+            // Through `validate`, not the gate function directly: this must
+            // also fail if the gate is written but never wired in. The
+            // rejection sits ahead of the `bwrap` probe, so the verdict is the
+            // same on a host without bwrap installed.
+            let refusal = runner
+                .validate(&request)
+                .expect_err("the backend must refuse what the declaration stopped checking");
+            assert!(
+                refusal.error_message == BWRAP_INGRESS_DEFAULT_ALLOW
+                    || refusal.error_message == BWRAP_HOST_LOOPBACK_ALLOW,
+                "unexpected refusal for default={default:?} \
+                 hostLoopback={host_loopback:?}: {}",
+                refusal.error_message
+            );
+        }
+    }
+
+    /// Every `NetworkPolicySupport` bit must be a deliberate decision, proven
+    /// against a config the shared gate actually rules on.
+    ///
+    /// The bits are a hand-written declaration: nothing derives them from the
+    /// fields this backend really consumes, so a bit that was simply never
+    /// added reads exactly like one that was considered and refused. Both
+    /// produce the same clean rejection. That is how `RUNTIME_PROXY` stayed
+    /// undeclared while the backend had full proxy support the whole time --
+    /// no test could see the difference, because there was nothing to compare
+    /// the declaration against.
+    ///
+    /// This closes that gap from both sides. The union assertion means a newly
+    /// added bit fails here until someone categorizes it, so the decision can
+    /// no longer be made by omission. Each entry is then proven against a
+    /// request that exercises its field: declared bits must be accepted,
+    /// undeclared ones must be refused by name. Every probe is also run against
+    /// `ALL`, so a probe that stops reaching its gate fails loudly instead of
+    /// quietly passing for the wrong reason.
+    #[test]
+    fn every_network_policy_support_bit_is_a_deliberate_decision() {
+        use wxc_common::models::{
+            NetworkAction, NetworkEgressPolicy, NetworkIngressPolicy, NetworkRule,
+        };
+
+        use crate::network_rules::{render_filter_payloads, EgressPlan, IngressPlan, RuleFamily};
+
+        // A directional posture makes the gates that key off it fire. Both
+        // sections are always set, because that is the only shape the parser
+        // produces (`apply_directional_network` fills them in together).
+        fn directional() -> ExecutionRequest {
+            let mut request = base_request();
+            request.schema_version = "0.8.0-alpha".into();
+            request.policy.network_mode_specified = true;
+            request.policy.network_egress = Some(NetworkEgressPolicy::default());
+            request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+            request
+        }
+
+        // (bit, declared, a request that exercises it, the field it names,
+        //  a probe proving the field reaches enforcement)
+        //
+        // Acceptance alone proved nothing: `HOST_LOOPBACK` sat here declared
+        // and accepted for its whole unenforced life. Each probe flips the
+        // field in a copy of its request and requires the rendered chain to
+        // change, so an over-declared bit fails here.
+        type Probe = fn(&ExecutionRequest) -> Result<(), String>;
+
+        /// The rendered v4 payload, exactly as the supervisor would install it.
+        fn chain_payload(request: &ExecutionRequest) -> Vec<String> {
+            let egress =
+                EgressPlan::for_request(request).expect("the probe requests are all renderable");
+            let ingress = IngressPlan::for_policy(&request.policy);
+            render_filter_payloads(
+                &egress,
+                &ingress,
+                RuleFamily::V4,
+                "MXC_EGRESS",
+                "MXC_INGRESS",
+            )
+        }
+
+        /// Requires the rendered chain to change, naming what was flipped.
+        fn must_differ(
+            flipped: &str,
+            before: Vec<String>,
+            after: Vec<String>,
+        ) -> Result<(), String> {
+            if before == after {
+                return Err(format!(
+                    "flipping {flipped} left the rendered chain unchanged: {before:?}"
+                ));
+            }
+            Ok(())
+        }
+
+        let egress_default: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_egress = Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..request.policy.network_egress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "egress.default",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let egress_rules: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_egress = Some(NetworkEgressPolicy {
+                allow: Vec::new(),
+                deny: Vec::new(),
+                ..request.policy.network_egress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "the egress rule lists",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let ingress_default: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_ingress = Some(NetworkIngressPolicy {
+                default: NetworkAction::Allow,
+                ..request.policy.network_ingress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "ingress.default",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let host_loopback: Probe = |request| {
+            let mut flipped = request.clone();
+            flipped.policy.network_ingress = Some(NetworkIngressPolicy {
+                host_loopback: NetworkAction::Allow,
+                ..request.policy.network_ingress.clone().unwrap_or_default()
+            });
+            must_differ(
+                "ingress.hostLoopback",
+                chain_payload(request),
+                chain_payload(&flipped),
+            )
+        };
+
+        let runtime_proxy: Probe = |request| {
+            let address = request
+                .policy
+                .network_proxy
+                .address
+                .clone()
+                .ok_or("the runtime-proxy probe carries no proxy address")?;
+            // The claim the bit makes is that a `runtimeConfig.networkProxy`
+            // lands on the proxy machinery this backend already enforces:
+            // the env injection, and no refusal on the way there.
+            if crate::bwrap_command::external_proxy_host_rules_rejection(request).is_some() {
+                return Err(
+                    "the runtime-proxy shape is refused before it reaches the proxy".into(),
+                );
+            }
+            must_differ(
+                "the proxy address",
+                crate::bwrap_command::build_args(request, Some(&address)),
+                crate::bwrap_command::build_args(request, None),
+            )
+        };
+
+        let decisions: [(
+            NetworkPolicySupport,
+            bool,
+            ExecutionRequest,
+            &str,
+            Option<Probe>,
+        ); 6] = [
+            (
+                NetworkPolicySupport::EGRESS_DEFAULT,
+                true,
+                directional(),
+                "network.egress.default",
+                Some(egress_default),
+            ),
+            (
+                NetworkPolicySupport::EGRESS_RULES,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        allow: vec![NetworkRule::default()],
+                        ..Default::default()
+                    });
+                    request
+                },
+                "network.egress allow/deny rules",
+                Some(egress_rules),
+            ),
+            (
+                NetworkPolicySupport::INGRESS_DEFAULT,
+                true,
+                directional(),
+                "network.ingress.default",
+                Some(ingress_default),
+            ),
+            (
+                NetworkPolicySupport::HOST_LOOPBACK,
+                true,
+                directional(),
+                "network.ingress.hostLoopback",
+                Some(host_loopback),
+            ),
+            (
+                // Declared: the parser normalizes `runtimeConfig.networkProxy`
+                // into the same `policy.network_proxy` the legacy field feeds,
+                // so it lands on machinery this backend already enforces.
+                NetworkPolicySupport::RUNTIME_PROXY,
+                true,
+                {
+                    let mut request = directional();
+                    request.policy.network_egress = Some(NetworkEgressPolicy {
+                        default: NetworkAction::Deny,
+                        ..Default::default()
+                    });
+                    request.policy.runtime_network_proxy_specified = true;
+                    request.policy.network_proxy = ProxyConfig {
+                        address: Some(ProxyAddress::new("127.0.0.1".to_string(), 3128)),
+                        builtin_test_server: false,
+                    };
+                    request
+                },
+                "runtimeConfig.networkProxy",
+                Some(runtime_proxy),
+            ),
+            (
+                // Undeclared: a ProcessContainer concept with no Bubblewrap
+                // equivalent, so shared validation must keep refusing it.
+                NetworkPolicySupport::PROXY_PEER_IDENTITY,
+                false,
+                {
+                    let mut request = base_request();
+                    request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+                    request
+                },
+                "processContainer.network.allowedProxyPeer",
+                None,
+            ),
+        ];
+
+        // A bit added to `ALL` but not categorized above fails here.
+        let categorized = decisions
+            .iter()
+            .fold(NetworkPolicySupport::LEGACY, |acc, (bit, ..)| acc | *bit);
+        assert!(
+            categorized.contains(NetworkPolicySupport::ALL)
+                && NetworkPolicySupport::ALL.contains(categorized),
+            "a NetworkPolicySupport bit is missing from this table -- decide whether \
+             Bubblewrap declares it, and prove that decision with a probe here"
+        );
+
+        let support = BubblewrapScriptRunner::new().network_policy_support();
+
+        for (bit, declared, request, field, probe) in decisions {
+            assert!(
+                validate_network_policy_support(&request, NetworkPolicySupport::ALL).is_ok(),
+                "the probe for {field} no longer reaches its gate, so it proves nothing"
+            );
+            assert_eq!(
+                support.contains(bit),
+                declared,
+                "the declaration for {field} disagrees with this table"
+            );
+
+            match validate_network_policy_support(&request, support) {
+                Ok(()) => assert!(declared, "{field} is accepted but recorded as undeclared"),
+                Err(error) => {
+                    assert!(
+                        !declared,
+                        "{field} is declared but was refused: {}",
+                        error.error_message
+                    );
+                    assert!(
+                        error.error_message.contains(field),
+                        "the refusal for {field} names something else: {}",
+                        error.error_message
+                    );
+                }
+            }
+
+            match (declared, probe) {
+                (true, Some(probe)) => probe(&request)
+                    .unwrap_or_else(|reason| panic!("{field} is over-declared: {reason}")),
+                (true, None) => panic!(
+                    "{field} is declared with no enforcement probe -- acceptance is not \
+                     evidence that anything acts on the field"
+                ),
+                (false, Some(_)) => panic!(
+                    "{field} is undeclared, so there is nothing for an enforcement probe \
+                     to prove; the refusal assertion above already covers it"
+                ),
+                (false, None) => {}
+            }
+        }
+    }
+
     #[test]
     fn the_firewall_manager_tolerates_the_veth_bubblewrap_never_has() {
         // bwrap never calls set_veth_interface, so the shared manager's
@@ -1003,6 +1375,78 @@ mod tests {
             "an endpoint the gateway cannot reach must be refused by validate: {}",
             err.error_message
         );
+    }
+
+    /// The runner-level twin of the proxy/directional conflict check.
+    ///
+    /// The helper has its own unit test, but nothing asserted that `validate`
+    /// actually *calls* it: deleting the wiring left every test green while
+    /// reopening the fail-open. This test fails if that call is removed.
+    ///
+    /// It also pins the ordering claim -- the refusal must land before the
+    /// environmental `bwrap` probe, so a host without bwrap still reports the
+    /// policy error rather than a missing binary.
+    #[test]
+    fn validate_rejects_a_directional_rule_set_combined_with_a_proxy() {
+        use wxc_common::models::{NetworkAction, NetworkEgressPolicy, NetworkRule};
+
+        let unhonorable = [
+            NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            },
+            NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule::default()],
+                ..Default::default()
+            },
+        ];
+
+        for egress in unhonorable {
+            for builtin in [false, true] {
+                let mut req = base_request();
+                req.schema_version = "0.8.0-alpha".into();
+                req.policy.network_egress = Some(egress.clone());
+                req.policy.network_proxy = ProxyConfig {
+                    address: (!builtin).then(|| ProxyAddress::new("127.0.0.1".into(), 3128)),
+                    builtin_test_server: builtin,
+                };
+
+                let err = BubblewrapScriptRunner::new().validate(&req).unwrap_err();
+                assert_eq!(
+                    err.error_message,
+                    bwrap_command::BWRAP_PROXY_DIRECTIONAL_EGRESS,
+                    "validate must refuse a proxy that would drop directional rules \
+                     (builtin={builtin})"
+                );
+            }
+        }
+    }
+
+    /// The proxy-only posture is the one directional shape a proxy may carry,
+    /// so it must survive the guard above rather than being caught by it.
+    #[test]
+    fn validate_accepts_the_proxy_only_directional_posture() {
+        use wxc_common::models::{NetworkAction, NetworkEgressPolicy};
+
+        let mut req = base_request();
+        req.schema_version = "0.8.0-alpha".into();
+        req.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Deny,
+            ..Default::default()
+        });
+        req.policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("127.0.0.1".into(), 3128)),
+            builtin_test_server: false,
+        };
+
+        if let Err(err) = BubblewrapScriptRunner::new().validate(&req) {
+            assert_ne!(
+                err.error_message,
+                bwrap_command::BWRAP_PROXY_DIRECTIONAL_EGRESS,
+                "deny-with-no-rules is proxy-only egress and must pass this gate"
+            );
+        }
     }
 
     #[test]

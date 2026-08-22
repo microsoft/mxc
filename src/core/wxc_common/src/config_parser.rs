@@ -325,12 +325,12 @@ fn decode_request_input_without_logging(input: &str, is_base64: bool) -> Result<
 // ---------- Cross-field validation ----------
 
 /// Maximum supported schema version (major.minor). Configs with a higher major.minor are rejected.
-const SUPPORTED_VERSION: &str = ">=0.6, <=0.8";
+const SUPPORTED_VERSION: &str = ">=0.6, <=0.9";
 
 /// Canonical "latest" schema version string used in samples and tests. Bump
 /// alongside `SUPPORTED_VERSION`'s upper bound when a new dev schema lands.
 #[cfg(test)]
-const CURRENT_SCHEMA_VERSION: &str = "0.8.0-alpha";
+const CURRENT_SCHEMA_VERSION: &str = "0.9.0-alpha";
 
 /// Known `experimental.<backend>` keys. Used by validation code to flag
 /// experimental backend sections that don't match the selected
@@ -3094,7 +3094,7 @@ mod tests {
     fn network_default_policy_absent_defaults_to_block_on_any_version() {
         // wxc-exec is the trust boundary -- absent `defaultPolicy`
         // resolves to `Block` regardless of declared schema version.
-        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha"] {
+        for version in ["0.6.0-alpha", "0.7.0-alpha", "0.8.0-alpha", "0.9.0-alpha"] {
             let json = format!(
                 r#"{{"version": "{}", "process": {{"commandLine": "echo x"}}}}"#,
                 version
@@ -5659,7 +5659,7 @@ mod tests {
 
     #[test]
     fn schema_version_above_max_rejected() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.9.0-alpha"}"#;
+        let json = r#"{"process": {"commandLine": "echo hi"}, "version": "0.10.0-alpha"}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 

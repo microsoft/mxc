@@ -43,7 +43,7 @@ mod decimal_u64 {
 /// The variant set is deliberately closed and cross-platform. The
 /// Windows decoder classifies ETW events into these buckets; other
 /// backends map their native sources onto the same vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ResourceType {
     /// Filesystem path (file or directory).
@@ -62,7 +62,7 @@ pub enum ResourceType {
 }
 
 /// The kind of access that was attempted and denied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccessType {
     /// Read / query access.

@@ -385,6 +385,158 @@ added in the same change that enables it.
 Legacy schemas are unaffected. Below `0.8.0-alpha`, proxy mode resolves to the
 shared host network namespace, where no chain of any kind is installed.
 
+#### Directional policy (`network.egress` / `network.ingress`)
+
+Schema `0.8.0-alpha` adds a directional network shape that replaces the
+`defaultPolicy` / `allowedHosts` / `blockedHosts` triple with an explicit
+`egress` and `ingress` section. The two shapes are **mutually exclusive**: a
+config that mixes legacy and directional fields is a parse error, and one that
+uses directional fields on a pre-0.8 schema is refused by the parser with
+`network.egress, network.ingress, runtimeConfig, and processContainer.network
+require schema version 0.8 or later`.
+
+A config carrying *any* legacy field takes the legacy path described above and
+is byte-identical to what it was before directional support existed. This
+matters: the proxy-mode callers on 0.6/0.7 are unaffected by anything in this
+section.
+
+```json
+{
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "1.1.1.1/32" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
+        }
+      ]
+    },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  }
+}
+```
+
+Egress lowers into the same private-namespace iptables chains the legacy
+firewall mode uses, so the enforcement properties are identical — supervisor
+holds `CAP_NET_ADMIN`, sandbox drops it, no root required, IP literals and
+CIDRs only. An `except` list on a rule is lowered by CIDR subtraction into the
+remaining covering blocks, so `allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set
+of accepts that provably omit the carve-out rather than an accept followed by a
+hoped-for later deny.
+
+**Mode selection.** Directional never resolves to the shared host namespace:
+
+| Directional policy | Resolved mode |
+|---|---|
+| proxy configured | proxy-only (unchanged; the proxy arm wins) |
+| ruleless `egress.default: "deny"` | isolated (`--unshare-net`) |
+| anything else — rules present, or `egress.default: "allow"` | firewall-enforced (private namespace) |
+
+An open outbound posture therefore becomes an accept-all chain **inside a
+private namespace**, not a shared host namespace. That is deliberate. The
+parser fills `network.ingress` unconditionally on the directional path —
+including when the config has no `network` section at all — and there is no
+`_specified` twin to distinguish a defaulted `ingress.default: "deny"` from a
+written one. Sharing the host namespace would leave that deny unenforceable,
+and it could not be refused without also refusing every legitimate "allow all
+outbound" config. Choosing the private namespace keeps the inbound half true
+for the cost of a slirp hop.
+
+A consequence worth knowing: on 0.8, a config with **no `network` section at
+all** selects the directional shape with a synthesized default-deny. It renders
+identically to the legacy default only because `NetworkPolicy::default()` and
+`NetworkAction::default()` both mean deny — a coincidence the tests pin rather
+than rely on silently.
+
+**What the backend refuses.** Bubblewrap declares support for
+`egress.default`, `egress` rules, `ingress.default`, `ingress.hostLoopback`,
+and `runtimeProxy`. Declaring the two inbound features means the backend
+*understands* those fields — not that it honors both of their values. Only the
+deny posture is reachable, so the allow posture is refused rather than accepted
+and dropped on the floor:
+
+| Rejected | Why |
+|---|---|
+| `ingress.default: "allow"` | slirp4netns installs no route into the namespace, and the schema carries no port list with which to forward one. Nothing would arrive, so "allow" would be a lie |
+| `ingress.hostLoopback: "allow"` | the inbound half needs the same port forwarding `ingress.default: "allow"` lacks. Granting only the outbound half would honor half a bidirectional field under its full name |
+| directional `egress` rules combined with a proxy | a proxy resolves to the proxy-only posture, whose chain opens the proxy endpoint alone. The rules would be silently discarded, so they are refused instead. This holds for `builtinTestServer` too: its exemption covers legacy host *lists*, which MXC applies itself, and must not extend to directional rules, which nothing applies |
+| any directional section before 0.8 | the parser refuses it first; the backend keeps its own twin of the check for programmatic callers that build an `ExecutionRequest` directly and never pass through the parser |
+
+**What the deny postures actually do.** `ingress.default` installs the
+`MXC_INGRESS` chain on `INPUT`. `ingress.hostLoopback` is bidirectional per the
+0.8 contract, so its deny also has to close container-to-host: under slirp that
+path is the gateway `10.0.2.2`, which maps onto the host's own loopback. That
+drop is lowered *ahead* of every caller rule, because the chain is first-match
+and a broad allow — a bare `0.0.0.0/0` included — would otherwise win and the
+deny would be decorative. An omitted `ingress` section enforces the same deny,
+since deny is the schema's default rather than an absence of policy. IPv4
+only — slirp gives the sandbox no IPv6 route to the host, so there is no V6
+gateway to close. The legacy shape gains no such rule.
+
+Proxy mode is the defined exception. The proxy is reached at the gateway
+`10.0.2.2:<port>`, which *is* host loopback, so its chain opens that single TCP
+endpoint and drops the rest of the gateway. That is the exception the 0.8
+contract sanctions: the endpoint named by `runtimeConfig.networkProxy` is
+allowed independently of `ingress.hostLoopback`, and no other host-loopback path
+is opened. A proxy config that states — or defaults to — `deny` therefore gets
+the posture it writes, since the deny still covers every host-loopback path but
+that endpoint. `ingress.hostLoopback` is not consulted there — `EgressPlan::for_proxy`
+builds that chain, not the directional builder that lowers the drop — but the
+observed result matches the contract regardless.
+
+The declaration and these refusals must ship together — declaring the inbound
+features without them would be a fail-open. A unit test asserts exactly that
+pairing, driven through `validate()` rather than the gate function, so deleting
+the wiring fails the test.
+
+**Declaration alone is not evidence.** `hostLoopback` was declared, accepted,
+and completely unenforced for its whole first life: egress to `10.0.2.2` was
+open on every directional config, and the end-to-end suite used exactly that
+address as its "reachable" target — so the tests were passing *because of* the
+bug. Acceptance proved only that shared validation did not refuse the field.
+Each declared bit therefore carries an **enforcement probe** in
+`every_network_policy_support_bit_is_a_deliberate_decision`: the probe flips the
+field in a copy of the request and requires the rendered `iptables-restore`
+payload to change. A bit whose field can be flipped with no effect on the chain
+is over-declared and fails there. Reverting the host-loopback drop reproduces
+the original bug as a test failure.
+
+`runtimeProxy` is declared. The parser normalizes
+`runtimeConfig.networkProxy` into the same `policy.network_proxy` the legacy
+`network.proxy` field feeds, pinned to a loopback endpoint and accepted only
+alongside `egress.default: "deny"` with no direct rules. That is exactly the
+proxy-only posture this backend already enforces, so the 0.8 spelling reaches
+the identical enforcement as the 0.7 one rather than a second implementation.
+An end-to-end test runs both spellings against the same workload and compares
+their verdicts to each other, anchored to an expected result so that two
+identically-broken spellings cannot agree their way to a pass.
+
+`proxyPeerIdentity` stays undeclared: it is a ProcessContainer concept with no
+Bubblewrap equivalent, so shared validation refuses it here.
+
+Declaring the bit was necessary but not sufficient. The backend's
+`external_proxy_host_rules_rejection` guard — which stops an operator-supplied
+proxy from being combined with host lists MXC never forwards to it — also keyed
+off `defaultPolicy: "block"`. That is a *legacy-shape* field the directional
+path never writes, so it sits at its `Block` default on every directional
+request. Since the parser requires `egress.default: "deny"` with no direct
+rules for a runtime proxy, the guard refused every such config: the capability
+would have been declared but unusable. The guard now reads `defaultPolicy` only
+on the legacy shape, treating a request as directional when *either* directional
+section is present — the same discriminator `EgressPlan::for_request` and
+`ResolvedNetworkMode::from_request` use. Keying on `network_egress` alone was
+not enough: an ingress-only request still read the defaulted `Block` as a caller
+statement and was refused. Real host lists are still refused in either shape.
+
+Because the bits are a hand-written declaration with nothing deriving them from
+the fields the backend actually consumes, a bit that is simply never added is
+indistinguishable from one that was considered and refused — both surface as
+the same clean rejection. `runtimeProxy` sat undeclared for exactly that
+reason while the proxy machinery behind it was already complete. A unit test
+now enumerates every `NetworkPolicySupport` bit and fails if a newly added one
+is left uncategorized, so the decision can no longer be made by omission.
+
 ### Process Settings
 
 Standard `process` fields work as expected:

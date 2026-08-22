@@ -21,9 +21,8 @@ pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
 mod network_parser;
-// `network_parser` stays private; this one predicate is needed by the
-// Seatbelt backend crate.
 pub use network_parser::host_is_canonical_loopback;
+pub use network_parser::supports_directional_network;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
@@ -44,12 +43,6 @@ pub mod wire;
 
 // Adapters that map between specific JSON contracts and the 'wire' model.
 pub(crate) mod config_contract_adapters;
-
-// TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
-// schema value and emits `sdk/node/src/generated/wire.ts`. Compiled with the wire
-// model under the `schema-gen` feature.
-#[cfg(feature = "schema-gen")]
-pub mod ts_emit;
 
 // Thin Windows-only helpers that are not backend-specific. Backend
 // runners live in dedicated crates under `backends/`; only utilities

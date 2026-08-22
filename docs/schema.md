@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](../schemas/stable/mxc-config.schema.0.7.0-alpha.json).
+[`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.8.0-dev.json`](../schemas/dev/mxc-config.schema.0.8.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.9.0-dev.json`](../schemas/dev/mxc-config.schema.0.9.0-dev.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -13,10 +13,10 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 // Production
-"$schema": "./schemas/stable/mxc-config.schema.0.7.0-alpha.json"
+"$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json"
 ```
 
 ### Schema 0.8 networking
@@ -84,7 +84,7 @@ cannot mix both formats in one request.
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.7.0-alpha".
+    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -363,13 +363,13 @@ state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 phase is being driven against an existing provisioned sandbox.
 
 The envelope follows the same supported version range as one-shot requests:
-`>=0.6, <=0.8`. The example uses `0.6.0-alpha`, which is accepted throughout
+`>=0.6, <=0.9`. The example uses `0.6.0-alpha`, which is accepted throughout
 that range. The state-aware field shape is documented by the current dev
 schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json",
+    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json",
     "version": "0.6.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
@@ -419,13 +419,14 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.6, <=0.8 | Accepted (assumed compatible) |
-| `"0.5.0-alpha"` | >=0.6, <=0.8 | **Rejected** — "older than supported" |
-| `"0.6.0-alpha"` | >=0.6, <=0.8 | Accepted (0.6 in range) |
-| `"0.7.0-alpha"` | >=0.6, <=0.8 | Accepted (0.7 in range) |
-| `"0.8.0-alpha"` | >=0.6, <=0.8 | Accepted (0.8 in range) |
-| `"0.9.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
+| absent | >=0.6, <=0.9 | Accepted (assumed compatible) |
+| `"0.5.0-alpha"` | >=0.6, <=0.9 | **Rejected** — "older than supported" |
+| `"0.6.0-alpha"` | >=0.6, <=0.9 | Accepted (0.6 in range) |
+| `"0.7.0-alpha"` | >=0.6, <=0.9 | Accepted (0.7 in range) |
+| `"0.8.0-alpha"` | >=0.6, <=0.9 | Accepted (0.8 in range) |
+| `"0.9.0-alpha"` | >=0.6, <=0.9 | Accepted (0.9 in range) |
+| `"0.10.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

@@ -50,5 +50,8 @@ jobs:
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
 
+      - name: Check exact contract generated artifacts and fixtures
+        run: node scripts/versioning/check-contract-codegen.js
+
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js

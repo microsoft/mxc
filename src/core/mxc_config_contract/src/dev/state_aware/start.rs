@@ -12,6 +12,7 @@ string_marker! {
 
 /// Experimental settings accepted by the `start` phase.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartExperimental {
     /// Optional telemetry override.
@@ -21,6 +22,7 @@ pub struct StartExperimental {
 
 /// A complete state-aware `start` request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartRequest {
     /// Optional JSON Schema reference for editor validation.

@@ -88,7 +88,11 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
 /// The gateway as an address, for rules and pins. Kept in step with
 /// [`SLIRP_HOST_GATEWAY`] by [`tests::gateway_constants_agree`].
-const SLIRP_HOST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
+///
+/// `pub(crate)` because the egress renderer needs it too: slirp maps this
+/// address onto the host's own loopback, which makes it the single address
+/// `ingress.hostLoopback` has to govern.
+pub(crate) const SLIRP_HOST_GATEWAY_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 /// The network slirp gives the sandbox, for diagnostics.
 const SLIRP_NETWORK: &str = "10.0.2.0/24";
 /// Path the hosts-file pin is mounted over inside the sandbox.

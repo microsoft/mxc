@@ -5,14 +5,14 @@ use super::experimental::OneShotExperimental;
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
-    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, Seatbelt, Ui,
+    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt, Ui,
 };
 use crate::dev::Version;
 
 string_enum! {
     /// Containment selections available in `0.8.0-alpha`.
     #[derive(Debug)]
-    pub enum Containment {
+    pub enum Containment, schema_name = "OneShotContainment" {
         // Stable-candidate values.
         /// Select the host's native process-containment backend.
         Process => ["process"],
@@ -43,6 +43,8 @@ string_enum! {
 
 /// A complete one-shot `0.8.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     /// Optional JSON Schema reference for editor validation.
@@ -86,6 +88,9 @@ pub struct Request {
     /// Optional macOS Seatbelt configuration.
     #[serde(alias = "macos_sandbox", default)]
     pub seatbelt: OptionalField<Seatbelt>,
+    /// Optional runtime configuration settings.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
     /// Optional experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<OneShotExperimental>,

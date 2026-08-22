@@ -40,7 +40,10 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
-        bash "$script_root/run_bwrap_all_tests.sh"
+        # Strict: a skip on a provisioned runner means a prerequisite vanished,
+        # not that the assertion held. Without this the job goes green having
+        # verified none of the directional enforcement.
+        MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$script_root/run_bwrap_all_tests.sh"
         # The inbound chain test needs real host CAP_NET_ADMIN to read the
         # sandbox's network namespace and inject a peer into it, so the non-root
         # suite above can only report it as skipped. Invoking it separately here

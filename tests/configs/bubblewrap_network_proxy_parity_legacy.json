@@ -1,0 +1,12 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Parity-Legacy",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; pu=\"${HTTP_PROXY:-${http_proxy:-}}\"; if [ -z \"$pu\" ]; then echo PARITY_NO_PROXY_ENV; exit 1; fi; echo PARITY_PROXY_ENV_OK; pa=\"${pu#*://}\"; pa=\"${pa%%/*}\"; ph=\"${pa%%:*}\"; pp=\"${pa##*:}\"; if [ \"$pp\" = \"$ph\" ]; then pp=80; fi; if ! timeout 6 bash -c \"exec 3<>/dev/tcp/$ph/$pp\" >/dev/null 2>&1; then echo PARITY_PROXY_UNREACHABLE; exit 1; fi; echo PARITY_PROXY_REACHABLE_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; if [ $? = 0 ]; then echo PARITY_DIRECT_LEAKED; exit 1; fi; echo PARITY_DIRECT_BLOCKED_OK; if ! curl -fsSL --max-time 15 https://api.github.com/zen >/dev/null; then echo PARITY_PROXIED_FETCH_FAILED; exit 1; fi; echo PARITY_PROXIED_FETCH_OK'"
+  },
+  "network": {
+    "defaultPolicy": "allow",
+    "proxy": { "url": "http://{{PROXY_HOST}}:{{PROXY_PORT}}" }
+  }
+}

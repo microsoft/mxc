@@ -318,7 +318,7 @@ the exact endpoint in `runtimeConfig.networkProxy` is the sole sanctioned except
 
 | Platform | Enforcement Mechanism |
 |---|---|
-| Windows (Process Containers) | Enforcing BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. AppContainer fallback: cooperative routing only. |
+| Windows (Process Containers) | PSEC BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. Legacy SBOX and AppContainer fallback reject schema 0.8 runtime proxy. |
 | WSLc | VM-level network policy permits only the translated proxy endpoint. Proxy variables are routing hints. |
 | Linux (LXC, Bubblewrap) | iptables permits only the proxy endpoint; proxy variables are routing hints. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
@@ -388,9 +388,10 @@ already implemented.
 
 The strict host-loopback guarantee applies to the identity-scoped
 ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
-proxy path requires broader host-loopback access, and the AppContainer fallback
-is cooperative; both are explicitly documented compatibility behaviors rather
-than strict model-2 enforcement.
+proxy path requires broader host-loopback access and is an explicitly documented
+PSEC compatibility behavior rather than strict model-2 enforcement. Legacy SBOX
+and the AppContainer fallback reject schema 0.8 runtime proxy requests because
+they cannot preserve either posture.
 
 **Connectivity models:**
 
@@ -409,11 +410,11 @@ than strict model-2 enforcement.
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations |
+| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
-| Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
-| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"` |
+| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
+| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
@@ -465,21 +466,39 @@ Model 2 permits only the proxy endpoint.
 > requires `nf_conntrack`; the sandbox fails to launch without it rather than
 > running unenforced.
 >
-> Not yet covered: the `ingress` section exists in the 0.8 schema and parses
-> into `ContainerPolicy::network_ingress`, but Bubblewrap declares
-> `NetworkPolicySupport::LEGACY`, so a config carrying `ingress.default` or
-> `ingress.hostLoopback` is rejected in `validate` as an unsupported *backend
-> feature* — not as an unknown field. (Supplying `ingress` marks the request as
-> directional, so the message names `network.egress.default`.) The inbound
-> posture is instead derived from the existing `network.allowLocalNetwork`, and
-> at 0.8 that field is rejected outright when it is `true` on a
-> private-namespace mode (there is no inbound-only primitive to honor it with).
-> Deny is therefore the only reachable posture today; wiring `ingress` — and
-> declaring the matching support bits — is what will make `allow` expressible.
-> Inbound denial also does not currently depend on the `INPUT`
-> chain in practice: no port forwarding is configured, so nothing outside the
-> sandbox can reach in regardless. Schema 0.6/0.7 keeps the previous
-> warn-and-continue behavior.
+> Not yet covered: `ingress.default: "allow"` and `ingress.hostLoopback:
+> "allow"` are both rejected, because honoring either needs slirp port
+> forwarding and a port contract neither schema expresses. The legacy
+> `network.allowLocalNetwork: true` is rejected on a private-namespace mode for
+> the same reason. Deny is therefore the only reachable inbound posture today.
+>
+> Both deny postures are enforced outside proxy mode. `ingress.default`
+> installs the `INPUT` chain described above. `ingress.hostLoopback` is
+> bidirectional per this contract, so its deny also closes the container-to-host
+> direction: under slirp that path is the gateway `10.0.2.2`, which maps onto
+> the host's own loopback, and a drop for it is lowered *ahead* of every caller
+> rule so that a broad allow — including a bare `0.0.0.0/0` — cannot reopen it
+> on the first-match chain. An omitted `ingress` section enforces the same deny,
+> since that is the schema's default rather than an absence of policy. IPv4
+> only — slirp gives the sandbox no IPv6 route to the host.
+>
+> **Proxy mode is the defined exception.** A runtime proxy is reached at the
+> gateway `10.0.2.2:<port>`, which *is* host loopback, so the chain opens that
+> one TCP endpoint and drops the rest of the gateway. That is exactly the
+> exception the 0.8 contract sanctions: the endpoint named by
+> `runtimeConfig.networkProxy` is allowed independently of
+> `ingress.hostLoopback`, and no other host-loopback path is opened. A proxy
+> config that states — or defaults to — `hostLoopback: "deny"` therefore gets
+> the posture it writes; the deny remains in force for every host-loopback path
+> other than that one endpoint. `ingress.hostLoopback` is not consulted in this
+> mode, because the chain comes from a proxy-specific builder rather than the
+> directional one that lowers the drop, but the result the caller observes
+> matches the contract either way.
+>
+> Inbound denial does not currently depend on the `INPUT` chain in practice:
+> no port forwarding is configured, so nothing outside the sandbox can reach in
+> regardless. Schema 0.6/0.7 keeps the previous warn-and-continue behavior and
+> gains no host-loopback rule.
 > LXC is unaffected: it has a veth and runs privileged, and enforces as
 > described.
 

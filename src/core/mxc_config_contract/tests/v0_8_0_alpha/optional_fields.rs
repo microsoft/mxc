@@ -13,6 +13,10 @@ fn accepts_empty_optional_objects() {
         r#""ui": {}"#,
         r#""processContainer": {}"#,
         r#""processContainer": {"ui": {}}"#,
+        r#""processContainer": {"network": {}}"#,
+        r#""runtimeConfig": {}"#,
+        r#""network": {"egress": {}}"#,
+        r#""network": {"ingress": {}}"#,
         r#""seatbelt": {}"#,
         r#""experimental": {}"#,
     ] {
@@ -235,6 +239,36 @@ fn rejects_null_optional_fields() {
                 "network.proxy",
                 version_and_process.as_str(),
                 r#""network": {"proxy": null}"#,
+            ),
+            (
+                "network.egress",
+                version_and_process.as_str(),
+                r#""network": {"egress": null}"#,
+            ),
+            (
+                "network.ingress",
+                version_and_process.as_str(),
+                r#""network": {"ingress": null}"#,
+            ),
+            (
+                "processContainer.network",
+                version_and_process.as_str(),
+                r#""processContainer": {"network": null}"#,
+            ),
+            (
+                "processContainer.network.allowedProxyPeer",
+                version_and_process.as_str(),
+                r#""processContainer": {"network": {"allowedProxyPeer": null}}"#,
+            ),
+            (
+                "runtimeConfig",
+                version_and_process.as_str(),
+                r#""runtimeConfig": null"#,
+            ),
+            (
+                "runtimeConfig.networkProxy",
+                version_and_process.as_str(),
+                r#""runtimeConfig": {"networkProxy": null}"#,
             ),
             (
                 "ui.disable",

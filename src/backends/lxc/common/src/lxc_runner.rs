@@ -10,16 +10,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{
-    ExecutionRequest, LifecycleConfig, LxcConfig, NetworkEnforcementMode, ScriptResponse,
-};
+use wxc_common::models::{ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::NetworkIptablesManager;
+use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -236,14 +234,10 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the config uses network features (firewall rules
-        // or allowed/blocked hosts), or when the container must reach a proxy.
-        let needs_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        ) || !request.policy.allowed_hosts.is_empty()
-            || !request.policy.blocked_hosts.is_empty()
-            || request.policy.network_proxy.is_enabled();
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+
+        let needs_network = needs_network(&request.policy, uses_directional_schema);
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -252,6 +246,7 @@ impl LxcScriptRunner {
         // Configure network rules
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
         fw_manager.set_preserve_policy(!self.cleanup_policy);
+        fw_manager.set_directional_schema(uses_directional_schema);
 
         // Try to discover the container's veth interface for scoped rules
         if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
@@ -280,19 +275,7 @@ impl LxcScriptRunner {
             }
         }
 
-        // Configure inbound (ingress) network rules inside the container's own
-        // netns. This is a separate, orthogonal chain from the egress rules
-        // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
-        // container's own iptables INPUT chain, reached with `nsenter`.
-        //
-        // A firewall enforcement mode means the caller asked for the inbound
-        // deny chain. LXC enforces it inside the container's own netns, so it
-        // is useless without the init PID that lets us enter that netns — and
-        // the ingress manager cannot even be constructed without one.
-        let use_firewall = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
-        );
+        let use_firewall = installs_firewall(&request.policy, uses_directional_schema);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).
@@ -307,7 +290,7 @@ impl LxcScriptRunner {
                     // destroyed.
                     signal_cleanup::set_active_pid(pid);
                 }
-                let mut mgr = IngressManager::new(&container_name, pid);
+                let mut mgr = IngressManager::new(&container_name, pid, uses_directional_schema);
                 match mgr.apply_firewall_rules(&request.policy, logger) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -650,9 +633,16 @@ impl LxcScriptRunner {
     }
 }
 
+fn lxc_network_policy_support() -> NetworkPolicySupport {
+    NetworkPolicySupport::EGRESS_DEFAULT
+        | NetworkPolicySupport::EGRESS_RULES
+        | NetworkPolicySupport::INGRESS_DEFAULT
+        | NetworkPolicySupport::HOST_LOOPBACK
+}
+
 impl ScriptRunner for LxcScriptRunner {
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        validate_network_policy_support(request, lxc_network_policy_support())?;
         Ok(())
     }
 
@@ -907,7 +897,9 @@ mod tests {
     // parser never saw and hand it straight to this runner.  These tests take
     // that path deliberately -- no parser anywhere in them -- because a guard
     // that only exists on the parse path does not protect the process spawn.
-    use wxc_common::models::{ProxyAddress, ProxyConfig};
+    use wxc_common::models::{
+        NetworkEgressPolicy, NetworkIngressPolicy, ProxyAddress, ProxyConfig,
+    };
 
     fn request_with_proxy_url(url: &str) -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
@@ -928,6 +920,46 @@ mod tests {
             release: "3.23".to_string(),
         };
         LxcScriptRunner::new(&config, "mxc-guard-test", &LifecycleConfig::default())
+    }
+
+    /// What the 0.8 parser produces for a config stating only `network.egress`:
+    /// the egress section as written, plus an ingress section filled in from
+    /// its defaults.
+    fn egress_only_directional_request() -> ExecutionRequest {
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(NetworkIngressPolicy::default());
+        request
+    }
+
+    #[test]
+    fn an_egress_only_directional_config_passes_validation() {
+        let runner = runner_for_guard_tests();
+
+        assert!(
+            runner
+                .validate_runner(&egress_only_directional_request())
+                .is_ok(),
+            "a 0.8 config stating only network.egress must reach the backend; rejecting it \
+             here would make every directional egress policy unusable on LXC"
+        );
+    }
+
+    // Pins the directional claim as all-or-nothing: dropping to the two egress
+    // bits alone would reject the config above.
+    #[test]
+    fn claiming_only_the_egress_bits_would_reject_an_egress_only_config() {
+        let egress_bits_only =
+            NetworkPolicySupport::EGRESS_DEFAULT | NetworkPolicySupport::EGRESS_RULES;
+
+        assert!(
+            validate_network_policy_support(&egress_only_directional_request(), egress_bits_only)
+                .is_err(),
+            "expected the two-bit claim to reject an egress-only config; if this now passes, \
+             the directional posture is no longer all-or-nothing and lxc_network_policy_support \
+             can drop the ingress bits"
+        );
     }
 
     #[test]

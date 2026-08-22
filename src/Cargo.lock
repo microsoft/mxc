@@ -1281,8 +1281,11 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 name = "learning_mode_core"
 version = "0.7.0"
 dependencies = [
+ "same-file",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "thiserror",
 ]
 
@@ -1293,6 +1296,7 @@ dependencies = [
  "flatbuffers",
  "learning_mode_core",
  "process_security_environment_spec",
+ "sha2 0.10.9",
  "thiserror",
  "windows",
  "windows-core",
@@ -1501,6 +1505,7 @@ dependencies = [
 name = "mxc_config_contract"
 version = "0.7.0"
 dependencies = [
+ "schemars",
  "serde",
  "serde_json",
  "thiserror",
@@ -1572,7 +1577,19 @@ dependencies = [
 name = "mxc_schema_gen"
 version = "0.7.0"
 dependencies = [
+ "clap",
+ "mxc_config_contract",
+ "mxc_schema_support",
+ "serde_json",
+ "tempfile",
  "wxc_common",
+]
+
+[[package]]
+name = "mxc_schema_support"
+version = "0.7.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -3184,6 +3201,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "mxc_config_contract",
+ "mxc_schema_support",
  "mxc_telemetry",
  "nanvix_common",
  "schemars",

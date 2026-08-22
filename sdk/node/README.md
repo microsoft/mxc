@@ -58,22 +58,81 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.4.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
 | `0.5.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
 | `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
-| `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
-| `0.8.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json) |
+| `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
+| `0.8.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
+| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-dev.json) |
 
-Pick `0.7.0-alpha` for new code on any supported platform.
+Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.8.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
-**Schema 0.8 directional networking:** Config-based requests may use
+<a id="schema-080-networking"></a>
+
+**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.defaultPolicy`, `network.enforcementMode`,
-`network.allowLocalNetwork`, host-list, or `network.proxy` fields.
-`createConfigFromPolicy` continues to produce the legacy network shape; build a
-`ContainerConfig` directly when using the schema 0.8 directional shape.
+legacy `network.allowOutbound`, `network.allowLocalNetwork`,
+`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
+`createConfigFromPolicy` authors either shape according to the supplied policy
+version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
+wire shape. With schema 0.8, omitting all network fields leaves the
+`network` block out of the generated config; the native parser interprets that
+as directional default-deny for egress, ingress, and host loopback. See the
+[Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
+for the complete cross-platform authoring shape.
+
+Model 1 permits direct connections selected by IP/CIDR, protocol, and port
+rules; it does not configure an application-layer proxy. Model 2 denies direct
+internet access and supplies a loopback HTTP/S proxy endpoint. Backend-specific
+requirements determine how that proxy endpoint is made reachable.
+
+**Simple model 1 example — direct egress with L3/L4 filtering:**
+
+```typescript
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
+
+const directConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: {
+      default: 'deny',
+      allow: [{
+        to: [{ cidr: '192.0.2.0/24' }],
+        ports: [{ protocol: 'tcp', port: 443 }],
+      }],
+    },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+});
+directConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(directConfig);
+```
+
+**Simple model 2 example — loopback HTTP/S proxy:**
+
+```typescript
+const proxyConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: { default: 'deny' },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+  runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+});
+proxyConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(proxyConfig);
+```
+
+These are example configurations rather than universal backend recipes.
+ProcessContainer proxy configurations have additional criteria; see the
+[ProcessContainer 0.8 proxy example](https://github.com/microsoft/mxc/blob/main/docs/process-container/examples/0.8.0-schema.md).
+See the [networking specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+for all three connectivity modes and backend-specific support.
 
 **Platforms:**
 
@@ -382,7 +441,7 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`. See [Compatibility](#compatibility). |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 
@@ -460,7 +519,7 @@ for the stable registry contract and interaction rules.
 - [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
 - [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
 - [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
-- [Sandbox policy 0.7.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.7.0/policy.md)
+- [Sandbox policy 0.8.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
   — policy specification
 - Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
 
