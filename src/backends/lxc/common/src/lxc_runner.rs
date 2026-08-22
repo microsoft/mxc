@@ -17,7 +17,7 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{installs_firewall, NetworkIptablesManager};
+use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -234,7 +234,7 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        let needs_network = installs_firewall(&request.policy);
+        let needs_network = needs_network(&request.policy);
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);

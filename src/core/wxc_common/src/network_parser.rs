@@ -208,6 +208,7 @@ pub(crate) fn parse_network_policy(
     match select_network_format(version, &sections)? {
         NetworkFormat::Legacy => apply_legacy_network(policy, sections.network),
         NetworkFormat::Directional => {
+            policy.uses_directional_network = true;
             apply_directional_network(policy, sections, containment)?;
             Ok(None)
         }

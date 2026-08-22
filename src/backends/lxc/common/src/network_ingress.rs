@@ -536,15 +536,8 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // Not `requires_firewall`, which answers only whether the *egress*
-        // chain has a rule to carry — a firewall-mode config with permissive
-        // egress has none, yet still owes this inbound deny.
         if !installs_firewall(policy) {
-            logger.log_line(
-                "Network policy installs no firewall (permissive default, no host lists, \
-                 no proxy, no firewall enforcement mode, no directional posture); \
-                 skipping ingress chain.",
-            );
+            logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
         }
 
@@ -1214,7 +1207,7 @@ mod permissive_spec_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network_iptables::requires_firewall;
+    use crate::network_iptables::installs_firewall;
     use wxc_common::models::{
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
@@ -2832,10 +2825,9 @@ mod tests {
         }
     }
 
-    // The inbound chain cannot be gated on whether the *egress* chain has a
-    // rule to carry. This config has none, and its inbound deny is still
-    // owed — skipping it would accept new inbound connections on every
-    // interface, the fail-open direction.
+    // A 0.7 config naming a firewall mode is owed the inbound deny even with
+    // nothing to restrict outbound; skipping it would accept new inbound
+    // connections on every interface, the fail-open direction.
     #[test]
     fn a_firewall_mode_config_with_nothing_to_restrict_outbound_still_installs_the_inbound_chain() {
         for mode in [
@@ -2845,11 +2837,6 @@ mod tests {
             let label = format!("{mode:?}");
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
-            assert!(
-                !requires_firewall(&policy),
-                "{label}: this config is only interesting while it has no egress rule to \
-                 carry; if that changes the test no longer covers the inbound gate"
-            );
             assert!(
                 installs_firewall(&policy),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
@@ -2873,19 +2860,15 @@ mod tests {
         );
     }
 
-    // 0.8 JSON always arrives with an egress section beside the ingress one;
-    // a stated directional posture reaches the inbound gate through the
-    // egress arm. This test fails if the parser ever stops writing egress.
+    // 0.8 states its posture with no enforcementMode to name, so the inbound
+    // chain has to follow from the schema itself.
     #[test]
     fn a_stated_directional_posture_installs_the_inbound_chain() {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
+        policy.uses_directional_network = true;
 
-        assert!(
-            installs_firewall(&policy),
-            "a 0.8 config states its posture with no enforcementMode to name, so the \
-             inbound chain has to follow from the posture itself"
-        );
+        assert!(installs_firewall(&policy));
     }
 }

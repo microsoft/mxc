@@ -13,6 +13,7 @@ fn directional_policy(
 ) -> ContainerPolicy {
     ContainerPolicy {
         network_mode_specified: true,
+        uses_directional_network: true,
         network_egress: Some(NetworkEgressPolicy {
             default,
             allow,
@@ -585,14 +586,25 @@ fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<V
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
     let chain = manager.chain_name().to_string();
-    fake.issued()
+    let appended: Vec<Vec<String>> = fake
+        .issued()
         .into_iter()
         .filter(|argv| {
             argv.first().map(String::as_str) == Some("iptables")
                 && argv.get(1).map(String::as_str) == Some("-A")
                 && argv.get(2).map(String::as_str) == Some(chain.as_str())
         })
-        .collect()
+        .collect();
+
+    // A policy that installs no chain emits nothing, which satisfies every
+    // "does not open DNS" assertion without exercising the builder at all.
+    assert!(
+        !appended.is_empty(),
+        "no rules were appended to {chain}; this policy never reached the rule builder, \
+         so any assertion about its rules would hold vacuously"
+    );
+
+    appended
 }
 
 /// A generated rule always names a destination, unlike the legacy port 53
@@ -709,7 +721,10 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
 // rather than a closed gap.
 #[test]
 fn a_legacy_policy_still_opens_dns() {
-    let policy = ContainerPolicy::default();
+    let policy = ContainerPolicy {
+        network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        ..Default::default()
+    };
     let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
 
     assert!(
@@ -721,9 +736,8 @@ fn a_legacy_policy_still_opens_dns() {
 // ---------------------------------------------------------------------------
 // The same contract driven from a request rather than a hand-built policy.
 //
-// These four tests drive the policy through the real parser rather than
-// assembling it by hand, catching a parser that selects the wrong network
-// format branch.
+// LXC reads one bit -- legacy or directional -- so these cover both, driven
+// through the real parser to catch a parser that selects the wrong branch.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -731,7 +745,7 @@ fn a_parsed_legacy_request_keeps_the_dns_exemption() {
     let policy = policy_from_json(
         r#"{"version": "0.7.0",
             "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block"}}"#,
+            "network": {"defaultPolicy": "block", "enforcementMode": "firewall"}}"#,
     );
     let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
 
@@ -753,23 +767,6 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
     assert!(
         !opens_dns_unconditionally(&rules),
         "input=0.8 egress.default=deny; expected no port 53 accept; output={rules:?}"
-    );
-}
-
-// A 0.8 request may still be written in the legacy shape while callers
-// migrate, and it keeps legacy semantics throughout -- including this one.
-#[test]
-fn a_parsed_v08_request_in_the_legacy_shape_keeps_the_dns_exemption() {
-    let policy = policy_from_json(
-        r#"{"version": "0.8.0-alpha",
-            "process": {"commandLine": "echo hi"},
-            "network": {"defaultPolicy": "block"}}"#,
-    );
-    let rules = appended_ipv4_chain_rules("parsed-v08-legacy-shape", &policy);
-
-    assert!(
-        opens_dns_unconditionally(&rules),
-        "input=0.8 defaultPolicy=block; expected the legacy port 53 accept; output={rules:?}"
     );
 }
 

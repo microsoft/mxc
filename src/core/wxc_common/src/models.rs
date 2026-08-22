@@ -735,6 +735,13 @@ pub struct ContainerPolicy {
     /// both have been normalized into `network_proxy`.
     #[serde(skip)]
     pub runtime_network_proxy_specified: bool,
+    /// Whether the parser filled the directional (0.8) network fields rather
+    /// than the legacy (0.7) ones. A run carries exactly one schema, and
+    /// version alone does not answer this: 0.8 still accepts a legacy `network`
+    /// block. Backends read this to apply the rules of the schema they were
+    /// actually given. Parse-derived, never on the wire.
+    #[serde(skip)]
+    pub uses_directional_network: bool,
     /// Cross-platform UI policy.
     pub ui: UiPolicy,
     /// Whether the caller supplied a `ui` block on the wire (any field

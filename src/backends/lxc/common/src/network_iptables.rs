@@ -19,24 +19,30 @@ use wxc_common::models::{
     ProxyHostPin,
 };
 
-/// True when this policy describes anything the egress firewall has to carry,
-/// in either schema.
-pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
-    policy.default_network_policy == NetworkPolicy::Block
-        || !policy.allowed_hosts.is_empty()
-        || !policy.blocked_hosts.is_empty()
-        || policy.network_proxy.is_enabled()
-        || policy.network_egress.is_some()
-}
-
-/// True when the run needs the container network up, covering a requested
-/// enforcement mode and a reachable proxy as well as egress rules.
+/// True when this run installs firewall chains.
+///
+/// A run carries one schema. 0.8 states a posture with no mode to opt out of,
+/// so it always enforces; 0.7 enforces only where the config asked for it.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
-    requires_firewall(policy)
-        || matches!(
+    if policy.uses_directional_network {
+        true
+    } else {
+        matches!(
             policy.network_enforcement_mode,
             NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
         )
+    }
+}
+
+/// True when the container needs a reachable network before rules are applied.
+///
+/// Wider than [`installs_firewall`]: host lists resolve names, and a proxy has
+/// to be reachable, even where the declared mode installs nothing.
+pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
+    installs_firewall(policy)
+        || !policy.allowed_hosts.is_empty()
+        || !policy.blocked_hosts.is_empty()
+        || policy.network_proxy.is_enabled()
 }
 
 /// One destination the container is allowed to reach when the policy routes
@@ -1993,14 +1999,23 @@ impl NetworkIptablesManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // A proxy counts toward requiring the firewall; skipping it here would
-        // report success while the runner still injects HTTP(S)_PROXY into a
-        // container whose egress was never restricted.
-        if !requires_firewall(policy) {
-            logger.log_line(
-                "Network policy requires no egress firewall (permissive default, no host \
-                 lists, no proxy, no directional posture); skipping iptables.",
-            );
+        if !installs_firewall(policy) {
+            // The runner injects HTTP(S)_PROXY from this same policy whatever
+            // happens here, so reporting success would leave a container that
+            // advertises a proxy and restricts nothing: any client ignoring the
+            // environment reaches the network directly.
+            if policy.network_proxy.is_enabled() {
+                return Err(
+                    "network.proxy requires network.enforcementMode='firewall' or 'both'. \
+                     This policy enables a proxy under 'capabilities', where no iptables \
+                     rules are installed, so the proxy environment would be injected while \
+                     direct egress stayed unrestricted -- any client that ignores HTTP_PROXY \
+                     would bypass the proxy entirely. Refusing to apply rather than reporting \
+                     success for an enforcement that did not happen."
+                        .to_string(),
+                );
+            }
+            logger.log_line("Network policy requests no firewall; skipping iptables.");
             return Ok(true);
         }
 
@@ -4504,118 +4519,101 @@ mod tests {
         );
     }
 
+    // A 0.7 config decides the firewall the way it always has: by the mode it
+    // names. Judging it by its contents instead installs chains on configs
+    // that never asked for one.
     #[test]
-    fn no_enforcement_mode_changes_the_firewall_gate() {
+    fn a_legacy_policy_installs_the_firewall_only_for_the_modes_that_ask_for_it() {
         use NetworkEnforcementMode::{Both, Capabilities, Firewall};
 
-        // The mode is a request for enforcement; the gate answers whether
-        // enforcement is owed. Reading the first to decide the second is what
-        // let a restrictive policy start with an open chain.
-        for mode in [Capabilities, Firewall, Both] {
+        for (mode, expected) in [(Capabilities, false), (Firewall, true), (Both, true)] {
             let label = format!("{mode:?}");
-
-            let restrictive = ContainerPolicy {
-                network_enforcement_mode: mode.clone(),
-                blocked_hosts: vec!["example.com".to_string()],
-                ..Default::default()
-            };
-            assert!(
-                requires_firewall(&restrictive),
-                "{label}: a policy that restricts egress is owed the firewall"
-            );
-
-            let permissive = ContainerPolicy {
+            let policy = ContainerPolicy {
                 network_enforcement_mode: mode,
-                default_network_policy: NetworkPolicy::Allow,
+                blocked_hosts: vec!["example.com".to_string()],
+                uses_directional_network: false,
                 ..Default::default()
             };
-            assert!(
-                !requires_firewall(&permissive),
-                "{label}: a policy that restricts nothing is owed no firewall"
+
+            assert_eq!(
+                installs_firewall(&policy),
+                expected,
+                "{label}: a 0.7 policy is answered by the mode it names, not by the \
+                 hosts it happens to list"
             );
         }
     }
 
     // 0.8 cannot carry `enforcementMode` and always defaults to
-    // `Capabilities`; reading the mode alone would leave a stated egress
-    // posture unenforced.
+    // `Capabilities`; reading the mode there would leave a stated posture
+    // unenforced.
     #[test]
-    fn a_stated_directional_egress_posture_requests_the_firewall_under_the_capabilities_default() {
+    fn a_directional_policy_installs_the_firewall_under_the_capabilities_default() {
         let policy = ContainerPolicy {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
             network_egress: Some(NetworkEgressPolicy::default()),
+            uses_directional_network: true,
             ..Default::default()
         };
 
         assert!(
-            requires_firewall(&policy),
-            "a stated 0.8 egress posture must request the firewall even though \
-             enforcementMode is absent from the 0.8 schema and defaults to capabilities"
+            installs_firewall(&policy),
+            "a stated 0.8 posture must install the firewall even though enforcementMode \
+             is absent from the 0.8 schema and defaults to capabilities"
         );
     }
 
-    // The `Block` arm answers this policy too, but only because `Block` is the
-    // parser's default for a field 0.8 never writes. Pinning the permissive
-    // default here keeps the directional arm as the thing under test.
+    // Resolving a host name and reaching a proxy both need the interface up,
+    // whatever the mode decides about installing rules.
     #[test]
-    fn a_legacy_policy_under_capabilities_is_still_owed_the_firewall() {
-        let policy = ContainerPolicy {
-            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
-            network_mode_specified: true,
-            default_network_policy: NetworkPolicy::Allow,
-            blocked_hosts: vec!["example.com".to_string()],
-            network_egress: None,
-            ..Default::default()
-        };
+    fn a_legacy_policy_that_installs_nothing_can_still_need_the_network() {
+        let mut policy = policy_requiring_no_firewall();
+        policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
+        policy.blocked_hosts = vec!["example.com".to_string()];
 
-        assert!(
-            requires_firewall(&policy),
-            "a 0.7 policy naming blocked hosts is owed the firewall whatever mode it \
-             names; the engine rewrites the mode to firewall when host rules arrive \
-             without a proxy, but nothing rejects this shape and a hand-built \
-             ExecutionRequest reaches here and would otherwise restrict nothing"
-        );
+        assert!(!installs_firewall(&policy));
+        assert!(needs_network(&policy));
     }
 
     // The JSON parser rejects proxy-under-capabilities, but it is not the only
     // way in: `LxcScriptRunner::execute` and `mxc_engine::run` take an
-    // already-built `ExecutionRequest`. Skipping here would report success for
-    // an enforcement that never happened, while the runner still injects the
-    // proxy environment -- a container that advertises a proxy and restricts
-    // nothing.
+    // already-built `ExecutionRequest`. Reporting success would leave the
+    // runner injecting the proxy environment into a container whose egress was
+    // never restricted.
     #[test]
-    fn a_proxied_policy_is_owed_the_firewall_whatever_mode_it_names() {
-        let mut policy = policy_requiring_no_firewall();
-        policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
-        policy.network_proxy = ProxyConfig {
-            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
-            builtin_test_server: false,
-        };
+    fn a_legacy_proxied_policy_under_capabilities_is_refused_rather_than_skipped() {
+        let proxies = [
+            ProxyConfig {
+                address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+                builtin_test_server: false,
+            },
+            // `builtin_test_server` enables the proxy without an address and
+            // takes the same injection path, so the check cannot key on the
+            // address alone.
+            ProxyConfig {
+                address: None,
+                builtin_test_server: true,
+            },
+        ];
 
-        assert!(
-            requires_firewall(&policy),
-            "a proxied policy must never reach the firewall skip, whatever enforcement \
-             mode it names or defaults to"
-        );
-    }
+        for proxy in proxies {
+            let mut policy = policy_requiring_no_firewall();
+            policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
+            policy.network_proxy = proxy;
 
-    // `builtin_test_server` enables the proxy without an address, and it takes
-    // the same injection path, so the gate cannot key on the address alone.
-    #[test]
-    fn the_builtin_test_server_proxy_is_owed_the_firewall_too() {
-        let mut policy = policy_requiring_no_firewall();
-        policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
-        policy.network_proxy = ProxyConfig {
-            address: None,
-            builtin_test_server: true,
-        };
+            let mut manager = NetworkIptablesManager::new("proxy-refusal");
+            let mut logger = Logger::new(Mode::Buffer);
+            let error = manager
+                .apply_firewall_rules(&policy, &mut logger)
+                .expect_err("a proxy under capabilities must be refused, not skipped");
 
-        assert!(
-            requires_firewall(&policy),
-            "an address-free proxy is still a proxy and must not be silently unenforced"
-        );
+            assert!(
+                error.contains("network.proxy requires"),
+                "unexpected refusal text: {error}"
+            );
+        }
     }
 
     // The gate stays narrow: a policy that restricts nothing and names no
