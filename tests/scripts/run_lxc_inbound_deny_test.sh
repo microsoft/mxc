@@ -59,9 +59,11 @@ command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed
 
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_default_deny.json"
 PERMISSIVE_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_permissive_unsupported.json"
+DIRECTIONAL_CONFIG="$REPO_DIR/tests/configs/lxc_inbound_v08_permissive_ingress.json"
 
 [ -f "$DENY_CONFIG" ] || skip "missing config $DENY_CONFIG."
 [ -f "$PERMISSIVE_CONFIG" ] || skip "missing config $PERMISSIVE_CONFIG."
+[ -f "$DIRECTIONAL_CONFIG" ] || skip "missing config $DIRECTIONAL_CONFIG."
 
 fail() {
     echo "FAIL: $1"
@@ -194,4 +196,34 @@ assert_no_new_chains iptables "$MXC_BEFORE_V4" mxc_egress_chains "egress chain(s
 assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(s) left behind"
 
 echo "PASS: permissive inbound path refused and rolled back."
+
+# ---------------------------------------------------------------------------
+# Case 3: the same refusal reached through the 0.8 ingress section
+# ---------------------------------------------------------------------------
+
+echo "Running LXC 0.8 permissive-ingress refusal test..."
+
+DIRECTIONAL_OUTPUT=$("$LXC_EXEC" --debug "$DIRECTIONAL_CONFIG" 2>&1 || true)
+echo "$DIRECTIONAL_OUTPUT"
+
+# The refusal has to name the field the operator wrote. A 0.8 author who never
+# typed `allowLocalNetwork` cannot act on a message about it.
+if ! grep -Fq "network.ingress.default" <<<"$DIRECTIONAL_OUTPUT"; then
+    fail "the refusal did not name network.ingress.default, so a 0.8 author is told to change a field their config does not contain."
+fi
+
+if ! grep -Fq "not yet implemented" <<<"$DIRECTIONAL_OUTPUT"; then
+    fail "network.ingress.default 'allow' did not report a not-yet-implemented refusal."
+fi
+
+if grep -Fq "this-should-never-run" <<<"$DIRECTIONAL_OUTPUT"; then
+    fail "the workload executed despite an unenforceable inbound policy."
+fi
+
+assert_no_new_chains iptables "$MXCI_BEFORE_V4" mxci_chains "inbound chain(s)"
+assert_no_new_chains ip6tables "$MXCI_BEFORE_V6" mxci_chains "inbound chain(s)"
+assert_no_new_chains iptables "$MXC_BEFORE_V4" mxc_egress_chains "egress chain(s) left behind"
+assert_no_new_chains ip6tables "$MXC_BEFORE_V6" mxc_egress_chains "egress chain(s) left behind"
+
+echo "PASS: 0.8 permissive ingress refused and rolled back."
 echo "LXC inbound default-deny test passed."

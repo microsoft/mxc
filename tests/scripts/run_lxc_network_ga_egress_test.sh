@@ -80,7 +80,7 @@ assert_no_forward_reference() {
 # A backend reading `enforcementMode` alone skips the chain and still reports
 # success, which is a silent unenforced run rather than a failure.
 assert_enforcement_not_skipped() {
-    if echo "$1" | grep -Fq "does not use firewall, skipping"; then
+    if echo "$1" | grep -Fq "requests no firewall; skipping iptables"; then
         fail "the 0.8 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
     fi
 }
