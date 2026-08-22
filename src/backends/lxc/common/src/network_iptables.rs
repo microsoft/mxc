@@ -23,20 +23,20 @@ use wxc_common::models::{
 ///
 /// A run carries one schema. 0.8 states a posture with no mode to opt out of,
 /// so it always enforces; 0.7 enforces only where the config asked for it.
-pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
-    if policy.uses_directional_network {
+pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    if uses_directional_schema {
         true
     } else {
         NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode)
     }
 }
 
-/// True when the container needs a reachable network before rules are applied.
+/// True when the container needs a reachable network.
 ///
 /// Wider than [`installs_firewall`]: host lists resolve names, and a proxy has
 /// to be reachable, even where the declared mode installs nothing.
-pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
-    installs_firewall(policy)
+pub(crate) fn needs_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    installs_firewall(policy, uses_directional_schema)
         || !policy.allowed_hosts.is_empty()
         || !policy.blocked_hosts.is_empty()
         || policy.network_proxy.is_enabled()
@@ -79,9 +79,9 @@ enum RuleAction {
     Deny,
 }
 
-/// One egress entry the chain emits a rule for, in the order the emitter must
-/// preserve — iptables applies first-match-wins, making an entry's position
-/// its precedence.
+/// One destination the chain filters on, in the order the chain must keep —
+/// iptables applies first-match-wins, making an entry's position its
+/// precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EgressEntry {
     /// Hostname, IP literal, or CIDR; owned because a 0.8 peer arrives as a
@@ -91,7 +91,7 @@ struct EgressEntry {
     matching: RuleMatch,
 }
 
-/// The protocol and port match a single emitted rule carries: only matches
+/// The protocol and port a single iptables rule matches on: only matches
 /// iptables can express in one rule are representable.
 ///
 /// Protocol `any` alongside a port has no `-p all --dport` form and lowers to
@@ -1103,7 +1103,7 @@ impl NetworkIptablesManager {
     /// Whether `host` is an IPv6 literal (bracketed `[..]` or bare).
     ///
     /// An IPv6 proxy endpoint cannot be enforced, since the proxy rules are
-    /// emitted with IPv4 `iptables` only. It needs naming as its own case
+    /// installed with IPv4 `iptables` only. It needs naming as its own case
     /// because the failure would otherwise be silent: an IPv6 literal yields
     /// no IPv4 endpoint, and a proxied chain with no endpoints is a deny-all
     /// container whose proxy was discarded.
@@ -1365,17 +1365,25 @@ impl NetworkIptablesManager {
     /// This shim panics on the unresolvable-block-entry error so that the many
     /// rulegen assertions over well-formed policies keep a plain return type.
     #[cfg(test)]
-    fn build_policy_rule_args(chain_name: &str, policy: &ContainerPolicy) -> FirewallRuleArgs {
+    fn build_policy_rule_args(
+        chain_name: &str,
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> FirewallRuleArgs {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        Self::build_policy_rules_logged(chain_name, policy, &mut logger).expect(
-            "test policy should not pair an accepting default with an unresolvable block entry",
-        )
+        Self::build_policy_rules_logged(chain_name, policy, uses_directional_schema, &mut logger)
+            .expect(
+                "test policy should not pair an accepting default with an unresolvable block entry",
+            )
     }
 
     /// The 0.8 `network.egress` section, or `None` when this run was given the
     /// legacy schema.
-    fn stated_egress(policy: &ContainerPolicy) -> Option<&NetworkEgressPolicy> {
-        if policy.uses_directional_network {
+    fn stated_egress(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> Option<&NetworkEgressPolicy> {
+        if uses_directional_schema {
             policy.network_egress.as_ref()
         } else {
             None
@@ -1387,8 +1395,11 @@ impl NetworkIptablesManager {
     /// The parser leaves the legacy `network.defaultPolicy` field at `Block`
     /// for every 0.8 config; reading it alone closes every 0.8 chain with
     /// DROP regardless of `network.egress.default`.
-    fn effective_default_policy(policy: &ContainerPolicy) -> NetworkPolicy {
-        match Self::stated_egress(policy) {
+    fn effective_default_policy(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> NetworkPolicy {
+        match Self::stated_egress(policy, uses_directional_schema) {
             Some(egress) => match egress.default {
                 NetworkAction::Allow => NetworkPolicy::Allow,
                 NetworkAction::Deny => NetworkPolicy::Block,
@@ -1398,23 +1409,23 @@ impl NetworkIptablesManager {
     }
 
     /// Lower whichever network schema the policy was written in into the
-    /// entries the chain emits, in the order they must be emitted.
+    /// chain's entries, in the order they must keep.
     ///
     /// The two schema shapes are alternatives, never a union: the parser
     /// rejects a config mixing them, and the directional path never writes
     /// the legacy host lists.
-    fn lower_egress(policy: &ContainerPolicy) -> Vec<EgressEntry> {
-        match Self::stated_egress(policy) {
+    fn lower_egress(policy: &ContainerPolicy, uses_directional_schema: bool) -> Vec<EgressEntry> {
+        match Self::stated_egress(policy, uses_directional_schema) {
             Some(egress) => Self::lower_directional_egress(egress),
             None => Self::lower_legacy_hosts(policy),
         }
     }
 
-    /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the entries
-    /// the chain emits, in the order they must be emitted.
+    /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the chain's
+    /// entries, in the order they must keep.
     ///
-    /// Block entries come first: deny-precedence (AB#62830341) is emission
-    /// order and nothing else, and exchanging the two halves reverses the
+    /// Block entries come first: deny-precedence (AB#62830341) is rule order
+    /// and nothing else, and exchanging the two halves reverses the
     /// security semantics of every policy whose lists overlap.
     fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry> {
         policy
@@ -1438,7 +1449,7 @@ impl NetworkIptablesManager {
             .collect()
     }
 
-    /// Lower a 0.8 `network.egress` section into the entries the chain emits.
+    /// Lower a 0.8 `network.egress` section into the chain's entries.
     ///
     /// `deny` rules precede `allow` rules for the same first-match-wins reason
     /// as the legacy lowering; the schema states the two lists independently
@@ -1525,8 +1536,8 @@ impl NetworkIptablesManager {
     }
 
     /// Render a parsed CIDR back into the destination string `resolve_host`
-    /// reads, letting a 0.8 peer and a legacy CIDR entry reach the emitter by
-    /// the same path.
+    /// reads, letting a 0.8 peer and a legacy CIDR entry reach it by the same
+    /// path.
     fn cidr_destination(cidr: &NetworkCidr) -> String {
         format!("{}/{}", cidr.address, cidr.prefix_length)
     }
@@ -1592,7 +1603,7 @@ impl NetworkIptablesManager {
     /// expires between the calls — so the rule installed would not match the
     /// rule that was validated and logged.
     ///
-    /// Entries are emitted in the order the lowering produced them, which is
+    /// Entries are added in the order the lowering produced them, which is
     /// the whole of this backend's deny-precedence guarantee. See
     /// [`Self::lower_legacy_hosts`] for why that order is load-bearing.
     ///
@@ -1606,13 +1617,14 @@ impl NetworkIptablesManager {
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         logger: &mut Logger,
     ) -> Result<FirewallRuleArgs, String> {
         let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy);
+        let entries = Self::lower_egress(policy, uses_directional_schema);
         for entry in &entries {
             let host = entry.destination.as_str();
             let action = entry.action;
@@ -2000,9 +2012,10 @@ impl NetworkIptablesManager {
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        if !installs_firewall(policy) {
+        if !installs_firewall(policy, uses_directional_schema) {
             // The runner injects HTTP(S)_PROXY from this same policy whatever
             // happens here, so reporting success would leave a container that
             // advertises a proxy and restricts nothing: any client ignoring the
@@ -2040,7 +2053,12 @@ impl NetworkIptablesManager {
         let (proxy_endpoints, proxy_pin) = Self::resolve_proxy_endpoints(policy, logger)?;
         self.proxy_pin = proxy_pin;
 
-        let outcome = self.apply_firewall_rules_inner(policy, &proxy_endpoints, logger);
+        let outcome = self.apply_firewall_rules_inner(
+            policy,
+            uses_directional_schema,
+            &proxy_endpoints,
+            logger,
+        );
         self.record_apply_outcome(outcome, logger)
     }
 
@@ -2112,11 +2130,18 @@ impl NetworkIptablesManager {
     fn apply_firewall_rules_inner(
         &self,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
     ) -> Result<CreatedResources, (String, CreatedResources)> {
         let mut created = CreatedResources::default();
-        match self.install_firewall_rules(policy, proxy_endpoints, logger, &mut created) {
+        match self.install_firewall_rules(
+            policy,
+            uses_directional_schema,
+            proxy_endpoints,
+            logger,
+            &mut created,
+        ) {
             Ok(()) => Ok(created),
             Err(e) => {
                 let residual = Self::teardown_created(
@@ -2136,6 +2161,7 @@ impl NetworkIptablesManager {
     fn install_firewall_rules(
         &self,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
         created: &mut CreatedResources,
@@ -2226,7 +2252,7 @@ impl NetworkIptablesManager {
             let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
 
             // Only the legacy schema carries the unconditional port 53 accept.
-            if !policy.uses_directional_network {
+            if !uses_directional_schema {
                 base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
             }
             Self::run_iptables_rule_args(&base_rules, logger)?;
@@ -2241,7 +2267,12 @@ impl NetworkIptablesManager {
             // error here rather than a warning, and propagating it aborts the
             // apply so the caller rolls back the chains created above instead of
             // leaving a chain that is missing one of its deny rules.
-            let policy_rules = Self::build_policy_rules_logged(&self.chain_name, policy, logger)?;
+            let policy_rules = Self::build_policy_rules_logged(
+                &self.chain_name,
+                policy,
+                uses_directional_schema,
+                logger,
+            )?;
             Self::run_iptables_rule_args(&policy_rules.ipv4, logger)?;
             if ipv6_enabled {
                 Self::run_ip6tables_rule_args(&policy_rules.ipv6, logger)?;
@@ -2257,7 +2288,7 @@ impl NetworkIptablesManager {
         // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
-            Self::effective_default_policy(policy),
+            Self::effective_default_policy(policy, uses_directional_schema),
             proxy_mode,
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
@@ -2969,7 +3000,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -2986,7 +3017,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Both);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -3019,7 +3050,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert!(
             result.is_err(),
@@ -3385,7 +3416,7 @@ mod tests {
 
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert!(
             result.is_err(),
@@ -3410,7 +3441,7 @@ mod tests {
         let mut manager = NetworkIptablesManager::new("fresh");
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         if let Err(e) = &result {
             assert!(
@@ -3622,7 +3653,7 @@ mod tests {
             ..Default::default()
         };
 
-        let args = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+        let args = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, false);
 
         // Membership rather than sequence: this test owns the family split, and
         // the order the two lists are emitted in is the deny-precedence
@@ -4051,8 +4082,9 @@ mod tests {
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        let err = NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
-            .expect_err("a catch-all allow must not be able to accept an unresolvable deny");
+        let err =
+            NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
+                .expect_err("a catch-all allow must not be able to accept an unresolvable deny");
 
         assert!(
             err.contains(UNRESOLVABLE_HOST) && err.contains("deny precedence"),
@@ -4070,7 +4102,7 @@ mod tests {
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect_err("a v6 catch-all allow accepts the unresolved deny just as a v4 one does");
     }
 
@@ -4086,7 +4118,7 @@ mod tests {
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("a bounded allow leaves the closing DROP covering the unresolved deny");
     }
 
@@ -4101,7 +4133,7 @@ mod tests {
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("a /24 allow covers a bounded set, so it proves nothing about the deny");
     }
 
@@ -4115,7 +4147,7 @@ mod tests {
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, &mut logger)
+        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
             .expect("an allow that programs no rule cannot accept the unresolved deny");
     }
 
@@ -4138,7 +4170,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let _ = manager.apply_firewall_rules(&policy, &mut logger);
+        let _ = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         let logged = logger.get_buffer();
         assert!(
@@ -4172,7 +4204,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
         assert!(
             result.is_err(),
             "a failed FORWARD hook insert must fail the apply, got {:?}",
@@ -4258,7 +4290,7 @@ mod tests {
             ],
             &[],
         );
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-mixed", &policy);
+        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-mixed", &policy, false);
 
         assert_eq!(
             rules.ipv4.len(),
@@ -4458,7 +4490,7 @@ mod tests {
     #[test]
     fn empty_policy_produces_no_destination_rules_in_either_bucket() {
         let policy = policy_with_hosts(&[], &[]);
-        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-empty", &policy);
+        let rules = NetworkIptablesManager::build_policy_rule_args("MXC-empty", &policy, false);
 
         assert!(
             rules.ipv4.is_empty(),
@@ -4507,7 +4539,7 @@ mod tests {
         let policy = policy_requiring_no_firewall();
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert_eq!(
             result,
@@ -4530,12 +4562,11 @@ mod tests {
             let policy = ContainerPolicy {
                 network_enforcement_mode: mode,
                 blocked_hosts: vec!["example.com".to_string()],
-                uses_directional_network: false,
                 ..Default::default()
             };
 
             assert_eq!(
-                installs_firewall(&policy),
+                installs_firewall(&policy, false),
                 expected,
                 "{label}: a 0.7 policy is answered by the mode it names, not by the \
                  hosts it happens to list"
@@ -4564,12 +4595,11 @@ mod tests {
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
             network_egress: Some(NetworkEgressPolicy::default()),
-            uses_directional_network: true,
             ..Default::default()
         };
 
         assert!(
-            installs_firewall(&policy),
+            installs_firewall(&policy, true),
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
@@ -4582,8 +4612,8 @@ mod tests {
         let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
         policy.blocked_hosts = vec!["example.com".to_string()];
 
-        assert!(!installs_firewall(&policy));
-        assert!(needs_network(&policy));
+        assert!(!installs_firewall(&policy, false));
+        assert!(needs_network(&policy, false));
     }
 
     // The JSON parser rejects proxy-under-capabilities, but it is not the only
@@ -4605,7 +4635,7 @@ mod tests {
         let mut manager = NetworkIptablesManager::new("proxy-gate");
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         let error = result.expect_err(
             "a proxy under an enforcement mode that installs no rules must not report success",
@@ -4633,7 +4663,9 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         assert!(
-            manager.apply_firewall_rules(&policy, &mut logger).is_err(),
+            manager
+                .apply_firewall_rules(&policy, false, &mut logger)
+                .is_err(),
             "an address-free proxy is still a proxy and must not be silently unenforced"
         );
     }
@@ -4647,7 +4679,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         assert_eq!(
-            manager.apply_firewall_rules(&policy, &mut logger),
+            manager.apply_firewall_rules(&policy, false, &mut logger),
             Ok(true),
             "capabilities mode without a proxy must stay a successful no-op"
         );
@@ -5096,7 +5128,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, &mut logger)
+            .apply_firewall_rules(&policy, false, &mut logger)
             .expect("the apply must succeed against the fake");
 
         // Pinned to the binary on purpose: the builders are family-agnostic, so
@@ -5137,7 +5169,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, &mut apply_logger)
+            .apply_firewall_rules(&policy, false, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();
@@ -5188,7 +5220,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -5218,7 +5250,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, &mut logger)
+            .apply_firewall_rules(&policy, false, &mut logger)
             .expect("a failed return rule must not fail the apply");
 
         let issued = fake.issued();
@@ -5247,7 +5279,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, &mut logger)
+            .apply_firewall_rules(&policy, false, &mut logger)
             .expect("a caller with no veth must not be refused");
 
         let issued = fake.issued();
@@ -5273,7 +5305,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, &mut apply_logger)
+            .apply_firewall_rules(&policy, false, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();
@@ -5320,7 +5352,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let outcome = manager.apply_firewall_rules(&policy, &mut logger);
+        let outcome = manager.apply_firewall_rules(&policy, false, &mut logger);
         assert!(
             outcome.is_err(),
             "an apply whose FORWARD hook could not be installed must fail"
@@ -5352,7 +5384,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, &mut apply_logger)
+            .apply_firewall_rules(&policy, false, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();

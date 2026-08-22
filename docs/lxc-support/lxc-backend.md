@@ -255,12 +255,13 @@ Inbound filtering is a separate chain from the egress chains above, and it lives
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
-A policy that restricts nothing gets no inbound filtering at all, and accepts `allowLocalNetwork: true` without complaint. The rows below apply to a policy with something to enforce.
+Under 0.7.0, inbound filtering is installed only when the configuration
+requests a firewall enforcement mode. Under 0.8.0 it is always installed.
 
-| 0.7.0 | 0.8.0 | Effect |
-|-------|-------|--------|
-| `allowLocalNetwork: false` (default) | `ingress.default` or `ingress.hostLoopback` of `deny` | New inbound connections are refused |
-| `allowLocalNetwork: true` | `ingress.default` or `ingress.hostLoopback` of `allow` | **Not yet implemented.** The run fails with an explicit error naming the field the operator wrote, rather than accepting inbound from every interface and source |
+| 0.7.0 | 0.8.0 | Effect | Notes |
+|-------|-------|--------|-------|
+| `allowLocalNetwork: false` (default) | `ingress.default` or `ingress.hostLoopback` of `deny` | New inbound connections are refused | |
+| `allowLocalNetwork: true` | `ingress.default` or `ingress.hostLoopback` of `allow` | The run fails with an explicit error naming the field the operator wrote | Accepting inbound from every interface and source is not implemented |
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 

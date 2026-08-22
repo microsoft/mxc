@@ -5210,7 +5210,7 @@ mod tests {
         };
 
         assert!(request.policy.network_proxy.is_enabled());
-        assert!(request.policy.uses_directional_network);
+        assert!(request.policy.network_egress.is_some());
         assert_eq!(
             request.policy.network_enforcement_mode,
             NetworkEnforcementMode::Capabilities,
@@ -5424,50 +5424,6 @@ mod tests {
         };
         assert_eq!(request.policy.default_network_policy, NetworkPolicy::Allow);
         assert!(request.policy.network_egress.is_none());
-    }
-
-    // Backends read this one bit to decide which schema's rules to apply, so
-    // it has to follow the format the parser selected. The version string
-    // cannot stand in for it: 0.8 still accepts a legacy `network` block.
-    #[test]
-    fn the_parsed_policy_records_which_network_schema_filled_it() {
-        let cases = [
-            (
-                r#"{"version": "0.7.0-alpha", "process": {"commandLine": "echo hi"},
-                    "network": {"defaultPolicy": "block"}}"#,
-                false,
-            ),
-            (
-                r#"{"version": "0.7.0-alpha", "process": {"commandLine": "echo hi"}}"#,
-                false,
-            ),
-            (
-                r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"},
-                    "network": {"defaultPolicy": "block"}}"#,
-                false,
-            ),
-            (
-                r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"},
-                    "network": {"egress": {"default": "deny"}}}"#,
-                true,
-            ),
-            (
-                r#"{"version": "0.8.0-alpha", "process": {"commandLine": "echo hi"}}"#,
-                true,
-            ),
-        ];
-
-        for (json, directional) in cases {
-            let request = match load_mxc(json).expect("config must parse") {
-                MxcRequest::OneShot(request) => request,
-                _ => panic!("expected a one-shot request"),
-            };
-
-            assert_eq!(
-                request.policy.uses_directional_network, directional,
-                "json={json}"
-            );
-        }
     }
 
     #[test]

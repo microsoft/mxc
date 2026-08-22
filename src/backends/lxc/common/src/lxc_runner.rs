@@ -234,7 +234,10 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        let needs_network = needs_network(&request.policy);
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+
+        let needs_network = needs_network(&request.policy, uses_directional_schema);
 
         if needs_network {
             Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
@@ -255,7 +258,7 @@ impl LxcScriptRunner {
             }
         }
 
-        match fw_manager.apply_firewall_rules(&request.policy, logger) {
+        match fw_manager.apply_firewall_rules(&request.policy, uses_directional_schema, logger) {
             Ok(true) => {}
             Ok(false) => {
                 if self.destroy_on_exit || container_created {
@@ -271,7 +274,7 @@ impl LxcScriptRunner {
             }
         }
 
-        let use_firewall = installs_firewall(&request.policy);
+        let use_firewall = installs_firewall(&request.policy, uses_directional_schema);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).
@@ -287,7 +290,7 @@ impl LxcScriptRunner {
                     signal_cleanup::set_active_pid(pid);
                 }
                 let mut mgr = IngressManager::new(&container_name, pid);
-                match mgr.apply_firewall_rules(&request.policy, logger) {
+                match mgr.apply_firewall_rules(&request.policy, uses_directional_schema, logger) {
                     Ok(true) => {}
                     Ok(false) => {
                         if self.destroy_on_exit || container_created {
@@ -923,7 +926,6 @@ mod tests {
     /// its defaults.
     fn egress_only_directional_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
-        request.policy.uses_directional_network = true;
         request.policy.network_mode_specified = true;
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());

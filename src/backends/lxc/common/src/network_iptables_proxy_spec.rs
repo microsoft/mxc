@@ -45,7 +45,7 @@ fn apply_and_collect(
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(policy, &mut logger);
+    let result = manager.apply_firewall_rules(policy, false, &mut logger);
     let issued = fake.issued();
     (manager, issued, result)
 }

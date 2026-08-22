@@ -35,7 +35,7 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
         .is_some_and(|peer| !peer.trim().is_empty())
 }
 
-pub(crate) fn supports_directional_network(version: &str) -> bool {
+pub fn supports_directional_network(version: &str) -> bool {
     semver::Version::parse(version)
         .map(|version| version.major > 0 || version.minor >= 8)
         .unwrap_or(false)
@@ -208,7 +208,6 @@ pub(crate) fn parse_network_policy(
     match select_network_format(version, &sections)? {
         NetworkFormat::Legacy => apply_legacy_network(policy, sections.network),
         NetworkFormat::Directional => {
-            policy.uses_directional_network = true;
             apply_directional_network(policy, sections, containment)?;
             Ok(None)
         }

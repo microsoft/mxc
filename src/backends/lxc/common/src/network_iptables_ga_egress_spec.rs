@@ -13,7 +13,6 @@ fn directional_policy(
 ) -> ContainerPolicy {
     ContainerPolicy {
         network_mode_specified: true,
-        uses_directional_network: true,
         network_egress: Some(NetworkEgressPolicy {
             default,
             allow,
@@ -165,7 +164,7 @@ fn explicit_deny_precedes_an_overlapping_allow_in_both_families() {
         vec![matching_rule()],
         vec![matching_rule()],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         destination_actions(&rules.ipv4, ipv4),
@@ -190,7 +189,7 @@ fn an_allow_peer_exclusion_is_denied_before_its_parent_cidr_is_allowed() {
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let exclusion_position = rule_position(&rules.ipv4, exclusion, "DROP");
     let parent_position = rule_position(&rules.ipv4, parent, "ACCEPT");
 
@@ -214,7 +213,7 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
         Vec::new(),
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         new_connection_action(
@@ -249,7 +248,7 @@ fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
@@ -274,7 +273,7 @@ fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
         Vec::new(),
         vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
@@ -299,7 +298,7 @@ fn each_cidr_is_emitted_only_in_its_matching_address_family() {
         vec![rule(vec![peer(ipv4, &[]), peer(ipv6, &[])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         destination_actions(&rules.ipv4, ipv4),
@@ -335,7 +334,7 @@ fn an_omitted_to_matches_destinations_in_both_address_families() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     assert_eq!(
         new_connection_action(
@@ -369,7 +368,7 @@ fn omitted_ports_match_every_protocol_and_port() {
         vec![rule(vec![peer(destination, &[])], Vec::new())],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let address = packet_address("192.0.2.25");
 
     for (protocol, port) in [("tcp", Some(443)), ("udp", Some(53)), ("icmp", None)] {
@@ -393,7 +392,7 @@ fn explicit_any_without_a_port_matches_every_protocol_and_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let address = packet_address("192.0.2.25");
 
     for (protocol, port) in [
@@ -426,7 +425,7 @@ fn any_with_a_port_expands_to_tcp_and_udp_rules() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let address = packet_address("192.0.2.25");
     let mut selectors = rules
         .ipv4
@@ -484,7 +483,7 @@ fn icmp_ignores_a_written_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let emitted_rule = rules.ipv4.iter().find(|rule| {
         argument_after(rule, "-d") == Some(destination)
             && argument_after(rule, "-j") == Some("ACCEPT")
@@ -517,7 +516,7 @@ fn a_single_port_and_an_inclusive_range_restrict_their_protocols() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let address = packet_address("192.0.2.25");
 
     for (protocol, packet_port, expected_action) in [
@@ -555,7 +554,7 @@ fn each_peer_combines_with_each_port_selector() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
 
     for (destination, address) in [
         (first_destination, "192.0.2.25"),
@@ -589,7 +588,7 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
         )],
         Vec::new(),
     );
-    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy, true);
     let ipv4_rule = rules.ipv4.iter().find(|rule| {
         argument_after(rule, "-d") == Some(ipv4) && argument_after(rule, "-j") == Some("ACCEPT")
     });
@@ -621,18 +620,18 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// DNS under a directional posture.
-// ---------------------------------------------------------------------------
-
-fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<Vec<String>> {
+fn appended_ipv4_chain_rules(
+    container: &str,
+    policy: &ContainerPolicy,
+    uses_directional_schema: bool,
+) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container);
     manager.set_veth_interface("veth-dns0");
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(policy, &mut logger);
+    let result = manager.apply_firewall_rules(policy, uses_directional_schema, &mut logger);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
     let chain = manager.chain_name().to_string();
@@ -690,7 +689,7 @@ fn policy_from_json(json: &str) -> ContainerPolicy {
 #[test]
 fn a_directional_deny_default_chain_does_not_open_dns() {
     let policy = directional_policy(NetworkAction::Deny, vec![], vec![]);
-    let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy);
+    let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -704,7 +703,7 @@ fn a_directional_deny_default_chain_does_not_open_dns() {
 #[test]
 fn a_directional_allow_default_chain_does_not_open_dns() {
     let policy = directional_policy(NetworkAction::Allow, vec![], vec![]);
-    let rules = appended_ipv4_chain_rules("ga-dns-allow", &policy);
+    let rules = appended_ipv4_chain_rules("ga-dns-allow", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -724,7 +723,7 @@ fn a_directional_policy_reaches_a_resolver_it_allows() {
         )],
         vec![],
     );
-    let rules = appended_ipv4_chain_rules("ga-dns-allowed", &policy);
+    let rules = appended_ipv4_chain_rules("ga-dns-allowed", &policy, true);
 
     assert!(
         rules.iter().any(|emitted| {
@@ -749,7 +748,7 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
             vec![port(NetworkProtocol::Udp, Some(53), None)],
         )],
     );
-    let rules = appended_ipv4_chain_rules("ga-dns-denied", &policy);
+    let rules = appended_ipv4_chain_rules("ga-dns-denied", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -775,20 +774,13 @@ fn a_legacy_policy_still_opens_dns() {
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
         ..Default::default()
     };
-    let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
+    let rules = appended_ipv4_chain_rules("legacy-dns", &policy, false);
 
     assert!(
         opens_dns_unconditionally(&rules),
         "input=legacy defaultPolicy=block; expected the documented port 53 accept; output={rules:?}"
     );
 }
-
-// ---------------------------------------------------------------------------
-// The same contract driven from a request rather than a hand-built policy.
-//
-// LXC reads one bit -- legacy or directional -- so these cover both, driven
-// through the real parser to catch a parser that selects the wrong branch.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_parsed_legacy_request_keeps_the_dns_exemption() {
@@ -797,7 +789,7 @@ fn a_parsed_legacy_request_keeps_the_dns_exemption() {
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "block", "enforcementMode": "firewall"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
+    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy, false);
 
     assert!(
         opens_dns_unconditionally(&rules),
@@ -812,7 +804,7 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
             "process": {"commandLine": "echo hi"},
             "network": {"egress": {"default": "deny"}}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-directional", &policy);
+    let rules = appended_ipv4_chain_rules("parsed-directional", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -828,7 +820,7 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy);
+    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy, true);
 
     assert!(
         !opens_dns_unconditionally(&rules),

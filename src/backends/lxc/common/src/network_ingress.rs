@@ -498,8 +498,11 @@ impl IngressManager {
 
     /// The 0.8 `network.ingress` section, or `None` when this run was given the
     /// legacy schema.
-    fn stated_ingress(policy: &ContainerPolicy) -> Option<&NetworkIngressPolicy> {
-        if policy.uses_directional_network {
+    fn stated_ingress(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> Option<&NetworkIngressPolicy> {
+        if uses_directional_schema {
             policy.network_ingress.as_ref()
         } else {
             None
@@ -512,8 +515,11 @@ impl IngressManager {
     /// 0.7 states this in `allowLocalNetwork`; 0.8 splits it across
     /// `network.ingress.default` and `network.ingress.hostLoopback`, but
     /// LXC's single inbound chain refuses either `allow` value alike.
-    fn permissive_inbound_field(policy: &ContainerPolicy) -> Option<&'static str> {
-        if let Some(ingress) = Self::stated_ingress(policy) {
+    fn permissive_inbound_field(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+    ) -> Option<&'static str> {
+        if let Some(ingress) = Self::stated_ingress(policy, uses_directional_schema) {
             if ingress.default == NetworkAction::Allow {
                 return Some("network.ingress.default");
             }
@@ -529,14 +535,15 @@ impl IngressManager {
     /// Apply the inbound firewall rules for `policy`.
     ///
     /// Delegates argv construction to the pure [`Self::build_ingress_rules`]
-    /// (unit-testable without root or `iptables`), then executes each emitted
+    /// (unit-testable without root or `iptables`), then executes each resulting
     /// vector inside the container netns via `nsenter -t <pid> -n`.
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        if !installs_firewall(policy) {
+        if !installs_firewall(policy, uses_directional_schema) {
             logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
         }
@@ -546,7 +553,7 @@ impl IngressManager {
         // claimed is a promise to either enforce the field or reject it.
         // Unconditional: we always have a real container netns to hook (the PID
         // is mandatory), so there is no inert path that could safely emit it.
-        if let Some(field) = Self::permissive_inbound_field(policy) {
+        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_schema) {
             return Err(format!(
                 "{field} (permissive host-loopback inbound) is not yet implemented for the \
                  LXC firewall path. Scoping inbound to host loopback requires a loopbackPorts \
@@ -561,7 +568,7 @@ impl IngressManager {
             "Creating inbound iptables chain: {}",
             self.chain_name
         ));
-        let inbound_field = if policy.uses_directional_network {
+        let inbound_field = if uses_directional_schema {
             "network.ingress"
         } else {
             "allowLocalNetwork"
@@ -604,7 +611,12 @@ impl IngressManager {
             }
         };
 
-        let ipv4_rules = Self::build_ingress_rules(&self.chain_name, policy, IpFamily::V4);
+        let ipv4_rules = Self::build_ingress_rules(
+            &self.chain_name,
+            policy,
+            uses_directional_schema,
+            IpFamily::V4,
+        );
 
         // Install per family, tracking ownership per resource. The IPv4 chain is
         // always installed; the IPv6 chain only when the family is usable in the
@@ -621,7 +633,12 @@ impl IngressManager {
         // (which would leak installed rules).
         self.install_family(IpFamily::V4, &ipv4_rules, &mut runner, logger)?;
         if ipv6_enabled {
-            let ipv6_rules = Self::build_ingress_rules(&self.chain_name, policy, IpFamily::V6);
+            let ipv6_rules = Self::build_ingress_rules(
+                &self.chain_name,
+                policy,
+                uses_directional_schema,
+                IpFamily::V6,
+            );
             self.install_family(IpFamily::V6, &ipv6_rules, &mut runner, logger)?;
         }
 
@@ -632,7 +649,7 @@ impl IngressManager {
     /// create the chain fresh, append the body rules, then hook into INPUT last
     /// — marking ownership immediately after each specific command succeeds.
     ///
-    /// The hook is emitted only after the body is fully in place, so a chain
+    /// The hook is added only after the body is fully in place, so a chain
     /// this call hooks is never momentarily empty. That covers the fresh-install
     /// case only. When a *leftover* hooked chain from a crashed run exists, step
     /// 1's reset unhooks it before the replacement is built, so whatever that
@@ -760,7 +777,7 @@ impl IngressManager {
     ///
     /// The `-I INPUT` jump is returned separately from the chain body ([`IngressRules`]),
     /// so install appends the body first and hooks *last* — a hooked chain is
-    /// never momentarily empty. The `-N` creation is *not* emitted here: install
+    /// never momentarily empty. The `-N` creation is *not* included here: install
     /// issues it explicitly so its success can gate ownership. The chain is
     /// hooked into the container's `INPUT` chain (executed inside the container
     /// netns by the caller), so every packet it sees is destined *to a container
@@ -770,6 +787,7 @@ impl IngressManager {
     fn build_ingress_rules(
         chain: &str,
         policy: &ContainerPolicy,
+        uses_directional_schema: bool,
         family: IpFamily,
     ) -> IngressRules {
         fn argv(args: &[&str]) -> Vec<String> {
@@ -823,11 +841,12 @@ impl IngressManager {
 
         // Accept or drop NEW inbound connections to the container's listening
         // sockets. A permissive request is refused before any rule is built.
-        let inbound_verb = if Self::permissive_inbound_field(policy).is_some() {
-            accept
-        } else {
-            drop
-        };
+        let inbound_verb =
+            if Self::permissive_inbound_field(policy, uses_directional_schema).is_some() {
+                accept
+            } else {
+                drop
+            };
         body.push(argv(&[
             "-A",
             chain,
@@ -1223,7 +1242,6 @@ mod tests {
         host_loopback: NetworkAction,
     ) -> ContainerPolicy {
         ContainerPolicy {
-            uses_directional_network: true,
             network_ingress: Some(NetworkIngressPolicy {
                 default,
                 host_loopback,
@@ -1235,10 +1253,10 @@ mod tests {
     #[test]
     fn a_deny_deny_directional_ingress_asks_for_nothing_permissive() {
         assert_eq!(
-            IngressManager::permissive_inbound_field(&directional_ingress(
-                NetworkAction::Deny,
-                NetworkAction::Deny
-            )),
+            IngressManager::permissive_inbound_field(
+                &directional_ingress(NetworkAction::Deny, NetworkAction::Deny),
+                true
+            ),
             None,
             "the GA ingress defaults are what the existing default-deny chain already \
              enforces, so they must not be refused"
@@ -1248,10 +1266,10 @@ mod tests {
     #[test]
     fn a_permissive_directional_ingress_default_is_named_in_the_refusal() {
         assert_eq!(
-            IngressManager::permissive_inbound_field(&directional_ingress(
-                NetworkAction::Allow,
-                NetworkAction::Deny
-            )),
+            IngressManager::permissive_inbound_field(
+                &directional_ingress(NetworkAction::Allow, NetworkAction::Deny),
+                true
+            ),
             Some("network.ingress.default"),
             "an unenforceable value must be refused by the name the operator wrote"
         );
@@ -1260,10 +1278,10 @@ mod tests {
     #[test]
     fn a_permissive_directional_host_loopback_is_named_in_the_refusal() {
         assert_eq!(
-            IngressManager::permissive_inbound_field(&directional_ingress(
-                NetworkAction::Deny,
-                NetworkAction::Allow
-            )),
+            IngressManager::permissive_inbound_field(
+                &directional_ingress(NetworkAction::Deny, NetworkAction::Allow),
+                true
+            ),
             Some("network.ingress.hostLoopback"),
             "an unenforceable value must be refused by the name the operator wrote"
         );
@@ -1280,7 +1298,7 @@ mod tests {
         };
 
         assert_eq!(
-            IngressManager::permissive_inbound_field(&policy),
+            IngressManager::permissive_inbound_field(&policy, false),
             Some("allowLocalNetwork"),
             "the 0.7 refusal must keep naming the 0.7 field"
         );
@@ -1291,13 +1309,12 @@ mod tests {
     #[test]
     fn a_bare_directional_config_asks_for_nothing_permissive() {
         let policy = ContainerPolicy {
-            uses_directional_network: true,
             network_ingress: Some(NetworkIngressPolicy::default()),
             ..Default::default()
         };
 
         assert_eq!(
-            IngressManager::permissive_inbound_field(&policy),
+            IngressManager::permissive_inbound_field(&policy, true),
             None,
             "the parser's fill-in denies inbound, which the default chain already enforces"
         );
@@ -1316,14 +1333,13 @@ mod tests {
                 network_enforcement_mode: NetworkEnforcementMode::Firewall,
                 ..Default::default()
             };
-            policy.uses_directional_network = directional;
             if directional {
                 policy.network_ingress = Some(NetworkIngressPolicy::default());
             }
 
             let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
             let mut manager = IngressManager::new("log-field-test", 1);
-            let _ = manager.apply_firewall_rules(&policy, &mut logger);
+            let _ = manager.apply_firewall_rules(&policy, directional, &mut logger);
             let logged = logger.get_buffer().to_string();
 
             assert!(
@@ -1347,7 +1363,7 @@ mod tests {
         }
     }
 
-    /// Exact-match a single emitted rule against an expected argv.
+    /// Exact-match a single rule against an expected argv.
     fn is(rule: &[String], want: &[&str]) -> bool {
         rule.len() == want.len() && rule.iter().zip(want).all(|(a, b)| a == b)
     }
@@ -1476,8 +1492,17 @@ mod tests {
     /// body, then the `-I INPUT` hook. Composed from the split [`IngressRules`]
     /// the builder returns, so the pinned-sequence and ordering tests assert the
     /// exact install order while the builder keeps body and hook separate.
-    fn full_sequence(policy: &ContainerPolicy, family: IpFamily) -> Vec<Vec<String>> {
-        let rules = IngressManager::build_ingress_rules(TEST_CHAIN, policy, family);
+    fn full_sequence(
+        policy: &ContainerPolicy,
+        uses_directional_schema: bool,
+        family: IpFamily,
+    ) -> Vec<Vec<String>> {
+        let rules = IngressManager::build_ingress_rules(
+            TEST_CHAIN,
+            policy,
+            uses_directional_schema,
+            family,
+        );
         let mut seq = vec![vec!["-N".to_string(), TEST_CHAIN.to_string()]];
         seq.extend(rules.body.iter().cloned());
         seq.push(rules.hook.clone());
@@ -1487,6 +1512,7 @@ mod tests {
     fn build(allow_local: bool) -> Vec<Vec<String>> {
         full_sequence(
             &policy_with(allow_local, NetworkPolicy::Block),
+            false,
             IpFamily::V4,
         )
     }
@@ -1737,7 +1763,7 @@ mod tests {
         // Inbound is default-deny; the egress `default_network_policy` must not
         // turn it into a default-accept.
         for default in [NetworkPolicy::Block, NetworkPolicy::Allow] {
-            let rules = full_sequence(&policy_with(false, default.clone()), IpFamily::V4);
+            let rules = full_sequence(&policy_with(false, default.clone()), false, IpFamily::V4);
             assert!(
                 has(&rules, &["-A", "MXC-t", "-j", "DROP"]),
                 "terminal must be DROP (egress default={default:?})"
@@ -1783,7 +1809,11 @@ mod tests {
     // ---- family-awareness: IPv4 pinned, IPv6 gains ICMPv6 ND ------------
 
     fn build_family(allow_local: bool, family: IpFamily) -> Vec<Vec<String>> {
-        full_sequence(&policy_with(allow_local, NetworkPolicy::Block), family)
+        full_sequence(
+            &policy_with(allow_local, NetworkPolicy::Block),
+            false,
+            family,
+        )
     }
 
     /// The IPv4 rule set must be exactly this sequence, in order — the
@@ -1824,7 +1854,7 @@ mod tests {
         }
     }
 
-    /// IPv4 must emit no ICMP/ICMPv6 rules at all — ARP is layer 2, so the IPv4
+    /// IPv4 must add no ICMP/ICMPv6 rules at all — ARP is layer 2, so the IPv4
     /// chain never needs a control-plane allowance.
     #[test]
     fn ipv4_emits_no_icmpv6_rules() {
@@ -2046,7 +2076,8 @@ mod tests {
         // The PID value is irrelevant: the refusal precedes every use of it.
         for pid in [1u32, 42u32, 999_999u32] {
             let mut mgr = IngressManager::new("permissive-container", pid);
-            let result = mgr.apply_firewall_rules(&permissive_firewall_policy(), &mut logger);
+            let result =
+                mgr.apply_firewall_rules(&permissive_firewall_policy(), false, &mut logger);
             assert!(
                 result.is_err(),
                 "allowLocalNetwork: true must be refused (pid={pid})"
@@ -2291,6 +2322,7 @@ mod tests {
             let rules = IngressManager::build_ingress_rules(
                 TEST_CHAIN,
                 &policy_with(false, NetworkPolicy::Block),
+                false,
                 family,
             );
             assert_eq!(
@@ -2343,6 +2375,7 @@ mod tests {
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
+            false,
             IpFamily::V4,
         );
 
@@ -2476,6 +2509,7 @@ mod tests {
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
+            false,
             IpFamily::V4,
         );
 
@@ -2541,6 +2575,7 @@ mod tests {
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
+            false,
             IpFamily::V4,
         );
 
@@ -2587,6 +2622,7 @@ mod tests {
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
+            false,
             IpFamily::V4,
         );
 
@@ -2642,6 +2678,7 @@ mod tests {
         let rules = IngressManager::build_ingress_rules(
             TEST_CHAIN,
             &policy_with(false, NetworkPolicy::Block),
+            false,
             IpFamily::V6,
         );
 
@@ -2873,7 +2910,7 @@ mod tests {
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
             assert!(
-                installs_firewall(&policy),
+                installs_firewall(&policy, false),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
                  deny chain even with nothing to restrict outbound"
             );
@@ -2889,7 +2926,7 @@ mod tests {
             legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
-            !installs_firewall(&policy),
+            !installs_firewall(&policy, false),
             "a policy naming no firewall mode, no posture, no hosts and no proxy has \
              nothing inbound to enforce"
         );
@@ -2902,8 +2939,7 @@ mod tests {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
-        policy.uses_directional_network = true;
 
-        assert!(installs_firewall(&policy));
+        assert!(installs_firewall(&policy, true));
     }
 }
