@@ -59,7 +59,7 @@ These fields preserve schema 0.6 and 0.7 authoring compatibility.
 | Field | Description |
 |---|---|
 | `allowOutbound` | Allow outbound network access. Defaults to `false`. |
-| `allowLocalNetwork` | Allow local/private-network access. Defaults to `false`. |
+| `allowLocalNetwork` | Allow inbound connections from local/private networks. Defaults to `false`. |
 | `allowedHosts` | Hosts or CIDRs allowed by backends that support host filtering. |
 | `blockedHosts` | Hosts or CIDRs denied by backends that support host filtering. |
 | `proxy` | Legacy proxy configuration: `builtinTestServer`, `localhost`, or `url`. |

@@ -545,6 +545,17 @@ fn validate_process_container_proxy_policy(
     policy: &ContainerPolicy,
     proxy_enabled: bool,
 ) -> Result<(), WxcError> {
+    if policy
+        .allowed_proxy_peer
+        .as_deref()
+        .is_some_and(|peer| peer.eq_ignore_ascii_case("MXC-Loopback"))
+    {
+        return Err(WxcError::ConfigParse(
+            "processContainer.network.allowedProxyPeer must not use the reserved \
+             'MXC-Loopback' identity"
+                .to_string(),
+        ));
+    }
     if policy.allowed_proxy_peer.is_some() && !proxy_enabled {
         return Err(WxcError::ConfigParse(
             "processContainer.network.allowedProxyPeer requires runtimeConfig.networkProxy"
@@ -580,6 +591,29 @@ fn validate_process_container_proxy_policy(
                 .to_string(),
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod proxy_policy_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_loopback_peer_identity_is_rejected_case_insensitively() {
+        let policy = ContainerPolicy {
+            allowed_proxy_peer: Some("mxc-loopback".to_string()),
+            ..Default::default()
+        };
+
+        let error = validate_process_container_proxy_policy(&policy, true).unwrap_err();
+        match error {
+            WxcError::ConfigParse(message) => assert_eq!(
+                message,
+                "processContainer.network.allowedProxyPeer must not use the reserved \
+                 'MXC-Loopback' identity"
+            ),
+            other => panic!("expected config error, got {other:?}"),
+        }
     }
 }
 

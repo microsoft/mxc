@@ -318,7 +318,7 @@ the exact endpoint in `runtimeConfig.networkProxy` is the sole sanctioned except
 
 | Platform | Enforcement Mechanism |
 |---|---|
-| Windows (Process Containers) | Enforcing BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. AppContainer fallback: cooperative routing only. |
+| Windows (Process Containers) | PSEC BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. Legacy SBOX and AppContainer fallback reject schema 0.8 runtime proxy. |
 | WSLc | VM-level network policy permits only the translated proxy endpoint. Proxy variables are routing hints. |
 | Linux (LXC, Bubblewrap) | iptables permits only the proxy endpoint; proxy variables are routing hints. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
@@ -388,9 +388,10 @@ already implemented.
 
 The strict host-loopback guarantee applies to the identity-scoped
 ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
-proxy path requires broader host-loopback access, and the AppContainer fallback
-is cooperative; both are explicitly documented compatibility behaviors rather
-than strict model-2 enforcement.
+proxy path requires broader host-loopback access and is an explicitly documented
+PSEC compatibility behavior rather than strict model-2 enforcement. Legacy SBOX
+and the AppContainer fallback reject schema 0.8 runtime proxy requests because
+they cannot preserve either posture.
 
 **Connectivity models:**
 
@@ -409,11 +410,11 @@ than strict model-2 enforcement.
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations |
+| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
-| Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. AppContainer has no internetClient capability. | |
-| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"` |
+| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
+| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
 | Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
 | Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
