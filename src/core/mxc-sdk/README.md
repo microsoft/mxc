@@ -50,6 +50,40 @@ To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`] — the same choice the
 TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
 
+For a directly configured Windows ProcessContainer, pass
+`Containment::ProcessContainer(ProcessContainerSection { ... })`. This exposes
+the Node SDK's ProcessContainer-specific settings: least-privilege creation,
+learning mode, capabilities, BaseProcessContainer UI isolation, proxy peer
+identity, and denial capture. Schema 0.8 directional networking is available
+through `NetworkSection::{egress, ingress, runtime_config}`.
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment, policy::CaptureDenialsSection, Containment,
+    ProcessContainerSection, SandboxPolicy,
+};
+
+let policy = SandboxPolicy {
+    version: "0.8.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+    capture_denials: None,
+};
+let process_container = ProcessContainerSection {
+    capabilities: vec!["registryRead".to_string()],
+    capture_denials: Some(CaptureDenialsSection::default()),
+    ..Default::default()
+};
+let request = build_request_with_containment(
+    &policy,
+    &Containment::ProcessContainer(process_container),
+    None,
+)?;
+# Ok::<(), mxc_sdk::Error>(())
+```
+
 Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
 available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
 dirs), [`user_profile_policy`], and [`temporary_files_policy`].
@@ -158,20 +192,16 @@ for that.
 
 ## Denial capture (Windows)
 
-`SandboxPolicy::capture_denials` enables the Windows ProcessContainer's
-learning-mode capture: the runner records every access the policy does not
-grant and writes them to a JSON denials document.
+`ProcessContainerSection::capture_denials` enables learning-mode capture: the
+runner records every access the policy does not grant and writes them to a JSON
+denials document. `SandboxPolicy::capture_denials` remains available for the
+host-resolved `build_request` path.
 
 ```rust
 use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
-use mxc_sdk::SandboxPolicy;
+use mxc_sdk::{Containment, ProcessContainerSection};
 
-let policy = SandboxPolicy {
-    version: "0.8.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
+let containment = Containment::ProcessContainer(ProcessContainerSection {
     capture_denials: Some(CaptureDenialsSection {
         // `Block` (the default) keeps deny-by-default and records the denial;
         // `Allow` runs permissively and records what *would* have been denied.
@@ -182,7 +212,8 @@ let policy = SandboxPolicy {
         // Preserve the sealed ETL and report its path in output metadata.
         retain_etl: false,
     }),
-};
+    ..Default::default()
+});
 ```
 
 `Allow` relaxes containment for the run — it is reported through `warnings()`.
@@ -360,6 +391,7 @@ default):
 | Linux   | Bubblewrap                                      | `Containment::Process`           |
 | macOS   | Seatbelt                                        | `Containment::Process`           |
 | Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
+| Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
 | Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
 
 `Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.

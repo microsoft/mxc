@@ -145,6 +145,7 @@ fn build_request_host_rules_require_outbound() {
             allowed_hosts: vec!["example.com".to_string()],
             blocked_hosts: vec![],
             proxy: None,
+            ..Default::default()
         }),
         ui: None,
         timeout_ms: None,
@@ -165,6 +166,54 @@ fn build_request_host_rules_require_outbound() {
             "Windows ProcessContainer requires allowOutbound for host rules"
         );
     }
+}
+
+#[test]
+fn public_reexports_build_process_container_networking_and_capture() {
+    use mxc_sdk::policy::{
+        CaptureDenialsSection, NetworkAction, NetworkEgressSection, NetworkIngressSection,
+        NetworkSection, RuntimeConfigSection,
+    };
+    use mxc_sdk::{
+        build_request_with_containment, Containment, ProcessContainerNetworkSection,
+        ProcessContainerSection,
+    };
+
+    let policy = SandboxPolicy {
+        version: "0.8.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Allow),
+                host_loopback: Some(NetworkAction::Deny),
+            }),
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://127.0.0.1:8080".to_string()),
+            }),
+            ..Default::default()
+        }),
+        ui: None,
+        timeout_ms: None,
+        capture_denials: None,
+    };
+    let process_container = ProcessContainerSection {
+        capture_denials: Some(CaptureDenialsSection::default()),
+        network: Some(ProcessContainerNetworkSection {
+            allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+        }),
+        ..Default::default()
+    };
+
+    build_request_with_containment(
+        &policy,
+        &Containment::ProcessContainer(process_container),
+        None,
+    )
+    .expect("public re-exports should build a schema 0.8 ProcessContainer request");
 }
 
 #[cfg(target_os = "macos")]
