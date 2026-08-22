@@ -1,12 +1,47 @@
 # MXC Sandbox Policy Spec v0.8.0
 
-This document summarizes the policy-bearing fields in a schema 0.8
-`ContainerConfig`. It describes the JSON contract consumed by MXC and does not
-depend on a particular SDK authoring API. See the
-[configuration schema](../../schema.md) for the complete config structure and
-the backend guides for platform-specific support.
+## SandboxPolicy
 
-## Policy fields
+`SandboxPolicy` is the Node SDK's user-facing authoring type. It expresses the
+requested filesystem, network, UI, and execution restrictions.
+`createConfigFromPolicy()` translates it into the wire-format
+`ContainerConfig` consumed by MXC.
+
+```typescript
+type SandboxPolicy = {
+  version: "0.8.0-alpha";
+  filesystem?: {
+    readwritePaths?: string[];
+    readonlyPaths?: string[];
+    deniedPaths?: string[];
+    clearPolicyOnExit?: boolean;
+  };
+  network?: {
+    // Legacy network format:
+    allowOutbound?: boolean;
+    allowLocalNetwork?: boolean;
+    allowedHosts?: string[];
+    blockedHosts?: string[];
+    proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
+
+    // Schema 0.8 directional network format:
+    egress?: NetworkEgressConfig;
+    ingress?: NetworkIngressConfig;
+  };
+  runtimeConfig?: RuntimeConfig;
+  processContainer?: {
+    network?: {
+      allowedProxyPeer?: string;
+    };
+  };
+  ui?: {
+    allowWindows?: boolean;
+    clipboard?: "none" | "read" | "write" | "all";
+    allowInputInjection?: boolean;
+  };
+  timeoutMs?: number;
+};
+```
 
 ### `filesystem`
 
@@ -15,6 +50,7 @@ the backend guides for platform-specific support.
 | `readwritePaths` | Paths the sandbox can read and write. |
 | `readonlyPaths` | Paths the sandbox can read but not write. |
 | `deniedPaths` | Paths the sandbox cannot access. |
+| `clearPolicyOnExit` | Remove filesystem policy after execution. Defaults to `true`. |
 
 Omitted filesystem permissions remain denied.
 
@@ -29,8 +65,7 @@ These fields preserve schema 0.6 and 0.7 authoring compatibility.
 
 | Field | Description |
 |---|---|
-| `defaultPolicy` | Legacy outbound posture: `"allow"` or `"block"`. |
-| `enforcementMode` | Legacy enforcement selection: `"capabilities"`, `"firewall"`, or `"both"`. |
+| `allowOutbound` | Allow outbound network access. Defaults to `false`. |
 | `allowLocalNetwork` | Allow local/private-network access. Defaults to `false`. |
 | `allowedHosts` | Hosts or CIDRs allowed by backends that support host filtering. |
 | `blockedHosts` | Hosts or CIDRs denied by backends that support host filtering. |
@@ -46,22 +81,18 @@ These fields preserve schema 0.6 and 0.7 authoring compatibility.
 
 Each allow or deny rule has this shape:
 
-```jsonc
-{
-  "to": [
-    {
-      "cidr": "192.0.2.0/24",
-      "except": ["192.0.2.128/25"]
-    }
-  ],
-  "ports": [
-    {
-      "protocol": "tcp",
-      "port": 443,
-      "endPort": 444
-    }
-  ]
-}
+```typescript
+type NetworkRuleConfig = {
+  to?: Array<{
+    cidr: string;
+    except?: string[];
+  }>;
+  ports?: Array<{
+    protocol?: "tcp" | "udp" | "icmp" | "any";
+    port?: number;
+    endPort?: number;
+  }>;
+};
 ```
 
 | Rule field | Description |
@@ -98,20 +129,20 @@ than weakening the policy.
 |---|---|
 | `allowedProxyPeer` | Package Family Name or AppContainer profile allowed to communicate over loopback. ProcessContainer only. |
 
-`allowedProxyPeer` is a scoped loopback grant and cannot be combined with
-`ingress.hostLoopback: "allow"`. See the
-[ProcessContainer networking guide](../../process-container/networking.md) for
-its backend-specific requirements.
+For ProcessContainer authoring, `egress.default: "allow"` adds the
+`internetClient` capability and `ingress.default: "allow"` adds
+`privateNetworkClientServer`. `allowedProxyPeer` is a scoped loopback grant and
+cannot be combined with `ingress.hostLoopback: "allow"`.
 
 ### `ui`
 
 | Field | Description |
 |---|---|
-| `disable` | Disable UI access. Defaults to `true`. |
+| `allowWindows` | Allow visible windows. Defaults to `false`. |
 | `clipboard` | `"none"`, `"read"`, `"write"`, or `"all"`. Defaults to `"none"`. |
-| `injection` | Allow keyboard or mouse input injection. Defaults to `false`. |
+| `allowInputInjection` | Allow keyboard or mouse input injection. Defaults to `false`. |
 
-### `process.timeout`
+### `timeoutMs`
 
 Execution timeout in milliseconds. Omission means no timeout.
 
@@ -122,6 +153,7 @@ selects directional deny defaults.
 
 ## Examples and detailed behavior
 
+- [Node SDK schema 0.8 examples](../../../sdk/node/README.md#schema-080-networking)
 - [Schema 0.8 directional config example](../../../tests/examples/30_network_0_8_directional.json)
 - [Schema updates from 0.7 to 0.8](networking/schema-updates.md)
 - [Network modes and rule semantics](networking/networking.md)

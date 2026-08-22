@@ -67,13 +67,66 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
 
-**Schema 0.8 directional networking:** Config-based requests may use
+<a id="schema-080-networking"></a>
+
+**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
 legacy `network.defaultPolicy`, `network.enforcementMode`,
 `network.allowLocalNetwork`, host-list, or `network.proxy` fields.
-`createConfigFromPolicy` continues to produce the legacy network shape; build a
-`ContainerConfig` directly when using the schema 0.8 directional shape.
+`createConfigFromPolicy` authors either shape according to the supplied policy
+version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
+wire shape. With schema 0.8, omitting all network fields leaves the
+`network` block out of the generated config; the native parser interprets that
+as directional default-deny for egress, ingress, and host loopback. See the
+[Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
+for the complete authoring shape.
+
+**Mode 1 — one direct-egress L3/L4 filtering configuration:**
+
+```typescript
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
+
+const directConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: {
+      default: 'deny',
+      allow: [{
+        to: [{ cidr: '192.0.2.0/24' }],
+        ports: [{ protocol: 'tcp', port: 443 }],
+      }],
+    },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+});
+directConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(directConfig);
+```
+
+**Mode 2 — one loopback HTTP/S proxy configuration:**
+
+```typescript
+const proxyConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: { default: 'deny' },
+    ingress: { default: 'allow', hostLoopback: 'allow' },
+  },
+  runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+});
+proxyConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(proxyConfig);
+```
+
+These are example configurations rather than universal backend recipes.
+ProcessContainer proxy configurations have additional criteria; see the
+[ProcessContainer 0.8 proxy example](https://github.com/microsoft/mxc/blob/main/docs/process-container/examples/0.8.0-schema.md).
+See the [networking specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+for all three connectivity modes and backend-specific support.
 
 **Platforms:**
 
@@ -460,7 +513,7 @@ for the stable registry contract and interaction rules.
 - [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
 - [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
 - [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
-- [Sandbox policy 0.7.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.7.0/policy.md)
+- [Sandbox policy 0.8.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
   — policy specification
 - Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
 
