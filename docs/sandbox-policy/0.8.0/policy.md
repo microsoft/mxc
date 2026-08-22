@@ -91,11 +91,11 @@ type NetworkRuleConfig = {
 |---|---|
 | `to` | Destination CIDRs. Omission matches both IP families. |
 | `to[].cidr` | IPv4 or IPv6 CIDR. |
-| `to[].except` | CIDRs excluded from the containing peer. |
+| `to[].except` | CIDRs excluded from the containing peer. Each exclusion must use the same address family and be contained within `to[].cidr`. |
 | `ports` | Protocol and destination-port selectors. Omission matches all. |
 | `ports[].protocol` | `"tcp"`, `"udp"`, `"icmp"`, or `"any"`. Defaults to `"any"`. |
-| `ports[].port` | Destination port. Omission matches every port. |
-| `ports[].endPort` | Inclusive range end. Requires `port`. |
+| `ports[].port` | Destination port from 1 through 65535. Omission matches every port. Must be omitted for `"icmp"`. |
+| `ports[].endPort` | Inclusive range end from 1 through 65535. Requires `port`, must be greater than or equal to it, and must be omitted for `"icmp"`. |
 
 Explicit `to` and `ports` arrays must not be empty.
 
