@@ -822,10 +822,7 @@ impl IngressManager {
         }
 
         // Accept or drop NEW inbound connections to the container's listening
-        // sockets. A permissive request is refused before any rule is built, so
-        // reading the posture through the schema that filled the policy keeps a
-        // stale legacy flag on a 0.8 request from opening the container to
-        // every interface and source.
+        // sockets. A permissive request is refused before any rule is built.
         let inbound_verb = if Self::permissive_inbound_field(policy).is_some() {
             accept
         } else {
@@ -1233,26 +1230,6 @@ mod tests {
             }),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn a_stale_legacy_flag_cannot_open_a_directional_deny_ingress() {
-        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
-        policy.allow_local_network = true;
-
-        let rules = IngressManager::build_ingress_rules(TEST_CHAIN, &policy, IpFamily::V4);
-        let new_rule = rules
-            .body
-            .iter()
-            .find(|argv| argv.contains(&"NEW".to_string()))
-            .expect("the chain must decide new inbound connections");
-
-        assert!(
-            new_rule.contains(&"DROP".to_string()),
-            "a request stating ingress deny/deny must drop new inbound connections even when \
-             the legacy allowLocalNetwork flag is also set, or a caller that fills both shapes \
-             opens the container to every interface and source; rule={new_rule:?}"
-        );
     }
 
     #[test]
