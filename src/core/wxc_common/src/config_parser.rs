@@ -5189,6 +5189,36 @@ mod tests {
         assert!(request.policy.network_proxy.is_enabled());
     }
 
+    // The 0.8 runtime proxy must be loopback, and two legacy LXC guards reject
+    // exactly that. Both sit behind the parser's legacy-only return value, so
+    // 0.8 never reaches them.
+    #[test]
+    fn schema_v08_does_not_apply_the_legacy_lxc_proxy_guards() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "containment": "lxc",
+            "process": {"commandLine": "echo hi"},
+            "network": {
+                "egress": {"default": "deny"},
+                "ingress": {"default": "deny", "hostLoopback": "deny"}
+            },
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"}
+        }"#;
+        let request = match load_mxc(json).unwrap() {
+            MxcRequest::OneShot(request) => request,
+            _ => panic!("expected one-shot request"),
+        };
+
+        assert!(request.policy.network_proxy.is_enabled());
+        assert!(request.policy.uses_directional_network);
+        assert_eq!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Capabilities,
+            "0.8 has no enforcementMode, so the legacy guard demanding 'firewall' or \
+             'both' would reject every proxying 0.8 config if it applied"
+        );
+    }
+
     #[test]
     fn schema_v08_parses_runtime_proxy_and_peer() {
         let json = r#"{

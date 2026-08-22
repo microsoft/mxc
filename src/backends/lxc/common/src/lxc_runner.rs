@@ -923,6 +923,7 @@ mod tests {
     /// its defaults.
     fn egress_only_directional_request() -> ExecutionRequest {
         let mut request = ExecutionRequest::default();
+        request.policy.uses_directional_network = true;
         request.policy.network_mode_specified = true;
         request.policy.network_egress = Some(NetworkEgressPolicy::default());
         request.policy.network_ingress = Some(NetworkIngressPolicy::default());
