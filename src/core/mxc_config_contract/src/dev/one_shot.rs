@@ -5,7 +5,7 @@ use super::experimental::OneShotExperimental;
 use super::network::Network;
 use super::primitives::OptionalField;
 use super::stable::{
-    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, Seatbelt, Ui,
+    Fallback, Filesystem, Lifecycle, Lxc, Process, ProcessContainer, RuntimeConfig, Seatbelt, Ui,
 };
 use crate::dev::Version;
 
@@ -88,6 +88,9 @@ pub struct Request {
     /// Optional macOS Seatbelt configuration.
     #[serde(alias = "macos_sandbox", default)]
     pub seatbelt: OptionalField<Seatbelt>,
+    /// Optional runtime configuration settings.
+    #[serde(default)]
+    pub runtime_config: OptionalField<RuntimeConfig>,
     /// Optional experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<OneShotExperimental>,

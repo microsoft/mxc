@@ -150,6 +150,76 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// A JSON array that must contain at least one element.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonEmptyVec<T>(Vec<T>);
+
+#[cfg(feature = "schema-gen")]
+impl<T> schemars::JsonSchema for NonEmptyVec<T>
+where
+    T: schemars::JsonSchema,
+{
+    fn schema_name() -> String {
+        format!("NonEmptyArray_of_{}", T::schema_name())
+    }
+
+    fn json_schema(generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{ArrayValidation, InstanceType, Schema, SchemaObject, SingleOrVec};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Array))),
+            array: Some(Box::new(ArrayValidation {
+                items: Some(SingleOrVec::Single(Box::new(
+                    generator.subschema_for::<T>(),
+                ))),
+                min_items: Some(1),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+
+    fn is_referenceable() -> bool {
+        false
+    }
+}
+
+impl<T> NonEmptyVec<T> {
+    /// Creates a validated array.
+    ///
+    /// Returns an error when `value` is empty.
+    fn new(value: Vec<T>) -> Result<Self, String> {
+        if value.is_empty() {
+            Err("array must not be empty".to_string())
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the validated elements as a slice.
+    pub fn as_slice(&self) -> &[T] {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the validated elements.
+    pub fn into_inner(self) -> Vec<T> {
+        self.0
+    }
+}
+
+impl<'de, T> Deserialize<'de> for NonEmptyVec<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Vec::<T>::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

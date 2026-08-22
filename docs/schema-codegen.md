@@ -8,7 +8,7 @@ version-specific parsing:
 | Rolling legacy | `src/core/wxc_common/src/wire.rs` | Current parser, corpus validation, and public SDK conformance until exact dispatch is enabled |
 | Exact `0.8.0-alpha` | `src/core/mxc_config_contract/src/dev/` | Closed mutable development contract and versioned TypeScript drift oracle |
 
-Neither family is hand-authored. Phase 9 retires the rolling generator after
+Neither family is hand-authored. The rolling generator remains in use until
 exact dispatch becomes authoritative.
 
 ## Sources of truth
@@ -24,7 +24,10 @@ and `string_marker!` macros implement `JsonSchema` so deserialization and
 generated constants cannot drift.
 
 `mxc_schema_support` owns shared integer normalization, deterministic root
-rendering, and TypeScript emission without depending on either model.
+rendering, and TypeScript emission without depending on either model. It is a
+separate crate rather than a module because both `wxc_common` and
+`mxc_schema_gen` consume it across crate boundaries; putting it inside either
+consumer would invert dependencies or duplicate the implementation.
 
 ## Generating
 
@@ -43,8 +46,8 @@ cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version 0.
 ```
 
 `mxc_schema_gen versions --json` emits registry-driven lifecycle and artifact
-metadata. Published version generation deliberately returns a Phase 11 error;
-it never falls back to another model.
+metadata. Published version generation deliberately returns an explicit
+unsupported error; it never falls back to another model.
 
 Both Rust model crates gate Schemars behind `schema-gen`, so normal builds do
 not carry it. The exact `OptionalField<T>` schema is transparent and
@@ -66,8 +69,8 @@ focused editor diagnostics than a bare eight-branch `oneOf`. One-shot and exec
 require `process`; the other lifecycle roots do not. Every reachable object,
 including all experimental objects, has `additionalProperties: false`.
 
-The exact schema is available for authoring before runtime enforcement. Until
-Phase 9, a document can validate against
+The exact schema is available for authoring before runtime enforcement. Before
+exact dispatch becomes authoritative, a document can validate against
 `mxc-config.schema.0.8.0-alpha.json` even though the production parser still
 uses the rolling wire model. The generated schema banner records this.
 
@@ -75,6 +78,27 @@ The CLI command-override entry point splices `process.commandLine` before exact
 parsing. Therefore the exact contract and schema correctly require `process`
 and a non-empty `process.commandLine`; a pre-splice policy document is not
 itself contract-valid, and no relaxed schema twin is generated.
+
+### Adding a state-aware provision containment
+
+A backend that adds a new state-aware `provision` containment needs an exact
+request root as well as runtime support:
+
+1. Define and export the closed provision request and containment marker under
+   `src/core/mxc_config_contract/src/dev/state_aware/provision/`.
+2. Add its subschema and containment discriminator to `provision_dispatch()` in
+   `dev/schema.rs`, then include the root in `ROOT_NAMES` and the discriminator
+   assertions there.
+3. Add the root-name mapping to `roots` in
+   `scripts/versioning/check-contract-codegen.js` and create matching
+   `valid/` and `invalid/` fixture directories under
+   `tests/v0_8_0_alpha/fixtures/`.
+4. Regenerate the exact schema and versioned TypeScript oracle with the
+   commands above; the contract codegen gate verifies that the new root is
+   dispatched, closed, referenced consistently, and covered by fixtures.
+5. Wire the request through the exact-contract adapter and state-aware runtime
+   dispatcher when the backend is implemented. Schema registration alone does
+   not make the containment executable.
 
 ## CI gates (`Versioning Checks` job)
 
@@ -86,14 +110,15 @@ itself contract-valid, and no relaxed schema twin is generated.
   valid and invalid fixtures for every concrete root with AJV, and checks a
   malformed exec request produces focused `if`/`then` diagnostics.
 - **`validate-configs.js`** — validates the `tests/examples` + `tests/configs`
-  corpus against the rolling schema until Phase 8 migrates it.
+  corpus against the rolling schema until that corpus migrates to exact
+  contracts.
 - **`check-schema-versions.js`** / **`check-version-sync.js`** — version-constant
   and product-version sync.
 
 Public SDK conformance remains attached to the rolling
-`sdk/node/src/generated/wire.ts` until Phase 8. The versioned
-`v0_8_0_alpha/wire.ts` file must compile, but is not exported and is not yet
-compared to the hand-written public SDK types.
+`sdk/node/src/generated/wire.ts` until the public SDK migrates to exact
+contracts. The versioned `v0_8_0_alpha/wire.ts` file must compile, but is not
+exported and is not yet compared to the hand-written public SDK types.
 
 ## Deliberate exact-versus-rolling differences
 

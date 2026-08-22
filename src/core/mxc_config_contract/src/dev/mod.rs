@@ -234,7 +234,10 @@ pub use experimental::{
     OneShotExperimental, OneShotWindowsSandbox, OneShotWslc, PortMapping, Telemetry, TestFeature,
     TransportProtocol,
 };
-pub use network::{DefaultNetworkPolicy, Network, NetworkEnforcementMode, NetworkProxy};
+pub use network::{
+    DefaultNetworkPolicy, Network, NetworkAction, NetworkEgress, NetworkEnforcementMode,
+    NetworkIngress, NetworkPeer, NetworkPort, NetworkProtocol, NetworkProxy, NetworkRule,
+};
 pub use one_shot::{Containment as OneShotContainment, Request as OneShotRequest};
 pub use primitives::{NonEmptyString, OptionalField, True};
 pub use request::{parse_request, Request, RequestParseError};
@@ -242,8 +245,8 @@ pub use request::{parse_request, Request, RequestParseError};
 pub use schema::development_schema;
 pub use stable::{
     CaptureDenials, CaptureDenialsMode, Fallback, Filesystem, LaunchMethod, Lifecycle, Lxc,
-    Process, ProcessContainer, ProcessContainerCapability, ProcessContainerUi,
-    ProcessContainerUiIsolation, Seatbelt, Ui, UiClipboard,
+    Process, ProcessContainer, ProcessContainerCapability, ProcessContainerNetwork,
+    ProcessContainerUi, ProcessContainerUiIsolation, RuntimeConfig, Seatbelt, Ui, UiClipboard,
 };
 pub use state_aware::{probe_containment, Containment, ContainmentProbeError};
 pub use state_aware::{probe_phase, Phase, PhaseProbeError};

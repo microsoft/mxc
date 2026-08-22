@@ -112,7 +112,7 @@ Adding a feature may touch these files:
 
 | File | What to change |
 |------|----------------|
-| `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model used by the current parser until Phase 9 |
+| `src/core/wxc_common/src/wire.rs` | Add the field to the rolling model while it remains the current parser input |
 | `src/core/mxc_config_contract/src/dev/` | Add the field to the closed exact mutable development contract |
 | `schemas/dev/mxc-config.schema.0.8.0-dev.json` | **Generated rolling artifact** — do not hand-edit |
 | `schemas/dev/mxc-config.schema.0.8.0-alpha.json` | **Generated exact artifact** — do not hand-edit |

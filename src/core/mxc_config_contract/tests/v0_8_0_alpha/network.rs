@@ -176,3 +176,201 @@ fn rejects_unknown_proxy_field() {
 
     assert_invalid(json);
 }
+
+// Directional network tests. The 0.8 contract accepts `network.egress` and
+// `network.ingress` alongside the legacy fields; the parser, not the contract,
+// rejects mixing the two families.
+fn with_network(network: &str) -> String {
+    format!(
+        r#"{{
+            "version": "0.8.0-alpha",
+            "network": {network},
+            "process": {{"commandLine": "echo"}}
+        }}"#
+    )
+}
+
+#[test]
+fn accepts_a_complete_directional_policy() {
+    assert_valid(&with_network(
+        r#"{
+            "egress": {
+                "default": "deny",
+                "allow": [
+                    {
+                        "to": [
+                            {"cidr": "140.82.112.0/20", "except": ["140.82.113.0/24"]},
+                            {"cidr": "2606:50c0::/32"}
+                        ],
+                        "ports": [
+                            {"port": 443, "protocol": "tcp"},
+                            {"port": 30000, "endPort": 30100, "protocol": "udp"}
+                        ]
+                    },
+                    {"to": [{"cidr": "198.51.100.0/24"}]},
+                    {"ports": [{"protocol": "icmp"}]}
+                ],
+                "deny": [{"to": [{"cidr": "10.0.0.0/8"}]}]
+            },
+            "ingress": {"default": "deny", "hostLoopback": "allow"}
+        }"#,
+    ));
+}
+
+// Each field inside a rule's `to` and `ports` entries is optional; a missing
+// one must not be a parse error.
+#[test]
+fn accepts_partial_directional_rule_entries() {
+    for entry in [
+        r#"{"to": [{"cidr": "10.0.0.0/8"}]}"#,
+        r#"{"to": [{"cidr": "10.0.0.0/8", "except": ["10.1.0.0/16"]}]}"#,
+        r#"{"ports": [{"port": 443}]}"#,
+        r#"{"ports": [{"protocol": "tcp"}]}"#,
+        r#"{"ports": [{"port": 443, "protocol": "tcp"}]}"#,
+        r#"{"ports": [{"port": 30000, "endPort": 30100}]}"#,
+        r#"{"ports": [{"port": 30000, "endPort": 30100, "protocol": "udp"}]}"#,
+        r#"{"ports": [{}]}"#,
+        r#"{}"#,
+    ] {
+        for section in ["allow", "deny"] {
+            assert_valid(&with_network(&format!(
+                r#"{{"egress": {{"{section}": [{entry}]}}}}"#
+            )));
+        }
+    }
+}
+
+#[test]
+fn accepts_empty_directional_sections() {
+    for network in [
+        r#"{"egress": {}}"#,
+        r#"{"ingress": {}}"#,
+        r#"{"egress": {}, "ingress": {}}"#,
+        r#"{"egress": {"allow": []}}"#,
+        r#"{"egress": {"deny": []}}"#,
+    ] {
+        assert_valid(&with_network(network));
+    }
+}
+
+#[test]
+fn rejects_a_destination_without_a_cidr() {
+    assert_invalid(&with_network(
+        r#"{"egress": {"allow": [{"to": [{"except": ["10.1.0.0/16"]}]}]}}"#,
+    ));
+}
+
+// `to` and `ports` are non-empty when present, matching the shipped schema's
+// minItems constraint.
+#[test]
+fn rejects_empty_rule_destination_and_port_arrays() {
+    for network in [
+        r#"{"egress": {"allow": [{"to": []}]}}"#,
+        r#"{"egress": {"allow": [{"ports": []}]}}"#,
+        r#"{"egress": {"deny": [{"to": []}]}}"#,
+        r#"{"egress": {"deny": [{"ports": []}]}}"#,
+    ] {
+        assert_invalid(&with_network(network));
+    }
+}
+
+#[test]
+fn accepts_directional_port_boundaries() {
+    for port in [1, 65535] {
+        assert_valid(&with_network(&format!(
+            r#"{{"egress": {{"allow": [{{"ports": [{{"port": {port}}}]}}]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn rejects_directional_ports_out_of_bounds() {
+    for port in [0, 65536] {
+        assert_invalid(&with_network(&format!(
+            r#"{{"egress": {{"allow": [{{"ports": [{{"port": {port}}}]}}]}}}}"#
+        )));
+        assert_invalid(&with_network(&format!(
+            r#"{{"egress": {{"allow": [{{"ports": [{{"port": 1, "endPort": {port}}}]}}]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn accepts_every_network_action_value() {
+    for action in ["allow", "deny"] {
+        for section in [
+            format!(r#"{{"egress": {{"default": "{action}"}}}}"#),
+            format!(r#"{{"ingress": {{"default": "{action}"}}}}"#),
+            format!(r#"{{"ingress": {{"hostLoopback": "{action}"}}}}"#),
+        ] {
+            assert_valid(&with_network(&section));
+        }
+    }
+}
+
+// The directional actions are allow/deny; the legacy `defaultPolicy` remains
+// allow/block, so `block` must not leak into the directional vocabulary.
+#[test]
+fn rejects_invalid_network_action_values() {
+    for network in [
+        r#"{"egress": {"default": "block"}}"#,
+        r#"{"ingress": {"default": "block"}}"#,
+        r#"{"ingress": {"hostLoopback": "invalid"}}"#,
+    ] {
+        assert_invalid(&with_network(network));
+    }
+}
+
+#[test]
+fn accepts_every_network_protocol_value() {
+    for protocol in ["tcp", "udp", "icmp", "any"] {
+        assert_valid(&with_network(&format!(
+            r#"{{"egress": {{"allow": [{{"ports": [{{"protocol": "{protocol}"}}]}}]}}}}"#
+        )));
+    }
+}
+
+#[test]
+fn rejects_invalid_network_protocol_value() {
+    assert_invalid(&with_network(
+        r#"{"egress": {"allow": [{"ports": [{"protocol": "sctp"}]}]}}"#,
+    ));
+}
+
+#[test]
+fn rejects_unknown_fields_in_every_directional_object() {
+    for network in [
+        r#"{"egress": {"nope": true}}"#,
+        r#"{"ingress": {"nope": true}}"#,
+        r#"{"egress": {"allow": [{"nope": true}]}}"#,
+        r#"{"egress": {"allow": [{"to": [{"cidr": "10.0.0.0/8", "nope": true}]}]}}"#,
+        r#"{"egress": {"allow": [{"ports": [{"port": 443, "nope": true}]}]}}"#,
+    ] {
+        assert_invalid(&with_network(network));
+    }
+}
+
+#[test]
+fn rejects_null_in_directional_objects() {
+    for network in [
+        r#"{"egress": null}"#,
+        r#"{"ingress": null}"#,
+        r#"{"egress": {"default": null}}"#,
+        r#"{"egress": {"allow": null}}"#,
+        r#"{"ingress": {"hostLoopback": null}}"#,
+        r#"{"egress": {"allow": [{"to": null}]}}"#,
+        r#"{"egress": {"allow": [{"to": [{"cidr": null}]}]}}"#,
+    ] {
+        assert_invalid(&with_network(network));
+    }
+}
+
+#[test]
+fn rejects_non_string_cidr_and_non_integer_ports() {
+    for network in [
+        r#"{"egress": {"allow": [{"to": [{"cidr": 42}]}]}}"#,
+        r#"{"egress": {"allow": [{"ports": [{"port": "443"}]}]}}"#,
+    ] {
+        assert_invalid(&with_network(network));
+    }
+}

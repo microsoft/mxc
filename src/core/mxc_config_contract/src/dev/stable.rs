@@ -159,6 +159,8 @@ pub struct CaptureDenials {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProcessContainerCapability(String);
 
+const RESERVED_CAPABILITIES: &[&str] = &["learningModeLogging", "permissiveLearningMode"];
+
 impl ProcessContainerCapability {
     /// Creates a validated capability name.
     ///
@@ -172,8 +174,9 @@ impl ProcessContainerCapability {
                     .to_string(),
             );
         }
-        if value.eq_ignore_ascii_case("learningModeLogging")
-            || value.eq_ignore_ascii_case("permissiveLearningMode")
+        if RESERVED_CAPABILITIES
+            .iter()
+            .any(|reserved| value.eq_ignore_ascii_case(reserved))
         {
             return Err(
                 "learningModeLogging and permissiveLearningMode are reserved; use learningMode, --audit, or captureDenials instead"
@@ -205,6 +208,35 @@ impl<'de> Deserialize<'de> for ProcessContainerCapability {
 }
 
 #[cfg(feature = "schema-gen")]
+fn ascii_case_insensitive_literal(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len() * 4);
+    for character in value.chars() {
+        if character.is_ascii_alphabetic() {
+            pattern.push('[');
+            pattern.push(character.to_ascii_lowercase());
+            pattern.push(character.to_ascii_uppercase());
+            pattern.push(']');
+        } else {
+            if r"\.^$|?*+()[]{}".contains(character) {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+    }
+    pattern
+}
+
+#[cfg(feature = "schema-gen")]
+fn capability_schema_pattern() -> String {
+    let reserved = RESERVED_CAPABILITIES
+        .iter()
+        .map(|value| ascii_case_insensitive_literal(value))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(r"^(?![\s\S]*,)(?!(?:{reserved})$)[\s\S]*$")
+}
+
+#[cfg(feature = "schema-gen")]
 impl schemars::JsonSchema for ProcessContainerCapability {
     fn schema_name() -> String {
         "ProcessContainerCapability".to_string()
@@ -216,10 +248,7 @@ impl schemars::JsonSchema for ProcessContainerCapability {
         Schema::Object(SchemaObject {
             instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
             string: Some(Box::new(StringValidation {
-                pattern: Some(
-                    r"^(?![\s\S]*,)(?!(?:[lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE][lL][oO][gG][gG][iI][nN][gG]|[pP][eE][rR][mM][iI][sS][sS][iI][vV][eE][lL][eE][aA][rR][nN][iI][nN][gG][mM][oO][dD][eE])$)[\s\S]*$"
-                        .to_string(),
-                ),
+                pattern: Some(capability_schema_pattern()),
                 ..Default::default()
             })),
             ..Default::default()
@@ -250,6 +279,31 @@ pub struct ProcessContainer {
     /// Optional ProcessContainer-specific user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific network settings.
+    #[serde(default)]
+    pub network: OptionalField<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific network settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerNetwork {
+    /// Optional loopback peer the contained process may reach in addition to
+    /// the configured runtime proxy. Requires `runtimeConfig.networkProxy`.
+    #[serde(default)]
+    pub allowed_proxy_peer: OptionalField<String>,
+}
+
+/// Runtime configuration supplied alongside the sandbox policy.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// Optional loopback proxy the runtime configures for the sandbox. Must
+    /// address localhost, and requires an egress policy.
+    #[serde(default)]
+    pub network_proxy: OptionalField<String>,
 }
 
 /// Linux LXC distribution settings.

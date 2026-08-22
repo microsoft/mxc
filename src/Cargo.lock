@@ -1577,6 +1577,7 @@ dependencies = [
  "mxc_config_contract",
  "mxc_schema_support",
  "serde_json",
+ "tempfile",
  "wxc_common",
 ]
 

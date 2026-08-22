@@ -289,21 +289,111 @@ export interface Network {
    */
   defaultPolicy?: DefaultNetworkPolicy;
   /**
+   * Optional outbound network rules.
+   */
+  egress?: NetworkEgress;
+  /**
    * Optional network enforcement mechanism.
    */
   enforcementMode?: NetworkEnforcementMode;
+  /**
+   * Optional inbound and host-loopback network rules.
+   */
+  ingress?: NetworkIngress;
   /**
    * Optional proxy configuration.
    */
   proxy?: NetworkProxy;
 }
 
+export type NetworkAction = "allow" | "deny";
+
+/**
+ * Outbound network policy.
+ */
+export interface NetworkEgress {
+  /**
+   * Optional explicit allow rules.
+   */
+  allow?: NetworkRule[];
+  /**
+   * Optional action applied when no explicit rule matches.
+   */
+  default?: NetworkAction;
+  /**
+   * Optional explicit deny rules. Deny takes precedence over allow.
+   */
+  deny?: NetworkRule[];
+}
+
 export type NetworkEnforcementMode = "capabilities" | "firewall" | "both";
+
+/**
+ * Inbound and host-loopback network policy.
+ */
+export interface NetworkIngress {
+  /**
+   * Optional default action for private-network inbound traffic.
+   */
+  default?: NetworkAction;
+  /**
+   * Optional bidirectional host-loopback connectivity action.
+   */
+  hostLoopback?: NetworkAction;
+}
+
+/**
+ * A CIDR destination, optionally excluding narrower ranges within it.
+ */
+export interface NetworkPeer {
+  /**
+   * The IPv4 or IPv6 CIDR this destination matches.
+   */
+  cidr: string;
+  /**
+   * Optional CIDRs excluded from this destination.
+   */
+  except?: string[];
+}
+
+/**
+ * A protocol and destination-port selector.
+ */
+export interface NetworkPort {
+  /**
+   * Optional inclusive end of a destination-port range. Requires `port`.
+   */
+  endPort?: number;
+  /**
+   * Optional destination port. Omission matches every port.
+   */
+  port?: number;
+  /**
+   * Optional transport protocol. Defaults to `any`.
+   */
+  protocol?: NetworkProtocol;
+}
+
+export type NetworkProtocol = "tcp" | "udp" | "icmp" | "any";
 
 /**
  * One of the proxy configurations accepted by the `0.8.0-alpha` contract.
  */
 export type NetworkProxy = { localhost: number; builtinTestServer?: never; url?: never } | { builtinTestServer: True; localhost?: never; url?: never } | { url: string; builtinTestServer?: never; localhost?: never };
+
+/**
+ * One outbound rule, matching destinations and ports.
+ */
+export interface NetworkRule {
+  /**
+   * Optional destination protocols and ports. Omission matches all.
+   */
+  ports?: NetworkPort[];
+  /**
+   * Optional destination CIDRs. Omission matches both IP families.
+   */
+  to?: NetworkPeer[];
+}
 
 export type NonEmptyString = string;
 
@@ -391,6 +481,10 @@ export type OneShotRequest = {
    * Optional ProcessContainer settings. The legacy `appContainer` spelling is accepted as an alias.
    */
   processContainer?: ProcessContainer;
+  /**
+   * Optional runtime configuration settings.
+   */
+  runtimeConfig?: RuntimeConfig;
   /**
    * Optional macOS Seatbelt configuration.
    */
@@ -522,12 +616,26 @@ export interface ProcessContainer {
    */
   leastPrivilege?: boolean;
   /**
+   * Optional ProcessContainer-specific network settings.
+   */
+  network?: ProcessContainerNetwork;
+  /**
    * Optional ProcessContainer-specific user-interface policy.
    */
   ui?: ProcessContainerUi;
 }
 
 export type ProcessContainerCapability = string;
+
+/**
+ * ProcessContainer-specific network settings.
+ */
+export interface ProcessContainerNetwork {
+  /**
+   * Optional loopback peer the contained process may reach in addition to the configured runtime proxy. Requires `runtimeConfig.networkProxy`.
+   */
+  allowedProxyPeer?: string;
+}
 
 /**
  * ProcessContainer-specific user-interface policy.
@@ -554,6 +662,16 @@ export interface ProcessContainerUi {
 export type ProcessContainerUiIsolation = "container" | "desktop" | "handles" | "atoms";
 
 export type ProvisionPhase = "provision";
+
+/**
+ * Runtime configuration supplied alongside the sandbox policy.
+ */
+export interface RuntimeConfig {
+  /**
+   * Optional loopback proxy the runtime configures for the sandbox. Must address localhost, and requires an egress policy.
+   */
+  networkProxy?: string;
+}
 
 /**
  * macOS Seatbelt backend settings.

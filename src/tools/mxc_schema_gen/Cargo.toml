@@ -10,3 +10,6 @@ mxc_config_contract = { workspace = true, features = ["schema-gen"] }
 mxc_schema_support.workspace = true
 serde_json.workspace = true
 wxc_common = { path = "../../core/wxc_common", features = ["schema-gen"] }
+
+[dev-dependencies]
+tempfile.workspace = true

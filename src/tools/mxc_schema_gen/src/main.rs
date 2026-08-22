@@ -65,11 +65,13 @@ fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     let descriptor = descriptor(version);
     if !descriptor.is_development() {
         return Err(format!(
-            "published contract generation for {} is not implemented until Phase 11",
+            "published contract generation for {} is not supported",
             version.as_str()
         ));
     }
 
+    // Keep this exhaustive after the status gate so every future development
+    // contract must explicitly wire its schema source into the generator.
     let mut schema = match version {
         ContractVersion::V0_8_0Alpha => mxc_config_contract::dev::development_schema(),
         ContractVersion::V0_6_0Alpha | ContractVersion::V0_7_0Alpha => {
@@ -115,7 +117,10 @@ fn types_content(target: Target) -> Result<String, String> {
 fn write_artifact(content: &str, path: Option<&Path>, label: &str) -> Result<(), String> {
     match path {
         Some(path) => {
-            if let Some(parent) = path.parent() {
+            if let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
                 std::fs::create_dir_all(parent).map_err(|error| {
                     format!(
                         "failed to create output directory {}: {error}",
@@ -220,8 +225,8 @@ mod tests {
     }
 
     #[test]
-    fn published_generation_reports_phase_11_boundary() {
+    fn published_generation_is_rejected() {
         let error = development_schema(ContractVersion::V0_7_0Alpha).unwrap_err();
-        assert!(error.contains("not implemented until Phase 11"), "{error}");
+        assert!(error.contains("not supported"), "{error}");
     }
 }

@@ -19,14 +19,23 @@ const Ajv = require("ajv");
 
 const repoRoot = join(__dirname, "..", "..");
 const cargoRoot = join(repoRoot, "src");
-const fixtureRoot = join(
-  cargoRoot,
-  "core",
-  "mxc_config_contract",
-  "tests",
-  "v0_8_0_alpha",
-  "fixtures"
-);
+
+// The fixture corpus lives beside the contract it exercises, in the crate's
+// own module naming (`0.8.0-alpha` -> `v0_8_0_alpha`). Deriving it from the
+// registry keeps the gate version-driven, so registering the next development
+// contract validates its own fixtures rather than the previous contract's.
+function fixtureRootFor(contract) {
+  const module = `v${contract.version.replace(/[.-]/g, "_")}`;
+  return join(
+    cargoRoot,
+    "core",
+    "mxc_config_contract",
+    "tests",
+    module,
+    "fixtures"
+  );
+}
+
 const roots = {
   one_shot: "OneShotRequest",
   windows_sandbox_provision: "WindowsSandboxProvisionRequest",
@@ -89,19 +98,19 @@ function compareArtifact(committedPath, generatedPath, command) {
   );
 }
 
-function readFixtures(root, kind) {
+function readFixtures(fixtureRoot, root, kind) {
   const directory = join(fixtureRoot, root, kind);
   const fixtures = readdirSync(directory)
     .filter((name) => name.endsWith(".json"))
     .sort()
-    .map((name) => readFixture(root, kind, name));
+    .map((name) => readFixture(fixtureRoot, root, kind, name));
   if (fixtures.length === 0) {
     fail(`fixture directory ${root}/${kind} is empty`);
   }
   return fixtures;
 }
 
-function readFixture(root, kind, name) {
+function readFixture(fixtureRoot, root, kind, name) {
   return {
     name: `${root}/${kind}/${name}`,
     value: JSON.parse(
@@ -131,7 +140,7 @@ function collectDispatchRoots(value, references = new Set()) {
   return references;
 }
 
-function validateFixtures(schema) {
+function validateFixtures(schema, fixtureRoot) {
   const dispatchedRoots = collectDispatchRoots(schema);
   const expectedRoots = new Set(Object.values(roots));
   const missing = [...dispatchedRoots].filter((root) => !expectedRoots.has(root));
@@ -157,7 +166,7 @@ function validateFixtures(schema) {
       strict: false,
     }).compile(rootSchema);
 
-    for (const fixture of readFixtures(directory, "valid")) {
+    for (const fixture of readFixtures(fixtureRoot, directory, "valid")) {
       if (!validateRoot(fixture.value)) {
         fail(
           `valid fixture ${fixture.name} failed ${definition}: ` +
@@ -172,7 +181,7 @@ function validateFixtures(schema) {
       }
     }
 
-    for (const fixture of readFixtures(directory, "invalid")) {
+    for (const fixture of readFixtures(fixtureRoot, directory, "invalid")) {
       if (validateRoot(fixture.value)) {
         fail(`invalid fixture ${fixture.name} passed ${definition}`);
       }
@@ -180,6 +189,7 @@ function validateFixtures(schema) {
   }
 
   const malformedExec = readFixture(
+    fixtureRoot,
     "exec",
     "invalid",
     "missing_process.json"
@@ -258,7 +268,10 @@ try {
       typesCommand
     );
 
-    validateFixtures(JSON.parse(readFileSync(schemaOut, "utf8")));
+    validateFixtures(
+      JSON.parse(readFileSync(schemaOut, "utf8")),
+      fixtureRootFor(contract)
+    );
   }
 } finally {
   rmSync(temporary, { recursive: true, force: true });
