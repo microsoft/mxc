@@ -84,10 +84,10 @@ fn firewall_policy(allow_local: bool) -> ContainerPolicy {
 #[test]
 fn permissive_inbound_in_a_container_netns_is_refused_not_installed() {
     let policy = firewall_policy(true);
-    let mut mgr = IngressManager::new("test-container-refused", UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new("test-container-refused", UNOCCUPIABLE_NETNS_PID, false);
     let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, false, &mut logger);
+    let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_err(),
@@ -125,10 +125,10 @@ fn permissive_inbound_in_both_mode_is_refused_not_installed() {
         network_enforcement_mode: NetworkEnforcementMode::Both,
         ..Default::default()
     };
-    let mut mgr = IngressManager::new("test-container-refused-both", UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new("test-container-refused-both", UNOCCUPIABLE_NETNS_PID, false);
     let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, false, &mut logger);
+    let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_err(),
@@ -159,10 +159,14 @@ fn permissive_inbound_in_both_mode_is_refused_not_installed() {
 #[test]
 fn permissive_inbound_refusal_does_not_set_rules_applied() {
     let policy = firewall_policy(true);
-    let mut mgr = IngressManager::new("test-container-refused-state", UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new(
+        "test-container-refused-state",
+        UNOCCUPIABLE_NETNS_PID,
+        false,
+    );
     let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, false, &mut logger);
+    let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_err(),
@@ -189,10 +193,14 @@ fn permissive_inbound_refusal_does_not_set_rules_applied() {
 #[test]
 fn default_deny_with_netns_is_not_the_permissive_refusal() {
     let policy = firewall_policy(false);
-    let mut mgr = IngressManager::new("test-container-deny-with-netns", UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new(
+        "test-container-deny-with-netns",
+        UNOCCUPIABLE_NETNS_PID,
+        false,
+    );
     let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, false, &mut logger);
+    let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
     if let Err(ref msg) = result {
         assert!(
@@ -226,10 +234,10 @@ fn permissive_inbound_capabilities_mode_is_not_refused() {
         network_enforcement_mode: NetworkEnforcementMode::Capabilities,
         ..Default::default()
     };
-    let mut mgr = IngressManager::new("test-container-perm-caps", UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new("test-container-perm-caps", UNOCCUPIABLE_NETNS_PID, false);
     let mut logger = make_logger();
 
-    let result = mgr.apply_firewall_rules(&policy, false, &mut logger);
+    let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
     // Capabilities mode returns Ok(true) before the firewall path.
     assert!(

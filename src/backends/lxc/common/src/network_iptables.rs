@@ -335,6 +335,10 @@ pub struct NetworkIptablesManager {
     /// Whether a caller that never supplies a veth is expected rather than
     /// broken.
     veth_scoping_optional: bool,
+    /// True when the request declared the directional (0.8) network schema.
+    /// Defaults to the legacy schema, so a caller that never sets it keeps the
+    /// 0.7 behavior.
+    uses_directional_schema: bool,
     /// Topology the hook logic assumes, in place of the sysfs probe.
     ///
     /// Test-only. A build host has no `/sys/class/net`, so the probe's
@@ -477,6 +481,7 @@ impl NetworkIptablesManager {
             preserve_policy: false,
             veth_interface: None,
             veth_scoping_optional: false,
+            uses_directional_schema: false,
             #[cfg(test)]
             topology_override: Some(VethTopology::DirectlyRouted),
             created: CreatedResources::default(),
@@ -498,6 +503,11 @@ impl NetworkIptablesManager {
     /// dropped.
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
+    }
+
+    /// Record which network schema the request declared.
+    pub fn set_directional_schema(&mut self, uses_directional_schema: bool) {
+        self.uses_directional_schema = uses_directional_schema;
     }
 
     /// The hosts-file pin a proxied container must be given before it runs, or
@@ -2012,9 +2022,9 @@ impl NetworkIptablesManager {
     pub fn apply_firewall_rules(
         &mut self,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
         logger: &mut Logger,
     ) -> Result<bool, String> {
+        let uses_directional_schema = self.uses_directional_schema;
         if !installs_firewall(policy, uses_directional_schema) {
             // The runner injects HTTP(S)_PROXY from this same policy whatever
             // happens here, so reporting success would leave a container that
@@ -3000,7 +3010,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -3017,7 +3027,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Both);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -3050,7 +3060,7 @@ mod tests {
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert!(
             result.is_err(),
@@ -3416,7 +3426,7 @@ mod tests {
 
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert!(
             result.is_err(),
@@ -3441,7 +3451,7 @@ mod tests {
         let mut manager = NetworkIptablesManager::new("fresh");
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         if let Err(e) = &result {
             assert!(
@@ -4170,7 +4180,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let _ = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let _ = manager.apply_firewall_rules(&policy, &mut logger);
 
         let logged = logger.get_buffer();
         assert!(
@@ -4204,7 +4214,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
         assert!(
             result.is_err(),
             "a failed FORWARD hook insert must fail the apply, got {:?}",
@@ -4539,7 +4549,7 @@ mod tests {
         let policy = policy_requiring_no_firewall();
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert_eq!(
             result,
@@ -4635,7 +4645,7 @@ mod tests {
         let mut manager = NetworkIptablesManager::new("proxy-gate");
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         let error = result.expect_err(
             "a proxy under an enforcement mode that installs no rules must not report success",
@@ -4663,9 +4673,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         assert!(
-            manager
-                .apply_firewall_rules(&policy, false, &mut logger)
-                .is_err(),
+            manager.apply_firewall_rules(&policy, &mut logger).is_err(),
             "an address-free proxy is still a proxy and must not be silently unenforced"
         );
     }
@@ -4679,7 +4687,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         assert_eq!(
-            manager.apply_firewall_rules(&policy, false, &mut logger),
+            manager.apply_firewall_rules(&policy, &mut logger),
             Ok(true),
             "capabilities mode without a proxy must stay a successful no-op"
         );
@@ -5128,7 +5136,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, false, &mut logger)
+            .apply_firewall_rules(&policy, &mut logger)
             .expect("the apply must succeed against the fake");
 
         // Pinned to the binary on purpose: the builders are family-agnostic, so
@@ -5169,7 +5177,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, false, &mut apply_logger)
+            .apply_firewall_rules(&policy, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();
@@ -5220,7 +5228,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let result = manager.apply_firewall_rules(&policy, &mut logger);
 
         assert!(
             result.is_ok(),
@@ -5250,7 +5258,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, false, &mut logger)
+            .apply_firewall_rules(&policy, &mut logger)
             .expect("a failed return rule must not fail the apply");
 
         let issued = fake.issued();
@@ -5279,7 +5287,7 @@ mod tests {
         let mut logger = Logger::new(Mode::Buffer);
 
         manager
-            .apply_firewall_rules(&policy, false, &mut logger)
+            .apply_firewall_rules(&policy, &mut logger)
             .expect("a caller with no veth must not be refused");
 
         let issued = fake.issued();
@@ -5305,7 +5313,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, false, &mut apply_logger)
+            .apply_firewall_rules(&policy, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();
@@ -5352,7 +5360,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
-        let outcome = manager.apply_firewall_rules(&policy, false, &mut logger);
+        let outcome = manager.apply_firewall_rules(&policy, &mut logger);
         assert!(
             outcome.is_err(),
             "an apply whose FORWARD hook could not be installed must fail"
@@ -5384,7 +5392,7 @@ mod tests {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
-            .apply_firewall_rules(&policy, false, &mut apply_logger)
+            .apply_firewall_rules(&policy, &mut apply_logger)
             .expect("the apply must succeed against the fake");
 
         fake.forget_issued();

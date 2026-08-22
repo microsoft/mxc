@@ -628,10 +628,11 @@ fn appended_ipv4_chain_rules(
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container);
     manager.set_veth_interface("veth-dns0");
+    manager.set_directional_schema(uses_directional_schema);
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(policy, uses_directional_schema, &mut logger);
+    let result = manager.apply_firewall_rules(policy, &mut logger);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
     let chain = manager.chain_name().to_string();

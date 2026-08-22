@@ -32,7 +32,7 @@ fn apply_is_refused_when_the_container_interface_is_unknown_in_firewall_mode() {
     let policy = policy_requesting(NetworkEnforcementMode::Firewall);
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+    let result = manager.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_err(),
@@ -52,7 +52,7 @@ fn apply_is_refused_when_the_container_interface_is_unknown_in_both_mode() {
     let policy = policy_requesting(NetworkEnforcementMode::Both);
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+    let result = manager.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_err(),
@@ -73,7 +73,7 @@ fn refusal_error_names_the_unenforced_chain() {
     let mut logger = Logger::new(Mode::Buffer);
 
     let err = manager
-        .apply_firewall_rules(&policy, false, &mut logger)
+        .apply_firewall_rules(&policy, &mut logger)
         .expect_err("Firewall mode with no veth interface set must fail closed");
 
     let chain = manager.chain_name();
@@ -102,7 +102,7 @@ fn apply_succeeds_once_the_veth_interface_is_known() {
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+    let result = manager.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_ok(),
@@ -127,7 +127,7 @@ fn apply_tears_down_the_chain_it_created_when_it_fails_closed() {
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+    let result = manager.apply_firewall_rules(&policy, &mut logger);
     assert!(
         result.is_err(),
         "expected the apply to fail closed so the teardown path runs, got {:?}",
@@ -178,7 +178,7 @@ fn capabilities_only_container_is_unaffected_by_a_missing_veth_interface() {
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 
-    let result = manager.apply_firewall_rules(&policy, false, &mut logger);
+    let result = manager.apply_firewall_rules(&policy, &mut logger);
 
     assert!(
         result.is_ok(),

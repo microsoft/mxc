@@ -246,6 +246,7 @@ impl LxcScriptRunner {
         // Configure network rules
         let mut fw_manager = NetworkIptablesManager::new(&container_name);
         fw_manager.set_preserve_policy(!self.cleanup_policy);
+        fw_manager.set_directional_schema(uses_directional_schema);
 
         // Try to discover the container's veth interface for scoped rules
         if let Some(veth) = NetworkIptablesManager::discover_veth_interface(&container_name) {
@@ -258,7 +259,7 @@ impl LxcScriptRunner {
             }
         }
 
-        match fw_manager.apply_firewall_rules(&request.policy, uses_directional_schema, logger) {
+        match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
                 if self.destroy_on_exit || container_created {
@@ -289,8 +290,8 @@ impl LxcScriptRunner {
                     // destroyed.
                     signal_cleanup::set_active_pid(pid);
                 }
-                let mut mgr = IngressManager::new(&container_name, pid);
-                match mgr.apply_firewall_rules(&request.policy, uses_directional_schema, logger) {
+                let mut mgr = IngressManager::new(&container_name, pid, uses_directional_schema);
+                match mgr.apply_firewall_rules(&request.policy, logger) {
                     Ok(true) => {}
                     Ok(false) => {
                         if self.destroy_on_exit || container_created {
