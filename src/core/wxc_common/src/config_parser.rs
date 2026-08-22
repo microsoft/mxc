@@ -15,10 +15,9 @@ use crate::models::{
 };
 use crate::mxc_error::MxcError;
 use crate::network_parser::{
-    directional_network_version_error, host_is_any_loopback, parse_network_policy,
+    directional_network_version_error, host_is_loopback, parse_network_policy,
     supports_directional_network, NetworkSections,
 };
-use crate::seatbelt_policy::validate_seatbelt_network_policy;
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
 use serde::{Deserialize, Deserializer};
@@ -1024,7 +1023,7 @@ fn convert_wire_config(
             // supports.
             if containment == ContainmentBackend::Lxc {
                 if let Some(host) = proxy_config.address.as_ref().map(|addr| addr.host()) {
-                    if host_is_any_loopback(host) {
+                    if host_is_loopback(host) {
                         let msg = "network.proxy.url host is a loopback address \
                                    (127.0.0.0/8, ::1, or localhost), which names the \
                                    container's own network-namespace loopback rather than \
@@ -1106,14 +1105,51 @@ fn convert_wire_config(
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
-        // All Seatbelt network invariants live in one place so the backend's
-        // own `validate` enforces the same rules for callers that build an
-        // ExecutionRequest directly and never touch this parser.
-        if containment == ContainmentBackend::Seatbelt {
-            if let Err(msg) = validate_seatbelt_network_policy(&policy) {
-                logger.log_line(&msg);
-                return Err(WxcError::ConfigParse(msg));
-            }
+        // Seatbelt has no privileged packet-filter layer on macOS: it enforces
+        // network policy through the sandbox profile (capabilities-style) and
+        // ignores enforcementMode. Combining network.proxy with a firewall mode
+        // would silently drop the firewall expectation, so reject it explicitly,
+        // mirroring the Bubblewrap guard above.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.network_proxy.is_enabled()
+            && matches!(
+                policy.network_enforcement_mode,
+                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+            )
+        {
+            let msg = "Seatbelt: network.proxy cannot be combined with \
+                       network.enforcementMode='firewall' or 'both'. macOS Seatbelt \
+                       enforces network policy through the sandbox profile and has no \
+                       packet-filter layer, so a firewall mode cannot be honored.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
+        }
+
+        // Seatbelt scopes a *loopback* proxy's reachability to its exact port
+        // even under default-deny (profile_builder::write_proxy_reachability_rules),
+        // but it cannot filter a *remote* proxy by host: a remote proxy under
+        // defaultPolicy='block' degrades to allow-all outbound, silently turning
+        // the kernel-enforced deny into allow-all for raw-socket clients that
+        // ignore HTTP_PROXY. Reject that combination. Loopback proxies (including
+        // builtinTestServer, whose loopback address is resolved at runtime and is
+        // therefore absent here) stay port-scoped and are allowed.
+        if containment == ContainmentBackend::Seatbelt
+            && policy.default_network_policy == NetworkPolicy::Block
+            && policy
+                .network_proxy
+                .address
+                .as_ref()
+                .is_some_and(|addr| !matches!(addr.host(), "127.0.0.1" | "::1" | "localhost"))
+        {
+            let msg = "Seatbelt: a remote network.proxy (non-loopback host) cannot be \
+                       combined with defaultPolicy='block'. Seatbelt cannot filter a remote \
+                       proxy by host, so outbound reachability degrades to allow-all, \
+                       silently weakening the deny for raw-socket clients that ignore \
+                       HTTP_PROXY. Use a loopback proxy (127.0.0.1/::1/localhost) or \
+                       'network.proxy.builtinTestServer: true' for port-scoped reachability \
+                       under deny.";
+            logger.log_line(msg);
+            return Err(WxcError::ConfigParse(msg.to_string()));
         }
 
         // LXC is the inverse of the two guards above: it *does* have a
@@ -3116,12 +3152,7 @@ mod tests {
 
     #[test]
     fn network_hosts() {
-        // Pinned to processcontainer: this covers generic host-list parsing,
-        // and the platform-default containment on macOS (Seatbelt) rejects
-        // allowedHosts under the default 'block' policy since it has no
-        // per-host filtering primitive.
         let json = r#"{
-            "containment": "processcontainer",
             "process": {"commandLine": "print('test')"},
             "network": {
                 "allowedHosts": ["example.com", "api.trusted.com"],
@@ -4123,176 +4154,6 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert!(req.policy.network_proxy.builtin_test_server);
-    }
-
-    #[test]
-    fn proxy_with_seatbelt_and_default_allow_is_rejected() {
-        // Outbound is already unrestricted under 'allow' — a proxy adds no
-        // enforcement, so the combination is a config-authoring mistake.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "allow",
-                "proxy": {"builtinTestServer": true}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("defaultPolicy='allow'"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn allowed_hosts_with_seatbelt_and_default_block_is_rejected() {
-        // Seatbelt has no per-host filtering primitive, so an allowlist under a
-        // deny default cannot be enforced and previously degraded to allow-all
-        // outbound — the inverse of the requested policy.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "allowedHosts": ["api.github.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("Seatbelt: allowedHosts cannot be combined with defaultPolicy='block'"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    /// The guard used to compare unbracketed literals only, so `http://[::1]`
-    /// — the documented IPv6 form — was misread as remote and rejected.
-    #[test]
-    fn loopback_proxy_under_default_block_is_accepted_in_every_spelling() {
-        for host in ["127.0.0.1", "[::1]", "localhost", "[0:0:0:0:0:0:0:1]"] {
-            let json = format!(
-                r#"{{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {{"commandLine": "echo hi"}},
-            "network": {{
-                "defaultPolicy": "block",
-                "proxy": {{"url": "http://{host}:8080"}}
-            }}
-        }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            assert!(
-                load_request(&encoded, &mut logger, true).is_ok(),
-                "loopback proxy host {host:?} should be accepted under defaultPolicy='block'"
-            );
-        }
-    }
-
-    #[test]
-    fn remote_proxy_under_default_block_is_still_rejected() {
-        for host in ["proxy.corp.example", "10.0.0.5", "[2001:db8::1]"] {
-            let json = format!(
-                r#"{{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {{"commandLine": "echo hi"}},
-            "network": {{
-                "defaultPolicy": "block",
-                "proxy": {{"url": "http://{host}:8080"}}
-            }}
-        }}"#
-            );
-            let encoded = base64_encode(json.as_bytes());
-            let mut logger = test_logger();
-
-            let err = load_request(&encoded, &mut logger, true).unwrap_err();
-            assert!(
-                format!("{err}").contains("a remote network.proxy (non-loopback host)"),
-                "remote proxy host {host:?} should be rejected under defaultPolicy='block'"
-            );
-        }
-    }
-
-    #[test]
-    fn allowed_hosts_with_seatbelt_and_builtin_test_proxy_is_accepted() {
-        // The builtin test proxy is the one proxy MXC configures with the host
-        // list, so the combination is enforceable and stays accepted.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "allowedHosts": ["api.github.com"],
-                "proxy": {"builtinTestServer": true}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
-        assert_eq!(req.policy.default_network_policy, NetworkPolicy::Block);
-    }
-
-    #[test]
-    fn allowed_hosts_with_seatbelt_and_external_proxy_is_rejected() {
-        // Host lists are not forwarded to an external proxy (see
-        // UnixProxyCoordinator::start), so this shape is unenforceable too.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "block",
-                "allowedHosts": ["api.github.com"],
-                "proxy": {"localhost": 8080}
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let err = load_request(&encoded, &mut logger, true).unwrap_err();
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("Seatbelt: allowedHosts cannot be combined with defaultPolicy='block'"),
-            "unexpected error message: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn allowed_hosts_with_seatbelt_and_default_allow_is_accepted() {
-        // Under 'allow' the allowlist is a no-op superset of the stated
-        // default, not a weakening, so it stays accepted.
-        let json = r#"{
-            "version": "0.7.0-alpha",
-            "containment": "seatbelt",
-            "process": {"commandLine": "echo hi"},
-            "network": {
-                "defaultPolicy": "allow",
-                "allowedHosts": ["api.github.com"]
-            }
-        }"#;
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-
-        let req = load_request(&encoded, &mut logger, true).unwrap();
-        assert_eq!(req.policy.allowed_hosts, vec!["api.github.com".to_string()]);
     }
 
     #[test]

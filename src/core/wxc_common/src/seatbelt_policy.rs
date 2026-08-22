@@ -1,15 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Seatbelt network invariants, shared by the config parser and the Seatbelt
-//! backend's own `validate`.
+//! Seatbelt network invariants, enforced by the backend's own `validate`.
 //!
-//! The parser only sees requests built from JSON. A Rust caller can hand
-//! `mxc_engine::run` an `ExecutionRequest` it built itself, skipping the parser
-//! entirely, so these checks live here and are called from both places.
+//! `validate` runs on every execution path -- the JSON parser and a Rust caller
+//! that hands `mxc_engine::run` an `ExecutionRequest` it built itself both
+//! reach it -- so one home here covers both.
 //!
-//! Each returns the caller-facing message; the parser wraps it as a config
-//! error and the backend as a `ScriptResponse`.
+//! Each check returns the caller-facing message; the backend wraps it as a
+//! `ScriptResponse`.
 
 use crate::host_is_canonical_loopback;
 use crate::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
@@ -111,4 +110,127 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ProxyAddress, ProxyConfig};
+
+    fn policy() -> ContainerPolicy {
+        ContainerPolicy::default()
+    }
+
+    fn proxy(host: &str) -> ProxyConfig {
+        ProxyConfig {
+            address: Some(ProxyAddress::from_url(
+                &format!("http://{host}:8080"),
+                host.to_string(),
+                8080,
+            )),
+            builtin_test_server: false,
+        }
+    }
+
+    #[test]
+    fn rejects_proxy_with_default_allow() {
+        // Outbound is already unrestricted under 'allow' — a proxy adds no
+        // enforcement, so the combination is a config-authoring mistake.
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Allow;
+        p.network_proxy = ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        };
+
+        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+        assert!(msg.contains("defaultPolicy='allow'"), "got: {msg}");
+    }
+
+    #[test]
+    fn rejects_proxy_with_firewall_enforcement_mode() {
+        let mut p = policy();
+        p.network_proxy = proxy("127.0.0.1");
+        p.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+
+        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+        assert!(msg.contains("enforcementMode"), "got: {msg}");
+    }
+
+    /// The guard compared unbracketed literals only, so `http://[::1]` — the
+    /// documented IPv6 form — was misread as remote and rejected.
+    #[test]
+    fn accepts_loopback_proxy_under_block_in_every_spelling() {
+        for host in ["127.0.0.1", "[::1]", "localhost", "[0:0:0:0:0:0:0:1]"] {
+            let mut p = policy();
+            p.default_network_policy = NetworkPolicy::Block;
+            p.network_proxy = proxy(host);
+
+            assert!(
+                validate_seatbelt_network_policy(&p).is_ok(),
+                "loopback proxy host {host:?} should be accepted under a deny default"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_remote_proxy_under_block() {
+        for host in ["proxy.corp.example", "10.0.0.5", "[2001:db8::1]"] {
+            let mut p = policy();
+            p.default_network_policy = NetworkPolicy::Block;
+            p.network_proxy = proxy(host);
+
+            let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+            assert!(msg.contains("non-loopback host"), "{host:?} got: {msg}");
+        }
+    }
+
+    #[test]
+    fn rejects_allowed_hosts_with_default_block() {
+        // Seatbelt has no per-host filtering primitive, so an allowlist under a
+        // deny default cannot be enforced and used to degrade to allow-all.
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Block;
+        p.allowed_hosts = vec!["api.github.com".to_string()];
+
+        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+        assert!(
+            msg.contains("allowedHosts cannot be combined with defaultPolicy='block'"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_allowed_hosts_with_builtin_test_proxy() {
+        // The builtin test proxy is the cooperative-enforcement escape hatch.
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Block;
+        p.allowed_hosts = vec!["api.github.com".to_string()];
+        p.network_proxy = ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        };
+
+        assert!(validate_seatbelt_network_policy(&p).is_ok());
+    }
+
+    #[test]
+    fn rejects_allowed_hosts_with_external_proxy() {
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Block;
+        p.allowed_hosts = vec!["api.github.com".to_string()];
+        p.network_proxy = proxy("127.0.0.1");
+
+        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+        assert!(msg.contains("allowedHosts"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_allowed_hosts_with_default_allow() {
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Allow;
+        p.allowed_hosts = vec!["api.github.com".to_string()];
+
+        assert!(validate_seatbelt_network_policy(&p).is_ok());
+    }
 }
