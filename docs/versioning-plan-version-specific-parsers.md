@@ -242,8 +242,7 @@ The order is:
 
 ### Phase 6.5 as rebased
 
-Phase 6.5 is one commit on top of #968, adding roughly 7,700 lines across 130
-files. It:
+Phase 6.5 is three commits on top of #968. It:
 
 - forks `published/v0_8_0_alpha` from the development contract, carrying the
   directional network surface, `RuntimeConfig`, `ProcessContainerNetwork`,
@@ -253,6 +252,9 @@ files. It:
   fixtures to `tests/v0_9_0_alpha`
 - registers both versions and commits the generated `0.9.0-alpha` schema and
   TypeScript oracle
+- covers the published adapter's directional conversion, which had no tests at
+  all: every reference to `egress`, `ingress`, `runtimeConfig`, and
+  `allowedProxyPeer` was in the implementation and none in the test module
 
 Two consequences of the rebase are worth recording, because both were found by
 a failing test rather than by inspection. The 0.8 test suite inherited from
@@ -264,7 +266,42 @@ that document must be rejected. And the adapter and one-shot tests added to
 class of error: a version-specific test moving between contracts without its
 version string moving with it.
 
-### Why the stable schema is generated from the contract
+### Phase 6.5 remaining work
+
+As of 2026-08-21, with the directional port, `NonEmptyVec`, the capability
+newtype, the registry path correction, and the adapter and contract test
+coverage all landed:
+
+| Item | Note |
+| --- | --- |
+| `version_boundaries` coverage | Nothing asserts directional networking and `runtimeConfig` are rejected at `0.6`/`0.7` and accepted at `0.8`, or that `experimental` and `phase` are rejected at `0.8` and accepted at `0.9`. This is the cross-version property the whole design exists to prove, and it is currently untested |
+| Published `0.8` doc comments | Eleven wrong strings survive: three say `0.7.0-alpha`, all four `NetworkProtocol` variants say "Enforce policy through containment capabilities", and `to`/`ports` are documented as "hostnames"/"IP addresses" rather than CIDRs and port selectors. **Freeze-permanent**, because these become the generated schema's descriptions |
+| Published contract generation | `mxc_schema_gen schema --version 0.8.0-alpha` still errors. Under the option-C decision this is the only route to a stable artifact, and it is the largest remaining piece |
+| `0.8` fixture tree | Flat `valid/`+`invalid/` rather than per-root. Probably fine: the published contract has one root and the gate walks development contracts only |
+| Legacy and directional on one `Network` | Accepted deliberately. The legacy fields are removed in `0.9`, not here; an attempt to remove them early was reverted after it cascaded through roughly 129 test references, 16 fixtures, and 94 adapter sites |
+
+### The adapter's no-wildcard rule is enforced by the compiler
+
+Phase 3 requires adapters to destructure every contract field explicitly, with
+no catch-all `..`. Mutation testing during Phase 6.5 showed this rule is
+stronger than the plan claims, and worth stating precisely:
+
+- **A dropped field cannot compile.** Removing a field's mapping leaves its
+  binding unused, and the crate denies warnings, so `unused variable: except`
+  fails the build.
+- **A swapped field usually cannot compile either.** Mapping `allow` from the
+  `deny` binding produces `use of moved value: deny`.
+- **A misrouted *value* compiles and must be caught by tests.** Changing
+  `NetworkAction::Deny => wire::NetworkAction::Allow` builds cleanly; it failed
+  four adapter tests, and `NetworkProtocol::Udp => Tcp` failed three.
+
+So adapter tests are not guarding against omission — the compiler already does
+that. They guard against a mapping that points at the wrong value, which is
+exactly what the wire-equivalence comparison detects best. Write them for enum
+arms and for fields whose types are interchangeable, and do not pad them with
+presence assertions the build already guarantees.
+
+
 
 The old stack's freeze generator would publish the rolling schema, which has no
 root `required` array at all, declares `phase`, `sandboxId`, and
