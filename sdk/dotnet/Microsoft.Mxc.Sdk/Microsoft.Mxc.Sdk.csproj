@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>Microsoft.Mxc.Sdk</RootNamespace>
     <AssemblyName>Microsoft.Mxc.Sdk</AssemblyName>
-    <Version>0.7.0</Version>
+    <Version>0.8.0</Version>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <Description>C# SDK for MXC (Microsoft eXecution Container), binding the native mxc_ffi library.</Description>
