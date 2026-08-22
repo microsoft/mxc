@@ -371,7 +371,7 @@ fn system_drive_root() -> std::path::PathBuf {
 /// Read-only and best-effort: a failed DACL read for any SID yields
 /// `false`, so the caller surfaces the recommendation rather than
 /// suppressing it on incomplete information.
-fn system_drive_prepared() -> bool {
+pub(crate) fn system_drive_prepared() -> bool {
     let root = system_drive_root();
     HOST_PREP_AC_SIDS.iter().all(
         |sid| match wxc_common::filesystem_dacl::scan_explicit_aces_for_sid(&root, sid) {
