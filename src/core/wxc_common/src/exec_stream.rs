@@ -64,6 +64,41 @@ type StreamCanceller = crate::interruptible_reader::ReadCanceller;
 /// A wrapped readable stream plus the closer that EOFs it on demand.
 type ReadStream = (Box<dyn Read + Send>, StreamCanceller);
 
+/// A caller's stdin writer paired with the backend's own end.
+///
+/// A pipe reaches EOF only once every write handle closes, so dropping the
+/// caller's duplicate is not enough: the backend keeps its own. Dropping this
+/// closes both, in that order.
+struct StdinWriter {
+    writer: Option<Box<dyn Write + Send>>,
+    backend_closer: Option<Box<dyn FnOnce() + Send>>,
+}
+
+impl Write for StdinWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self.writer.as_mut() {
+            Some(w) => w.write(buf),
+            None => Ok(0),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self.writer.as_mut() {
+            Some(w) => w.flush(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for StdinWriter {
+    fn drop(&mut self) {
+        drop(self.writer.take());
+        if let Some(close) = self.backend_closer.take() {
+            close();
+        }
+    }
+}
+
 /// An [`ExecHandle`]'s streams, once classified.
 struct PreparedStreams {
     stdout: Option<ReadStream>,
@@ -115,6 +150,7 @@ impl ExecSandboxProcess {
             stdin,
             waiter,
             terminator,
+            stdin_closer,
         } = handle;
 
         // A handle with nothing on any stream is a backend that has not
@@ -156,7 +192,12 @@ impl ExecSandboxProcess {
             Ok(PreparedStreams {
                 stdout: out,
                 stderr: err,
-                stdin: input,
+                stdin: input.map(|writer| {
+                    Box::new(StdinWriter {
+                        writer: Some(writer),
+                        backend_closer: stdin_closer,
+                    }) as Box<dyn Write + Send>
+                }),
             })
         });
 
@@ -290,15 +331,9 @@ impl ExecSandboxProcess {
     /// This is what satisfies the contract on
     /// [`stdout_closer`](SandboxProcess::stdout_closer) that `wait` "already
     /// cancels its own internal safety-drain".
-    ///
-    /// # Not covered
-    ///
-    /// An untaken `stdin` is dropped rather than closed, which does **not**
-    /// deliver EOF to the child: the handle here is a duplicate, and the
-    /// original belongs to the backend's process object. A workload that reads
-    /// stdin to EOF will still block. Closing that cycle needs an owned or
-    /// closable `ExecHandle::stdin`, which is tracked separately.
     fn drain_and_join(&mut self) -> std::io::Result<i32> {
+        self.stdin.take();
+
         // Deliberately **not** gated on `self.exit`. A cached exit code means a
         // previous `try_wait` observed the child finish; it says nothing about
         // whether anything drained. Returning early here would let
@@ -821,6 +856,7 @@ mod tests {
         let (waiter_tx, waiter_rx) = mpsc::channel();
         let (term_tx, term_rx) = mpsc::channel();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -862,6 +898,7 @@ mod tests {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         let (tx, rx) = mpsc::channel();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -891,6 +928,7 @@ mod tests {
     fn kill_reports_a_refused_termination() {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -921,6 +959,7 @@ mod tests {
     fn a_refused_kill_stays_refused_on_retry() {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -960,6 +999,7 @@ mod tests {
         // Held by the waiter; never sent to until the assertion is done.
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1004,6 +1044,7 @@ mod tests {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         drop(stdout_w); // EOF so the drain finishes
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1032,6 +1073,7 @@ mod tests {
         drop(stdout_w);
         let (tx, rx) = mpsc::channel();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1127,6 +1169,7 @@ mod tests {
         drop(stdout_w);
         let (release_tx, release_rx) = mpsc::channel::<()>();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1184,6 +1227,7 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let handle = ExecHandle {
+                stdin_closer: None,
                 stdout: null_pipe_handle(),
                 stderr: null_pipe_handle(),
                 stdin: null_pipe_handle(),
@@ -1216,6 +1260,7 @@ mod tests {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
         drop(stdout_w); // EOF, so the drain finishes promptly
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1269,6 +1314,7 @@ mod tests {
 
         let (done_tx, done_rx) = mpsc::channel();
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1318,6 +1364,7 @@ mod tests {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1366,6 +1413,7 @@ mod tests {
         let (stdout_r, mut stdout_w) = std::io::pipe().expect("pipe");
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1405,6 +1453,7 @@ mod tests {
         let (stdout_r, stdout_w) = std::io::pipe().expect("pipe");
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1463,6 +1512,7 @@ mod tests {
         drop(stdout_w); // EOF, so the drain can finish
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&stdout_r),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1534,6 +1584,7 @@ mod tests {
         drop(writer); // close the write end so the reader sees EOF
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: reader_handle(&reader),
             stderr: null_pipe_handle(),
             stdin: null_pipe_handle(),
@@ -1559,6 +1610,7 @@ mod tests {
         let (mut reader, writer) = std::io::pipe().expect("pipe");
 
         let handle = ExecHandle {
+            stdin_closer: None,
             stdout: null_pipe_handle(),
             stderr: null_pipe_handle(),
             stdin: writer_handle(&writer),
@@ -1578,5 +1630,89 @@ mod tests {
         reader.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "fed-via-adapter");
         assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    /// The backend keeps its own write end, as `IsoSessionProcess` does. EOF
+    /// then depends on `stdin_closer`, not on dropping the caller's duplicate.
+    ///
+    /// The test holds `writer` open for the whole run: closing it would supply
+    /// the EOF this is meant to prove the closer delivers.
+    #[test]
+    fn dropping_a_taken_stdin_closes_the_backend_end_too() {
+        use std::io::{Read, Write};
+        use std::sync::mpsc;
+
+        let (mut reader, writer) = std::io::pipe().expect("pipe");
+        let (closed_tx, closed_rx) = mpsc::channel();
+
+        // Stands in for the backend's own end, closed only by the closer.
+        let backend_end = Some(writer.try_clone().expect("clone"));
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: writer_handle(&writer),
+            waiter: Box::new(|| Ok(ExecOutcome::Exited(0))),
+            terminator: Box::new(|| Ok(())),
+            stdin_closer: Some(Box::new(move || {
+                drop(backend_end);
+                let _ = closed_tx.send(());
+            })),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        {
+            let mut stdin = proc.take_stdin().expect("stdin should be present");
+            stdin.write_all(b"needs-eof").unwrap();
+            stdin.flush().unwrap();
+        }
+
+        assert!(
+            closed_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .is_ok(),
+            "dropping the caller's writer must close the backend's end"
+        );
+
+        // Only the test's own handle is left; releasing it lets the read below
+        // terminate once the closer has done its half.
+        drop(writer);
+
+        let mut buf = String::new();
+        reader.read_to_string(&mut buf).unwrap();
+        assert_eq!(buf, "needs-eof");
+        assert_eq!(proc.wait().unwrap(), 0);
+    }
+
+    /// The waiter runs on its own thread from construction, so arrival order
+    /// would race; blocking it on the closer makes `wait` returning the proof.
+    #[test]
+    fn wait_closes_an_untaken_stdin_before_joining_the_waiter() {
+        use std::sync::mpsc;
+
+        let (_reader, writer) = std::io::pipe().expect("pipe");
+        let (closed_tx, closed_rx) = mpsc::channel();
+
+        let handle = ExecHandle {
+            stdout: null_pipe_handle(),
+            stderr: null_pipe_handle(),
+            stdin: writer_handle(&writer),
+            waiter: Box::new(move || {
+                closed_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .map_err(|_| MxcError::backend_error("stdin was not closed before the join"))?;
+                Ok(ExecOutcome::Exited(0))
+            }),
+            terminator: Box::new(|| Ok(())),
+            stdin_closer: Some(Box::new(move || {
+                let _ = closed_tx.send(());
+            })),
+        };
+        let mut proc = ExecSandboxProcess::from_exec_handle(handle).unwrap();
+
+        assert_eq!(
+            proc.wait().unwrap(),
+            0,
+            "the waiter completes only if stdin closed first"
+        );
     }
 }

@@ -13,6 +13,13 @@ use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode, NetworkPolicy, ProxyAddress};
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
+/// The fixed prefix of the command bwrap is asked to run.
+///
+/// `build_args` appends this last, so its position identifies where the
+/// options end -- unlike a bare `--` token, which a caller-supplied
+/// environment value can also be. Shared so the two cannot drift apart.
+pub(crate) const COMMAND_TAIL: [&str; 3] = ["--", "sh", "-c"];
+
 /// Read-only host paths bind-mounted into every Bubblewrap sandbox as the
 /// deny-by-default baseline. Mirrors the seatbelt backend's
 /// `SYSTEM_READ_ALLOW` (`src/backends/seatbelt/common/src/profile_builder.rs`):
@@ -97,29 +104,54 @@ pub(crate) enum ResolvedNetworkMode {
     /// Pre-0.8 cooperative proxy routing in the host network namespace.
     LegacyProxy,
     /// The host network namespace with per-destination iptables filtering.
+    ///
+    /// Pre-0.8 only. The rules land on the *host* chain, which the sandbox
+    /// never traverses, so this filters nothing; it is retained unchanged
+    /// because pre-0.8 callers already run under it.
     FirewallFiltered,
+    /// Per-destination iptables filtering inside a slirp-backed private
+    /// namespace, with no proxy. 0.8+ only.
+    FirewallEnforced,
     /// Cooperative proxy routing inside a slirp-backed private namespace, with
     /// egress closed to everything but the proxy.
     ProxyOnly,
 }
 
-/// Whether this schema opts into the 0.8 private proxy-network contract.
-fn uses_private_proxy_network(request: &ExecutionRequest) -> bool {
-    let mut components = request.schema_version.split('.');
-    let major = components
-        .next()
-        .and_then(|value| value.parse::<u64>().ok());
-    let minor = components
-        .next()
-        .and_then(|value| value.parse::<u64>().ok());
-    matches!((major, minor), (Some(major), Some(minor)) if major > 0 || minor >= 8)
+/// Whether a schema version opts into the 0.8 network contract, under which a
+/// network element Bubblewrap cannot enforce is a hard error rather than a
+/// warning.
+///
+/// An absent version stays lenient: the parser accepts it, and programmatic
+/// callers who never set one are the pre-0.8 population. A malformed non-empty
+/// version is treated as strict instead of lenient -- the parser would reject
+/// it outright, so the only way one reaches here is a hand-built
+/// `ExecutionRequest` that skipped the parser, and a typo like `"0.8"` must not
+/// silently buy pre-0.8 leniency.
+pub fn schema_enforces_network_strictly(version: &str) -> bool {
+    if version.is_empty() {
+        return false;
+    }
+    semver::Version::parse(version)
+        .map(|parsed| (parsed.major, parsed.minor) >= (0, 8))
+        .unwrap_or(true)
+}
+
+/// Whether this schema opts into the 0.8 private network-namespace contract.
+///
+/// Gates both the proxy path (`LegacyProxy` → `ProxyOnly`) and the firewall
+/// path (`FirewallFiltered` → `FirewallEnforced`). Everything the private
+/// namespace brings — slirp, in-namespace rules, IP/CIDR-only rule addresses —
+/// is a behavior change for callers already running on 0.6/0.7, so it is
+/// introduced on the dev line rather than retrofitted.
+fn uses_private_network_contract(request: &ExecutionRequest) -> bool {
+    schema_enforces_network_strictly(&request.schema_version)
 }
 
 impl ResolvedNetworkMode {
     /// Classify the internal request using the proxy's resolved runtime state.
     pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
         if proxy_active {
-            return if uses_private_proxy_network(request) {
+            return if uses_private_network_contract(request) {
                 Self::ProxyOnly
             } else {
                 Self::LegacyProxy
@@ -134,7 +166,11 @@ impl ResolvedNetworkMode {
             !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
 
         if uses_firewall && has_host_rules {
-            Self::FirewallFiltered
+            if uses_private_network_contract(request) {
+                Self::FirewallEnforced
+            } else {
+                Self::FirewallFiltered
+            }
         } else if request.policy.default_network_policy == NetworkPolicy::Block && !has_host_rules {
             Self::Isolated
         } else {
@@ -144,23 +180,146 @@ impl ResolvedNetworkMode {
 
     /// Whether current behavior gives the sandbox a private network namespace.
     pub(crate) fn uses_private_netns(self) -> bool {
-        matches!(self, Self::Isolated | Self::ProxyOnly)
+        matches!(
+            self,
+            Self::Isolated | Self::ProxyOnly | Self::FirewallEnforced
+        )
     }
 
     /// Whether the runner supplies a pre-created user namespace to Bubblewrap.
     pub(crate) fn uses_external_userns(self) -> bool {
-        matches!(self, Self::ProxyOnly)
+        matches!(self, Self::ProxyOnly | Self::FirewallEnforced)
     }
 
     /// Whether the mode uses the host-side firewall manager.
     ///
-    /// False for `ProxyOnly`, which is *not* iptables-free: it programs rules
-    /// directly into the sandbox's own network namespace from the supervisor
-    /// (see `proxy_network`) rather than going through the host manager.
+    /// False for `ProxyOnly` and `FirewallEnforced`, which are *not*
+    /// iptables-free: they program rules directly into the sandbox's own
+    /// network namespace from the supervisor (see `proxy_network`) rather than
+    /// going through the host manager.
     #[cfg(any(target_os = "linux", test))]
     pub(crate) fn requires_host_firewall_manager(self) -> bool {
         matches!(self, Self::FirewallFiltered)
     }
+
+    /// Whether this mode actually applies the policy's host lists.
+    ///
+    /// `FirewallEnforced` filters by address in the sandbox's own namespace.
+    /// `ProxyOnly` closes egress to everything but the proxy endpoint, so the
+    /// lists are enforced at the proxy — true only for the builtin proxy; an
+    /// external one is refused by [`external_proxy_host_rules_rejection`].
+    /// Every other mode leaves the lists unapplied.
+    pub(crate) fn enforces_host_rules(self) -> bool {
+        matches!(self, Self::FirewallEnforced | Self::ProxyOnly)
+    }
+}
+
+/// Whether this schema opts into rejecting network elements Bubblewrap cannot
+/// honor. Pre-0.8 callers keep the warning, so existing configs still run.
+fn rejects_unhonorable_network(request: &ExecutionRequest) -> bool {
+    schema_enforces_network_strictly(&request.schema_version)
+}
+
+/// Rejection text for host lists no mechanism will enforce, on schema 0.8+.
+///
+/// Owned here rather than in the parser: this is a statement about what
+/// Bubblewrap can enforce, so it belongs with the backend that enforces it.
+pub const BWRAP_UNENFORCED_HOST_RULES: &str =
+    "Bubblewrap: network.allowedHosts and network.blockedHosts require an enforcement \
+     mechanism. With enforcementMode='capabilities' (the default) and no network.proxy, \
+     nothing applies them: the host lists suppress the --unshare-net full block, so the \
+     sandbox shares the host network namespace with no filtering at all. Set \
+     network.enforcementMode to 'firewall' to filter by address inside the sandbox's own \
+     network namespace, set network.proxy to enforce host filtering at the proxy layer, or \
+     drop the host lists to get the namespace-level block that defaultPolicy='block' applies \
+     on its own.";
+
+/// Rejection text for `allowLocalNetwork=false` under a shared namespace.
+pub const BWRAP_LOCAL_NETWORK_SHARED_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
+     sandbox shares the host network namespace (defaultPolicy='allow'). \
+     The sandboxed process can still bind, listen and accept on host-local addresses. For \
+     an unreachable sandbox use defaultPolicy='block' with no host rules and no proxy, \
+     which applies --unshare-net; to keep the shared namespace, acknowledge the exposure \
+     with allowLocalNetwork=true.";
+
+/// Rejection text for `allowLocalNetwork=true` under a private namespace.
+pub const BWRAP_LOCAL_NETWORK_PRIVATE_NS: &str =
+    "Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
+     network namespace. Isolated, proxy and firewall modes apply --unshare-net, so a \
+     listener inside the sandbox is reachable only from within it, never from the host. \
+     Use defaultPolicy='allow' with no host rules and no proxy to share the host network \
+     namespace.";
+
+/// Reject host lists that no mechanism will apply, on schema 0.8+.
+///
+/// Host lists suppress the `Isolated` mode, so a mode that does not apply them
+/// leaves the sandbox on the host namespace unfiltered. This is the only layer
+/// that checks it: the parser validates structure, and every caller — CLI,
+/// SDK, FFI, or a Rust caller handing `mxc_engine` a hand-built
+/// `ExecutionRequest` — reaches a runner, while only JSON configs reach the
+/// parser.
+pub fn unenforced_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    let has_host_rules =
+        !request.policy.allowed_hosts.is_empty() || !request.policy.blocked_hosts.is_empty();
+    let mode =
+        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
+
+    (has_host_rules && !mode.enforces_host_rules()).then_some(BWRAP_UNENFORCED_HOST_RULES)
+}
+
+/// Rejection text for an external proxy combined with host lists.
+///
+/// Duplicated (verbatim) from the parser's pre-existing check of the same
+/// combination. The parser keeps its copy for JSON configs; this one covers
+/// callers who hand a runner an `ExecutionRequest` directly.
+pub const BWRAP_EXTERNAL_PROXY_HOST_RULES: &str =
+    "Bubblewrap: an external network.proxy (url/localhost) cannot be combined with \
+     allowedHosts, blockedHosts, or defaultPolicy='block'. The external proxy is expected to \
+     enforce its own host policy; MXC does not forward host lists to it. Use \
+     'network.proxy.builtinTestServer: true' (testing only) for MXC-enforced host filtering, \
+     or remove the host policy.";
+
+/// Validate-time twin of the parser's external-proxy host-list rejection.
+///
+/// MXC applies the host lists itself only for the builtin test proxy; an
+/// operator-supplied proxy is never handed them, so accepting the combination
+/// would drop the requested policy silently. Not schema-gated, matching the
+/// parser.
+pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    let proxy = &request.policy.network_proxy;
+    if !proxy.is_enabled() || proxy.builtin_test_server {
+        return None;
+    }
+    let conflicts = !request.policy.allowed_hosts.is_empty()
+        || !request.policy.blocked_hosts.is_empty()
+        || request.policy.default_network_policy == NetworkPolicy::Block;
+
+    conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
+}
+
+/// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
+/// only for schemas that reject it rather than warn.
+///
+/// Keys off proxy *enablement* rather than a resolved address because
+/// `builtinTestServer` has no address until the proxy starts, which is after
+/// validation.
+///
+/// Rejects on the value, not on whether the caller wrote the field. `false` is
+/// the schema default *and* a deny, so an omitted `allowLocalNetwork` still
+/// asks for inbound denial. Callers wanting the shared namespace acknowledge
+/// the exposure with `allowLocalNetwork=true`. The warning path keeps the
+/// looser check: it only logs.
+pub fn local_network_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    if !rejects_unhonorable_network(request) {
+        return None;
+    }
+    let mode =
+        ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled());
+    local_network_diagnostic_for_mode(request, mode)
 }
 
 /// Describe a `network.allowLocalNetwork` setting Bubblewrap cannot honor, or
@@ -191,6 +350,9 @@ pub fn local_network_diagnostic(
 }
 
 /// Describe an inbound-policy mismatch using a previously resolved mode.
+///
+/// The text carries no severity prefix so it can serve both the pre-0.8
+/// warning and the 0.8+ rejection; callers add "WARNING: " when logging.
 pub(crate) fn local_network_diagnostic_for_mode(
     request: &ExecutionRequest,
     network_mode: ResolvedNetworkMode,
@@ -199,19 +361,8 @@ pub(crate) fn local_network_diagnostic_for_mode(
         request.policy.allow_local_network,
         network_mode.uses_private_netns(),
     ) {
-        (false, false) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=false is not enforced while the \
-             sandbox shares the host network namespace (defaultPolicy='allow'). \
-             The sandboxed process can still bind, listen and accept on host-local addresses. For \
-             an unreachable sandbox use defaultPolicy='block' with no proxy, which applies \
-             --unshare-net.",
-        ),
-        (true, true) => Some(
-            "WARNING: Bubblewrap: network.allowLocalNetwork=true is confined to the sandbox's own \
-             network namespace. Isolated and proxy modes apply --unshare-net, so a listener inside \
-             the sandbox is reachable only from within it, never from the host. Use \
-             defaultPolicy='allow' without a proxy to share the host network namespace.",
-        ),
+        (false, false) => Some(BWRAP_LOCAL_NETWORK_SHARED_NS),
+        (true, true) => Some(BWRAP_LOCAL_NETWORK_PRIVATE_NS),
         _ => None,
     }
 }
@@ -378,9 +529,7 @@ pub(crate) fn build_args_classified_with_mode(
     }
 
     // -- Command -----------------------------------------------------------
-    args.push("--".into());
-    args.push("sh".into());
-    args.push("-c".into());
+    args.extend(COMMAND_TAIL.iter().map(|arg| arg.to_string()));
     args.push(request.script_code.clone());
 
     args
@@ -389,6 +538,7 @@ pub(crate) fn build_args_classified_with_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wxc_common::models::ContainerPolicy;
 
     fn base_request() -> ExecutionRequest {
         ExecutionRequest {
@@ -414,15 +564,19 @@ mod tests {
             ("0.10.0", ResolvedNetworkMode::ProxyOnly),
             ("1.0.0", ResolvedNetworkMode::ProxyOnly),
             ("2.1.0", ResolvedNetworkMode::ProxyOnly),
-            // Anything unparsable fails closed onto the legacy path: the old
-            // behavior is the compatible one, so an unreadable version must
-            // never silently opt a caller into the new namespace model.
+            // An absent version stays legacy: programmatic callers who never
+            // set one are the pre-0.8 population. Anything non-empty but
+            // unparsable cannot have come from the parser (it validates the
+            // version first), so it is a hand-built request whose typo must not
+            // buy pre-0.8 leniency -- it resolves strictly, matching
+            // `schema_enforces_network_strictly`, which the rejection gates
+            // share.
             ("", ResolvedNetworkMode::LegacyProxy),
             ("0.8", ResolvedNetworkMode::ProxyOnly),
-            ("0", ResolvedNetworkMode::LegacyProxy),
-            ("0.8-beta", ResolvedNetworkMode::LegacyProxy),
-            ("v0.8.0", ResolvedNetworkMode::LegacyProxy),
-            ("not-a-version", ResolvedNetworkMode::LegacyProxy),
+            ("0", ResolvedNetworkMode::ProxyOnly),
+            ("0.8-beta", ResolvedNetworkMode::ProxyOnly),
+            ("v0.8.0", ResolvedNetworkMode::ProxyOnly),
+            ("not-a-version", ResolvedNetworkMode::ProxyOnly),
         ];
 
         for (version, expected) in cases {
@@ -434,6 +588,45 @@ mod tests {
                 ResolvedNetworkMode::from_request(&request, true),
                 expected,
                 "schema version {version:?} resolved to the wrong network mode"
+            );
+        }
+    }
+
+    #[test]
+    fn the_schema_gate_selects_in_netns_firewall_rules_only_from_0_8_onward() {
+        // The same gate governs the firewall path. Pre-0.8 callers keep
+        // FirewallFiltered — which filters nothing, because its rules land on
+        // a host chain the sandbox never traverses — because that is the
+        // behavior they already run under; only 0.8+ opts into rules that
+        // actually apply, and into the IP/CIDR-only rule addresses that come
+        // with them.
+        let cases = [
+            ("0.6.0-alpha", ResolvedNetworkMode::FirewallFiltered),
+            ("0.7.0-alpha", ResolvedNetworkMode::FirewallFiltered),
+            ("0.7.99", ResolvedNetworkMode::FirewallFiltered),
+            ("0.8.0-alpha", ResolvedNetworkMode::FirewallEnforced),
+            ("0.9.0", ResolvedNetworkMode::FirewallEnforced),
+            ("1.0.0", ResolvedNetworkMode::FirewallEnforced),
+            // Absent stays legacy; a non-empty unparsable version resolves
+            // strictly, for the same reason it does on the proxy path.
+            ("", ResolvedNetworkMode::FirewallFiltered),
+            ("not-a-version", ResolvedNetworkMode::FirewallEnforced),
+        ];
+
+        for (version, expected) in cases {
+            let request = ExecutionRequest {
+                schema_version: version.into(),
+                policy: ContainerPolicy {
+                    network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                    allowed_hosts: vec!["203.0.113.7".into()],
+                    ..Default::default()
+                },
+                ..base_request()
+            };
+            assert_eq!(
+                ResolvedNetworkMode::from_request(&request, false),
+                expected,
+                "schema version {version:?} resolved to the wrong firewall mode"
             );
         }
     }
@@ -464,6 +657,7 @@ mod tests {
 
     struct NetworkPlanCase {
         name: &'static str,
+        schema_version: &'static str,
         default_policy: NetworkPolicy,
         enforcement_mode: NetworkEnforcementMode,
         allowed_hosts: &'static [&'static str],
@@ -477,6 +671,7 @@ mod tests {
         let cases = [
             NetworkPlanCase {
                 name: "default block is isolated",
+                schema_version: "0.8.0-alpha",
                 default_policy: NetworkPolicy::Block,
                 enforcement_mode: NetworkEnforcementMode::Capabilities,
                 allowed_hosts: &[],
@@ -486,6 +681,7 @@ mod tests {
             },
             NetworkPlanCase {
                 name: "default allow is shared",
+                schema_version: "0.8.0-alpha",
                 default_policy: NetworkPolicy::Allow,
                 enforcement_mode: NetworkEnforcementMode::Capabilities,
                 allowed_hosts: &[],
@@ -494,7 +690,18 @@ mod tests {
                 expected: ResolvedNetworkMode::Shared,
             },
             NetworkPlanCase {
-                name: "firewall allow rules require filtering",
+                name: "firewall allow rules are enforced in-namespace at 0.8",
+                schema_version: "0.8.0-alpha",
+                default_policy: NetworkPolicy::Block,
+                enforcement_mode: NetworkEnforcementMode::Firewall,
+                allowed_hosts: &["203.0.113.7"],
+                blocked_hosts: &[],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::FirewallEnforced,
+            },
+            NetworkPlanCase {
+                name: "firewall allow rules keep the legacy host chain pre-0.8",
+                schema_version: "0.7.0-alpha",
                 default_policy: NetworkPolicy::Block,
                 enforcement_mode: NetworkEnforcementMode::Firewall,
                 allowed_hosts: &["example.com"],
@@ -503,7 +710,18 @@ mod tests {
                 expected: ResolvedNetworkMode::FirewallFiltered,
             },
             NetworkPlanCase {
-                name: "combined enforcement block rules require filtering",
+                name: "combined enforcement block rules are enforced at 0.8",
+                schema_version: "0.8.0-alpha",
+                default_policy: NetworkPolicy::Allow,
+                enforcement_mode: NetworkEnforcementMode::Both,
+                allowed_hosts: &[],
+                blocked_hosts: &["198.51.100.9"],
+                proxy_active: false,
+                expected: ResolvedNetworkMode::FirewallEnforced,
+            },
+            NetworkPlanCase {
+                name: "combined enforcement block rules keep the host chain pre-0.8",
+                schema_version: "0.6.0-alpha",
                 default_policy: NetworkPolicy::Allow,
                 enforcement_mode: NetworkEnforcementMode::Both,
                 allowed_hosts: &[],
@@ -513,6 +731,7 @@ mod tests {
             },
             NetworkPlanCase {
                 name: "capabilities mode with host rules stays shared",
+                schema_version: "0.8.0-alpha",
                 default_policy: NetworkPolicy::Block,
                 enforcement_mode: NetworkEnforcementMode::Capabilities,
                 allowed_hosts: &["example.com"],
@@ -522,6 +741,7 @@ mod tests {
             },
             NetworkPlanCase {
                 name: "proxy takes precedence over isolation",
+                schema_version: "0.8.0-alpha",
                 default_policy: NetworkPolicy::Block,
                 enforcement_mode: NetworkEnforcementMode::Capabilities,
                 allowed_hosts: &[],
@@ -531,6 +751,7 @@ mod tests {
             },
             NetworkPlanCase {
                 name: "proxy takes precedence over firewall filtering",
+                schema_version: "0.8.0-alpha",
                 default_policy: NetworkPolicy::Allow,
                 enforcement_mode: NetworkEnforcementMode::Firewall,
                 allowed_hosts: &[],
@@ -542,7 +763,7 @@ mod tests {
 
         for case in cases {
             let mut request = ExecutionRequest {
-                schema_version: "0.8.0-alpha".into(),
+                schema_version: case.schema_version.into(),
                 ..Default::default()
             };
             request.policy.default_network_policy = case.default_policy;
@@ -574,6 +795,12 @@ mod tests {
         assert!(!ResolvedNetworkMode::Shared.requires_host_firewall_manager());
         // ProxyOnly enforces via in-netns rules, not the host manager.
         assert!(!ResolvedNetworkMode::ProxyOnly.requires_host_firewall_manager());
+        // FirewallEnforced is the same shape as ProxyOnly minus the proxy: its
+        // rules are programmed from inside the sandbox's own namespace, which
+        // is the whole reason it filters where FirewallFiltered does not.
+        assert!(ResolvedNetworkMode::FirewallEnforced.uses_private_netns());
+        assert!(ResolvedNetworkMode::FirewallEnforced.uses_external_userns());
+        assert!(!ResolvedNetworkMode::FirewallEnforced.requires_host_firewall_manager());
     }
 
     #[test]
@@ -660,6 +887,211 @@ mod tests {
         r.policy.allow_local_network = true;
         r.policy.default_network_policy = NetworkPolicy::Allow;
         assert!(local_network_diagnostic(&r, None).is_none());
+    }
+
+    // ------- allowLocalNetwork rejection (schema 0.8+) ------------------
+
+    #[test]
+    fn local_network_mismatch_is_not_rejected_before_0_8() {
+        // A 0.7 proxy config shares the host netns and leaves allowLocalNetwork
+        // at its default false. That combination must keep warning rather than
+        // start failing, or every existing 0.6/0.7 proxy caller breaks.
+        let mut r = base_request();
+        r.schema_version = "0.7.0-alpha".into();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 8080));
+        assert!(local_network_diagnostic(&r, r.policy.network_proxy.address.as_ref()).is_some());
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn local_network_mismatch_is_rejected_at_0_8() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        let msg = local_network_rejection(&r).expect("shared netns cannot honor the deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+        // The text is reused verbatim as an error, so it must carry no severity.
+        assert!(!msg.contains("WARNING"));
+    }
+
+    #[test]
+    fn an_omitted_local_network_is_rejected_like_an_explicit_deny_at_0_8() {
+        // `false` is the schema default *and* a deny, so silence still asks for
+        // inbound denial.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        assert!(!r.policy.allow_local_network, "default is the deny posture");
+        let msg = local_network_rejection(&r).expect("an omitted deny is still a deny");
+        assert!(msg.contains("allowLocalNetwork=false"));
+        // Actionable only if it names the acknowledgment.
+        assert!(msg.contains("allowLocalNetwork=true"));
+    }
+
+    #[test]
+    fn acknowledged_local_network_exposure_is_accepted_at_0_8() {
+        // The escape hatch from the rejection above.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn honored_local_network_is_not_rejected_at_0_8() {
+        // block + no host rules + no proxy is a private netns, which satisfies
+        // allowLocalNetwork=false; nothing to reject.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        assert!(local_network_rejection(&r).is_none());
+    }
+
+    #[test]
+    fn builtin_test_server_counts_as_an_active_proxy_when_rejecting() {
+        // builtinTestServer has no address until the proxy starts, which is
+        // after validation, so the rejection keys off enablement instead.
+        // defaultPolicy='allow' would be a shared namespace on its own, so the
+        // rejection fires only if the proxy is recognized without an address.
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.allow_local_network = true;
+        assert!(local_network_rejection(&r).is_none());
+
+        r.policy.network_proxy.builtin_test_server = true;
+        assert!(r.policy.network_proxy.address.is_none());
+        assert!(local_network_rejection(&r).is_some());
+    }
+
+    /// Without this twin a programmatic caller would sail past the parser's
+    /// rejection and have the host policy dropped on the floor.
+    #[test]
+    fn external_proxy_with_host_rules_is_rejected() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.default_network_policy = NetworkPolicy::Allow;
+        r.policy.network_proxy.address = Some(ProxyAddress::new("proxy.example.com".into(), 3128));
+        assert!(external_proxy_host_rules_rejection(&r).is_none());
+
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        let msg = external_proxy_host_rules_rejection(&r).expect("lists are never forwarded");
+        assert!(msg.contains("external network.proxy"));
+
+        r.policy.allowed_hosts.clear();
+        r.policy.blocked_hosts = vec!["10.0.0.1".into()];
+        assert!(external_proxy_host_rules_rejection(&r).is_some());
+
+        r.policy.blocked_hosts.clear();
+        r.policy.default_network_policy = NetworkPolicy::Block;
+        assert!(external_proxy_host_rules_rejection(&r).is_some());
+    }
+
+    /// The builtin test proxy *is* handed the lists, so it must stay accepted.
+    #[test]
+    fn builtin_test_server_with_host_rules_is_not_rejected() {
+        let mut r = base_request();
+        r.schema_version = "0.8.0-alpha".into();
+        r.policy.network_proxy.builtin_test_server = true;
+        r.policy.allowed_hosts = vec!["10.0.0.1".into()];
+        assert!(external_proxy_host_rules_rejection(&r).is_none());
+    }
+
+    // The predicate gates whether an unenforceable network element is a hard
+    // error or a warning, so a regression in it changes security behavior
+    // silently. Pinned directly rather than only through the call sites.
+    #[test]
+    fn strict_network_enforcement_starts_at_0_8() {
+        assert!(!schema_enforces_network_strictly("0.7.9"));
+        assert!(!schema_enforces_network_strictly("0.7.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+        assert!(schema_enforces_network_strictly("0.8.0"));
+        assert!(schema_enforces_network_strictly("0.9.0"));
+    }
+
+    #[test]
+    fn strict_network_enforcement_holds_past_1_0() {
+        // A tuple compare, so a major bump must not wrap back to lenient.
+        assert!(schema_enforces_network_strictly("1.0.0"));
+        assert!(schema_enforces_network_strictly("2.3.4"));
+    }
+
+    #[test]
+    fn a_pre_release_label_does_not_lower_the_version() {
+        // semver orders 0.8.0-alpha *below* 0.8.0; comparing (major, minor)
+        // sidesteps that, which is the whole reason for the tuple.
+        assert!(
+            semver::Version::parse("0.8.0-alpha").unwrap()
+                < semver::Version::parse("0.8.0").unwrap()
+        );
+        assert!(schema_enforces_network_strictly("0.8.0-alpha"));
+    }
+
+    #[test]
+    fn an_absent_version_is_lenient_but_a_malformed_one_is_not() {
+        // Absent is the pre-0.8 programmatic caller: the parser accepts it, so
+        // it keeps its behavior. Malformed cannot come from the parser at all
+        // (it rejects these), so it is a hand-built request whose typo must not
+        // buy leniency.
+        assert!(!schema_enforces_network_strictly(""));
+        assert!(schema_enforces_network_strictly("x"));
+        assert!(schema_enforces_network_strictly("0.8"));
+        assert!(schema_enforces_network_strictly("0.7"));
+    }
+
+    /// `ResolvedNetworkMode` is now the only implementation of the namespace
+    /// choice — the parser's re-derived twin is gone — so the mode matrix is
+    /// pinned against explicit expectations rather than against a second copy
+    /// that could drift with it.
+    #[test]
+    fn the_resolved_mode_matches_the_namespace_it_claims_across_the_matrix() {
+        for schema in ["", "0.7.0-alpha", "0.8.0-alpha"] {
+            let strict = schema == "0.8.0-alpha";
+            for proxy in [false, true] {
+                for mode in [
+                    NetworkEnforcementMode::Capabilities,
+                    NetworkEnforcementMode::Firewall,
+                    NetworkEnforcementMode::Both,
+                ] {
+                    for policy in [NetworkPolicy::Allow, NetworkPolicy::Block] {
+                        for hosts in [false, true] {
+                            let mut r = base_request();
+                            r.schema_version = schema.into();
+                            r.policy.network_proxy.builtin_test_server = proxy;
+                            r.policy.network_enforcement_mode = mode.clone();
+                            r.policy.default_network_policy = policy.clone();
+                            r.policy.allowed_hosts = if hosts {
+                                vec!["10.0.0.1".into()]
+                            } else {
+                                vec![]
+                            };
+
+                            // Private namespaces: proxy-only and firewall-
+                            // enforced are both 0.8-only, so either shape is
+                            // private exactly when the schema is strict. Plus
+                            // Isolated, the only pre-0.8 mode that unshares.
+                            let uses_firewall = matches!(
+                                mode,
+                                NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+                            );
+                            let expected = if proxy || (uses_firewall && hosts) {
+                                strict
+                            } else {
+                                policy == NetworkPolicy::Block && !hosts
+                            };
+
+                            let resolved = ResolvedNetworkMode::from_request(&r, proxy);
+                            assert_eq!(
+                                resolved.uses_private_netns(),
+                                expected,
+                                "schema={schema} proxy={proxy} mode={mode:?} \
+                                 policy={policy:?} hosts={hosts}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

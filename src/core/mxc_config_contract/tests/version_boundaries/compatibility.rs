@@ -139,8 +139,11 @@ fn app_container_section_alias_remains_accepted_across_registered_contracts() {
         v08_process_container
             .capabilities
             .as_ref()
-            .expect("0.8 capabilities"),
-        &vec!["internetClient".to_string()]
+            .expect("0.8 capabilities")
+            .iter()
+            .map(mxc_config_contract::dev::ProcessContainerCapability::as_str)
+            .collect::<Vec<_>>(),
+        vec!["internetClient"]
     );
 }
 

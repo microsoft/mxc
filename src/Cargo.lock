@@ -218,6 +218,7 @@ version = "0.7.0"
 dependencies = [
  "lxc_common",
  "nix",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1485,6 +1486,7 @@ version = "0.7.0"
 dependencies = [
  "libc",
  "mxc_engine",
+ "serde_json",
  "wxc_common",
 ]
 

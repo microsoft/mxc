@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Host-Rules",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); if curl -fsS --noproxy \"*\" --max-time 8 http://example.com/ >/dev/null 2>&1; then echo DIRECT_EGRESS_LEAKED; exit 1; fi; echo DIRECT_EGRESS_BLOCKED_OK; if ! curl -fsSL --max-time 15 https://api.github.com/zen >/dev/null 2>&1; then echo PROXY_PATH_UNREACHABLE; exit 1; fi; echo PROXY_PATH_OK'"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "proxy": { "builtinTestServer": true },
+    "allowedHosts": ["api.github.com"]
+  }
+}

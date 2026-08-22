@@ -144,7 +144,7 @@ pub trait IIsoSessionOps_Impl: windows_core::IUnknownImpl {
     fn BehaviorVersion(&self) -> windows_core::Result<i32>;
     fn AddUserAsync(
         &self,
-        optEntraAccountName: &windows_core::HSTRING,
+        optEnterpriseAccountName: &windows_core::HSTRING,
         optWamToken: &windows_core::HSTRING,
     ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>>;
     fn GetFeatureLevel(&self, feature: IsoSessionFeature) -> windows_core::Result<i32>;
@@ -195,7 +195,7 @@ impl IIsoSessionOps_Vtbl {
             const OFFSET: isize,
         >(
             this: *mut core::ffi::c_void,
-            optentraaccountname: *mut core::ffi::c_void,
+            optenterpriseaccountname: *mut core::ffi::c_void,
             optwamtoken: *mut core::ffi::c_void,
             result__: *mut *mut core::ffi::c_void,
         ) -> windows_core::HRESULT {
@@ -204,7 +204,7 @@ impl IIsoSessionOps_Vtbl {
                     &*((this as *const *const ()).offset(OFFSET) as *const Identity);
                 match IIsoSessionOps_Impl::AddUserAsync(
                     this,
-                    core::mem::transmute(&optentraaccountname),
+                    core::mem::transmute(&optenterpriseaccountname),
                     core::mem::transmute(&optwamtoken),
                 ) {
                     Ok(ok__) => {
@@ -396,6 +396,177 @@ pub struct IIsoSessionOps_Vtbl {
         *mut core::ffi::c_void,
         *mut *mut core::ffi::c_void,
     ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionOpsPreview2,
+    IIsoSessionOpsPreview2_Vtbl,
+    0x2e26214d_02c1_5dc5_9ce7_f9a41cddd5b1
+);
+impl windows_core::RuntimeType for IIsoSessionOpsPreview2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOpsPreview2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionOpsPreview2";
+}
+pub trait IIsoSessionOpsPreview2_Impl: windows_core::IUnknownImpl {
+    fn AddUserAsync2(
+        &self,
+        optAppId: &windows_core::HSTRING,
+        optEnterpriseAccountName: &windows_core::HSTRING,
+        optWamToken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>>;
+}
+impl IIsoSessionOpsPreview2_Vtbl {
+    pub const fn new<Identity: IIsoSessionOpsPreview2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn AddUserAsync2<
+            Identity: IIsoSessionOpsPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            optappid: *mut core::ffi::c_void,
+            optenterpriseaccountname: *mut core::ffi::c_void,
+            optwamtoken: *mut core::ffi::c_void,
+            result__: *mut *mut core::ffi::c_void,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview2_Impl::AddUserAsync2(
+                    this,
+                    core::mem::transmute(&optappid),
+                    core::mem::transmute(&optenterpriseaccountname),
+                    core::mem::transmute(&optwamtoken),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        core::mem::forget(ok__);
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOpsPreview2, OFFSET>(
+            ),
+            AddUserAsync2: AddUserAsync2::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOpsPreview2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOpsPreview2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub AddUserAsync2: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
+    IIsoSessionOpsPreview3,
+    IIsoSessionOpsPreview3_Vtbl,
+    0x142b6655_e129_570d_902f_c20483662239
+);
+impl windows_core::RuntimeType for IIsoSessionOpsPreview3 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionOpsPreview3 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionOpsPreview3";
+}
+pub trait IIsoSessionOpsPreview3_Impl: windows_core::IUnknownImpl {
+    fn IsLocalAgentUserSupported(&self) -> windows_core::Result<bool>;
+    fn IsEnterpriseAgentUserSupported(&self) -> windows_core::Result<bool>;
+    fn IsAppScopedRegistrationSupported(&self) -> windows_core::Result<bool>;
+}
+impl IIsoSessionOpsPreview3_Vtbl {
+    pub const fn new<Identity: IIsoSessionOpsPreview3_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn IsLocalAgentUserSupported<
+            Identity: IIsoSessionOpsPreview3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut bool,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview3_Impl::IsLocalAgentUserSupported(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn IsEnterpriseAgentUserSupported<
+            Identity: IIsoSessionOpsPreview3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut bool,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview3_Impl::IsEnterpriseAgentUserSupported(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn IsAppScopedRegistrationSupported<
+            Identity: IIsoSessionOpsPreview3_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut bool,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionOpsPreview3_Impl::IsAppScopedRegistrationSupported(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<Identity, IIsoSessionOpsPreview3, OFFSET>(
+            ),
+            IsLocalAgentUserSupported: IsLocalAgentUserSupported::<Identity, OFFSET>,
+            IsEnterpriseAgentUserSupported: IsEnterpriseAgentUserSupported::<Identity, OFFSET>,
+            IsAppScopedRegistrationSupported: IsAppScopedRegistrationSupported::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionOpsPreview3 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionOpsPreview3_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsLocalAgentUserSupported:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub IsEnterpriseAgentUserSupported:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub IsAppScopedRegistrationSupported:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
     IIsoSessionProcess,
@@ -917,6 +1088,115 @@ pub struct IIsoSessionProcessOptions_Vtbl {
     ) -> windows_core::HRESULT,
 }
 windows_core::imp::define_interface!(
+    IIsoSessionProcessPreview2,
+    IIsoSessionProcessPreview2_Vtbl,
+    0xeb6a3efa_736d_5301_a241_6d36eda0905a
+);
+impl windows_core::RuntimeType for IIsoSessionProcessPreview2 {
+    const SIGNATURE: windows_core::imp::ConstBuffer =
+        windows_core::imp::ConstBuffer::for_interface::<Self>();
+}
+impl windows_core::RuntimeName for IIsoSessionProcessPreview2 {
+    const NAME: &'static str = "Windows.AI.IsolationSession.Preview.IIsoSessionProcessPreview2";
+}
+pub trait IIsoSessionProcessPreview2_Impl: windows_core::IUnknownImpl {
+    fn IsRunning(&self) -> windows_core::Result<bool>;
+    fn Exited(
+        &self,
+        handler: windows_core::Ref<
+            '_,
+            windows::Foundation::TypedEventHandler<IsoSessionProcess, windows_core::IInspectable>,
+        >,
+    ) -> windows_core::Result<i64>;
+    fn RemoveExited(&self, token: i64) -> windows_core::Result<()>;
+}
+impl IIsoSessionProcessPreview2_Vtbl {
+    pub const fn new<Identity: IIsoSessionProcessPreview2_Impl, const OFFSET: isize>() -> Self {
+        unsafe extern "system" fn IsRunning<
+            Identity: IIsoSessionProcessPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            result__: *mut bool,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionProcessPreview2_Impl::IsRunning(this) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn Exited<
+            Identity: IIsoSessionProcessPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            handler: *mut core::ffi::c_void,
+            result__: *mut i64,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                match IIsoSessionProcessPreview2_Impl::Exited(
+                    this,
+                    core::mem::transmute_copy(&handler),
+                ) {
+                    Ok(ok__) => {
+                        result__.write(core::mem::transmute_copy(&ok__));
+                        windows_core::HRESULT(0)
+                    }
+                    Err(err) => err.into(),
+                }
+            }
+        }
+        unsafe extern "system" fn RemoveExited<
+            Identity: IIsoSessionProcessPreview2_Impl,
+            const OFFSET: isize,
+        >(
+            this: *mut core::ffi::c_void,
+            token: i64,
+        ) -> windows_core::HRESULT {
+            unsafe {
+                let this: &Identity =
+                    &*((this as *const *const ()).offset(OFFSET) as *const Identity);
+                IIsoSessionProcessPreview2_Impl::RemoveExited(this, token).into()
+            }
+        }
+        Self {
+            base__: windows_core::IInspectable_Vtbl::new::<
+                Identity,
+                IIsoSessionProcessPreview2,
+                OFFSET,
+            >(),
+            IsRunning: IsRunning::<Identity, OFFSET>,
+            Exited: Exited::<Identity, OFFSET>,
+            RemoveExited: RemoveExited::<Identity, OFFSET>,
+        }
+    }
+    pub fn matches(iid: &windows_core::GUID) -> bool {
+        iid == &<IIsoSessionProcessPreview2 as windows_core::Interface>::IID
+    }
+}
+#[repr(C)]
+#[doc(hidden)]
+pub struct IIsoSessionProcessPreview2_Vtbl {
+    pub base__: windows_core::IInspectable_Vtbl,
+    pub IsRunning:
+        unsafe extern "system" fn(*mut core::ffi::c_void, *mut bool) -> windows_core::HRESULT,
+    pub Exited: unsafe extern "system" fn(
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+        *mut i64,
+    ) -> windows_core::HRESULT,
+    pub RemoveExited:
+        unsafe extern "system" fn(*mut core::ffi::c_void, i64) -> windows_core::HRESULT,
+}
+windows_core::imp::define_interface!(
     IIsoSessionProcessResult,
     IIsoSessionProcessResult_Vtbl,
     0x30c5f8a5_efb8_5872_b8f9_be625090b9ba
@@ -1273,9 +1553,10 @@ unsafe impl Sync for IsoSessionError {}
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct IsoSessionFeature(pub i32);
 impl IsoSessionFeature {
-    pub const None: Self = Self(0i32);
+    pub const Unknown: Self = Self(0i32);
     pub const LocalAgentUser: Self = Self(1i32);
-    pub const EntraAgentUser: Self = Self(2i32);
+    pub const EnterpriseAgentUser: Self = Self(2i32);
+    pub const AppScopedRegistration: Self = Self(3i32);
 }
 impl windows_core::TypeKind for IsoSessionFeature {
     type TypeKind = windows_core::CopyType;
@@ -1322,7 +1603,7 @@ impl IsoSessionOps {
     }
     pub fn AddUserAsync(
         &self,
-        optentraaccountname: &windows_core::HSTRING,
+        optenterpriseaccountname: &windows_core::HSTRING,
         optwamtoken: &windows_core::HSTRING,
     ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>> {
         let this = self;
@@ -1330,7 +1611,7 @@ impl IsoSessionOps {
             let mut result__ = core::mem::zeroed();
             (windows_core::Interface::vtable(this).AddUserAsync)(
                 windows_core::Interface::as_raw(this),
-                core::mem::transmute_copy(optentraaccountname),
+                core::mem::transmute_copy(optenterpriseaccountname),
                 core::mem::transmute_copy(optwamtoken),
                 &mut result__,
             )
@@ -1418,6 +1699,58 @@ impl IsoSessionOps {
                 &mut result__,
             )
             .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn AddUserAsync2(
+        &self,
+        optappid: &windows_core::HSTRING,
+        optenterpriseaccountname: &windows_core::HSTRING,
+        optwamtoken: &windows_core::HSTRING,
+    ) -> windows_core::Result<windows_future::IAsyncOperation<IsoSessionUserResult>> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).AddUserAsync2)(
+                windows_core::Interface::as_raw(this),
+                core::mem::transmute_copy(optappid),
+                core::mem::transmute_copy(optenterpriseaccountname),
+                core::mem::transmute_copy(optwamtoken),
+                &mut result__,
+            )
+            .and_then(|| windows_core::Type::from_abi(result__))
+        }
+    }
+    pub fn IsLocalAgentUserSupported(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsLocalAgentUserSupported)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn IsEnterpriseAgentUserSupported(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsEnterpriseAgentUserSupported)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn IsAppScopedRegistrationSupported(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IIsoSessionOpsPreview3>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsAppScopedRegistrationSupported)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
         }
     }
 }
@@ -1541,6 +1874,44 @@ impl IsoSessionProcess {
                 &mut result__,
             )
             .map(|| result__)
+        }
+    }
+    pub fn IsRunning(&self) -> windows_core::Result<bool> {
+        let this = &windows_core::Interface::cast::<IIsoSessionProcessPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).IsRunning)(
+                windows_core::Interface::as_raw(this),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn Exited<P0>(&self, handler: P0) -> windows_core::Result<i64>
+    where
+        P0: windows_core::Param<
+            windows::Foundation::TypedEventHandler<IsoSessionProcess, windows_core::IInspectable>,
+        >,
+    {
+        let this = &windows_core::Interface::cast::<IIsoSessionProcessPreview2>(self)?;
+        unsafe {
+            let mut result__ = core::mem::zeroed();
+            (windows_core::Interface::vtable(this).Exited)(
+                windows_core::Interface::as_raw(this),
+                handler.param().abi(),
+                &mut result__,
+            )
+            .map(|| result__)
+        }
+    }
+    pub fn RemoveExited(&self, token: i64) -> windows_core::Result<()> {
+        let this = &windows_core::Interface::cast::<IIsoSessionProcessPreview2>(self)?;
+        unsafe {
+            (windows_core::Interface::vtable(this).RemoveExited)(
+                windows_core::Interface::as_raw(this),
+                token,
+            )
+            .ok()
         }
     }
 }
