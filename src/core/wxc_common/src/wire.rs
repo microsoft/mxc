@@ -50,7 +50,7 @@ pub struct MxcConfig {
     #[serde(rename = "_comment")]
     pub comment: Option<serde_json::Value>,
 
-    /// MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+    /// MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
     pub version: Option<String>,
 
     /// State-aware lifecycle phase. When present, the request is a state-aware
@@ -745,7 +745,7 @@ mod schema_gen {
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
     const SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json";
+        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
 
     /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
     /// model. The schema is post-processed to (a) inject the canonical `$id`,

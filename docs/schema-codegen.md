@@ -34,7 +34,7 @@ consumer would invert dependencies or duplicate the implementation.
 Rolling artifacts:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
 ```
 

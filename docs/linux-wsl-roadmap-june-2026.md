@@ -202,7 +202,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 
 | # | Item | Description | Effort |
 |---|---|---|---|
-| 26 | **Add backend-specific `BubblewrapConfig`** | No per-backend config block today (every other backend has one). Needed for seccomp, cgroups, custom binds. `schemas/dev/mxc-config.schema.0.8.0-dev.json` — Bwrap has no entry at `lxc:` (line 324) / `wslc:` (line 373) equivalent. | M |
+| 26 | **Add backend-specific `BubblewrapConfig`** | No per-backend config block today (every other backend has one). Needed for seccomp, cgroups, custom binds. `schemas/dev/mxc-config.schema.0.9.0-dev.json` — Bwrap has no entry at `lxc:` / `wslc:` equivalent. | M |
 
 > **More context for item #26.** Table-stakes infrastructure for seccomp (#27), cgroups (#28), and promote-to-stable (#29). Same shape as `LxcConfig` expansion: schema entry, `RawBubblewrap` in `config_parser.rs`, validated `BubblewrapConfig` in `models.rs`, plumbing through `bwrap_command.rs`, SDK type — ~10-15 file PR.
 
@@ -215,7 +215,7 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 | # | Item | Description | Effort |
 |---|---|---|---|
 | 28 | **Resource limits (cgroups v2)** | No CPU / memory / PID / IO governance. Same gap as LXC. *(see [Ext-Dep E7](#external-dependencies))* | L |
-| 29 | **Promote bubblewrap from `experimental` → stable in 0.8.0-dev** | Move config under the stable surface per `docs/versioning.md:91-93,182-203`. | L |
+| 29 | **Promote bubblewrap from `experimental` → stable** | Move config under the stable surface per `docs/versioning.md:91-93,182-203`. | L |
 | 30 | **State-aware lifecycle** | Implement `StatefulSandboxBackend` for bwrap. | L |
 | 31 | **Update plan doc** | `docs/bwrap-support/bubblewrap-backend-plan.md:42-60,295-324` still describes core implementation as "planned" even though it's shipped. | M |
 | 32 | **Structured per-host network decision trace** | Surface why each connection attempt was allowed/denied. | M |

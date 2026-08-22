@@ -675,7 +675,7 @@ export interface MXCConfiguration {
    */
   ui?: Ui | null;
   /**
-   * MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+   * MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
    */
   version?: string | null;
 }

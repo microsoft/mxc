@@ -56,8 +56,8 @@ reasons:
 | **Host capability** | What the *running OS* can actually enforce (e.g. whether the BaseContainer sandbox API is usable, velocity keys, Hyper-V). | Negotiated at runtime — **never a string in the config**. | The host, probed at execution time. |
 
 - **Schema version** is semver and is checked at the trust boundary: the parser
-  accepts the `0.6.x` floor line through the `0.8.x` dev-ceiling line (the
-  canonical min/max constants are currently `0.6.0-alpha` and `0.8.0-alpha` in
+  accepts the `0.6.x` floor line through the `0.9.x` dev-ceiling line (the
+  canonical min/max constants are currently `0.6.0-alpha` and `0.9.0-alpha` in
   `schemas/schema-version.json`), and the SDK mirrors that range. Only
   `major.minor` is compared — patch and pre-release labels are ignored — and both
   back-dated and forward-dated versions are rejected.
@@ -81,9 +81,10 @@ mxc/schemas/
 │   ├── mxc-config.schema.0.4.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.5.0-alpha.json  (retired — below the supported floor)
 │   ├── mxc-config.schema.0.6.0-alpha.json  (minimum supported)
-│   └── mxc-config.schema.0.7.0-alpha.json  (shipped — current stable)
+│   ├── mxc-config.schema.0.7.0-alpha.json  (shipped)
+│   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
 └── dev/
-    ├── mxc-config.schema.0.8.0-dev.json    (rolling parser — currently authoritative)
+    ├── mxc-config.schema.0.9.0-dev.json    (rolling parser — currently authoritative)
     └── mxc-config.schema.0.8.0-alpha.json  (exact closed contract — future authority)
 ```
 
@@ -94,7 +95,7 @@ parser simply stops accepting those versions (the supported floor is
 The two development schemas coexist during the version-specific parser
 transition:
 
-- `mxc-config.schema.0.8.0-dev.json` is generated from the rolling
+- `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
   `wxc_common::wire` model. It remains authoritative for runtime parsing and
   corpus validation until exact dispatch is enabled.
 - `mxc-config.schema.0.8.0-alpha.json` is generated from the exact
@@ -205,7 +206,7 @@ by the current parser and the closed mutable contract under
 `src/core/mxc_config_contract/src/dev/`. Regenerate both schemas:
 
 ```text
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.8.0-dev.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.8.0-alpha --out schemas/dev/mxc-config.schema.0.8.0-alpha.json
 ```
 
