@@ -4,8 +4,9 @@
 
 `SandboxPolicy` is MXC's cross-platform JSON authoring contract. It expresses
 portable filesystem, network, UI, and execution restrictions without selecting
-backend-specific mechanisms. Each SDK may expose native language types or
-builders, but they represent the same policy fields and produce the
+backend-specific mechanisms. This page defines the language-neutral JSON shape;
+SDK API coverage is version-dependent, and an SDK's native types or builders
+may not yet expose every field. When supported, those APIs produce the
 `ContainerConfig` consumed by MXC.
 
 ```json
@@ -118,7 +119,7 @@ The only runtime metadata currently defined is the network proxy endpoint.
 
 | Field | Description |
 |---|---|
-| `networkProxy` | HTTP/S loopback proxy URL with an explicit port. Selects the directional network format. |
+| `networkProxy` | HTTP/S loopback proxy URL with an explicit port. Requires `network.egress.default` to be `"deny"` with no direct allow or deny rules. |
 
 ### `ui`
 

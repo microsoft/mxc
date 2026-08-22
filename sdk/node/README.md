@@ -80,7 +80,7 @@ wire shape. With schema 0.8, omitting all network fields leaves the
 `network` block out of the generated config; the native parser interprets that
 as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
-for the complete authoring shape.
+for the complete cross-platform authoring shape.
 
 Model 1 permits direct connections selected by IP/CIDR, protocol, and port
 rules; it does not configure an application-layer proxy. Model 2 denies direct
