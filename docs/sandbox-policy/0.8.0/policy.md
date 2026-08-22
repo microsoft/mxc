@@ -2,45 +2,37 @@
 
 ## SandboxPolicy
 
-`SandboxPolicy` is the Node SDK's user-facing authoring type. It expresses the
-requested filesystem, network, UI, and execution restrictions.
-`createConfigFromPolicy()` translates it into the wire-format
+`SandboxPolicy` is MXC's cross-platform JSON authoring contract. It expresses
+portable filesystem, network, UI, and execution restrictions without selecting
+backend-specific mechanisms. Each SDK may expose native language types or
+builders, but they represent the same policy fields and produce the
 `ContainerConfig` consumed by MXC.
 
-```typescript
-type SandboxPolicy = {
-  version: "0.8.0-alpha";
-  filesystem?: {
-    readwritePaths?: string[];
-    readonlyPaths?: string[];
-    deniedPaths?: string[];
-    clearPolicyOnExit?: boolean;
-  };
-  network?: {
-    // Legacy network format:
-    allowOutbound?: boolean;
-    allowLocalNetwork?: boolean;
-    allowedHosts?: string[];
-    blockedHosts?: string[];
-    proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
-
-    // Schema 0.8 directional network format:
-    egress?: NetworkEgressConfig;
-    ingress?: NetworkIngressConfig;
-  };
-  runtimeConfig?: RuntimeConfig;
-  processContainer?: {
-    network?: {
-      allowedProxyPeer?: string;
-    };
-  };
-  ui?: {
-    allowWindows?: boolean;
-    clipboard?: "none" | "read" | "write" | "all";
-    allowInputInjection?: boolean;
-  };
-  timeoutMs?: number;
-};
+```json
+{
+  "version": "0.8.0-alpha",
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "192.0.2.0/24" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  },
+  "ui": {
+    "allowWindows": false,
+    "clipboard": "none",
+    "allowInputInjection": false
+  },
+  "timeoutMs": 30000
+}
 ```
 
 ### `filesystem`
@@ -50,7 +42,7 @@ type SandboxPolicy = {
 | `readwritePaths` | Paths the sandbox can read and write. |
 | `readonlyPaths` | Paths the sandbox can read but not write. |
 | `deniedPaths` | Paths the sandbox cannot access. |
-| `clearPolicyOnExit` | Clear backend policy after execution. Maps to the inverse of `lifecycle.preservePolicy`; on ProcessContainer this covers both filesystem and firewall policy. Defaults to `true`. |
+| `clearPolicyOnExit` | Clear retained policy after execution. Maps to the inverse of `lifecycle.preservePolicy` and can cover multiple policy types, including filesystem and network policy. Defaults to `true`. |
 
 Omitted filesystem permissions remain denied.
 
@@ -119,20 +111,14 @@ than weakening the policy.
 
 ### `runtimeConfig`
 
+Schema 0.8 introduces `runtimeConfig` for cross-platform runtime metadata
+needed to execute a policy but which is not itself security-policy intent. It
+is configuration rather than policy, and it is not tied to a specific backend.
+The only runtime metadata currently defined is the network proxy endpoint.
+
 | Field | Description |
 |---|---|
 | `networkProxy` | HTTP/S loopback proxy URL with an explicit port. Selects the directional network format. |
-
-### `processContainer.network`
-
-| Field | Description |
-|---|---|
-| `allowedProxyPeer` | Package Family Name or AppContainer profile allowed to communicate over loopback. ProcessContainer only. |
-
-For ProcessContainer authoring, `egress.default: "allow"` adds the
-`internetClient` capability and `ingress.default: "allow"` adds
-`privateNetworkClientServer`. `allowedProxyPeer` is a scoped loopback grant and
-cannot be combined with `ingress.hostLoopback: "allow"`.
 
 ### `ui`
 
@@ -153,8 +139,6 @@ selects directional deny defaults.
 
 ## Examples and detailed behavior
 
-- [Node SDK schema 0.8 examples](../../../sdk/node/README.md#schema-080-networking)
 - [Schema 0.8 directional config example](../../../tests/examples/30_network_0_8_directional.json)
 - [Schema updates from 0.7 to 0.8](networking/schema-updates.md)
 - [Network modes and rule semantics](networking/networking.md)
-- [ProcessContainer identity-scoped proxy](../../process-container/examples/0.8.0-schema.md)
