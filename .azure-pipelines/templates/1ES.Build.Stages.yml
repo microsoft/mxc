@@ -66,6 +66,7 @@ stages:
   jobs:
   - template: Package.NpmSdk.Job.yml
     parameters:
+      isOfficialBuild: ${{ parameters.isOfficialBuild }}
       targets:
         - artifact: wxc-binaries-x86_64-pc-windows-msvc
           sdkArch: x64
