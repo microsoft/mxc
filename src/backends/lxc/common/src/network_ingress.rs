@@ -561,8 +561,13 @@ impl IngressManager {
             "Creating inbound iptables chain: {}",
             self.chain_name
         ));
+        let inbound_field = if policy.uses_directional_network {
+            "network.ingress"
+        } else {
+            "allowLocalNetwork"
+        };
         logger.log_line(&format!(
-            "Inbound (allowLocalNetwork) policy: {}",
+            "Inbound ({inbound_field}) policy: {}",
             if policy.allow_local_network {
                 "ACCEPT new inbound connections"
             } else {
@@ -816,8 +821,9 @@ impl IngressManager {
             }
         }
 
-        // allowLocalNetwork toggle: accept or drop NEW inbound connections to
-        // the container's listening sockets.
+        // Accept or drop NEW inbound connections to the container's listening
+        // sockets. Both schemas only reach here asking for deny; a permissive
+        // request is refused before any rule is built.
         let inbound_verb = if policy.allow_local_network {
             accept
         } else {
@@ -1296,6 +1302,40 @@ mod tests {
             None,
             "the parser's fill-in denies inbound, which the default chain already enforces"
         );
+    }
+
+    // A 0.8 operator never writes allowLocalNetwork, so naming it in the log
+    // would point at a field their schema does not have.
+    #[test]
+    fn the_inbound_log_line_names_the_schema_that_asked_for_the_posture() {
+        for (directional, expected, absent) in [
+            (true, "network.ingress", "allowLocalNetwork"),
+            (false, "allowLocalNetwork", "network.ingress"),
+        ] {
+            let mut policy = ContainerPolicy {
+                default_network_policy: NetworkPolicy::Block,
+                network_enforcement_mode: NetworkEnforcementMode::Firewall,
+                ..Default::default()
+            };
+            policy.uses_directional_network = directional;
+            if directional {
+                policy.network_ingress = Some(NetworkIngressPolicy::default());
+            }
+
+            let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+            let mut manager = IngressManager::new("log-field-test", 1);
+            let _ = manager.apply_firewall_rules(&policy, &mut logger);
+            let logged = logger.get_buffer().to_string();
+
+            assert!(
+                logged.contains(expected),
+                "directional={directional}: inbound log must name {expected}, got: {logged}"
+            );
+            assert!(
+                !logged.contains(absent),
+                "directional={directional}: inbound log must not name {absent}, got: {logged}"
+            );
+        }
     }
 
     /// A `ContainerPolicy` with the two fields these tests vary; everything

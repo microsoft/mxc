@@ -34,6 +34,9 @@ ALLOW_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_allow.json"
 WRONG_PORT_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_wrong_port.json"
 DNS_DENIED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_denied.json"
 DNS_ALLOWED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_dns_allowed.json"
+DENY_RULE_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny_rule.json"
+EXCEPT_EXCLUDED_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_excluded.json"
+EXCEPT_SIBLING_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_except_sibling.json"
 
 fail() {
     echo "FAIL: $1"
@@ -137,5 +140,14 @@ assert_blocked "a DNS query to 8.8.8.8 succeeded under egress.default deny with 
 run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG"
 assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. DNS is over-blocked, so the dns-denied case above proves only that this container has no DNS at all."
 
-echo "PASS: schema 0.8 egress rules filtered by destination, by port, and by resolver."
+run_case "deny-rule case: egress.default allow, one destination denied on udp/53" "$DENY_RULE_CONFIG"
+assert_blocked "a denied destination stayed reachable under egress.default allow. Entries from egress.deny are not reaching the chain, so a config written as allow-with-exceptions enforces nothing."
+
+run_case "except case: allow 8.8.0.0/16 except 8.8.8.8/32, probe the excluded address" "$EXCEPT_EXCLUDED_CONFIG"
+assert_blocked "an address named in except was reachable through the rule that excludes it. The exclusion is being dropped, so the surrounding allow is wider than written."
+
+run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
+assert_allowed "an address inside the allowed range but outside except was unreachable. The exclusion is over-blocking, so the case above proves only that the whole rule failed to install."
+
+echo "PASS: schema 0.8 egress rules filtered by destination, by port, by resolver, by deny rule, and by exclusion."
 echo "LXC schema 0.8 egress enforcement test complete."

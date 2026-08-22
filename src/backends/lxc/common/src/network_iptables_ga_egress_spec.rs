@@ -241,6 +241,54 @@ fn a_deny_peer_exclusion_remains_outside_the_deny() {
 }
 
 #[test]
+fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
+    let parent = "10.0.0.0/8";
+    let exclusion = "10.10.0.0/16";
+    let policy = directional_policy(
+        NetworkAction::Allow,
+        vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
+        Vec::new(),
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+
+    assert_eq!(
+        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        "ACCEPT",
+        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
+        rules.ipv4
+    );
+    assert!(
+        rule_position(&rules.ipv4, exclusion, "DROP").is_none(),
+        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out belongs in the chain; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
+fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
+    let parent = "10.0.0.0/8";
+    let exclusion = "10.10.0.0/16";
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        Vec::new(),
+        vec![rule(vec![peer(parent, &[exclusion])], Vec::new())],
+    );
+    let rules = NetworkIptablesManager::build_policy_rule_args("MXC-test", &policy);
+
+    assert_eq!(
+        new_connection_action(&rules.ipv4, packet_address("10.10.1.1"), "tcp", Some(443)),
+        "DROP",
+        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}], packet=10.10.1.1/tcp/443; an exclusion narrows its own rule and never reverses the direction default; output={:?}",
+        rules.ipv4
+    );
+    assert!(
+        rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none(),
+        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out belongs in the chain; output={:?}",
+        rules.ipv4
+    );
+}
+
+#[test]
 fn each_cidr_is_emitted_only_in_its_matching_address_family() {
     let ipv4 = "192.0.2.0/24";
     let ipv6 = "2001:db8:1::/48";
