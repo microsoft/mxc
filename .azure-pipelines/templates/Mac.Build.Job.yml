@@ -18,6 +18,7 @@ parameters:
 jobs:
 - job: 'build_arm64_MAC'
   displayName: 'Build (arm64 MAC)'
+  timeoutInMinutes: 120
 
   pool:
     name: Azure Pipelines
