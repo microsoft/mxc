@@ -72,8 +72,8 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 **Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
 `network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
 `processContainer.network.allowedProxyPeer`. Do not mix those fields with the
-legacy `network.defaultPolicy`, `network.enforcementMode`,
-`network.allowLocalNetwork`, host-list, or `network.proxy` fields.
+legacy `network.allowOutbound`, `network.allowLocalNetwork`,
+`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
 `createConfigFromPolicy` authors either shape according to the supplied policy
 version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
 wire shape. With schema 0.8, omitting all network fields leaves the
@@ -82,7 +82,13 @@ as directional default-deny for egress, ingress, and host loopback. See the
 [Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
 for the complete authoring shape.
 
-**Mode 1 — one direct-egress L3/L4 filtering configuration:**
+Model 1 permits direct connections selected by IP/CIDR, protocol, and port
+rules; it does not configure an application-layer proxy. Model 2 denies direct
+internet access and supplies a loopback HTTP/S proxy endpoint for cooperating
+clients. Backend-specific requirements determine how that proxy endpoint is
+made reachable.
+
+**Simple model 1 example — direct egress with L3/L4 filtering:**
 
 ```typescript
 import {
@@ -107,14 +113,14 @@ directConfig.process!.commandLine = 'node agent.js';
 spawnSandboxFromConfig(directConfig);
 ```
 
-**Mode 2 — one loopback HTTP/S proxy configuration:**
+**Simple model 2 example — loopback HTTP/S proxy:**
 
 ```typescript
 const proxyConfig = createConfigFromPolicy({
   version: '0.8.0-alpha',
   network: {
     egress: { default: 'deny' },
-    ingress: { default: 'allow', hostLoopback: 'allow' },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
   },
   runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
 });

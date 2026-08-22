@@ -50,7 +50,7 @@ type SandboxPolicy = {
 | `readwritePaths` | Paths the sandbox can read and write. |
 | `readonlyPaths` | Paths the sandbox can read but not write. |
 | `deniedPaths` | Paths the sandbox cannot access. |
-| `clearPolicyOnExit` | Remove filesystem policy after execution. Defaults to `true`. |
+| `clearPolicyOnExit` | Clear backend policy after execution. Maps to the inverse of `lifecycle.preservePolicy`; on ProcessContainer this covers both filesystem and firewall policy. Defaults to `true`. |
 
 Omitted filesystem permissions remain denied.
 
