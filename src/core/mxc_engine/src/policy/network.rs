@@ -3,12 +3,9 @@
 
 //! Network policy authoring types and wire-format helpers.
 
-/// Network proxy configuration, mirroring the SDK union type
-/// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
+/// Network proxy configuration.
 #[derive(Debug, Clone)]
 pub enum ProxySpec {
-    /// Route through the built-in test proxy server.
-    BuiltinTestServer,
     /// Route through `127.0.0.1:<port>`.
     Localhost(u16),
     /// Route through an explicit proxy URL.
@@ -24,23 +21,17 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Raw {
             #[serde(default)]
-            builtin_test_server: Option<bool>,
-            #[serde(default)]
             localhost: Option<u16>,
             #[serde(default)]
             url: Option<String>,
         }
 
         let raw = <Raw as serde::Deserialize>::deserialize(deserializer)?;
-        match (raw.builtin_test_server, raw.localhost, raw.url) {
-            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
-            (Some(false), None, None) => Err(serde::de::Error::custom(
-                "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
-            )),
-            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
-            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
+        match (raw.localhost, raw.url) {
+            (Some(port), None) => Ok(ProxySpec::Localhost(port)),
+            (None, Some(url)) => Ok(ProxySpec::Url(url)),
             _ => Err(serde::de::Error::custom(
-                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
+                "network.proxy must set exactly one of localhost or url",
             )),
         }
     }
@@ -151,7 +142,6 @@ pub struct RuntimeConfigSection {
 pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
     use serde_json::json;
     match proxy {
-        ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
         ProxySpec::Localhost(port) => json!({ "localhost": port }),
         ProxySpec::Url(url) => json!({ "url": url }),
     }
@@ -166,4 +156,38 @@ pub(super) fn has_host_rules(network: &serde_json::Value) -> bool {
             .is_some_and(|values| !values.is_empty())
     };
     non_empty("allowedHosts") || non_empty("blockedHosts")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxySpec;
+
+    #[test]
+    fn builtin_test_server_is_not_supported() {
+        let error = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": true }"#)
+            .expect_err("the in-process API cannot start the built-in proxy");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn conflicting_proxy_modes_are_rejected() {
+        let error =
+            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080, "url": "http://proxy" }"#)
+                .expect_err("conflicting proxy modes must be rejected");
+
+        assert!(error.to_string().contains("exactly one"));
+    }
+
+    #[test]
+    fn localhost_and_url_proxy_modes_parse() {
+        assert!(matches!(
+            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
+            ProxySpec::Localhost(8080)
+        ));
+        assert!(matches!(
+            serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
+            ProxySpec::Url(_)
+        ));
+    }
 }

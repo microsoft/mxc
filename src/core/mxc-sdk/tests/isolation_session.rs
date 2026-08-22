@@ -25,7 +25,6 @@ fn iso_policy() -> SandboxPolicy {
         }),
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     }
 }
 

@@ -4,7 +4,49 @@
 //! ProcessContainer-specific policy authoring types and wire mapping.
 
 use super::network::has_host_rules;
-use super::{CaptureDenialsSection, NetworkAction, SandboxPolicy};
+use super::{NetworkAction, SandboxPolicy};
+
+/// How denial capture handles ungranted access checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureDenialsMode {
+    /// Keep the access denied and record the denial.
+    #[default]
+    Block,
+    /// Allow the access and record what would have been denied.
+    Allow,
+}
+
+impl CaptureDenialsMode {
+    pub(super) fn wire(self) -> &'static str {
+        match self {
+            Self::Block => "block",
+            Self::Allow => "allow",
+        }
+    }
+}
+
+/// ProcessContainer denial-capture settings.
+///
+/// Its presence enables capture: the runner records the sandboxed process's
+/// ungranted access attempts and writes a JSON denials document, reported
+/// through
+/// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CaptureDenialsSection {
+    /// How each ungranted access check is handled while it is recorded.
+    pub mode: CaptureDenialsMode,
+    /// Absolute path for the JSON denials document.
+    ///
+    /// The runner stamps a per-run identifier into the file stem
+    /// (`denials.json` -> `denials.<run-id>.json`) and reports the actual path.
+    /// When `None`, a managed per-run temporary file is used. The parent
+    /// directory must already exist.
+    pub output_path: Option<String>,
+    /// Preserve the sealed ETL trace and report its path in output metadata.
+    pub retain_etl: bool,
+}
 
 /// ProcessContainer settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,12 +138,6 @@ pub(super) fn apply(
 ) -> Result<(), wxc_common::mxc_error::MxcError> {
     use serde_json::json;
 
-    if process_container.capture_denials.is_some() && policy.capture_denials.is_some() {
-        return Err(wxc_common::mxc_error::MxcError::malformed_request(
-            "captureDenials cannot be configured both on SandboxPolicy and ProcessContainerSection",
-        ));
-    }
-
     config["containment"] = json!(containment);
 
     let mut capabilities = process_container.capabilities.clone();
@@ -154,11 +190,7 @@ pub(super) fn apply(
             "allowedProxyPeer": allowed_proxy_peer,
         });
     }
-    if let Some(capture_denials) = process_container
-        .capture_denials
-        .as_ref()
-        .or(policy.capture_denials.as_ref())
-    {
+    if let Some(capture_denials) = &process_container.capture_denials {
         config["processContainer"]["captureDenials"] = json!({
             "mode": capture_denials.mode.wire(),
             "outputPath": capture_denials.output_path,
@@ -177,4 +209,113 @@ pub(super) fn apply(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::policy::{
+        build_wire_config, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+        RuntimeConfigSection,
+    };
+
+    fn policy(network: Option<NetworkSection>) -> SandboxPolicy {
+        SandboxPolicy {
+            version: "0.8.0-alpha".to_string(),
+            filesystem: None,
+            network,
+            ui: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn maps_backend_specific_config() {
+        let process_container = ProcessContainerSection {
+            least_privilege: true,
+            learning_mode: true,
+            capabilities: vec!["registryRead".to_string()],
+            capture_denials: Some(CaptureDenialsSection {
+                mode: CaptureDenialsMode::Allow,
+                output_path: Some("C:\\capture\\denials.json".to_string()),
+                retain_etl: true,
+            }),
+            ui: Some(ProcessContainerUiSection {
+                isolation: ProcessContainerUiIsolation::Atoms,
+                desktop_system_control: true,
+                system_settings: "read".to_string(),
+                ime: true,
+            }),
+            network: Some(ProcessContainerNetworkSection {
+                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+            }),
+        };
+
+        let config = build_wire_config(
+            &policy(None),
+            &crate::policy::Containment::ProcessContainer(process_container),
+            Some("sdk-test"),
+        )
+        .expect("ProcessContainer config should build");
+
+        assert_eq!(config["containment"], "processcontainer");
+        assert_eq!(config["processContainer"]["leastPrivilege"], true);
+        assert_eq!(config["processContainer"]["learningMode"], true);
+        assert_eq!(
+            config["processContainer"]["capabilities"],
+            serde_json::json!(["registryRead"])
+        );
+        assert_eq!(config["processContainer"]["ui"]["isolation"], "atoms");
+        assert_eq!(
+            config["processContainer"]["network"]["allowedProxyPeer"],
+            "Contoso.Proxy_123"
+        );
+        assert_eq!(
+            config["processContainer"]["captureDenials"]["mode"],
+            "allow"
+        );
+        assert_eq!(
+            config["processContainer"]["captureDenials"]["retainEtl"],
+            true
+        );
+    }
+
+    #[test]
+    fn maps_directional_network_config() {
+        let network = NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Deny),
+                host_loopback: Some(NetworkAction::Allow),
+            }),
+            runtime_config: Some(RuntimeConfigSection {
+                network_proxy: Some("http://127.0.0.1:8080".to_string()),
+            }),
+            ..Default::default()
+        };
+        let process_container = ProcessContainerSection {
+            network: Some(ProcessContainerNetworkSection {
+                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let config = build_wire_config(
+            &policy(Some(network)),
+            &crate::policy::Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect("directional network config should build");
+
+        assert_eq!(config["network"]["egress"]["default"], "deny");
+        assert_eq!(config["network"]["ingress"]["hostLoopback"], "allow");
+        assert_eq!(
+            config["runtimeConfig"]["networkProxy"],
+            "http://127.0.0.1:8080"
+        );
+        assert!(config["network"].get("defaultPolicy").is_none());
+    }
 }

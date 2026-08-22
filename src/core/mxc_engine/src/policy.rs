@@ -2,15 +2,14 @@
 // Licensed under the MIT License.
 
 //! Policy discovery and config building — the Rust port of the SDK's
-//! `policy.ts` helpers and `createConfigFromPolicy`.
+//! policy discovery helpers and request construction.
 //!
 //! - [`available_tools_policy`], [`user_profile_policy`], and
 //!   [`temporary_files_policy`] enumerate the host environment to discover
 //!   tool/SDK/profile/temp directories as filesystem-policy fragments.
-//! - [`SandboxPolicy`] mirrors the SDK's cross-platform policy type, and
-//!   [`build_request`] maps it to an [`ExecutionRequest`] for the backends the
-//!   crate supports (Seatbelt, Bubblewrap, ProcessContainer) — so callers no
-//!   longer need the TypeScript SDK to build a spawnable config.
+//! - [`SandboxPolicy`] describes cross-platform restrictions, and
+//!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
+//!   Bubblewrap, and ProcessContainer.
 
 mod network;
 mod process_container;
@@ -32,8 +31,8 @@ pub use network::{
     RuntimeConfigSection,
 };
 pub use process_container::{
-    ProcessContainerNetworkSection, ProcessContainerSection, ProcessContainerUiIsolation,
-    ProcessContainerUiSection,
+    CaptureDenialsMode, CaptureDenialsSection, ProcessContainerNetworkSection,
+    ProcessContainerSection, ProcessContainerUiIsolation, ProcessContainerUiSection,
 };
 
 // ---------------------------------------------------------------------------
@@ -458,54 +457,6 @@ pub struct UiSection {
     pub allow_input_injection: bool,
 }
 
-/// How `captureDenials` handles each ungranted access check while it records
-/// it. Both modes log every access the policy does not grant.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptureDenialsMode {
-    /// The access stays denied and the denial is recorded; deny-by-default
-    /// containment is preserved. Safe default.
-    #[default]
-    Block,
-    /// The access is allowed and recorded (audit mode). This relaxes
-    /// deny-by-default for the run, so the runner emits a security warning
-    /// surfaced through [`Sandbox::warnings`](crate::SandboxProcess::warnings).
-    Allow,
-}
-
-impl CaptureDenialsMode {
-    /// Wire-format value accepted by the config parser.
-    fn wire(self) -> &'static str {
-        match self {
-            CaptureDenialsMode::Block => "block",
-            CaptureDenialsMode::Allow => "allow",
-        }
-    }
-}
-
-/// Denial-capture section of a [`SandboxPolicy`] (Windows ProcessContainer
-/// only). Its presence enables capture: the runner records the sandboxed
-/// process's ungranted access attempts and writes a JSON denials document,
-/// reported back through
-/// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
-///
-/// Ignored on Linux and macOS, whose backends have no learning-mode API.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CaptureDenialsSection {
-    /// How each ungranted access check is handled while it is recorded.
-    pub mode: CaptureDenialsMode,
-    /// Absolute path for the JSON denials document. The runner stamps a
-    /// per-run identifier into the file stem (`denials.json` ->
-    /// `denials.<run-id>.json`) and reports the actual path back. When `None`,
-    /// a managed per-run temporary file is used. The parent directory must
-    /// already exist.
-    pub output_path: Option<String>,
-    /// Preserve the sealed ETL trace after analysis and report its path in
-    /// output metadata. Defaults to `false`.
-    pub retain_etl: bool,
-}
-
 /// The containment backend [`build_request_with_containment`] targets — the
 /// Rust analogue of the SDK's `ContainmentType | ContainmentBackend` argument
 /// to `createConfigFromPolicy`.
@@ -537,21 +488,20 @@ pub enum Containment {
     IsolationSession,
 }
 
-/// WSL Container settings, mirroring the SDK's `experimental.wslc` config
-/// block; carried by [`Containment::Wslc`].
+/// WSL Container settings carried by [`Containment::Wslc`].
 ///
 /// [`Default`] matches the native backend's defaults: the `alpine:latest`
-/// image, host-determined CPU/memory, no GPU, and the SDK's default store.
+/// image, host-determined CPU/memory, no GPU, and the default store.
 ///
 /// # Network policy
 ///
 /// WSLC derives its networking mode from `allowOutbound` alone (bridged when
 /// true, isolated when false). Per-host rules (`allowedHosts`/`blockedHosts`)
-/// are accepted here for parity with the TypeScript SDK, but the backend
-/// currently enforces them with in-container `iptables`, which the container
-/// lacks `CAP_NET_ADMIN` to install — so such a policy **fails the run at
-/// spawn** rather than silently going unenforced. Until enforcement moves to a
-/// VM-level API, prefer expressing WSLC network intent with `allowOutbound`.
+/// are accepted, but the backend currently enforces them with in-container
+/// `iptables`, which the container lacks `CAP_NET_ADMIN` to install — so such a
+/// policy **fails the run at spawn** rather than silently going unenforced.
+/// Until enforcement moves to a VM-level API, prefer expressing WSLC network
+/// intent with `allowOutbound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
@@ -643,13 +593,6 @@ pub struct SandboxPolicy {
     /// Execution timeout in milliseconds (`None` = no timeout).
     #[serde(default)]
     pub timeout_ms: Option<u32>,
-    /// Windows denial capture. `Some` enables it; ignored on Linux and macOS.
-    ///
-    /// New code targeting an explicit ProcessContainer should prefer
-    /// [`ProcessContainerSection::capture_denials`]. This field remains for
-    /// compatibility with [`build_request`]'s host-resolved path.
-    #[serde(default)]
-    pub capture_denials: Option<CaptureDenialsSection>,
 }
 
 /// A spawnable sandbox request, built from a [`SandboxPolicy`] by
@@ -785,7 +728,6 @@ pub fn build_request(
 ///     network: None,
 ///     ui: None,
 ///     timeout_ms: None,
-///     capture_denials: None,
 /// };
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
@@ -1011,8 +953,6 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::ProxySpec;
-
     // `ui` must be emitted only when the caller supplied one.
     //
     // These pin the fix for a defect that was invisible by value: the builder
@@ -1057,196 +997,6 @@ mod tests {
             config.get("ui").is_some(),
             "wire config dropped a `ui` block the caller supplied: {config}"
         );
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_true_is_accepted() {
-        let spec: ProxySpec =
-            serde_json::from_str(r#"{ "builtinTestServer": true }"#).expect("true is valid");
-        assert!(matches!(spec, ProxySpec::BuiltinTestServer));
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_false_is_rejected() {
-        // An explicit `false` must not silently select the (experimental,
-        // deliberately-permissive) built-in proxy — it is rejected as malformed.
-        let err = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": false }"#)
-            .expect_err("false must be rejected");
-        assert!(
-            err.to_string().contains("builtinTestServer must be true"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_conflicting_modes_are_rejected() {
-        // Several modes at once must be rejected (cr-005), not silently reduced
-        // to the first matching one.
-        let err = serde_json::from_str::<ProxySpec>(
-            r#"{ "builtinTestServer": true, "localhost": 8080 }"#,
-        )
-        .expect_err("conflicting proxy modes must be rejected");
-        assert!(
-            err.to_string().contains("exactly one"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_localhost_and_url_still_parse() {
-        assert!(matches!(
-            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
-            ProxySpec::Localhost(8080)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
-            ProxySpec::Url(_)
-        ));
-    }
-
-    #[test]
-    fn process_container_section_maps_backend_specific_config() {
-        use super::{
-            build_wire_config, Containment, ProcessContainerNetworkSection,
-            ProcessContainerSection, ProcessContainerUiIsolation, ProcessContainerUiSection,
-        };
-
-        let policy = SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-            capture_denials: None,
-        };
-        let process_container = ProcessContainerSection {
-            least_privilege: true,
-            learning_mode: true,
-            capabilities: vec!["registryRead".to_string()],
-            capture_denials: Some(CaptureDenialsSection {
-                mode: CaptureDenialsMode::Allow,
-                output_path: Some("C:\\capture\\denials.json".to_string()),
-                retain_etl: true,
-            }),
-            ui: Some(ProcessContainerUiSection {
-                isolation: ProcessContainerUiIsolation::Atoms,
-                desktop_system_control: true,
-                system_settings: "read".to_string(),
-                ime: true,
-            }),
-            network: Some(ProcessContainerNetworkSection {
-                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-            }),
-        };
-
-        let config = build_wire_config(
-            &policy,
-            &Containment::ProcessContainer(process_container),
-            Some("sdk-test"),
-        )
-        .expect("ProcessContainer config should build");
-
-        assert_eq!(config["containment"], "processcontainer");
-        assert_eq!(config["processContainer"]["leastPrivilege"], true);
-        assert_eq!(config["processContainer"]["learningMode"], true);
-        assert_eq!(
-            config["processContainer"]["capabilities"],
-            serde_json::json!(["registryRead"])
-        );
-        assert_eq!(config["processContainer"]["ui"]["isolation"], "atoms");
-        assert_eq!(
-            config["processContainer"]["network"]["allowedProxyPeer"],
-            "Contoso.Proxy_123"
-        );
-        assert_eq!(
-            config["processContainer"]["captureDenials"]["mode"],
-            "allow"
-        );
-        assert_eq!(
-            config["processContainer"]["captureDenials"]["retainEtl"],
-            true
-        );
-    }
-
-    #[test]
-    fn process_container_supports_directional_network_config() {
-        use super::{
-            build_wire_config, Containment, NetworkAction, NetworkEgressSection,
-            NetworkIngressSection, NetworkSection, ProcessContainerNetworkSection,
-            ProcessContainerSection, RuntimeConfigSection,
-        };
-
-        let policy = SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
-            filesystem: None,
-            network: Some(NetworkSection {
-                egress: Some(NetworkEgressSection {
-                    default: Some(NetworkAction::Deny),
-                    ..Default::default()
-                }),
-                ingress: Some(NetworkIngressSection {
-                    default: Some(NetworkAction::Deny),
-                    host_loopback: Some(NetworkAction::Allow),
-                }),
-                runtime_config: Some(RuntimeConfigSection {
-                    network_proxy: Some("http://127.0.0.1:8080".to_string()),
-                }),
-                ..Default::default()
-            }),
-            ui: None,
-            timeout_ms: None,
-            capture_denials: None,
-        };
-        let process_container = ProcessContainerSection {
-            network: Some(ProcessContainerNetworkSection {
-                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
-            }),
-            ..Default::default()
-        };
-
-        let config = build_wire_config(
-            &policy,
-            &Containment::ProcessContainer(process_container),
-            None,
-        )
-        .expect("directional network config should build");
-
-        assert_eq!(config["network"]["egress"]["default"], "deny");
-        assert_eq!(config["network"]["ingress"]["hostLoopback"], "allow");
-        assert_eq!(
-            config["runtimeConfig"]["networkProxy"],
-            "http://127.0.0.1:8080"
-        );
-        assert!(config["network"].get("defaultPolicy").is_none());
-    }
-
-    #[test]
-    fn process_container_rejects_duplicate_capture_denials() {
-        use super::{build_wire_config, Containment, ProcessContainerSection};
-
-        let policy = SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-            capture_denials: Some(CaptureDenialsSection::default()),
-        };
-        let process_container = ProcessContainerSection {
-            capture_denials: Some(CaptureDenialsSection::default()),
-            ..Default::default()
-        };
-
-        let error = build_wire_config(
-            &policy,
-            &Containment::ProcessContainer(process_container),
-            None,
-        )
-        .expect_err("duplicate captureDenials must be rejected");
-
-        assert!(error
-            .message
-            .contains("cannot be configured both on SandboxPolicy"));
     }
 
     #[cfg(target_os = "windows")]
@@ -1299,7 +1049,8 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenialsMode, CaptureDenialsSection, NetworkSection, SandboxPolicy,
+        build_request, CaptureDenialsMode, CaptureDenialsSection, NetworkSection, ProxySpec,
+        SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1310,12 +1061,11 @@ mod tests {
             network: Some(network),
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         }
     }
 
-    // Mirror the TypeScript SDK by accepting `allowedHosts` with or without
-    // `allowOutbound`, even though Seatbelt cannot enforce the host list.
+    // Accept `allowedHosts` with or without `allowOutbound`, even though
+    // Seatbelt cannot enforce the host list.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_allowed_hosts_without_outbound_is_accepted() {
@@ -1379,7 +1129,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: Some(5000),
-            capture_denials: None,
         };
 
         // Inspect the internal model the SDK maps to — a unit concern; the public
@@ -1406,7 +1155,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         };
         let mut request = build_request(&policy, None).expect("build_request should succeed");
         request.set_env([("FIRST", "1"), ("SECOND", "2")]);
@@ -1434,7 +1182,6 @@ mod tests {
                     allow_input_injection: false,
                 }),
                 timeout_ms: None,
-                capture_denials: None,
             };
             let request = build_request(&policy, None).expect("build_request should succeed");
             assert_eq!(
@@ -1477,7 +1224,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         };
         // build_request resolves Seatbelt on macOS, so the config is present and
         // the consumer can read its defaults and write back.
@@ -1499,15 +1245,11 @@ mod tests {
             .contains(&"com.example.service".to_string()));
     }
 
-    fn policy_with_capture_denials(section: CaptureDenialsSection) -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
+    fn process_container_with_capture_denials(section: CaptureDenialsSection) -> Containment {
+        Containment::ProcessContainer(ProcessContainerSection {
             capture_denials: Some(section),
-        }
+            ..Default::default()
+        })
     }
 
     #[test]
@@ -1543,12 +1285,14 @@ mod tests {
         // the path somewhere guaranteed to be present.
         let output_path = std::env::temp_dir().join("denials.json");
         let expected = output_path.to_string_lossy().into_owned();
-        let policy = policy_with_capture_denials(CaptureDenialsSection {
+        let policy = minimal_policy();
+        let containment = process_container_with_capture_denials(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request_with_containment(&policy, &containment, None)
+            .expect("build_request_with_containment");
 
         let captured = request
             .inner
@@ -1564,27 +1308,18 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
-        let policy = policy_with_capture_denials(CaptureDenialsSection::default());
-        let request = build_request(&policy, None).expect("build_request");
+        let policy = minimal_policy();
+        let containment = process_container_with_capture_denials(CaptureDenialsSection::default());
+        let request = build_request_with_containment(&policy, &containment, None)
+            .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_some());
 
-        let mut policy = policy;
-        policy.capture_denials = None;
-        let request = build_request(&policy, None).expect("build_request");
-        assert!(request.inner.policy.capture_denials.is_none());
-    }
-
-    // captureDenials has no Linux/macOS counterpart, so it is accepted and
-    // dropped rather than rejected.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn capture_denials_is_ignored_off_windows() {
-        let policy = policy_with_capture_denials(CaptureDenialsSection {
-            mode: CaptureDenialsMode::Allow,
-            output_path: Some("/tmp/denials.json".to_string()),
-            retain_etl: true,
-        });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainerSection::default()),
+            None,
+        )
+        .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_none());
     }
 
@@ -1667,18 +1402,18 @@ mod tests {
             .join("denials-with-proxy.json")
             .to_string_lossy()
             .into_owned();
-        let mut policy = policy_with_network(NetworkSection {
+        let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
-        policy.capture_denials = Some(CaptureDenialsSection {
+        let containment = process_container_with_capture_denials(CaptureDenialsSection {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
 
-        let request = build_request(&policy, None)
+        let request = build_request_with_containment(&policy, &containment, None)
             .expect("captureDenials and network.proxy are accepted together");
 
         let captured = request
@@ -1692,7 +1427,9 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, WslcSection};
+    use super::{
+        build_request_with_containment, Containment, ProcessContainerSection, WslcSection,
+    };
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1702,7 +1439,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         }
     }
 

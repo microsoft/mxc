@@ -22,7 +22,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: Some(10_000),
-    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("echo hello");
@@ -38,24 +37,21 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [`spawn_sandbox`] when you need to drive the process live (see
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
-[`build_request`] is the Rust port of the SDK's `createConfigFromPolicy`. It
-resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
-Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
-network validation, building the same wire config internally and running it
-through the shared parser. The returned [`SandboxRequest`] has an empty
+[`build_request`] resolves the host's containment backend (Seatbelt on macOS,
+Bubblewrap on Linux, ProcessContainer on Windows), builds the wire config, and
+runs it through the shared parser. The returned [`SandboxRequest`] has an empty
 command line — set the command with [`SandboxRequest::set_script`] (and any
 working directory / env) before spawning.
 
 To target a specific backend instead of the host default, use
-[`build_request_with_containment`] with a [`Containment`] — the same choice the
-TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
+[`build_request_with_containment`] with a [`Containment`].
 
-For a directly configured Windows ProcessContainer, pass
-`Containment::ProcessContainer(ProcessContainerSection { ... })`. This exposes
-the Node SDK's ProcessContainer-specific settings: least-privilege creation,
-learning mode, capabilities, BaseProcessContainer UI isolation, proxy peer
-identity, and denial capture. Schema 0.8 directional networking is available
-through `NetworkSection::{egress, ingress, runtime_config}`.
+Configure a Windows ProcessContainer with
+`Containment::ProcessContainer(ProcessContainerSection { ... })`.
+`ProcessContainerSection` controls least-privilege creation, learning mode,
+capabilities, BaseProcessContainer UI isolation, proxy peer identity, and
+denial capture. Schema 0.8 directional networking is available through
+`NetworkSection::{egress, ingress, runtime_config}`.
 
 ```rust,no_run
 use mxc_sdk::{
@@ -69,7 +65,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
-    capture_denials: None,
 };
 let process_container = ProcessContainerSection {
     capabilities: vec!["registryRead".to_string()],
@@ -84,9 +79,9 @@ let request = build_request_with_containment(
 # Ok::<(), mxc_sdk::Error>(())
 ```
 
-Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
-available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
-dirs), [`user_profile_policy`], and [`temporary_files_policy`].
+Filesystem-policy discovery helpers are also available to feed a policy:
+[`available_tools_policy`] (PATH + tool/SDK environment directories),
+[`user_profile_policy`], and [`temporary_files_policy`].
 
 ## Diagnosing a failure
 
@@ -182,20 +177,11 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
-> **Before / after.** Host-and-backend discovery previously lived only in the
-> TypeScript SDK (`getPlatformSupport`), so Rust callers and the executor
-> binaries had no in-process way to ask "what backends does this host support?"
-> and could only learn a backend was unusable by trying to launch it. Now the
-> engine answers both in-process — [`platform_support`] for the SDK-launchable
-> subset and [`available_backends`] for the full host-capability set with tiers —
-> with no TypeScript dependency and no trial spawn.
-
 ## Denial capture (Windows)
 
 `ProcessContainerSection::capture_denials` enables learning-mode capture: the
 runner records every access the policy does not grant and writes them to a JSON
-denials document. `SandboxPolicy::capture_denials` remains available for the
-host-resolved `build_request` path.
+denials document.
 
 ```rust
 use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
@@ -223,8 +209,7 @@ the process terminates. When `retain_etl` is enabled, the capture output's
 `capture_denials_error` carries the failure and retained path. Dropping a
 sandbox without a terminal wait deletes the internal trace even when retention
 was requested. After deleting a retained ETL, callers should also remove its
-now-empty per-run parent directory. The section is ignored on Linux and macOS,
-whose backends have no learning-mode API.
+now-empty per-run parent directory.
 
 ## Live stdio + kill (streaming)
 
@@ -242,7 +227,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
-    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("cat"); // echoes stdin until EOF

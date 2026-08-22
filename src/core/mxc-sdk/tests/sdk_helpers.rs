@@ -127,7 +127,6 @@ fn build_request_rejects_empty_version() {
         network: None,
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
@@ -149,7 +148,6 @@ fn build_request_host_rules_require_outbound() {
         }),
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
@@ -198,7 +196,6 @@ fn public_reexports_build_process_container_networking_and_capture() {
         }),
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
     let process_container = ProcessContainerSection {
         capture_denials: Some(CaptureDenialsSection::default()),
@@ -230,7 +227,6 @@ fn build_request_then_run_seatbelt() {
         network: None,
         ui: None,
         timeout_ms: Some(10000),
-        capture_denials: None,
     };
 
     let mut request = build_request(&policy, None).expect("build_request should succeed");

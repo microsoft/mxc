@@ -24,7 +24,6 @@
 //!     network: None,
 //!     ui: None,
 //!     timeout_ms: None,
-//!     capture_denials: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
@@ -41,9 +40,7 @@
 //!
 //! The selected backend is driven by the `containment` field in the request:
 //! [`build_request`] resolves the host's native one, and
-//! [`build_request_with_containment`] takes an explicit [`Containment`] — the
-//! same choice the TypeScript SDK makes with
-//! `createConfigFromPolicy(policy, containment)`.
+//! [`build_request_with_containment`] takes an explicit [`Containment`].
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
@@ -91,7 +88,6 @@
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
-//! #     capture_denials: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
