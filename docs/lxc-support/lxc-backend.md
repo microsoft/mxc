@@ -111,8 +111,6 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Which configurations reach the firewall depends on what the policy restricts, never on `enforcementMode`.  A policy is owed the firewall when its default is `block`, when it names any `allowedHosts` or `blockedHosts`, when it enables a proxy, or when it states a schema 0.8 `egress` posture — `ContainerPolicy::requires_firewall`.  A caller may get more enforcement than the mode asked for, never less.  Reading the mode instead let a restrictive policy start with an open chain: schema 0.8 has no `enforcementMode` to set, since the schema rejects it written beside `egress`, so every 0.8 policy carried the default `capabilities` and would have gone unenforced while reporting success.  Only a policy that restricts nothing at all is skipped.
-
 Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
 
 | Policy | Implementation |
@@ -175,63 +173,34 @@ check would imply a guarantee this code cannot make.
 
 ### Schema 0.8 egress rules
 
-Schema 0.8 replaces the host lists with `network.egress`, which carries a
-per-direction default and two rule lists. Peers are CIDRs only — the shape has
-no hostname form, and the resolution failure modes tabulated above therefore
-have no 0.8 equivalent.
+`network.egress` carries a per-direction default and two rule lists. Peers are
+CIDRs only; the shape has no hostname form.
 
-| Field | Implementation |
-|-------|---------------|
-| `egress.default: "deny"` | Final DROP rule in the container chain |
-| `egress.default: "allow"` | Final ACCEPT rule in the container chain |
-| `egress.deny[]` | DROP rules, emitted *before* the allow rules |
-| `egress.allow[]` | ACCEPT rules |
-| `to[].cidr` | `-d <cidr>`, routed to the `iptables` or `ip6tables` chain by address family |
-| `to[].except[]` | Carve-outs within the peer's CIDR |
-| `ports[].protocol` | `-p tcp`, `-p udp`, or ICMP; `any` matches every protocol |
-| `ports[].port`, `ports[].endPort` | `--dport <port>` or `--dport <port>:<endPort>` |
+| Field | Effect | Notes |
+|-------|--------|-------|
+| `egress.default: "deny"` | Traffic that no rule allows is dropped | |
+| `egress.default: "allow"` | Traffic that no rule denies is permitted | |
+| `egress.deny[]` | Denies the traffic each rule names | A destination named by both lists is denied |
+| `egress.allow[]` | Permits the traffic each rule names | |
+| `to[].cidr` | Scopes the rule to one destination range | Omitting `to` applies the rule to every destination |
+| `to[].except[]` | Removes addresses from the peer's range | Excepted addresses fall through to `egress.default`, so an `except` whose rule already agrees with the default changes nothing |
+| `ports[].protocol` | Scopes the rule to TCP, UDP, or ICMP | `any` paired with a port covers TCP and UDP only, since ICMP carries no port; an ICMP rule covers both IPv4 and IPv6 |
+| `ports[].port`, `ports[].endPort` | Scopes the rule to a single port or an inclusive range | Omitting `ports` applies the rule to every port and protocol |
 
-Omitting `to` selects every destination, and omitting `ports` selects every
-port and protocol. Deny-before-allow ordering matches the host lists above, as
-does the `ESTABLISHED,RELATED` exemption: the base chain accepts a flow that
-conntrack already knows, ahead of the generated rules.
+A connection already open when the policy takes effect keeps running;
+enforcement governs connections opened afterwards.
 
-**DNS is not exempt here.** The unconditional port 53 accept is emitted only on
-the legacy host-list path. Under a directional posture this chain governs
-forwarded DNS with the same rules as every other forwarded destination — a
-resolver the policy never allowed is a resolver the container cannot reach, and
-reaching one takes an `egress.allow` rule naming its address. That is the GA
-decision, not a local choice: [D3](../sandbox-policy/0.8.0/networking/networking.md)
-states that DNS is not a first-class policy surface and that queries fail when
-the rules do not allow the resolver's IP. Carrying the exemption into a
-directional posture would accept port 53 to every destination ahead of the
-generated rules, leaving an `egress.default: "deny"` container a standing
-DNS-tunnel path — the same path the proxy posture refuses to open.
+**DNS is not exempt.** A resolver the policy does not allow is a resolver the
+container cannot reach, and reaching one takes an `egress.allow` rule naming its
+address. That is the GA decision:
+[D3](../sandbox-policy/0.8.0/networking/networking.md) states that DNS is not a
+first-class policy surface and that queries fail when the rules do not allow the
+resolver's IP.
 
-**One resolver sits outside that guarantee.** LXC's own bridge resolver is
-addressed to the bridge gateway, which the container reaches through the host's
-`INPUT` path rather than this `FORWARD` chain. No egress rule is consulted for
-it, and none can block it. A container keeps ordinary name resolution through
-the bridge whatever its policy says; what a directional posture takes away is
-the unasked-for route to an *external* resolver. Closing that gap needs a
-host-local rule and is not done here.
-
-Three points where one schema field does not map to one iptables rule:
-
-- **`protocol: "any"` with a port expands to two rules**, one TCP and one UDP.
-  `-p all --dport` is not a legal match, and ICMP is excluded from the
-  expansion because it carries no port.
-- **ICMP is named by address family.** A rule reaching the IPv4 chain matches
-  `icmp` and the same rule reaching the IPv6 chain matches `icmpv6`, because
-  `ip6tables` rejects `-p icmp` outright.
-- **`except` takes the direction's default verdict.** The excepted range sits
-  outside the rule that names it, so it receives whatever `egress.default`
-  would have given it, emitted ahead of the rule it narrows. Nothing is emitted
-  when the rule's own action already agrees with the default, because the range
-  reaches the identical verdict at the closing rule. The case that makes this
-  matter is a `deny` rule under `egress.default: allow`: the excepted range is
-  the operator asking for addresses to be spared, and leaving it to the peer's
-  DROP would block them.
+**One resolver sits outside that.** LXC's own bridge resolver stays reachable
+whatever the policy says, and no egress rule can block it. A container keeps
+ordinary name resolution; what a directional posture takes away is the
+unasked-for route to an *external* resolver. Closing that gap is not done here.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
@@ -286,14 +255,12 @@ Inbound filtering is a separate chain from the egress chains above, and it lives
 
 Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
 
-The rows below describe every run that reaches the firewall, which is every policy with something to enforce, in either schema. The ingress path takes the same gate as the egress chains. A policy that restricts nothing installs nothing at all, which leaves inbound unfiltered and accepts `allowLocalNetwork: true` rather than refusing it. Inbound default-deny is a property of the runs that reach the firewall, not of every LXC run.
+A policy that restricts nothing gets no inbound filtering at all, and accepts `allowLocalNetwork: true` without complaint. The rows below apply to a policy with something to enforce.
 
-Schema 0.8 states the same posture with `ingress.default` and `ingress.hostLoopback`. LXC has one inbound chain rather than two independent controls, and the mapping is lossless for the values it implements: `deny` on either field is served by the default-deny chain, and `allow` on either is refused by the not-yet-implemented error below. The field named in that error is whichever one the operator actually wrote.
-
-| Policy (any config with something to enforce, in either schema) | Implementation |
-|--------|---------------|
-| `allowLocalNetwork: false` (default), or `ingress.default`/`ingress.hostLoopback` of `deny` | Container `INPUT` chain drops new inbound connections |
-| `allowLocalNetwork: true`, or `ingress.default`/`ingress.hostLoopback` of `allow` | **Not yet implemented.** Firewall setup fails with an explicit not-yet-implemented error rather than falling back to an unenforced accept |
+| 0.7.0 | 0.8.0 | Effect |
+|-------|-------|--------|
+| `allowLocalNetwork: false` (default) | `ingress.default` or `ingress.hostLoopback` of `deny` | New inbound connections are refused |
+| `allowLocalNetwork: true` | `ingress.default` or `ingress.hostLoopback` of `allow` | **Not yet implemented.** The run fails with an explicit error naming the field the operator wrote, rather than accepting inbound from every interface and source |
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 

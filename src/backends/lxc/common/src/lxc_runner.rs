@@ -234,8 +234,6 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // `installs_firewall` also covers needing a reachable proxy, not just
-        // firewall rules.
         let needs_network = installs_firewall(&request.policy);
 
         if needs_network {
@@ -273,13 +271,6 @@ impl LxcScriptRunner {
             }
         }
 
-        // Configure inbound (ingress) network rules inside the container's own
-        // netns. This is a separate, orthogonal chain from the egress rules
-        // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
-        // container's own iptables INPUT chain, reached with `nsenter`.
-        //
-        // Must resolve the same way as the network-wait gate above, or the wait
-        // and the enforcement guard can silently disagree.
         let use_firewall = installs_firewall(&request.policy);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
@@ -638,7 +629,6 @@ impl LxcScriptRunner {
     }
 }
 
-/// The 0.8 network-policy surface the LXC backend promises to honor.
 fn lxc_network_policy_support() -> NetworkPolicySupport {
     NetworkPolicySupport::EGRESS_DEFAULT
         | NetworkPolicySupport::EGRESS_RULES

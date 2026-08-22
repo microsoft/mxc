@@ -21,9 +21,6 @@ use wxc_common::models::{
 
 /// True when this policy describes anything the egress firewall has to carry,
 /// in either schema.
-///
-/// Keyed on what the policy states rather than on `network.enforcementMode`:
-/// the mode requests enforcement, this answers whether enforcement is owed.
 pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
     policy.default_network_policy == NetworkPolicy::Block
         || !policy.allowed_hosts.is_empty()
@@ -32,12 +29,8 @@ pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
         || policy.network_egress.is_some()
 }
 
-/// True when the run installs firewall chains at all, which is a wider
-/// question than [`requires_firewall`].
-///
-/// `enforcementMode: firewall` with a permissive egress default and no host
-/// lists needs no outbound rule, but the chain's default-deny still enforces
-/// `allowLocalNetwork: false` inbound.
+/// True when the run needs the container network up, covering a requested
+/// enforcement mode and a reachable proxy as well as egress rules.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
     requires_firewall(policy)
         || matches!(
