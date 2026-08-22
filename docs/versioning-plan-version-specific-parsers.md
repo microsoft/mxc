@@ -1,18 +1,16 @@
 # MXC Version-Specific Config Parsers
 
 Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
-#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete:
-Phase 5A merged in PR #909, Phase 5B in PR #910, Phase 5C in PR #929, Phase 5D
-in PR #941, and the Phase 5A review follow-up in PR #949. One stacked pull
-request remains open and unreviewed: the capabilities parity remediation in
-PR #966, now based on `main`. Phase 6 is implemented in 11 commits on the local
-branch `user/gudge/version_specific_config_parsers_phase6`, branched from #949;
-it has not been pushed and has no pull request, so it is unreviewed. Phase 7.1
-is renamed Phase 7a: it is squashed onto `main` as
-`user/gudge/version_specific_config_parsers_phase7a`, has no pull request, and
-is therefore also unreviewed. Phases 7.2-7.5 and Phases 8-11 remain. The
-parser-parity remediation that paused Phase 7 is addressed by PR #966; Phase 7
-resumes when that PR merges.
+#838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
+and merged: Phase 5A in PR #909, Phase 5B in PR #910, Phase 5C in PR #929,
+Phase 5D in PR #941, the Phase 5A review follow-up in PR #949, and the
+capabilities parity remediation in PR #966. Phase 6 is complete and awaiting a
+final signoff in PR #968, which also carries the directional networking the
+exact `0.8` contract had been missing. Phase 6.5 — publication of
+`0.8.0-alpha` and the move of development to `0.9.0-alpha` — is a single commit
+on `user/gudge/version_specific_config_parsers_phase6.5`, rebased onto #968,
+with no pull request yet. Phase 7.1 is renamed Phase 7a and is open as PR #969.
+Phases 7.2-7.5 and Phases 8-11 remain.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -44,7 +42,7 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 - Reject positional JSON arrays that Serde can deserialize into structs. That
   object-root hardening is out of scope for this work in every phase.
 - Introduce another development version as part of the initial parser
-  conversion. `0.9.0-dev` is selected when `0.8.0-alpha` is published;
+  conversion. `0.9.0-alpha` is selected when `0.8.0-alpha` is published;
   `1.0.0` remains a later milestone.
 
 ## Contract reconstruction policy
@@ -210,7 +208,7 @@ will be added.
 **Superseded by the revised publication sequence below.** `0.8.0-alpha` is
 being published early, so the table above describes the state up to that point
 only: after publication `0.8.0-alpha` is a published contract carrying the
-stable-candidate one-shot surface, and `0.9.0-dev` becomes the development
+stable-candidate one-shot surface, and `0.9.0-alpha` becomes the development
 contract holding experimental and state-aware. The exclusion list immediately
 above therefore applies to `0.8.0-alpha` as well.
 
@@ -223,16 +221,48 @@ model ahead of this work. It replaces the implicit ordering in Phases 8 through
 The order is:
 
 1. PRs #961 and #962 land: directional networking and its backend validation,
-   on the rolling wire model, version-gated to `0.8`.
+   on the rolling wire model, version-gated to `0.8`. **Done.**
 2. Port the same fields into `mxc_config_contract::dev` and its adapters —
    `network.egress`, `network.ingress`, and
    `processContainer.network.allowedProxyPeer`. **This is a prerequisite, not
    an option:** publishing a `0.8.0-alpha` contract that cannot express a
-   feature the same version ships to customers would be incoherent.
+   feature the same version ships to customers would be incoherent. **Done, in
+   PR #968 rather than separately:** a review of that pull request identified
+   the same gap, so the port landed there alongside a `NonEmptyVec` primitive
+   that restores the shipped schema's `minItems` constraint on a rule's `to`
+   and `ports`.
 3. Land Phase 6, so the generated artifacts derive from the contract crate.
+   **Awaiting a final signoff in PR #968.**
 4. Publish `0.8.0-alpha` from the contract crate, forking the published module,
    the frozen adapter, and (when it exists) the per-version policy builder.
-5. Move the remaining development work to `0.9.0-dev`.
+   **Implemented on the Phase 6.5 branch, rebased onto #968.**
+5. Move the remaining development work to `0.9.0-alpha`. **Implemented on the
+   same branch;** note the suffix is `-alpha`, not the `-dev` this plan
+   originally wrote — see "Two coexisting versioning models".
+
+### Phase 6.5 as rebased
+
+Phase 6.5 is one commit on top of #968, adding roughly 7,700 lines across 130
+files. It:
+
+- forks `published/v0_8_0_alpha` from the development contract, carrying the
+  directional network surface, `RuntimeConfig`, `ProcessContainerNetwork`,
+  `NonEmptyVec`, and the `ProcessContainerCapability` newtype
+- adds the frozen `config_contract_adapters::v0_8` adapter
+- renames the development contract to `0.9.0-alpha`, moving its tests and
+  fixtures to `tests/v0_9_0_alpha`
+- registers both versions and commits the generated `0.9.0-alpha` schema and
+  TypeScript oracle
+
+Two consequences of the rebase are worth recording, because both were found by
+a failing test rather than by inspection. The 0.8 test suite inherited from
+#968 assumed `0.8` was still the development contract, so it listed
+`"experimental": {}` as an acceptable empty optional object; under publication
+that document must be rejected. And the adapter and one-shot tests added to
+#968 for `runtimeConfig` carried `0.8.0-alpha` version markers into the renamed
+`0.9` suites, where the exact version marker rejects them. Both are the same
+class of error: a version-specific test moving between contracts without its
+version string moving with it.
 
 ### Why the stable schema is generated from the contract
 
@@ -265,7 +295,7 @@ stable-surface fields, so they publish with the rest of the one-shot contract.
 
 The corpus cost is small and entirely predictable. Of the thirty configs
 declaring `0.8.0-alpha` today, twenty-four are stable-candidate only and stay;
-six move to `0.9.0-dev`, and they are the same six documents — every one is a
+six move to `0.9.0-alpha`, and they are the same six documents — every one is a
 WSLC config that uses both the development-only `wslc` containment and an
 `experimental` block:
 
@@ -278,7 +308,7 @@ wslc_filesystem_object.json          wslc_port_mapping_tcp.json
 No corpus config declares `0.8.0-alpha` together with a `phase`, so excluding
 state-aware costs nothing in the corpus. It does, however, decide where
 state-aware lives: with no published version to declare, state-aware requests
-move from the `0.6.0-alpha` they hard-code today onto `0.9.0-dev`, so the
+move from the `0.6.0-alpha` they hard-code today onto `0.9.0-alpha`, so the
 lifecycle ships only against a development contract until it is promoted. That
 is the intended consequence of the Phase 11 rule, recorded here as a choice.
 
@@ -309,7 +339,7 @@ coexist.
   contracts. Deliberate is fine; accidental is not.
 - Phase 8's "state-aware producers must stop hard-coding `0.6.0-alpha`" moves
   up: that constant is more obviously wrong once `0.8.0-alpha` is published,
-  and the scope decision sends state-aware to `0.9.0-dev` rather than to the
+  and the scope decision sends state-aware to `0.9.0-alpha` rather than to the
   newly published version. `schemas/schema-version.json`'s `stateAware` field
   moves with it.
 - Phase 6's branch must be rebased and its artifacts **regenerated** rather
@@ -381,12 +411,15 @@ disagree about the same version numbers rather than merely duplicating them.
   for the rolling family being retired. An audit on 2026-08-21 found the
   contract stack already compliant — `registry.rs` and `mxc_schema_gen` contain
   no `-dev` reference — with a single exception: the `$schema` string in
-  `tests/v0_9_0_alpha/fixtures/one_shot/valid/annotations.json` points at a
-  nonexistent `0.9.0-dev` file. It is inert, since `$schema` is a free string
-  the contract does not resolve, which is why no gate catches it.
+  `tests/v0_9_0_alpha/fixtures/one_shot/valid/annotations.json` pointed at a
+  nonexistent `0.9.0-dev` file. It was inert, since `$schema` is a free string
+  the contract does not resolve, which is why no gate caught it. **Fixed on the
+  Phase 6.5 branch.**
 - Move the published `0.8` artifact to `schemas/stable/` and make `schema_id`
   and `schema_path` agree. A `Published` descriptor writing into `schemas/dev/`
-  is what makes contradiction 4 possible.
+  is what makes contradiction 4 possible. **The registry now names the stable
+  path on the Phase 6.5 branch; the artifact itself is created by whoever
+  publishes `0.8` through the old stack, not by this work.**
 
 **Medium.** Split the three jobs "version" currently conflates: what the
 runtime accepts, what shape is frozen, and what artifact is generated. Narrow
@@ -1189,7 +1222,7 @@ published `0.6.0-alpha` or `0.7.0-alpha` requests.
 Extend `mxc_schema_gen` with the publication command:
 
 ```text
-mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-dev
+mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-alpha
 ```
 
 Publication copies only the development stable-candidate request;
