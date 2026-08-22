@@ -258,8 +258,9 @@ fn an_exclusion_inside_an_allow_rule_under_an_allow_default_stays_reachable() {
         rules.ipv4
     );
     assert!(
-        rule_position(&rules.ipv4, exclusion, "DROP").is_none(),
-        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out belongs in the chain; output={:?}",
+        rule_position(&rules.ipv4, exclusion, "DROP").is_none()
+            && rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none(),
+        "input=default allow, allow.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out of either action belongs in the chain; output={:?}",
         rules.ipv4
     );
 }
@@ -282,8 +283,9 @@ fn an_exclusion_inside_a_deny_rule_under_a_deny_default_stays_blocked() {
         rules.ipv4
     );
     assert!(
-        rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none(),
-        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out belongs in the chain; output={:?}",
+        rule_position(&rules.ipv4, exclusion, "ACCEPT").is_none()
+            && rule_position(&rules.ipv4, exclusion, "DROP").is_none(),
+        "input=default deny, deny.to=[{{cidr:{parent}, except:[{exclusion}]}}]; the exclusion and the default agree, so no carve-out of either action belongs in the chain; output={:?}",
         rules.ipv4
     );
 }
