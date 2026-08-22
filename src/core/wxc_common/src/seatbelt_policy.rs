@@ -11,10 +11,8 @@
 //! Each returns the caller-facing message; the parser wraps it as a config
 //! error and the backend as a `ScriptResponse`.
 
-use crate::models::{
-    host_is_canonical_loopback, ContainerPolicy, NetworkAction, NetworkEnforcementMode,
-    NetworkPolicy,
-};
+use crate::host_is_canonical_loopback;
+use crate::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 /// Effective outbound posture, preferring the directional `network.egress`
 /// over the legacy `defaultPolicy` when both are present.

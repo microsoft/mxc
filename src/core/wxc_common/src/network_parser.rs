@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::error::WxcError;
 use crate::models::{
-    host_is_canonical_loopback, unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction,
-    NetworkCidr, NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort,
-    NetworkProtocol, NetworkRule, ProxyAddress, ProxyConfig,
+    unbracket_host, ContainerPolicy, ContainmentBackend, NetworkAction, NetworkCidr,
+    NetworkEgressPolicy, NetworkIngressPolicy, NetworkPeer, NetworkPort, NetworkProtocol,
+    NetworkRule, ProxyAddress, ProxyConfig,
 };
 use crate::wire;
 
@@ -71,7 +71,7 @@ enum NetworkFormat {
 ///
 /// Use this to *reject* a host (LXC treats all of `127/8` as the container's
 /// own namespace loopback). Breadth is fail-safe here: a wider match rejects
-/// more. To *admit* a host, use [`crate::models::host_is_canonical_loopback`].
+/// more. To *admit* a host, use [`host_is_canonical_loopback`].
 pub(crate) fn host_is_any_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -80,6 +80,22 @@ pub(crate) fn host_is_any_loopback(host: &str) -> bool {
         .parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
+}
+
+/// Only `127.0.0.1` and `::1`, plus `localhost`; bracketed or not, any case.
+///
+/// Use this to *admit* a proxy host. The accept-set is exactly what Seatbelt's
+/// `(remote ip "localhost:<port>")` enforces — measured, not assumed: under
+/// that rule `127.0.0.1` and `::1` connect while `127.0.0.2` gets `EPERM`.
+/// Matching `127.0.0.0/8` here would admit a proxy the sandbox then blocks.
+pub fn host_is_canonical_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches!(
+        unbracket_host(host).parse::<IpAddr>(),
+        Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)) | Ok(IpAddr::V6(Ipv6Addr::LOCALHOST))
+    )
 }
 
 fn convert_wire_proxy_at(proxy: wire::Proxy, path: &str) -> Result<ProxyConfig, WxcError> {

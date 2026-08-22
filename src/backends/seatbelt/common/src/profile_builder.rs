@@ -28,9 +28,8 @@
 use std::fmt::Write as _;
 
 use wxc_common::filesystem_resolve::{resolve_path_plan, FsIntent};
-use wxc_common::models::{
-    host_is_canonical_loopback, ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress,
-};
+use wxc_common::host_is_canonical_loopback;
+use wxc_common::models::{ClipboardPolicy, ContainerPolicy, ExecutionRequest, ProxyAddress};
 use wxc_common::seatbelt_policy;
 
 /// Build a complete Seatbelt sandbox profile, scoping cooperative proxy

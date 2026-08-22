@@ -226,3 +226,51 @@ fn trailing_dot_localhost_is_not_loopback() {
          name match; must NOT be loopback"
     );
 }
+
+// ─── canonical loopback (admit-side predicate) ───────────────────────────────
+// Moved here from models.rs so both loopback predicates are tested together.
+
+#[test]
+fn loopback_proxy_host_accepts_every_canonical_spelling() {
+    for host in [
+        "127.0.0.1",
+        "::1",
+        "[::1]",
+        "0:0:0:0:0:0:0:1",
+        "[0:0:0:0:0:0:0:1]",
+        "localhost",
+        "LOCALHOST",
+        "LocalHost",
+    ] {
+        assert!(
+            host_is_canonical_loopback(host),
+            "{host:?} should be recognized as a loopback proxy host"
+        );
+    }
+}
+
+#[test]
+fn loopback_proxy_host_rejects_non_loopback_and_lookalikes() {
+    for host in [
+        "proxy.corp.example",
+        "10.0.0.5",
+        "[2001:db8::1]",
+        "2001:db8::1",
+        "0.0.0.0",
+        "",
+        // Lookalikes that must not be mistaken for the loopback name.
+        "localhost.evil.com",
+        "notlocalhost",
+        "localhost.",
+        // Outside the two canonical addresses the Seatbelt profile can
+        // express, even though they are inside 127.0.0.0/8.
+        "127.0.0.2",
+        // IPv4-mapped IPv6 is not the IPv6 loopback address.
+        "::ffff:127.0.0.1",
+    ] {
+        assert!(
+            !host_is_canonical_loopback(host),
+            "{host:?} should not be recognized as a loopback proxy host"
+        );
+    }
+}
