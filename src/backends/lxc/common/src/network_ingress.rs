@@ -496,14 +496,14 @@ impl IngressManager {
         }
     }
 
-    /// The parser fills in `network_ingress` for every 0.8 config, even one
-    /// with no `network` block; `network_mode_specified` is what marks a
-    /// posture the operator actually stated.
+    /// The 0.8 `network.ingress` section, or `None` when this run was given the
+    /// legacy schema.
     fn stated_ingress(policy: &ContainerPolicy) -> Option<&NetworkIngressPolicy> {
-        policy
-            .network_ingress
-            .as_ref()
-            .filter(|_| policy.network_mode_specified)
+        if policy.uses_directional_network {
+            policy.network_ingress.as_ref()
+        } else {
+            None
+        }
     }
 
     /// The policy field asking for permissive inbound, if any, named as the
@@ -1218,7 +1218,7 @@ mod tests {
         host_loopback: NetworkAction,
     ) -> ContainerPolicy {
         ContainerPolicy {
-            network_mode_specified: true,
+            uses_directional_network: true,
             network_ingress: Some(NetworkIngressPolicy {
                 default,
                 host_loopback,
@@ -1281,24 +1281,20 @@ mod tests {
         );
     }
 
-    // The parser writes an ingress section for every 0.8 config, including one
-    // with no `network` block at all. Reading it without the stated-posture
-    // filter would treat that fill-in as an operator request.
+    // A bare 0.8 config gets the parser's fill-in, which denies on both
+    // fields. Nothing permissive is being asked for, and nothing is refused.
     #[test]
-    fn an_unstated_directional_ingress_is_not_read_as_a_request() {
+    fn a_bare_directional_config_asks_for_nothing_permissive() {
         let policy = ContainerPolicy {
-            network_mode_specified: false,
-            network_ingress: Some(NetworkIngressPolicy {
-                default: NetworkAction::Allow,
-                host_loopback: NetworkAction::Allow,
-            }),
+            uses_directional_network: true,
+            network_ingress: Some(NetworkIngressPolicy::default()),
             ..Default::default()
         };
 
         assert_eq!(
             IngressManager::permissive_inbound_field(&policy),
             None,
-            "a section the parser filled in is not a posture the operator stated"
+            "the parser's fill-in denies inbound, which the default chain already enforces"
         );
     }
 
