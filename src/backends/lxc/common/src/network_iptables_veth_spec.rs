@@ -165,10 +165,8 @@ fn apply_tears_down_the_chain_it_created_when_it_fails_closed() {
     );
 }
 
-// A container whose policy restricts nothing must not be punished for an
-// interface the caller was never required to set. Any firewall command
-// touching the host here would be an unrequested side effect on a container
-// that has nothing to enforce.
+// Firewall commands here would be an unrequested side effect on a container
+// with nothing to enforce.
 #[test]
 fn a_policy_with_nothing_to_enforce_is_unaffected_by_a_missing_veth_interface() {
     let fake = super::test_firewall::install();

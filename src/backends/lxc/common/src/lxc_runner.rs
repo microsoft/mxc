@@ -234,8 +234,8 @@ impl LxcScriptRunner {
             let _ = writeln!(logger, "Container already running.");
         }
 
-        // Wait for network only when the run installs a firewall, or when the
-        // container must reach a proxy. Both questions are `installs_firewall`.
+        // `installs_firewall` also covers needing a reachable proxy, not just
+        // firewall rules.
         let needs_network = installs_firewall(&request.policy);
 
         if needs_network {
@@ -278,12 +278,8 @@ impl LxcScriptRunner {
         // above: it enforces `allowLocalNetwork` (inbound default-deny) via the
         // container's own iptables INPUT chain, reached with `nsenter`.
         //
-        // A policy that installs a firewall means the caller is owed the inbound
-        // deny chain, whichever schema stated it. LXC enforces it inside the
-        // container's own netns, so it is useless without the init PID that
-        // lets us enter that netns — and the ingress manager cannot even be
-        // constructed without one. This has to be the same question the ingress
-        // gate asks, or a run skips the guard and then skips the chain.
+        // Must resolve the same way as the network-wait gate above, or the wait
+        // and the enforcement guard can silently disagree.
         let use_firewall = installs_firewall(&request.policy);
 
         // Kept in scope for post-execution cleanup; `None` when there is no
@@ -643,22 +639,6 @@ impl LxcScriptRunner {
 }
 
 /// The 0.8 network-policy surface the LXC backend promises to honor.
-///
-/// The four bits are not independently selectable. `validate_network_policy_support`
-/// treats the directional posture as a unit: the parser fills in an ingress
-/// section for every 0.8 config, and both the ingress and host-loopback checks
-/// fire on `directional_posture_supplied`, which a stated `egress` alone sets.
-/// Claiming only the two egress bits therefore rejects every egress-only 0.8
-/// config — the directional bits have to be claimed together or not at all.
-///
-/// Claiming the ingress bits is honest because a bit promises to *handle* the
-/// field, not to accept every value. LXC serves `deny` for both ingress
-/// controls with its existing default-deny inbound chain, and refuses `allow`
-/// with a not-yet-implemented error rather than ignoring it — see
-/// `IngressManager::permissive_inbound_field` and AB#63505947.
-///
-/// `RUNTIME_PROXY` and `PROXY_PEER_IDENTITY` stay unclaimed, so a config using
-/// them is still rejected up front rather than half-enforced.
 fn lxc_network_policy_support() -> NetworkPolicySupport {
     NetworkPolicySupport::EGRESS_DEFAULT
         | NetworkPolicySupport::EGRESS_RULES
@@ -972,11 +952,8 @@ mod tests {
         );
     }
 
-    // The declaration cannot be trimmed to the two egress bits. The parser
-    // fills in an ingress section for every 0.8 config, and the ingress and
-    // host-loopback checks fire on the directional posture that a stated
-    // `egress` alone supplies -- so the narrower claim rejects the very config
-    // above. This pins that, and fails if the declaration is ever narrowed.
+    // Pins the directional claim as all-or-nothing: dropping to the two egress
+    // bits alone would reject the config above.
     #[test]
     fn claiming_only_the_egress_bits_would_reject_an_egress_only_config() {
         let egress_bits_only =

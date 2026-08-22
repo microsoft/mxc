@@ -496,13 +496,9 @@ impl IngressManager {
         }
     }
 
-    /// The 0.8 inbound posture, but only when the config actually stated one.
-    ///
-    /// The directional parser writes `network_ingress` for *every* 0.8 config,
-    /// filling in `NetworkIngressPolicy::default()` even when the config
-    /// carries no `network` block at all, so `is_some()` alone does not mean
-    /// the operator asked for anything. `network_mode_specified` is what
-    /// separates a stated posture from that fill-in.
+    /// The parser fills in `network_ingress` for every 0.8 config, even one
+    /// with no `network` block; `network_mode_specified` is what marks a
+    /// posture the operator actually stated.
     fn stated_ingress(policy: &ContainerPolicy) -> Option<&NetworkIngressPolicy> {
         policy
             .network_ingress
@@ -514,12 +510,8 @@ impl IngressManager {
     /// operator wrote it.
     ///
     /// 0.7 states this in `allowLocalNetwork`; 0.8 splits it across
-    /// `network.ingress.default` and `network.ingress.hostLoopback`. LXC's
-    /// inbound chain is a single posture, so either 0.8 control asking for
-    /// `allow` is the same permissive request — the split is lossless here only
-    /// because both `allow` values are refused and both `deny` values are
-    /// served by the one default-deny chain. Returning the field name rather
-    /// than a bare `bool` keeps the refusal pointing at the line to change.
+    /// `network.ingress.default` and `network.ingress.hostLoopback`, but
+    /// LXC's single inbound chain refuses either `allow` value alike.
     fn permissive_inbound_field(policy: &ContainerPolicy) -> Option<&'static str> {
         if let Some(ingress) = Self::stated_ingress(policy) {
             if ingress.default == NetworkAction::Allow {
@@ -544,9 +536,9 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // Not `requires_firewall`: that answers whether the *egress* chain has
-        // a rule to carry, and a firewall-mode config with permissive egress
-        // has none while still asking for the inbound deny this chain is.
+        // Not `requires_firewall`, which answers only whether the *egress*
+        // chain has a rule to carry — a firewall-mode config with permissive
+        // egress has none, yet still owes this inbound deny.
         if !installs_firewall(policy) {
             logger.log_line(
                 "Network policy installs no firewall (permissive default, no host lists, \
@@ -556,15 +548,6 @@ impl IngressManager {
             return Ok(true);
         }
 
-        // Permissive inbound is not yet implementable safely, whichever schema
-        // asked for it. Scoping it to host loopback needs a schema field that
-        // does not exist yet (`loopbackPorts`) plus an MXC-owned host-loopback
-        // forwarder (work item AB#63505947). The only rule we could emit today
-        // is an unscoped `--state NEW -j ACCEPT`, which opens the container to
-        // new inbound connections from every interface and source — LAN and WAN
-        // included, not just host loopback. Refuse with a clear error rather
-        // than silently installing that over-broad accept.
-        //
         // Refusing also keeps the support declaration honest: LXC claims the
         // 0.8 ingress bits because it enforces their `deny` values, and a bit
         // claimed is a promise to either enforce the field or reject it.
@@ -1289,7 +1272,7 @@ mod tests {
     }
 
     // A 0.8 config never writes the legacy toggle, and a 0.7 config never
-    // carries an ingress section, so neither schema can be reported under the
+    // carries an ingress section. Neither schema can be reported under the
     // other's field name.
     #[test]
     fn a_legacy_permissive_request_is_still_named_allow_local_network() {
@@ -2839,10 +2822,6 @@ mod tests {
         }
     }
 
-    /// A 0.7 config that asks for firewall enforcement while restricting
-    /// nothing outbound: `enforcementMode: "firewall"`, `defaultPolicy:
-    /// "allow"`, no host lists, no proxy. `allowLocalNetwork` defaults to
-    /// false, and that inbound deny is the whole of what this config asks for.
     fn legacy_firewall_mode_with_permissive_egress(
         mode: NetworkEnforcementMode,
     ) -> ContainerPolicy {
@@ -2854,9 +2833,9 @@ mod tests {
     }
 
     // The inbound chain cannot be gated on whether the *egress* chain has a
-    // rule to carry. This config has none, and its inbound deny is still owed:
-    // dropping it accepts new inbound connections on every interface, which is
-    // the fail-open direction.
+    // rule to carry. This config has none, and its inbound deny is still
+    // owed — skipping it would accept new inbound connections on every
+    // interface, the fail-open direction.
     #[test]
     fn a_firewall_mode_config_with_nothing_to_restrict_outbound_still_installs_the_inbound_chain() {
         for mode in [
@@ -2879,9 +2858,9 @@ mod tests {
         }
     }
 
-    // The gate stays narrow. A config that names no firewall mode, states no
-    // posture, and restricts nothing has no inbound chain to install, so
-    // skipping it is correct rather than dangerous.
+    // A config that names no firewall mode, states no posture, and restricts
+    // nothing has no inbound chain to install; skipping it is correct, not
+    // dangerous.
     #[test]
     fn a_config_that_asks_for_no_firewall_at_all_installs_no_inbound_chain() {
         let policy =
@@ -2894,9 +2873,9 @@ mod tests {
         );
     }
 
-    // 0.8 JSON always arrives with an egress section beside the ingress one, so
-    // a stated directional posture reaches the inbound gate through the egress
-    // arm. This pins that, and fails if the parser ever stops writing egress.
+    // 0.8 JSON always arrives with an egress section beside the ingress one;
+    // a stated directional posture reaches the inbound gate through the
+    // egress arm. This test fails if the parser ever stops writing egress.
     #[test]
     fn a_stated_directional_posture_installs_the_inbound_chain() {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);

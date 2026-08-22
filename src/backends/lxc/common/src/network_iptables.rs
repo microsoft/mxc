@@ -22,24 +22,8 @@ use wxc_common::models::{
 /// True when this policy describes anything the egress firewall has to carry,
 /// in either schema.
 ///
-/// Deliberately keyed on what the policy *says* rather than on
-/// `network.enforcementMode`. The mode is a request for enforcement and this is
-/// the question of whether enforcement is owed, and answering the second with
-/// the first lets a policy that restricts egress start with an open chain
-/// because it never named a mode. A caller may get more enforcement than the
-/// mode asked for, never less.
-///
-/// The directional arm is what admits schema 0.8, which has no mode to name:
-/// the parser rejects `enforcementMode` beside `egress`/`ingress`, so every
-/// directional policy carries the `Capabilities` default. The arm is written
-/// out rather than left to the `Block` arm to cover it, because `Block` covers
-/// it only by being the parser's default for a field 0.8 never writes — an
-/// `egress.default: allow` config would stop being enforced the day that
-/// default changed.
-///
-/// This asks what LXC does about a policy rather than what the policy is, which
-/// is why it lives beside the emitter it gates and not on the shared contract
-/// type. No other backend installs iptables chains from it.
+/// Keyed on what the policy states rather than on `network.enforcementMode`:
+/// the mode requests enforcement, this answers whether enforcement is owed.
 pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
     policy.default_network_policy == NetworkPolicy::Block
         || !policy.allowed_hosts.is_empty()
@@ -48,20 +32,12 @@ pub(crate) fn requires_firewall(policy: &ContainerPolicy) -> bool {
         || policy.network_egress.is_some()
 }
 
-/// True when the run installs firewall chains at all, which is a wider question
-/// than [`requires_firewall`].
+/// True when the run installs firewall chains at all, which is a wider
+/// question than [`requires_firewall`].
 ///
-/// The two differ on one shape: `enforcementMode: firewall` (or `both`) with a
-/// permissive egress default and no host lists. Outbound, that policy has no
-/// rule to install, so skipping the chain costs nothing and `requires_firewall`
-/// correctly answers no. Inbound, the chain *is* the policy — its default deny
-/// is what keeps `allowLocalNetwork: false` true — so skipping opens the
-/// container to new inbound connections the config asked to refuse. Anything
-/// gating the inbound chain has to ask this instead.
-///
-/// Schema 0.8 needs no arm of its own here: it cannot carry `enforcementMode`,
-/// and its parser writes an egress section for every config, so
-/// `requires_firewall` already answers every directional policy.
+/// `enforcementMode: firewall` with a permissive egress default and no host
+/// lists needs no outbound rule, but the chain's default-deny still enforces
+/// `allowLocalNetwork: false` inbound.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy) -> bool {
     requires_firewall(policy)
         || matches!(
@@ -107,39 +83,34 @@ enum RuleAction {
     Deny,
 }
 
-/// One egress entry the chain emits a rule for, lowered from whichever network
-/// schema the policy was written in.
-///
-/// The emitter consumes these in list order and iptables applies
-/// first-match-wins within a chain, which makes an entry's position its
-/// precedence. Deny-precedence is therefore a property each lowering function
-/// establishes, and the emitter only has to preserve the order it is handed.
+/// One egress entry the chain emits a rule for, in the order the emitter must
+/// preserve — iptables applies first-match-wins, making an entry's position
+/// its precedence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EgressEntry {
-    /// Hostname, IP literal, or CIDR. Interpreted by
-    /// [`NetworkIptablesManager::resolve_host`]. Owned because a 0.8 peer
-    /// arrives as a parsed [`NetworkCidr`] with no string to borrow.
+    /// Hostname, IP literal, or CIDR; owned because a 0.8 peer arrives as a
+    /// parsed [`NetworkCidr`] with no string to borrow.
     destination: String,
     action: RuleAction,
     matching: RuleMatch,
 }
 
-/// The protocol and port match a single emitted rule carries.
+/// The protocol and port match a single emitted rule carries: only matches
+/// iptables can express in one rule are representable.
 ///
-/// Only matches one iptables rule can express are representable. A `ports`
-/// selector naming protocol `any` alongside a port has no `-p all --dport`
-/// form, and the lowering expands it into a TCP match and a UDP match rather
-/// than admitting a state the emitter would have to reject.
+/// Protocol `any` alongside a port has no `-p all --dport` form and lowers to
+/// separate TCP and UDP matches instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RuleMatch {
-    /// Every protocol and every port. What a 0.8 rule with no `ports`
-    /// selector matches, and the only match a legacy host-list entry has.
+    /// Every protocol and every port — the match for a 0.8 rule with no
+    /// `ports` selector, and the only match a legacy host-list entry has.
     AnyTraffic,
-    /// ICMP, which carries no port. Rendered `icmp` under `iptables` and
-    /// `icmpv6` under `ip6tables`: the same selector has a different protocol
-    /// name per family, and naming it `icmp` on the IPv6 command is rejected
-    /// rather than silently ignored.
+
+    /// ICMP, which carries no port and is rendered `icmp` under `iptables`
+    /// but `icmpv6` under `ip6tables` — naming it `icmp` on the IPv6 command
+    /// is rejected rather than silently ignored.
     Icmp,
+
     /// TCP or UDP, optionally narrowed to an inclusive destination port range.
     Transport {
         protocol: TransportProtocol,
@@ -1060,11 +1031,8 @@ impl NetworkIptablesManager {
     /// The unconditional port 53 accept that only the legacy host-list path
     /// carries.
     ///
-    /// A directional posture governs forwarded DNS with the same rules as
-    /// every other forwarded destination: a resolver the policy never allowed
-    /// is a resolver the container cannot reach.  Emitting this pair there
-    /// would accept port 53 to the whole internet ahead of the generated
-    /// rules, leaving a standing DNS-tunnel path out of an
+    /// A directional policy governs DNS like any other destination; applying
+    /// this pair there would leave a standing bypass out of an
     /// `egress.default: "deny"` container.
     fn build_legacy_dns_exemption_rule_args(chain_name: &str) -> Vec<Vec<String>> {
         vec![
@@ -1326,9 +1294,8 @@ impl NetworkIptablesManager {
     /// The `-p`/`--dport` arguments a match contributes, in the order
     /// `iptables` expects them.
     ///
-    /// The family decides the ICMP protocol name. `ip6tables` rejects
-    /// `-p icmp` outright rather than treating it as ICMPv6, which would
-    /// otherwise turn an ICMP rule into a failed command on the v6 chain.
+    /// The family decides the ICMP protocol name: `ip6tables` rejects
+    /// `-p icmp` outright rather than treating it as ICMPv6.
     fn build_match_args(matching: RuleMatch, family: IpFamily) -> Vec<String> {
         let (protocol, ports) = match matching {
             RuleMatch::AnyTraffic => return Vec::new(),
@@ -1412,16 +1379,10 @@ impl NetworkIptablesManager {
     /// The 0.8 `network.egress` section, but only when the author actually
     /// stated a directional posture.
     ///
-    /// This is the single place that decides which schema governs the chain,
-    /// and the filter on `network_mode_specified` is what makes it correct.
-    /// The parser hands every 0.8 config a defaulted `NetworkEgressPolicy`
-    /// even when the config carries no `network` block at all, and
-    /// `NetworkAction::Deny` is that default, so reading
-    /// `network_egress.is_some()` alone would cut outbound traffic for every
-    /// existing 0.8 LXC config that never asked for a directional posture.
-    /// `network_mode_specified` is set only when an `egress` or `ingress`
-    /// section was written, and `validate_network_policy_support` gates on
-    /// the same field.
+    /// The parser defaults every 0.8 config to a `NetworkEgressPolicy` denying
+    /// all egress, even with no `network` block written; reading
+    /// `network_egress.is_some()` alone would cut outbound traffic for configs
+    /// that never asked for a directional posture.
     fn stated_egress(policy: &ContainerPolicy) -> Option<&NetworkEgressPolicy> {
         policy
             .network_egress
@@ -1431,12 +1392,9 @@ impl NetworkIptablesManager {
 
     /// The default policy the chain's closing rule must express.
     ///
-    /// A 0.8 config states its outbound default in `network.egress.default`
-    /// and never writes the legacy `network.defaultPolicy`, which the parser
-    /// leaves at its `Block` default. Reading the legacy field alone closes
-    /// every 0.8 chain with DROP, discarding an `egress.default: allow` the
-    /// operator asked for. The legacy field still decides for a policy that
-    /// stated no directional posture.
+    /// The parser leaves the legacy `network.defaultPolicy` field at `Block`
+    /// for every 0.8 config; reading it alone closes every 0.8 chain with
+    /// DROP regardless of `network.egress.default`.
     fn effective_default_policy(policy: &ContainerPolicy) -> NetworkPolicy {
         match Self::stated_egress(policy) {
             Some(egress) => match egress.default {
@@ -1463,12 +1421,9 @@ impl NetworkIptablesManager {
     /// Lower the legacy `blockedHosts`/`allowedHosts` lists into the entries
     /// the chain emits, in the order they must be emitted.
     ///
-    /// Block entries come first. Deny-precedence (AB#62830341) is emission
-    /// order and nothing else: iptables/ip6tables apply first-match-wins
-    /// within the chain, which makes a destination present in both lists
-    /// DROP. There is no separate reconciliation pass anywhere in this
-    /// backend. Exchanging the two halves reverses the security semantics of
-    /// every policy whose lists overlap and produces no other symptom.
+    /// Block entries come first: deny-precedence (AB#62830341) is emission
+    /// order and nothing else, and exchanging the two halves reverses the
+    /// security semantics of every policy whose lists overlap.
     fn lower_legacy_hosts(policy: &ContainerPolicy) -> Vec<EgressEntry> {
         policy
             .blocked_hosts
@@ -1483,8 +1438,9 @@ impl NetworkIptablesManager {
             .map(|(host, action)| EgressEntry {
                 destination: host.clone(),
                 action,
-                // A legacy entry names a destination and nothing else, so it
-                // matches every protocol and port reaching that destination.
+
+                // A legacy entry names only a destination, matching every
+                // protocol and port that reaches it.
                 matching: RuleMatch::AnyTraffic,
             })
             .collect()
@@ -1492,12 +1448,9 @@ impl NetworkIptablesManager {
 
     /// Lower a 0.8 `network.egress` section into the entries the chain emits.
     ///
-    /// `deny` rules precede `allow` rules for the same reason the legacy
-    /// lowering puts blocks first: the chain is first-match-wins and holds no
-    /// reconciliation pass, so a destination named in both lists is DROPped
-    /// only while the deny is emitted first. The schema states the two lists
-    /// independently and fixes no order between them, which makes
-    /// establishing that order this function's job.
+    /// `deny` rules precede `allow` rules for the same first-match-wins reason
+    /// as the legacy lowering; the schema states the two lists independently
+    /// and fixes no order between them.
     fn lower_directional_egress(egress: &NetworkEgressPolicy) -> Vec<EgressEntry> {
         let mut entries = Vec::new();
         let default_action = match egress.default {
@@ -1515,14 +1468,9 @@ impl NetworkIptablesManager {
 
     /// Expand one 0.8 rule into one entry per (peer, port selector) pair.
     ///
-    /// The expansion happens here rather than in the emitter because a rule
-    /// names a set of destinations and a set of port selectors, while an
-    /// iptables rule names exactly one of each.
-    ///
-    /// An omitted `to` selects every destination, matching the schema's
-    /// documented wildcard behavior for an absent field. The parser rejects
-    /// an explicitly empty array, so an empty `to` here can only be the
-    /// omitted form.
+    /// An omitted `to` selects every destination; the parser rejects an
+    /// explicit empty array, leaving the omitted form as the only way an
+    /// empty `to` reaches here.
     fn lower_rule(
         rule: &NetworkRule,
         action: RuleAction,
@@ -1540,23 +1488,10 @@ impl NetworkIptablesManager {
 
         for peer in peers {
             for matching in &matches {
-                // An `except` range narrows the peer that follows it, and the
-                // chain is first-match-wins, so the carve-out must be emitted
-                // before the rule it narrows or it can never be reached.
-                //
-                // The carve-out carries the direction's default verdict rather
-                // than the opposite of the rule's own. The schema defines
-                // `except` as an exclusion from the peer, which puts the range
-                // outside the rule entirely and leaves it whatever the
-                // direction would have given it. Emitting the rule's opposite
-                // instead denies an excepted range under `default: allow` —
-                // the operator asking for a range to be spared and getting it
-                // blocked.
-                //
-                // Nothing is emitted when the two already agree: the range
-                // reaches the identical verdict at the closing rule, and an
-                // extra `iptables` invocation on the container-start path buys
-                // no change in behavior.
+                // The carve-out takes the direction's default verdict rather
+                // than the rule's own — `except` excludes the range from the
+                // rule; it does not reverse it. Nothing is pushed when the
+                // two verdicts already agree.
                 if default_action != action {
                     for excluded in &peer.except {
                         entries.push(EgressEntry {
@@ -1598,8 +1533,8 @@ impl NetworkIptablesManager {
     }
 
     /// Render a parsed CIDR back into the destination string `resolve_host`
-    /// reads. `resolve_host` passes a validated CIDR through untouched, so a
-    /// 0.8 peer and a legacy CIDR entry reach the emitter by the same path.
+    /// reads, letting a 0.8 peer and a legacy CIDR entry reach the emitter by
+    /// the same path.
     fn cidr_destination(cidr: &NetworkCidr) -> String {
         format!("{}/{}", cidr.address, cidr.prefix_length)
     }
@@ -1618,22 +1553,17 @@ impl NetworkIptablesManager {
     /// Lower one `ports` selector into the matches a single iptables rule can
     /// express.
     ///
-    /// Protocol `any` with a port is the case that yields two matches.
-    /// `-p all` accepts no `--dport`, and the port has to survive, so the
-    /// selector becomes one TCP match and one UDP match. ICMP is excluded
-    /// from that pair deliberately: it carries no port, so a selector naming
-    /// a port cannot have meant it.
+    /// Protocol `any` with a port yields separate TCP and UDP matches,
+    /// because `-p all` accepts no `--dport`.
     fn lower_port_selector(port: &NetworkPort) -> Vec<RuleMatch> {
         let ports = port.port.map(|start| PortRange {
             start,
-            // A selector with no `endPort` names a single port, which is the
-            // range whose ends are equal.
             end: port.end_port.unwrap_or(start),
         });
 
         match port.protocol {
-            // ICMP has no ports. A port alongside it is dropped rather than
-            // emitted, since `-p icmp --dport` is not a legal match.
+            // ICMP carries no ports and accepts no `--dport`; a port
+            // alongside it is dropped rather than emitted.
             NetworkProtocol::Icmp => vec![RuleMatch::Icmp],
             NetworkProtocol::Tcp => vec![RuleMatch::Transport {
                 protocol: TransportProtocol::Tcp,
@@ -1710,11 +1640,10 @@ impl NetworkIptablesManager {
                 }
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
             } else if matches!(action, RuleAction::Allow)
-                // A catch-all is what defeats an unwritten deny, and only an
-                // entry matching every protocol and port can do that. An
-                // allow of `0.0.0.0/0` on one port accepts a single port
-                // rather than whatever the unresolvable deny named, so
-                // counting it here would reject ordinary policies.
+
+                // Only an entry matching every protocol and port can defeat
+                // an unwritten deny; a narrower allow, like one port on
+                // `0.0.0.0/0`, must not count as a catch-all.
                 && matches!(entry.matching, RuleMatch::AnyTraffic)
                 && destinations
                     .ipv4
@@ -2071,11 +2000,8 @@ impl NetworkIptablesManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        // `enforcementMode` is deliberately not consulted here; a caller may get
-        // more enforcement than the mode asked for, never less. That is what
-        // makes a proxy safe without a special case: `requires_firewall` counts
-        // an enabled proxy, so a proxied policy can no longer reach this skip
-        // and report success while the runner injects HTTP(S)_PROXY into a
+        // A proxy counts toward requiring the firewall; skipping it here would
+        // report success while the runner still injects HTTP(S)_PROXY into a
         // container whose egress was never restricted.
         if !requires_firewall(policy) {
             logger.log_line(
@@ -2287,6 +2213,7 @@ impl NetworkIptablesManager {
             }
         } else {
             let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+
             // The field records the network format the parser actually chose,
             // not the version the request declared: a 0.8 request written in
             // the legacy shape lands here and keeps legacy DNS behavior.
@@ -3720,7 +3647,7 @@ mod tests {
 
     #[test]
     fn base_chain_rule_args_are_family_agnostic() {
-        // The same rules are fed to both iptables and ip6tables, so neither
+        // The same rules are fed to both iptables and ip6tables; neither
         // builder may name an address family or a v4-only protocol.
         let base = NetworkIptablesManager::build_base_chain_rule_args("MXC-test");
         let dns = NetworkIptablesManager::build_legacy_dns_exemption_rule_args("MXC-test");
@@ -4616,10 +4543,9 @@ mod tests {
         }
     }
 
-    // A 0.8 config cannot carry `enforcementMode` -- the parser rejects it
-    // beside `egress` -- so it always arrives with the `Capabilities` default.
-    // Reading the mode alone would skip the chain the `egress` section just
-    // asked for, leaving the policy unenforced while the run reported success.
+    // 0.8 cannot carry `enforcementMode` and always defaults to
+    // `Capabilities`; reading the mode alone would leave a stated egress
+    // posture unenforced.
     #[test]
     fn a_stated_directional_egress_posture_requests_the_firewall_under_the_capabilities_default() {
         let policy = ContainerPolicy {
@@ -4666,11 +4592,6 @@ mod tests {
     // an enforcement that never happened, while the runner still injects the
     // proxy environment -- a container that advertises a proxy and restricts
     // nothing.
-    // The runner injects HTTP(S)_PROXY from the same policy regardless of what
-    // the firewall does, so a proxied policy that skipped the chain would
-    // advertise a proxy and restrict nothing -- any client that ignores the
-    // environment reaches the network directly. Counting the proxy in the gate
-    // makes that skip unreachable rather than something to refuse afterward.
     #[test]
     fn a_proxied_policy_is_owed_the_firewall_whatever_mode_it_names() {
         let mut policy = policy_requiring_no_firewall();
@@ -4704,8 +4625,9 @@ mod tests {
         );
     }
 
-    // The gate stays narrow: a policy that restricts nothing and names no proxy
-    // has no rules to install, so skipping it is correct rather than dangerous.
+    // The gate stays narrow: a policy that restricts nothing and names no
+    // proxy has no rules to install, making the skip correct rather than
+    // dangerous.
     #[test]
     fn a_proxy_free_permissive_policy_still_skips_cleanly() {
         let policy = policy_requiring_no_firewall();
@@ -4720,8 +4642,8 @@ mod tests {
     }
 
     /// A policy whose only distinguishing feature is its enforcement mode.
-    /// Restrictive by default: `default_network_policy` is `Block`, so the
-    /// firewall is owed and the apply path runs.
+    /// Restrictive by default: `default_network_policy` is `Block`, keeping
+    /// the firewall owed and the apply path running.
     fn policy_with_enforcement_mode(
         network_enforcement_mode: NetworkEnforcementMode,
     ) -> ContainerPolicy {
@@ -4731,8 +4653,8 @@ mod tests {
         }
     }
 
-    /// A policy that restricts nothing at all, which is now the only shape the
-    /// firewall gate skips.
+    /// A policy that restricts nothing at all: the only shape the firewall
+    /// gate skips.
     fn policy_requiring_no_firewall() -> ContainerPolicy {
         ContainerPolicy {
             default_network_policy: NetworkPolicy::Allow,

@@ -1,10 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Black-box specification for schema 0.8 `network.egress` lowering.
-//!
-//! Written against the documented contract of the policy rule builder, not
-//! against its body.
+//! Black-box specification for schema 0.8 `network.egress` lowering, written
+//! against the rule builder's documented contract rather than its implementation.
 
 use super::*;
 
@@ -576,8 +574,6 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
 // DNS under a directional posture.
 // ---------------------------------------------------------------------------
 
-/// Apply `policy` against the command fake and return the rules appended to
-/// the container's IPv4 chain, in issue order.
 fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container);
@@ -599,12 +595,8 @@ fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<V
         .collect()
 }
 
-/// Whether the chain carries the legacy DNS exemption: the UDP and TCP port 53
-/// ACCEPT pair, sitting ahead of every generated policy rule and reaching every
-/// resolver on the internet.
-///
-/// A generated rule always names a destination, which is what tells the pair
-/// apart from an `egress.allow` entry that happens to name port 53.
+/// A generated rule always names a destination, unlike the legacy port 53
+/// exemption pair this checks for.
 fn opens_dns_unconditionally(rules: &[Vec<String>]) -> bool {
     let generated = rules
         .iter()
@@ -620,8 +612,6 @@ fn opens_dns_unconditionally(rules: &[Vec<String>]) -> bool {
     exempts("udp") && exempts("tcp")
 }
 
-/// Parse a request the way production does and hand back the policy the
-/// firewall installer will be given.
 fn policy_from_json(json: &str) -> ContainerPolicy {
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let request = wxc_common::config_parser::load_mxc_request_from_json(json, &mut logger)
@@ -632,12 +622,9 @@ fn policy_from_json(json: &str) -> ContainerPolicy {
     }
 }
 
-// A directional posture governs forwarded DNS with the same rules as every
-// other forwarded destination: a
-// resolver the policy never allowed is a resolver the container cannot reach.
-// The unconditional port 53 accept sits ahead of every generated rule, and
-// leaving it in place carries DNS out of a deny-all posture to the whole
-// internet.
+// A directional posture governs forwarded DNS the same as every other
+// forwarded destination: a resolver the policy never allowed is a resolver
+// the container cannot reach.
 #[test]
 fn a_directional_deny_default_chain_does_not_open_dns() {
     let policy = directional_policy(NetworkAction::Deny, vec![], vec![]);
@@ -649,9 +636,9 @@ fn a_directional_deny_default_chain_does_not_open_dns() {
     );
 }
 
-// The exemption must not survive on the allow-default branch either.  The
-// closing ACCEPT already reaches every destination, which would hide a
-// reintroduced exemption from the test above.
+// The closing ACCEPT on the allow-default branch already reaches every
+// destination, and could mask a reintroduced exemption undetected by the
+// test above.
 #[test]
 fn a_directional_allow_default_chain_does_not_open_dns() {
     let policy = directional_policy(NetworkAction::Allow, vec![], vec![]);
@@ -663,9 +650,8 @@ fn a_directional_allow_default_chain_does_not_open_dns() {
     );
 }
 
-// Removing the exemption must not make DNS unreachable when the policy asks
-// for it.  An explicit rule is what the schema offers in place of the
-// carve-out.
+// An explicit `egress.allow` rule is what the schema offers in place of the
+// automatic exemption.
 #[test]
 fn a_directional_policy_reaches_a_resolver_it_allows() {
     let policy = directional_policy(
@@ -688,9 +674,9 @@ fn a_directional_policy_reaches_a_resolver_it_allows() {
     );
 }
 
-// The shape the exemption defeated outright: a deny naming a resolver under an
-// allow default.  An unscoped accept ahead of it wins on first match and the
-// deny never fires.
+// Under iptables' first-match semantics, an unscoped accept ahead of an
+// explicit deny would win, silently defeating a deny naming the same
+// resolver.
 #[test]
 fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
     let policy = directional_policy(
@@ -716,10 +702,11 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
     );
 }
 
-// Negative control for the four tests above: the legacy path keeps the
-// exemption.  Schema 0.7 carries no field naming a legitimate resolver, and
-// the limitation is documented rather than closed.  Without this, those tests
-// would pass against a manager that had stopped emitting base rules at all.
+// Negative control for the four tests above: without a manager that still
+// emits the legacy exemption, those tests would pass vacuously against one
+// that had stopped emitting base rules at all.  Schema 0.7 carries no field
+// naming a legitimate resolver, leaving the exemption a documented limitation
+// rather than a closed gap.
 #[test]
 fn a_legacy_policy_still_opens_dns() {
     let policy = ContainerPolicy::default();
@@ -734,10 +721,9 @@ fn a_legacy_policy_still_opens_dns() {
 // ---------------------------------------------------------------------------
 // The same contract driven from a request rather than a hand-built policy.
 //
-// Everything above hands the installer a policy assembled in the test, so it
-// cannot catch a parser that stopped agreeing with it.  The exemption follows
-// the network format the parser selected, and these four cover every route
-// into that decision.
+// These four tests drive the policy through the real parser rather than
+// assembling it by hand, catching a parser that selects the wrong network
+// format branch.
 // ---------------------------------------------------------------------------
 
 #[test]

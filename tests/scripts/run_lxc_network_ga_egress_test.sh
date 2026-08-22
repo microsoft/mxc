@@ -1,39 +1,11 @@
 #!/bin/bash
 # LXC schema 0.8 egress enforcement test
 #
-# The sibling enforcement script covers the legacy 0.7 host lists. This one
-# covers the 0.8 `network.egress` section, which reaches the chain by a
-# different route: a 0.8 config cannot carry `enforcementMode` at all -- the
-# parser rejects it beside `egress` -- so the firewall gate has to be satisfied
-# by the directional posture itself.
+# Asserts reachability rather than a log line: a chain can install cleanly,
+# name the right chain, and still filter nothing.
 #
-# Every case asserts reachability rather than a log line, for the reason given
-# in run_lxc_network_enforcement_test.sh: a chain can install cleanly, name the
-# right chain, and still filter nothing.
-#
-# The five cases are chosen so that no single defect leaves the suite green:
-#
-#   deny         egress.default deny, no rules       -> unreachable
-#   allow        same default, CIDR + tcp/443 rule   -> reachable
-#   wrong_port   same CIDR, tcp/444 instead of 443   -> unreachable
-#   dns_denied   same default, DNS probe to 8.8.8.8  -> unreachable
-#   dns_allowed  same probe, 8.8.8.8/32 + udp/53     -> reachable
-#
-# The allow case alone would pass on a backend that skipped enforcement
-# entirely, and the deny case alone would pass on a host with no working
-# network. The wrong-port case is what proves the port selector is enforced
-# rather than parsed and dropped: it differs from the allow case in one field,
-# so a backend that ignored `ports` would let it through.
-#
-# The two DNS cases exist because the legacy chain accepts UDP and TCP port 53
-# unconditionally, ahead of every generated rule. Carried into a directional
-# posture that would leave an `egress.default: "deny"` container able to reach
-# any resolver on the internet -- a standing DNS-tunnel path out of a deny-all
-# policy. A directional posture governs port 53 like any other forwarded
-# destination (GA decision
-# D3), and the pair proves both halves: denied by default, reachable when the
-# policy names the resolver. The allowed case is the control that keeps the
-# denied case from passing on a container that simply has no DNS at all.
+# A directional posture carries no port 53 exemption, unlike the legacy chain,
+# which is what the two DNS cases pin.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,8 +16,7 @@ if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
-# An honest skip for a missing prerequisite: exit 77 so run_lxc_all_tests.sh
-# records SKIPPED rather than PASS. A suite that could not run must not look green.
+# Exit 77 is what run_lxc_all_tests.sh records as SKIPPED rather than PASS.
 SKIP_EXIT=77
 skip() {
     echo "SKIP: $1"
@@ -72,8 +43,8 @@ fail() {
 # shellcheck source=lib/chain_name.sh
 . "$SCRIPT_DIR/lib/chain_name.sh"
 
-# Compared against a snapshot taken before the run, so chains left behind by an
-# earlier failed run are not blamed on this one.
+# The snapshot keeps chains left behind by an earlier failed run from being
+# blamed on this one.
 assert_no_new_mxc_chains() {
     local tool="$1" before="$2" after="" leaked="" chain
     if ! after="$(mxc_chains "$tool")"; then
@@ -106,18 +77,14 @@ assert_no_forward_reference() {
     fi
 }
 
-# A 0.8 config leaves `network.enforcementMode` at its `capabilities` default
-# because the schema has no such field to set. A backend that reads the mode
-# alone skips the chain and reports success, which is a silent unenforced run
-# rather than a failure. The skip is announced in the log, so the absence of
-# that line is checkable directly and does not depend on the verdict.
+# A backend reading `enforcementMode` alone skips the chain and still reports
+# success, which is a silent unenforced run rather than a failure.
 assert_enforcement_not_skipped() {
     if echo "$1" | grep -Fq "does not use firewall, skipping"; then
         fail "the 0.8 config was treated as not using the firewall, so no rules were installed. The directional posture is not reaching the firewall gate."
     fi
 }
 
-# Run one case and return its output, verifying cleanup for the chain it used.
 run_case() {
     local label="$1" config="$2" output="" 
     echo "--- $label ---"
@@ -152,9 +119,9 @@ assert_allowed() {
 
 echo "Running LXC schema 0.8 egress enforcement test..."
 
-# This config states `egress` and nothing else. It is also the shape that a
-# backend claiming only the two egress support bits would reject outright, so
-# reaching a verdict here at all exercises the support declaration.
+# An egress-only config is the shape a backend claiming only the two egress
+# bits would reject outright, which makes any verdict here a test of the
+# support declaration.
 run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG"
 assert_blocked "egress succeeded under egress.default deny with no allow rules. The chain is not filtering this container's traffic."
 

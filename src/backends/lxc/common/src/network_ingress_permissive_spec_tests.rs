@@ -213,11 +213,8 @@ fn default_deny_with_netns_is_not_the_permissive_refusal() {
     }
 }
 
-/// allow_local_network=true on a policy with nothing to enforce.
-///
-/// The firewall gate returns early before the firewall path is entered, so the
-/// permissive guard is never reached.  This catches anyone who hoists the guard
-/// above the gate, which would break every config that has no rules to install.
+/// Catches a guard hoisted above the gate, which would break every config
+/// that has no rules to install.
 #[test]
 fn permissive_inbound_with_nothing_to_enforce_is_not_refused() {
     let policy = ContainerPolicy {
@@ -231,7 +228,6 @@ fn permissive_inbound_with_nothing_to_enforce_is_not_refused() {
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
 
-    // A policy with nothing to enforce returns Ok(true) before the firewall path.
     assert!(
         result.is_ok(),
         "allow_local_network=true with nothing to enforce: expected early Ok, got {:?}",
