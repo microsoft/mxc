@@ -8,7 +8,8 @@
 [CmdletBinding()]
 param(
     [string]$BinDir = (Join-Path $PSScriptRoot '..\..\src\target\debug'),
-    [string]$PackageOutput = (Join-Path $env:TEMP 'mxc-proxy-test-packages')
+    [string]$PackageOutput = (Join-Path $env:TEMP 'mxc-proxy-test-packages'),
+    [switch]$PackagedOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,7 +32,8 @@ if (-not (Test-Path $wxc) -or -not (Test-Path $proxy)) {
 $principal = [Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+if (-not $PackagedOnly -and
+    -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Proxy identity E2E tests require an elevated PowerShell session.'
 }
 
@@ -209,32 +211,34 @@ try {
     Invoke-Client -Name 'packaged-fulltrust' -AllowedPeer $peer
     Stop-Proxy $processes[-1]
 
-    $proxyPid = Invoke-ProxyLauncherPid @(
-        'launch-appcontainer',
-        '--profile', $appContainerProfile,
-        '--port', "$proxyPort"
-    )
-    $process = Get-Process -Id $proxyPid
-    $processes += $process
-    $profileSid = Invoke-ProxyLauncher @(
-        'derive-appcontainer-sid',
-        '--profile', $appContainerProfile
-    )
-    $rule = "MXC proxy test $PID appcontainer"
-    New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort $proxyPort -Program $proxy -Package $profileSid | Out-Null
-    $firewallRules += $rule
+    if (-not $PackagedOnly) {
+        $proxyPid = Invoke-ProxyLauncherPid @(
+            'launch-appcontainer',
+            '--profile', $appContainerProfile,
+            '--port', "$proxyPort"
+        )
+        $process = Get-Process -Id $proxyPid
+        $processes += $process
+        $profileSid = Invoke-ProxyLauncher @(
+            'derive-appcontainer-sid',
+            '--profile', $appContainerProfile
+        )
+        $rule = "MXC proxy test $PID appcontainer"
+        New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort $proxyPort -Program $proxy -Package $profileSid | Out-Null
+        $firewallRules += $rule
 
-    Wait-Proxy -Port $proxyPort -Process $process
-    Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $appContainerProfile
-    Stop-Proxy $process
+        Wait-Proxy -Port $proxyPort -Process $process
+        Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $appContainerProfile
+        Stop-Proxy $process
 
-    $rule = "MXC proxy test $PID fulltrust"
-    New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
-        -Protocol TCP -LocalPort $proxyPort -Program $proxy | Out-Null
-    $firewallRules += $rule
-    Start-UnpackagedProxy
-    Invoke-Client -Name 'unpackaged-fulltrust' -HostLoopback allow
+        $rule = "MXC proxy test $PID fulltrust"
+        New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
+            -Protocol TCP -LocalPort $proxyPort -Program $proxy | Out-Null
+        $firewallRules += $rule
+        Start-UnpackagedProxy
+        Invoke-Client -Name 'unpackaged-fulltrust' -HostLoopback allow
+    }
 } finally {
     foreach ($process in $processes) {
         if ($process -and -not $process.HasExited) {
