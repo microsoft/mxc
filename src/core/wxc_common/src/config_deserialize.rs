@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::splice::SourceEdit;
 use std::fmt;
 
 use serde::{de::DeserializeOwned, Deserialize, Deserializer};
@@ -264,6 +265,40 @@ fn escape_control_characters(value: &str) -> String {
         }
     }
     escaped
+}
+
+pub(crate) fn remap_error_through_edit(
+    error: ConfigDeserializeError,
+    edited_source: &str,
+    original_source: &str,
+    edit: &SourceEdit,
+) -> ConfigDeserializeError {
+    let Some((line, column)) = error.source_line_column() else {
+        return error;
+    };
+
+    let Some(offset) = byte_offset_of_line_col(edited_source, line, column) else {
+        return error;
+    };
+
+    let original_offset = if offset < edit.replacement_range.start {
+        offset
+    } else if offset >= edit.replacement_range.end {
+        let Some(original_offset) = offset
+            .checked_sub(edit.replacement_range.len())
+            .and_then(|offset| offset.checked_add(edit.original_range.len()))
+        else {
+            return error;
+        };
+        original_offset
+    } else {
+        edit.original_range.start
+    };
+
+    let (original_line, original_column) =
+        line_col_of_byte_offset(original_source, original_offset);
+
+    error.with_source_location(original_line, original_column)
 }
 
 /// Escape control and invisible-format characters in free-form, user-controlled

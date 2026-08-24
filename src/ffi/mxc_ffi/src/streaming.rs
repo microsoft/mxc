@@ -312,8 +312,7 @@ fn spawn_inner(
         )
     })?;
 
-    let mut request = build_request(&policy, None).map_err(sdk_error_detail)?;
-    request.set_script(command);
+    let request = build_request(&policy, command, None).map_err(sdk_error_detail)?;
 
     spawn_sandbox(request).map_err(sdk_error_detail)
 }

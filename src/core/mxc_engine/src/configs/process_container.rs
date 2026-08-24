@@ -274,6 +274,8 @@ mod tests {
         RuntimeConfigSection,
     };
 
+    const TEST_COMMAND: &str = "echo hello";
+
     fn policy(network: Option<NetworkSection>) -> SandboxPolicy {
         policy_for_version("0.8.0-alpha", network)
     }
@@ -313,6 +315,7 @@ mod tests {
         let config = build_wire_config(
             &policy(None),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             Some("sdk-test"),
         )
         .expect("ProcessContainer config should build");
@@ -370,6 +373,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect("directional network config should build");
@@ -400,6 +404,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("directional network config should build");
@@ -427,6 +432,7 @@ mod tests {
         let config = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect("schema 0.8 config should build");
@@ -461,6 +467,7 @@ mod tests {
             let error = build_wire_config(
                 &policy_for_version("0.7.0-alpha", None),
                 &crate::policy::Containment::ProcessContainer(process_container),
+                TEST_COMMAND,
                 None,
             )
             .expect_err("schema 0.7 must reject schema 0.8 ProcessContainer fields");
@@ -475,6 +482,7 @@ mod tests {
         let config = build_wire_config(
             &policy_for_version("0.7.0-alpha", None),
             &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("default ProcessContainer should remain valid for schema 0.7");
@@ -499,6 +507,7 @@ mod tests {
         let error = build_wire_config(
             &policy(Some(network)),
             &crate::policy::Containment::ProcessContainer(process_container),
+            TEST_COMMAND,
             None,
         )
         .expect_err("legacy and ProcessContainer directional networking must not mix");

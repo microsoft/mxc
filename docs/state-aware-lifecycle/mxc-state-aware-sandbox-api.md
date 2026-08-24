@@ -1100,23 +1100,43 @@ validates the wire model, and maps it into the typed domain models
 (`convert_wire_config` → `ExecutionRequest`, with `From` impls beside the
 domain types for trivial enum/struct conversions). The state-aware path reuses
 this wire model while retaining its per-backend `experimental` subtree for
-dispatch-time typing.
+dispatch-time typing. When the CLI supplies a command, the parser first renders
+it for the probed backend and splices it into `process.commandLine`. The splice
+retains a source edit map so typed errors are reported against the caller's
+original line and column coordinates. A CLI-specific probe or rendering failure
+is deferred until the original policy has passed typed validation, so it cannot
+hide an earlier policy error. If a typed request uses a representation that
+cannot be safely source-spliced, the CLI override fails closed after typed
+policy validation rather than silently retaining the policy command.
 
 ```rust
-// In config_parser.rs — discrimination is by presence of the `phase` key in
-// the source JSON without building a full untyped request tree.
+// In config_parser.rs — apply the CLI command before typed parsing.
+let effective = match apply_cli_command(&json_str, opts.cli_command, logger) {
+    Ok(effective) => effective,
+    Err(cli_error) => {
+        return parse_before_cli_error(&json_str, cli_error, logger);
+    }
+};
+let source_map = effective.edit.as_ref().map(|edit| SourceMap {
+    original: &json_str,
+    edit,
+});
+
+// Discrimination is by presence of the `phase` key in the effective source,
+// without building a full untyped request tree.
 let discriminator: RequestDiscriminator<'_> =
-    config_deserialize::from_str(&json_str)?;
+    deserialize_with_source_map(&effective.json, source_map)?;
 if discriminator.phase.is_some() {
     convert_wire_state_aware(
-        &json_str,
+        &effective.json,
         discriminator.experimental,
+        source_map,
         logger,
-        allow_missing_command,
     )
 } else {
-    let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)?;
-    convert_wire_config(cfg, logger, true, allow_missing_command)
+    let cfg: wire::MxcConfig =
+        deserialize_with_source_map(&effective.json, source_map)?;
+    convert_wire_config(cfg, logger, true, false)
 }
 ```
 

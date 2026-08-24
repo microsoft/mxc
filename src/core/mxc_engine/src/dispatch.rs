@@ -326,7 +326,8 @@ mod tests {
         // `dry_run` ("validate, don't execute") has no process to stream, so the
         // streaming spawn rejects it. The public `SandboxRequest` can't set it,
         // so drive the dispatch directly with the internal model.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.dry_run = true;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
@@ -342,7 +343,8 @@ mod tests {
         // clear `UnsupportedContainment` rather than spawning. The public
         // `SandboxRequest` can't choose a backend, so drive dispatch with the
         // internal model.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Lxc;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
@@ -379,8 +381,7 @@ mod tests {
             ui: None,
             timeout_ms: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request");
-        request.set_script("echo hi");
+        let request = build_request(&policy, "echo hi", None).expect("build_request");
         request
             .inner
             .seatbelt
@@ -400,7 +401,8 @@ mod tests {
     fn streaming_rejects_wslc_off_windows() {
         // WSLC is a Windows-host backend; selecting it anywhere else must be a
         // clear `UnsupportedContainment` rather than a confusing spawn failure.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Wslc;
         request.set_experimental(true);
         let mut logger = Logger::new(Mode::Buffer);
@@ -417,7 +419,8 @@ mod tests {
     fn streaming_rejects_wslc_without_experimental() {
         // The experimental gate is fail-closed: selecting WSLC without opting
         // in must be rejected before any container is created.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
+        let mut request =
+            build_request(&minimal_policy(), "echo hello", None).expect("build_request");
         request.inner.containment = ContainmentBackend::Wslc;
         let mut logger = Logger::new(Mode::Buffer);
         let err = match spawn_runner(&request.inner, &mut logger) {
