@@ -20,17 +20,25 @@ mod proxy;
     about = "Builtin test proxy for wxc integration testing (NOT for production use)"
 )]
 struct Cli {
+    /// Loopback port to listen on. Zero selects an OS-assigned port.
+    #[arg(long, default_value_t = 0)]
+    port: u16,
+
     /// Path where the proxy writes its port number once ready.
     #[arg(long = "ready-file")]
-    ready_file: PathBuf,
+    ready_file: Option<PathBuf>,
 
     /// Name of the Windows event to wait on for cleanup signal.
     #[arg(long = "cleanup-event")]
-    cleanup_event: String,
+    cleanup_event: Option<String>,
 
     /// PID of the parent process — proxy exits if the parent dies.
     #[arg(long = "parent-pid")]
-    parent_pid: u32,
+    parent_pid: Option<u32>,
+
+    /// Keep running until the process is terminated externally.
+    #[arg(long)]
+    standalone: bool,
 }
 
 #[tokio::main]
@@ -42,19 +50,32 @@ async fn main() {
 
     let cli = Cli::parse();
 
-    let port = proxy::start().await;
+    let port = proxy::start(cli.port).await;
     eprintln!("[wxc-test-proxy] Listening on 127.0.0.1:{}", port);
 
-    if let Err(err) = fs::write(&cli.ready_file, port.to_string()) {
-        eprintln!(
-            "[wxc-test-proxy] Failed to write ready file {}: {}",
-            cli.ready_file.display(),
-            err
-        );
-        std::process::exit(1);
+    if let Some(ready_file) = &cli.ready_file {
+        if let Err(err) = fs::write(ready_file, port.to_string()) {
+            eprintln!(
+                "[wxc-test-proxy] Failed to write ready file {}: {}",
+                ready_file.display(),
+                err
+            );
+            std::process::exit(1);
+        }
     }
 
-    wait_for_shutdown(&cli.cleanup_event, cli.parent_pid);
+    if cli.standalone {
+        std::future::pending::<()>().await;
+    }
+
+    let (Some(cleanup_event), Some(parent_pid)) = (cli.cleanup_event.as_deref(), cli.parent_pid)
+    else {
+        eprintln!(
+            "[wxc-test-proxy] --cleanup-event and --parent-pid are required unless --standalone is used"
+        );
+        std::process::exit(2);
+    };
+    wait_for_shutdown(cleanup_event, parent_pid);
     eprintln!("[wxc-test-proxy] Shutting down.");
 }
 
