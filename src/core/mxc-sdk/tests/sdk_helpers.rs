@@ -163,7 +163,35 @@ fn build_request_host_rules_require_outbound() {
 }
 
 #[test]
-fn public_reexports_build_process_container_networking_and_capture() {
+fn rust_sdk_builds_legacy_process_container_networking() {
+    use mxc_sdk::configs::ProcessContainerSection;
+    use mxc_sdk::policy::NetworkSection;
+    use mxc_sdk::{build_request_with_containment, Containment};
+
+    let mut network = NetworkSection::default();
+    network.allow_outbound = true;
+    network.allow_local_network = true;
+    network.allowed_hosts = vec!["allowed.example".to_string()];
+    network.blocked_hosts = vec!["blocked.example".to_string()];
+
+    let policy = SandboxPolicy {
+        version: "0.7.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    build_request_with_containment(
+        &policy,
+        &Containment::ProcessContainer(ProcessContainerSection::default()),
+        None,
+    )
+    .expect("the Rust SDK should build legacy ProcessContainer networking");
+}
+
+#[test]
+fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     use mxc_sdk::configs::{
         CaptureDenialsSection, ProcessContainerNetworkSection, ProcessContainerSection,
     };
