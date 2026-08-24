@@ -11,30 +11,28 @@
 //!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
 //!   Bubblewrap, and ProcessContainer.
 
-mod network;
-mod process_container;
+pub(crate) mod network;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::configs::process_container;
+use crate::configs::ProcessContainerSection;
+#[cfg(test)]
+use crate::configs::{CaptureDenialsMode, CaptureDenialsSection};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
 
 #[cfg(target_os = "linux")]
 use network::has_host_rules;
-use network::proxy_to_wire;
+use network::{proxy_to_wire, select_network_format, NetworkFormat};
 pub use network::{
     NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
     NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
     RuntimeConfigSection,
 };
-pub use process_container::{
-    CaptureDenialsMode, CaptureDenialsSection, ProcessContainerNetworkSection,
-    ProcessContainerSection, ProcessContainerUiIsolation, ProcessContainerUiSection,
-};
-
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
 // ---------------------------------------------------------------------------
@@ -757,7 +755,7 @@ pub fn build_request_with_containment(
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
-fn build_wire_config(
+pub(crate) fn build_wire_config(
     policy: &SandboxPolicy,
     containment: &Containment,
     container_name: Option<&str>,
@@ -817,13 +815,21 @@ fn build_wire_config(
         Containment::IsolationSession => false,
     };
 
-    if let Some(net) = &policy.network {
-        if net.has_directional_fields() && net.has_legacy_fields() {
-            return Err(MxcError::malformed_request(
-                "schema 0.8 network egress/ingress/runtimeConfig cannot be combined with legacy network fields",
-            ));
-        }
+    let has_process_container_network = match containment {
+        Containment::ProcessContainer(process_container) => process_container
+            .network
+            .as_ref()
+            .and_then(|network| network.allowed_proxy_peer.as_deref())
+            .is_some_and(|peer| !peer.trim().is_empty()),
+        _ => false,
+    };
+    let network_format = select_network_format(
+        &policy.version,
+        policy.network.as_ref(),
+        has_process_container_network,
+    )?;
 
+    if let Some(net) = &policy.network {
         if !accepts_host_rules_without_outbound
             && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
             && !net.allow_outbound
@@ -832,43 +838,56 @@ fn build_wire_config(
                 "allowedHosts/blockedHosts require allowOutbound to be true",
             ));
         }
+    }
 
-        if net.has_directional_fields() {
-            if net.egress.is_some() || net.ingress.is_some() {
-                config["network"] = json!({
-                    "egress": net.egress,
-                    "ingress": net.ingress,
-                });
+    match network_format {
+        NetworkFormat::Directional => {
+            if let Some(net) = &policy.network {
+                if net.egress.is_some() || net.ingress.is_some() {
+                    config["network"] = json!({
+                        "egress": net.egress,
+                        "ingress": net.ingress,
+                    });
+                }
+                if let Some(runtime_config) = &net.runtime_config {
+                    config["runtimeConfig"] =
+                        serde_json::to_value(runtime_config).map_err(|error| {
+                            MxcError::malformed_request(format!(
+                                "failed to serialize runtimeConfig: {error}"
+                            ))
+                        })?;
+                }
             }
-            if let Some(runtime_config) = &net.runtime_config {
-                config["runtimeConfig"] =
-                    serde_json::to_value(runtime_config).map_err(|error| {
-                        MxcError::malformed_request(format!(
-                            "failed to serialize runtimeConfig: {error}"
-                        ))
-                    })?;
-            }
-        } else {
-            let mut network = json!({
-                "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
-                "allowLocalNetwork": net.allow_local_network,
-                "allowedHosts": net.allowed_hosts,
-                "blockedHosts": net.blocked_hosts,
-            });
-            if let Some(proxy) = &net.proxy {
-                network["proxy"] = proxy_to_wire(proxy);
-            }
-            config["network"] = network;
         }
-    } else {
-        config["network"] = json!({ "defaultPolicy": "block" });
+        NetworkFormat::Legacy => {
+            if let Some(net) = &policy.network {
+                let mut network = json!({
+                    "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
+                    "allowLocalNetwork": net.allow_local_network,
+                    "allowedHosts": net.allowed_hosts,
+                    "blockedHosts": net.blocked_hosts,
+                });
+                if let Some(proxy) = &net.proxy {
+                    network["proxy"] = proxy_to_wire(proxy);
+                }
+                config["network"] = network;
+            } else {
+                config["network"] = json!({ "defaultPolicy": "block" });
+            }
+        }
     }
 
     match containment {
-        Containment::Process => apply_host_process_backend(&mut config, policy, &container_id)?,
-        Containment::ProcessContainer(process_container) => {
-            process_container::apply(&mut config, policy, process_container, "processcontainer")?
+        Containment::Process => {
+            apply_host_process_backend(&mut config, policy, network_format, &container_id)?
         }
+        Containment::ProcessContainer(process_container) => process_container::apply(
+            &mut config,
+            policy,
+            process_container,
+            network_format,
+            "processcontainer",
+        )?,
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
         Containment::IsolationSession => {
             config["containment"] = serde_json::json!("isolation_session");
@@ -884,6 +903,7 @@ fn build_wire_config(
 fn apply_host_process_backend(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
+    network_format: NetworkFormat,
     container_id: &str,
 ) -> Result<(), MxcError> {
     use serde_json::json;
@@ -893,13 +913,13 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "linux")]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
         apply_linux_network_policy(config);
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
         config["containment"] = json!("seatbelt");
         if config.get("seatbelt").is_none() {
             config["seatbelt"] = json!({});
@@ -913,13 +933,14 @@ fn apply_host_process_backend(
             config,
             policy,
             &ProcessContainerSection::default(),
+            network_format,
             "process",
         )?;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
     }
 
     Ok(())

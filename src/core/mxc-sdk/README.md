@@ -37,26 +37,30 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [`spawn_sandbox`] when you need to drive the process live (see
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
-[`build_request`] resolves the host's containment backend (Seatbelt on macOS,
-Bubblewrap on Linux, ProcessContainer on Windows), builds the wire config, and
-runs it through the shared parser. The returned [`SandboxRequest`] has an empty
-command line — set the command with [`SandboxRequest::set_script`] (and any
-working directory / env) before spawning.
+[`build_request`] resolves the host's default containment backend (see
+[Supported backends](#supported-backends)), builds the wire config, and runs it
+through the shared parser. The returned [`SandboxRequest`] has an empty command
+line — set the command with [`SandboxRequest::set_script`] (and any working
+directory / env) before spawning.
 
 To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
 
 Configure a Windows ProcessContainer with
-`Containment::ProcessContainer(ProcessContainerSection { ... })`.
-`ProcessContainerSection` controls least-privilege creation, learning mode,
-capabilities, BaseProcessContainer UI isolation, proxy peer identity, and
-denial capture. Schema 0.8 directional networking is available through
+`Containment::ProcessContainer(ProcessContainerSection::default())`.
+`ProcessContainerSection` controls learning mode, capabilities,
+BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
+Schema 0.8 directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
+
+Policy section structs are non-exhaustive so fields can be added compatibly.
+Construct them with `Default`, then assign the settings the request needs.
 
 ```rust,no_run
 use mxc_sdk::{
-    build_request_with_containment, policy::CaptureDenialsSection, Containment,
-    ProcessContainerSection, SandboxPolicy,
+    build_request_with_containment,
+    configs::{CaptureDenialsSection, ProcessContainerSection},
+    Containment, SandboxPolicy,
 };
 
 let policy = SandboxPolicy {
@@ -66,11 +70,9 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: None,
 };
-let process_container = ProcessContainerSection {
-    capabilities: vec!["registryRead".to_string()],
-    capture_denials: Some(CaptureDenialsSection::default()),
-    ..Default::default()
-};
+let mut process_container = ProcessContainerSection::default();
+process_container.capabilities = vec!["registryRead".to_string()];
+process_container.capture_denials = Some(CaptureDenialsSection::default());
 let request = build_request_with_containment(
     &policy,
     &Containment::ProcessContainer(process_container),
@@ -184,22 +186,24 @@ runner records every access the policy does not grant and writes them to a JSON
 denials document.
 
 ```rust
-use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
-use mxc_sdk::{Containment, ProcessContainerSection};
+use mxc_sdk::configs::{
+    CaptureDenialsMode, CaptureDenialsSection, ProcessContainerSection,
+};
+use mxc_sdk::Containment;
 
-let containment = Containment::ProcessContainer(ProcessContainerSection {
-    capture_denials: Some(CaptureDenialsSection {
-        // `Block` (the default) keeps deny-by-default and records the denial;
-        // `Allow` runs permissively and records what *would* have been denied.
-        mode: CaptureDenialsMode::Block,
-        // Absolute path; a per-run id is stamped into the stem
-        // (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
-        output_path: None,
-        // Preserve the sealed ETL and report its path in output metadata.
-        retain_etl: false,
-    }),
-    ..Default::default()
-});
+let mut capture = CaptureDenialsSection::default();
+// `Block` (the default) keeps deny-by-default and records the denial;
+// `Allow` runs permissively and records what *would* have been denied.
+capture.mode = CaptureDenialsMode::Block;
+// Absolute path; a per-run id is stamped into the stem
+// (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
+capture.output_path = None;
+// Preserve the sealed ETL and report its path in output metadata.
+capture.retain_etl = false;
+
+let mut process_container = ProcessContainerSection::default();
+process_container.capture_denials = Some(capture);
+let containment = Containment::ProcessContainer(process_container);
 ```
 
 `Allow` relaxes containment for the run — it is reported through `warnings()`.

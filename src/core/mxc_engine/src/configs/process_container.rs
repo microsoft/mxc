@@ -1,14 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! ProcessContainer-specific policy authoring types and wire mapping.
+//! ProcessContainer-specific configuration types and wire mapping.
 
-use super::network::has_host_rules;
-use super::{NetworkAction, SandboxPolicy};
+use crate::policy::network::{has_host_rules, NetworkFormat};
+use crate::policy::{NetworkAction, SandboxPolicy};
 
 /// How denial capture handles ungranted access checks.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
 pub enum CaptureDenialsMode {
     /// Keep the access denied and record the denial.
     #[default]
@@ -18,7 +19,7 @@ pub enum CaptureDenialsMode {
 }
 
 impl CaptureDenialsMode {
-    pub(super) fn wire(self) -> &'static str {
+    pub(crate) fn wire(self) -> &'static str {
         match self {
             Self::Block => "block",
             Self::Allow => "allow",
@@ -34,6 +35,7 @@ impl CaptureDenialsMode {
 /// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[non_exhaustive]
 pub struct CaptureDenialsSection {
     /// How each ungranted access check is handled while it is recorded.
     pub mode: CaptureDenialsMode,
@@ -50,6 +52,7 @@ pub struct CaptureDenialsSection {
 
 /// ProcessContainer settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProcessContainerSection {
     /// Enable least-privilege process creation.
     pub least_privilege: bool,
@@ -80,6 +83,7 @@ impl Default for ProcessContainerSection {
 
 /// ProcessContainer-specific network settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProcessContainerNetworkSection {
     /// Package family name or AppContainer profile authorized as proxy peer.
     pub allowed_proxy_peer: Option<String>,
@@ -87,6 +91,7 @@ pub struct ProcessContainerNetworkSection {
 
 /// BaseProcessContainer user-interface settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProcessContainerUiSection {
     /// Desktop-resource isolation level.
     pub isolation: ProcessContainerUiIsolation,
@@ -111,6 +116,7 @@ impl Default for ProcessContainerUiSection {
 
 /// Desktop-resource isolation level for BaseProcessContainer.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ProcessContainerUiIsolation {
     Desktop,
     Handles,
@@ -130,10 +136,11 @@ impl ProcessContainerUiIsolation {
     }
 }
 
-pub(super) fn apply(
+pub(crate) fn apply(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
     process_container: &ProcessContainerSection,
+    network_format: NetworkFormat,
     containment: &str,
 ) -> Result<(), wxc_common::mxc_error::MxcError> {
     use serde_json::json;
@@ -142,11 +149,20 @@ pub(super) fn apply(
 
     let mut capabilities = process_container.capabilities.clone();
     if let Some(net) = &policy.network {
-        let allows_internet = net.allow_outbound
-            || net.egress.as_ref().is_some_and(|egress| {
-                egress.default == Some(NetworkAction::Allow)
-                    || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
-            });
+        let (allows_internet, allows_local_network) = match network_format {
+            NetworkFormat::Legacy => (net.allow_outbound, net.allow_local_network),
+            NetworkFormat::Directional => {
+                let allows_internet = net.egress.as_ref().is_some_and(|egress| {
+                    egress.default == Some(NetworkAction::Allow)
+                        || egress.allow.as_ref().is_some_and(|rules| !rules.is_empty())
+                });
+                let allows_local_network = net
+                    .ingress
+                    .as_ref()
+                    .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
+                (allows_internet, allows_local_network)
+            }
+        };
         if allows_internet
             && !capabilities
                 .iter()
@@ -154,11 +170,6 @@ pub(super) fn apply(
         {
             capabilities.push("internetClient".to_string());
         }
-        let allows_local_network = net.allow_local_network
-            || net
-                .ingress
-                .as_ref()
-                .is_some_and(|ingress| ingress.default == Some(NetworkAction::Allow));
         if allows_local_network
             && !capabilities
                 .iter()
@@ -197,8 +208,8 @@ pub(super) fn apply(
             "retainEtl": capture_denials.retain_etl,
         });
     }
-    if let Some(network) = config.get_mut("network") {
-        if network.get("egress").is_none() && network.get("ingress").is_none() {
+    if network_format == NetworkFormat::Legacy {
+        if let Some(network) = config.get_mut("network") {
             let mode = if has_host_rules(network) {
                 "both"
             } else {
@@ -270,6 +281,7 @@ mod tests {
             config["processContainer"]["network"]["allowedProxyPeer"],
             "Contoso.Proxy_123"
         );
+        assert!(config.get("network").is_none());
         assert_eq!(
             config["processContainer"]["captureDenials"]["mode"],
             "allow"
@@ -317,5 +329,28 @@ mod tests {
             "http://127.0.0.1:8080"
         );
         assert!(config["network"].get("defaultPolicy").is_none());
+    }
+
+    #[test]
+    fn rejects_process_container_network_with_legacy_network_config() {
+        let network = NetworkSection {
+            allow_outbound: true,
+            ..Default::default()
+        };
+        let process_container = ProcessContainerSection {
+            network: Some(ProcessContainerNetworkSection {
+                allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let error = build_wire_config(
+            &policy(Some(network)),
+            &crate::policy::Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect_err("legacy and ProcessContainer directional networking must not mix");
+
+        assert!(error.message.contains("cannot be combined"));
     }
 }
