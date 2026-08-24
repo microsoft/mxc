@@ -83,14 +83,16 @@
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, Wslc};
+//! use mxc_sdk::{
+//!     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
+//! };
 //!
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
-//! let wslc = Wslc { image: "python:3.12".to_string(), ..Default::default() };
+//! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 //! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 //! request.set_script("python3 -c 'print(42)'").set_experimental(true);
 //! let output = run(request)?;
@@ -147,7 +149,7 @@ pub use mxc_engine::{
     BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, NetworkAction,
     NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
     NetworkProtocol, NetworkRuleSection, PlatformSupport, RuntimeConfigSection, SandboxPolicy,
-    SandboxRequest, Wslc,
+    SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{

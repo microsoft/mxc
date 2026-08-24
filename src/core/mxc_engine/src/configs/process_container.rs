@@ -3,7 +3,7 @@
 
 //! ProcessContainer-specific configuration types and wire mapping.
 
-use crate::policy::network::{has_host_rules, NetworkFormat};
+use crate::policy::network::{has_host_rules, supports_schema_v0_8, NetworkFormat};
 use crate::policy::{NetworkAction, SandboxPolicy};
 
 /// How denial capture handles ungranted access checks.
@@ -98,7 +98,7 @@ pub struct ProcessContainerUi {
     /// Permit desktop system control.
     pub desktop_system_control: bool,
     /// System-settings access level.
-    pub system_settings: String,
+    pub system_settings: ProcessContainerSystemSettings,
     /// Permit Input Method Editor access.
     pub ime: bool,
 }
@@ -108,8 +108,34 @@ impl Default for ProcessContainerUi {
         Self {
             isolation: ProcessContainerUiIsolation::Container,
             desktop_system_control: false,
-            system_settings: "none".to_string(),
+            system_settings: ProcessContainerSystemSettings::None,
             ime: false,
+        }
+    }
+}
+
+/// System-settings access level for BaseProcessContainer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProcessContainerSystemSettings {
+    /// Permit system parameter and display-setting changes.
+    All,
+    /// Permit system parameter changes only.
+    Parameters,
+    /// Permit display-setting changes only.
+    Display,
+    /// Block system parameter and display-setting changes.
+    #[default]
+    None,
+}
+
+impl ProcessContainerSystemSettings {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Parameters => "parameters",
+            Self::Display => "display",
+            Self::None => "none",
         }
     }
 }
@@ -147,6 +173,19 @@ pub(crate) fn apply(
 
     config["containment"] = json!(containment);
 
+    if !supports_schema_v0_8(&policy.version) {
+        if process_container.learning_mode {
+            return Err(wxc_common::mxc_error::MxcError::malformed_request(
+                "processContainer.learningMode requires schema version 0.8 or later",
+            ));
+        }
+        if process_container.capture_denials.is_some() {
+            return Err(wxc_common::mxc_error::MxcError::malformed_request(
+                "processContainer.captureDenials requires schema version 0.8 or later",
+            ));
+        }
+    }
+
     let mut capabilities = process_container.capabilities.clone();
     if let Some(net) = &policy.network {
         let (allows_internet, allows_local_network) = match network_format {
@@ -181,14 +220,16 @@ pub(crate) fn apply(
 
     config["processContainer"] = json!({
         "leastPrivilege": process_container.least_privilege,
-        "learningMode": process_container.learning_mode,
         "capabilities": capabilities,
     });
+    if process_container.learning_mode {
+        config["processContainer"]["learningMode"] = json!(true);
+    }
     if let Some(ui) = &process_container.ui {
         config["processContainer"]["ui"] = json!({
             "isolation": ui.isolation.wire(),
             "desktopSystemControl": ui.desktop_system_control,
-            "systemSettings": ui.system_settings,
+            "systemSettings": ui.system_settings.wire(),
             "ime": ui.ime,
         });
     }
@@ -202,11 +243,14 @@ pub(crate) fn apply(
         });
     }
     if let Some(capture_denials) = &process_container.capture_denials {
-        config["processContainer"]["captureDenials"] = json!({
+        let mut capture = json!({
             "mode": capture_denials.mode.wire(),
-            "outputPath": capture_denials.output_path,
             "retainEtl": capture_denials.retain_etl,
         });
+        if let Some(output_path) = &capture_denials.output_path {
+            capture["outputPath"] = json!(output_path);
+        }
+        config["processContainer"]["captureDenials"] = capture;
     }
     if network_format == NetworkFormat::Legacy {
         if let Some(network) = config.get_mut("network") {
@@ -231,8 +275,12 @@ mod tests {
     };
 
     fn policy(network: Option<NetworkSection>) -> SandboxPolicy {
+        policy_for_version("0.8.0-alpha", network)
+    }
+
+    fn policy_for_version(version: &str, network: Option<NetworkSection>) -> SandboxPolicy {
         SandboxPolicy {
-            version: "0.8.0-alpha".to_string(),
+            version: version.to_string(),
             filesystem: None,
             network,
             ui: None,
@@ -254,7 +302,7 @@ mod tests {
             ui: Some(ProcessContainerUi {
                 isolation: ProcessContainerUiIsolation::Atoms,
                 desktop_system_control: true,
-                system_settings: "read".to_string(),
+                system_settings: ProcessContainerSystemSettings::Parameters,
                 ime: true,
             }),
             network: Some(ProcessContainerNetwork {
@@ -277,6 +325,10 @@ mod tests {
             serde_json::json!(["registryRead"])
         );
         assert_eq!(config["processContainer"]["ui"]["isolation"], "atoms");
+        assert_eq!(
+            config["processContainer"]["ui"]["systemSettings"],
+            "parameters"
+        );
         assert_eq!(
             config["processContainer"]["network"]["allowedProxyPeer"],
             "Contoso.Proxy_123"
@@ -329,6 +381,106 @@ mod tests {
             "http://127.0.0.1:8080"
         );
         assert!(config["network"].get("defaultPolicy").is_none());
+    }
+
+    #[test]
+    fn directional_network_adds_required_capabilities() {
+        let network = NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ingress: Some(NetworkIngressSection {
+                default: Some(NetworkAction::Allow),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = build_wire_config(
+            &policy(Some(network)),
+            &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            None,
+        )
+        .expect("directional network config should build");
+
+        assert_eq!(
+            config["processContainer"]["capabilities"],
+            serde_json::json!(["internetClient", "privateNetworkClientServer"])
+        );
+    }
+
+    #[test]
+    fn omits_absent_v0_8_optional_fields() {
+        let network = NetworkSection {
+            egress: Some(NetworkEgressSection {
+                default: Some(NetworkAction::Deny),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let process_container = ProcessContainer {
+            capture_denials: Some(CaptureDenials::default()),
+            ..Default::default()
+        };
+
+        let config = build_wire_config(
+            &policy(Some(network)),
+            &crate::policy::Containment::ProcessContainer(process_container),
+            None,
+        )
+        .expect("schema 0.8 config should build");
+
+        assert!(config["network"].get("ingress").is_none());
+        assert!(config["network"]["egress"].get("allow").is_none());
+        assert!(config["network"]["egress"].get("deny").is_none());
+        assert!(config["processContainer"].get("learningMode").is_none());
+        assert!(config["processContainer"]["captureDenials"]
+            .get("outputPath")
+            .is_none());
+    }
+
+    #[test]
+    fn rejects_v0_8_process_container_fields_for_legacy_schemas() {
+        for (process_container, field) in [
+            (
+                ProcessContainer {
+                    learning_mode: true,
+                    ..Default::default()
+                },
+                "learningMode",
+            ),
+            (
+                ProcessContainer {
+                    capture_denials: Some(CaptureDenials::default()),
+                    ..Default::default()
+                },
+                "captureDenials",
+            ),
+        ] {
+            let error = build_wire_config(
+                &policy_for_version("0.7.0-alpha", None),
+                &crate::policy::Containment::ProcessContainer(process_container),
+                None,
+            )
+            .expect_err("schema 0.7 must reject schema 0.8 ProcessContainer fields");
+
+            assert!(error.message.contains(field), "{error:?}");
+            assert!(error.message.contains("schema version 0.8"), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_process_container_omits_v0_8_defaults() {
+        let config = build_wire_config(
+            &policy_for_version("0.7.0-alpha", None),
+            &crate::policy::Containment::ProcessContainer(ProcessContainer::default()),
+            None,
+        )
+        .expect("default ProcessContainer should remain valid for schema 0.7");
+
+        assert!(config["processContainer"].get("learningMode").is_none());
+        assert!(config["processContainer"].get("captureDenials").is_none());
     }
 
     #[test]

@@ -473,12 +473,12 @@ pub enum Containment {
     /// settings.
     ProcessContainer(ProcessContainer),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
-    /// SDK, configured by the carried [`Wslc`]
-    /// (`Wslc::default()` matches the SDK's defaults).
+    /// SDK, configured by the carried [`WslcSection`]
+    /// (`WslcSection::default()` matches the SDK's defaults).
     ///
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
-    Wslc(Wslc),
+    Wslc(WslcSection),
     /// IsolationSession backend: a Windows isolated user session.
     ///
     /// Not served by [`crate::spawn`]; reach it through the state-aware
@@ -501,7 +501,7 @@ pub enum Containment {
 /// Until enforcement moves to a VM-level API, prefer expressing WSLC network
 /// intent with `allowOutbound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Wslc {
+pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
     /// The image must already be in the WSLC image store unless
     /// `image_tar_path` is set — MXC never pulls images itself.
@@ -527,7 +527,7 @@ pub struct Wslc {
     pub port_mappings: Vec<(u16, u16)>,
 }
 
-impl Default for Wslc {
+impl Default for WslcSection {
     fn default() -> Self {
         Self {
             image: "alpine:latest".to_string(),
@@ -541,7 +541,7 @@ impl Default for Wslc {
     }
 }
 
-impl Wslc {
+impl WslcSection {
     /// The wire-format `experimental.wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
     fn wire(&self) -> serde_json::Value {
@@ -718,7 +718,7 @@ pub fn build_request(
 /// before they will spawn.
 ///
 /// ```no_run
-/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, Wslc};
+/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcSection};
 ///
 /// let policy = SandboxPolicy {
 ///     version: "0.7.0-alpha".to_string(),
@@ -727,7 +727,7 @@ pub fn build_request(
 ///     ui: None,
 ///     timeout_ms: None,
 /// };
-/// let wslc = Wslc { image: "python:3.12".to_string(), ..Default::default() };
+/// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 /// request.set_script("python3 -c 'print(1)'").set_experimental(true);
 /// # Ok::<(), mxc_engine::Error>(())
@@ -830,6 +830,11 @@ pub(crate) fn build_wire_config(
     )?;
 
     if let Some(net) = &policy.network {
+        if matches!(net.proxy, Some(ProxySpec::BuiltinTestServer)) {
+            return Err(MxcError::malformed_request(
+                "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
+            ));
+        }
         if !accepts_host_rules_without_outbound
             && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
             && !net.allow_outbound
@@ -844,10 +849,28 @@ pub(crate) fn build_wire_config(
         NetworkFormat::Directional => {
             if let Some(net) = &policy.network {
                 if net.egress.is_some() || net.ingress.is_some() {
-                    config["network"] = json!({
-                        "egress": net.egress,
-                        "ingress": net.ingress,
-                    });
+                    let mut network = serde_json::Map::new();
+                    if let Some(egress) = &net.egress {
+                        network.insert(
+                            "egress".to_string(),
+                            serde_json::to_value(egress).map_err(|error| {
+                                MxcError::malformed_request(format!(
+                                    "failed to serialize network.egress: {error}"
+                                ))
+                            })?,
+                        );
+                    }
+                    if let Some(ingress) = &net.ingress {
+                        network.insert(
+                            "ingress".to_string(),
+                            serde_json::to_value(ingress).map_err(|error| {
+                                MxcError::malformed_request(format!(
+                                    "failed to serialize network.ingress: {error}"
+                                ))
+                            })?,
+                        );
+                    }
+                    config["network"] = serde_json::Value::Object(network);
                 }
                 if let Some(runtime_config) = &net.runtime_config {
                     config["runtimeConfig"] =
@@ -951,7 +974,7 @@ fn apply_host_process_backend(
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
 /// its settings live under `experimental.wslc` because the backend is
 /// experimental.
-fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &Wslc) {
+fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
     use serde_json::json;
     config["containment"] = json!("wslc");
     config["experimental"] = json!({ "wslc": wslc.wire() });
@@ -1235,6 +1258,21 @@ mod tests {
         assert!(request.inner.policy.allow_local_network);
     }
 
+    #[test]
+    fn build_request_rejects_builtin_test_server_proxy() {
+        let policy = policy_with_network(NetworkSection {
+            proxy: Some(ProxySpec::BuiltinTestServer),
+            ..Default::default()
+        });
+
+        let error = build_request(&policy, None)
+            .expect_err("the in-process SDK cannot start the built-in test proxy");
+
+        assert!(error.message.contains("builtinTestServer"));
+        assert!(error.message.contains("in-process Rust SDK"));
+        assert!(error.message.contains("localhost or url"));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
@@ -1305,7 +1343,8 @@ mod tests {
         // the path somewhere guaranteed to be present.
         let output_path = std::env::temp_dir().join("denials.json");
         let expected = output_path.to_string_lossy().into_owned();
-        let policy = minimal_policy();
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
         let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
@@ -1328,7 +1367,8 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
-        let policy = minimal_policy();
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
         let containment = process_container_with_capture_denials(CaptureDenials::default());
         let request = build_request_with_containment(&policy, &containment, None)
             .expect("build_request_with_containment");
@@ -1368,13 +1408,12 @@ mod tests {
 
         let omitted = serde_json::json!({
             "mode": CaptureDenialsMode::Block.wire(),
-            "outputPath": Option::<String>::None,
-            "retainEtl": Option::<bool>::None,
+            "retainEtl": false,
         });
         let parsed: wire::CaptureDenials =
-            serde_json::from_value(omitted).expect("null outputPath satisfies the wire type");
+            serde_json::from_value(omitted).expect("omitted outputPath satisfies the wire type");
         assert!(parsed.output_path.is_none());
-        assert!(parsed.retain_etl.is_none());
+        assert_eq!(parsed.retain_etl, Some(false));
     }
 
     // `captureDenials` and `network.proxy` are independent: capture records
@@ -1422,11 +1461,12 @@ mod tests {
             .join("denials-with-proxy.json")
             .to_string_lossy()
             .into_owned();
-        let policy = policy_with_network(NetworkSection {
+        let mut policy = policy_with_network(NetworkSection {
             allow_outbound: true,
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
+        policy.version = "0.8.0-alpha".to_string();
         let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
@@ -1447,7 +1487,7 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, ProcessContainer, Wslc};
+    use super::{build_request_with_containment, Containment, ProcessContainer, WslcSection};
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1473,7 +1513,7 @@ mod tests {
         // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
         // `experimental.wslc` block: the wire config goes through the shared
         // parser, so the mapped request carries the WSLC settings verbatim.
-        let wslc = Wslc {
+        let wslc = WslcSection {
             image: "python:3.12".to_string(),
             cpu_count: Some(2),
             memory_mb: Some(2048),
@@ -1506,11 +1546,11 @@ mod tests {
 
     #[test]
     fn wslc_defaults_match_the_sdk() {
-        // `Wslc::default()` must produce the same block the TypeScript
+        // `WslcSection::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(Wslc::default()),
+            &Containment::Wslc(WslcSection::default()),
             None,
         )
         .expect("build_request_with_containment");
@@ -1533,7 +1573,7 @@ mod tests {
         // `SandboxSpawnOptions.experimental`.
         let mut request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(Wslc::default()),
+            &Containment::Wslc(WslcSection::default()),
             None,
         )
         .expect("build_request_with_containment");
@@ -1546,7 +1586,7 @@ mod tests {
     fn wslc_rejects_an_invalid_port_mapping() {
         // Validation is the shared parser's, so a bad mapping is rejected at
         // build time rather than at spawn.
-        let wslc = Wslc {
+        let wslc = WslcSection {
             port_mappings: vec![(8080, 80), (8080, 81)],
             ..Default::default()
         };
@@ -1569,9 +1609,12 @@ mod tests {
             allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
-        let err =
-            build_request_with_containment(&policy, &Containment::Wslc(Wslc::default()), None)
-                .expect_err("WSLc must reject per-host egress filtering");
+        let err = build_request_with_containment(
+            &policy,
+            &Containment::Wslc(WslcSection::default()),
+            None,
+        )
+        .expect_err("WSLc must reject per-host egress filtering");
         assert!(
             err.message.contains("per-host egress filtering"),
             "got: {}",

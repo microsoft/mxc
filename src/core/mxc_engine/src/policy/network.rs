@@ -7,6 +7,14 @@
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum ProxySpec {
+    /// Built-in test proxy mode used by executor test flows.
+    ///
+    /// The in-process Rust SDK cannot enable testing features, so
+    /// [`build_request`](super::build_request) and
+    /// [`build_request_with_containment`](super::build_request_with_containment)
+    /// reject this variant. Use [`Localhost`](Self::Localhost) or
+    /// [`Url`](Self::Url) instead.
+    BuiltinTestServer,
     /// Route through `127.0.0.1:<port>`.
     Localhost(u16),
     /// Route through an explicit proxy URL.
@@ -22,17 +30,23 @@ impl<'de> serde::Deserialize<'de> for ProxySpec {
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         struct Raw {
             #[serde(default)]
+            builtin_test_server: Option<bool>,
+            #[serde(default)]
             localhost: Option<u16>,
             #[serde(default)]
             url: Option<String>,
         }
 
         let raw = <Raw as serde::Deserialize>::deserialize(deserializer)?;
-        match (raw.localhost, raw.url) {
-            (Some(port), None) => Ok(ProxySpec::Localhost(port)),
-            (None, Some(url)) => Ok(ProxySpec::Url(url)),
+        match (raw.builtin_test_server, raw.localhost, raw.url) {
+            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
+            (Some(false), None, None) => Err(serde::de::Error::custom(
+                "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
+            )),
+            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
+            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
             _ => Err(serde::de::Error::custom(
-                "network.proxy must set exactly one of localhost or url",
+                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
             )),
         }
     }
@@ -81,7 +95,7 @@ pub(crate) enum NetworkFormat {
     Directional,
 }
 
-fn supports_directional_network(version: &str) -> bool {
+pub(crate) fn supports_schema_v0_8(version: &str) -> bool {
     version
         .split_once('.')
         .and_then(|(major, rest)| {
@@ -100,7 +114,7 @@ pub(super) fn select_network_format(
     let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
     let has_directional = has_process_container_network
         || network.is_some_and(NetworkSection::has_directional_fields);
-    let supports_directional = supports_directional_network(version);
+    let supports_directional = supports_schema_v0_8(version);
 
     if has_legacy && has_directional {
         return Err(wxc_common::mxc_error::MxcError::malformed_request(
@@ -147,6 +161,7 @@ pub enum NetworkProtocol {
 #[non_exhaustive]
 pub struct NetworkPeerSection {
     pub cidr: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub except: Option<Vec<String>>,
 }
 
@@ -165,8 +180,11 @@ impl NetworkPeerSection {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkPortSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub protocol: Option<NetworkProtocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_port: Option<u16>,
 }
 
@@ -175,7 +193,9 @@ pub struct NetworkPortSection {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkRuleSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<Vec<NetworkPeerSection>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ports: Option<Vec<NetworkPortSection>>,
 }
 
@@ -184,8 +204,11 @@ pub struct NetworkRuleSection {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkEgressSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<NetworkAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow: Option<Vec<NetworkRuleSection>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deny: Option<Vec<NetworkRuleSection>>,
 }
 
@@ -194,7 +217,9 @@ pub struct NetworkEgressSection {
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
 pub struct NetworkIngressSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<NetworkAction>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub host_loopback: Option<NetworkAction>,
 }
 
@@ -204,12 +229,14 @@ pub struct NetworkIngressSection {
 #[non_exhaustive]
 pub struct RuntimeConfigSection {
     /// HTTP/S loopback proxy URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub network_proxy: Option<String>,
 }
 
 pub(super) fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
     use serde_json::json;
     match proxy {
+        ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
         ProxySpec::Localhost(port) => json!({ "localhost": port }),
         ProxySpec::Url(url) => json!({ "url": url }),
     }
@@ -228,7 +255,10 @@ pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{select_network_format, NetworkFormat, NetworkSection, ProxySpec};
+    use super::{
+        proxy_to_wire, select_network_format, NetworkEgressSection, NetworkFormat,
+        NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection, ProxySpec,
+    };
 
     #[test]
     fn format_selection_defaults_to_legacy_without_directional_intent() {
@@ -260,20 +290,37 @@ mod tests {
     }
 
     #[test]
-    fn builtin_test_server_is_not_supported() {
-        let error = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": true }"#)
-            .expect_err("the in-process API cannot start the built-in proxy");
+    fn builtin_test_server_true_is_accepted() {
+        let proxy = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": true }"#)
+            .expect("builtinTestServer");
 
-        assert!(error.to_string().contains("unknown field"));
+        assert!(matches!(proxy, ProxySpec::BuiltinTestServer));
+        assert_eq!(
+            proxy_to_wire(&proxy),
+            serde_json::json!({ "builtinTestServer": true })
+        );
+    }
+
+    #[test]
+    fn builtin_test_server_false_is_rejected() {
+        let error = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": false }"#)
+            .expect_err("builtinTestServer false must fail closed");
+
+        assert!(error.to_string().contains("must be true"));
     }
 
     #[test]
     fn conflicting_proxy_modes_are_rejected() {
-        let error =
-            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080, "url": "http://proxy" }"#)
+        for json in [
+            r#"{ "builtinTestServer": true, "localhost": 8080 }"#,
+            r#"{ "builtinTestServer": true, "url": "http://proxy" }"#,
+            r#"{ "localhost": 8080, "url": "http://proxy" }"#,
+        ] {
+            let error = serde_json::from_str::<ProxySpec>(json)
                 .expect_err("conflicting proxy modes must be rejected");
 
-        assert!(error.to_string().contains("exactly one"));
+            assert!(error.to_string().contains("exactly one"));
+        }
     }
 
     #[test]
@@ -286,5 +333,39 @@ mod tests {
             serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
             ProxySpec::Url(_)
         ));
+    }
+
+    #[test]
+    fn directional_serialization_omits_absent_optional_fields() {
+        let egress = NetworkEgressSection {
+            allow: Some(vec![NetworkRuleSection {
+                to: Some(vec![NetworkPeerSection::new("192.0.2.0/24")]),
+                ports: Some(vec![NetworkPortSection::default()]),
+            }]),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(egress).expect("directional policy serializes");
+
+        fn assert_no_null(value: &serde_json::Value) {
+            match value {
+                serde_json::Value::Array(values) => {
+                    values.iter().for_each(assert_no_null);
+                }
+                serde_json::Value::Object(fields) => {
+                    assert!(
+                        fields.values().all(|value| !value.is_null()),
+                        "optional fields must be omitted rather than null: {value}"
+                    );
+                    fields.values().for_each(assert_no_null);
+                }
+                _ => {}
+            }
+        }
+
+        assert_no_null(&value);
+        assert!(value.get("default").is_none());
+        assert!(value["allow"][0]["to"][0].get("except").is_none());
+        assert!(value["allow"][0]["ports"][0].get("protocol").is_none());
     }
 }

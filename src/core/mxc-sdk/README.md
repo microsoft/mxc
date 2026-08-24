@@ -400,19 +400,21 @@ WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
 opt-in on two axes: build this crate with its **`wslc` feature**, and call
 [`SandboxRequest::set_experimental(true)`] on the request (the library-side
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
-memory, GPU, storage path, port forwards — are carried by the [`Wslc`]
+memory, GPU, storage path, port forwards — are carried by the [`WslcSection`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
 go through the same parser the executor uses — so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
-use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, Wslc};
+use mxc_sdk::{
+    build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
+};
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
 #     filesystem: None, network: None, ui: None, timeout_ms: None,
 # };
-let wslc = Wslc { image: "python:3.12".to_string(), ..Default::default() };
+let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 request.set_script("python3 -c 'print(42)'").set_experimental(true);
 let output = run(request)?;

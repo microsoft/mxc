@@ -180,7 +180,7 @@ mxc-sdk = { path = "…/src/core/mxc-sdk", features = ["wslc"] }
 
 ```rust
 use mxc_sdk::{
-    build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, Wslc,
+    build_request_with_containment, run, spawn_sandbox, Containment, SandboxPolicy, WslcSection,
 };
 
 let policy = SandboxPolicy {
@@ -191,7 +191,7 @@ let policy = SandboxPolicy {
     timeout_ms: None,
 };
 
-let wslc = Wslc {
+let wslc = WslcSection {
     image: "python:3.12-alpine".to_string(),
     cpu_count: Some(2),
     memory_mb: Some(1024),
@@ -212,8 +212,8 @@ let mut sandbox = spawn_sandbox(request)?;
 let stdout = sandbox.take_stdout().expect("stdout");
 ```
 
-`Wslc` mirrors the `experimental.wslc` block below;
-`Wslc::default()` matches the SDK default (`alpine:latest`). Settings go
+`WslcSection` mirrors the `experimental.wslc` block below;
+`WslcSection::default()` matches the SDK default (`alpine:latest`). Settings go
 through the same parser the executor uses, so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at
 `build_request_with_containment` rather than at spawn.

@@ -8,5 +8,5 @@ pub(crate) mod process_container;
 #[doc(inline)]
 pub use process_container::{
     CaptureDenials, CaptureDenialsMode, ProcessContainer, ProcessContainerNetwork,
-    ProcessContainerUi, ProcessContainerUiIsolation,
+    ProcessContainerSystemSettings, ProcessContainerUi, ProcessContainerUiIsolation,
 };
