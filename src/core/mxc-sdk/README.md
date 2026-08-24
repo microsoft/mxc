@@ -53,8 +53,11 @@ BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
 Schema 0.8 directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
 
-Policy section structs are non-exhaustive so fields can be added compatibly.
-Construct them with `Default`, then assign the settings the request needs.
+The new ProcessContainer and directional-network configuration types are
+non-exhaustive so fields can be added compatibly. Construct types whose fields
+are all optional with `Default`, then assign the settings the request needs.
+Construct network peers with `NetworkPeerSection::new(cidr)`, since each peer
+requires a CIDR.
 
 ```rust,no_run
 use mxc_sdk::{
