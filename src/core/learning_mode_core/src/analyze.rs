@@ -28,7 +28,7 @@ pub struct AnalysisResult {
     /// Whether additional unique denials were observed after the result bound
     /// was reached.
     pub denied_resources_truncated: bool,
-    /// Username-redacted signatures for outcomes omitted from canonical denials.
+    /// Username-redacted signatures for actionable and diagnostic outcomes.
     #[serde(default)]
     pub verbose_logging: VerboseLoggingSummary,
 }
@@ -72,8 +72,8 @@ impl AnalysisResult {
     /// Trims verbose logging signatures so the complete compact JSON
     /// serialization is no larger than `max_bytes`.
     ///
-    /// Returns `false` when the canonical denials and empty verbose logging envelope
-    /// alone exceed `max_bytes`; canonical denials are never discarded.
+    /// Returns `false` when the actionable denials and empty verbose logging
+    /// envelope alone exceed `max_bytes`; actionable denials are never discarded.
     pub fn fit_verbose_logging_within_serialized_bytes(
         &mut self,
         max_bytes: usize,
@@ -95,7 +95,7 @@ impl AnalysisResult {
             .saturating_sub(base_len)
             .saturating_sub(ENVELOPE_HEADROOM);
         let mut original = original;
-        original.sort_by_key(|aggregate| !aggregate.signature.reason.is_canonical_denial());
+        original.sort_by_key(|aggregate| !aggregate.signature.reason.is_actionable());
         for aggregate in original {
             let aggregate_len = serde_json::to_vec(&aggregate)?.len().saturating_add(1);
             if retained_bytes.saturating_add(aggregate_len) <= signature_budget {
@@ -155,18 +155,18 @@ fn serialized_analysis_len(
         signatures: &'a [VerboseLoggingAggregate],
         total_occurrences: u64,
         overflow_occurrences: u64,
-        canonical_overflow_occurrences: u64,
+        actionable_overflow_occurrences: u64,
         aggregate_groups_truncated: bool,
         processed_events_truncated: bool,
-        canonical_denial_limit_reached: bool,
+        actionable_limit_reached: bool,
     }
 
     let removed_occurrences = removed.iter().fold(0u64, |total, aggregate| {
         total.saturating_add(aggregate.count)
     });
-    let removed_canonical_occurrences = removed
+    let removed_actionable_occurrences = removed
         .iter()
-        .filter(|aggregate| aggregate.signature.reason.is_canonical_denial())
+        .filter(|aggregate| aggregate.signature.reason.is_actionable())
         .fold(0u64, |total, aggregate| {
             total.saturating_add(aggregate.count)
         });
@@ -180,14 +180,14 @@ fn serialized_analysis_len(
                 .verbose_logging
                 .overflow_occurrences
                 .saturating_add(removed_occurrences),
-            canonical_overflow_occurrences: analysis
+            actionable_overflow_occurrences: analysis
                 .verbose_logging
-                .canonical_overflow_occurrences
-                .saturating_add(removed_canonical_occurrences),
+                .actionable_overflow_occurrences
+                .saturating_add(removed_actionable_occurrences),
             aggregate_groups_truncated: analysis.verbose_logging.aggregate_groups_truncated
                 || !removed.is_empty(),
             processed_events_truncated: analysis.verbose_logging.processed_events_truncated,
-            canonical_denial_limit_reached: analysis.verbose_logging.canonical_denial_limit_reached,
+            actionable_limit_reached: analysis.verbose_logging.actionable_limit_reached,
         },
     };
     serde_json::to_vec(&view).map(|bytes| bytes.len())
@@ -308,7 +308,7 @@ mod tests {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "provider".to_string(),
                 event_id: 14,
-                reason: VerboseLoggingExclusionReason::CanonicalDenial,
+                reason: VerboseLoggingExclusionReason::Actionable,
                 pid,
                 access_type: Some(AccessType::Read),
                 resource_type: Some(ResourceType::File),
@@ -318,7 +318,7 @@ mod tests {
         };
         let mut result = AnalysisResult {
             denials: vec![DeniedResource {
-                resource: "canonical".repeat(512),
+                resource: "actionable".repeat(512),
                 resource_type: ResourceType::File,
                 access_type: AccessType::Read,
                 pid: 1,
@@ -353,7 +353,7 @@ mod tests {
                         provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
-                        reason: VerboseLoggingExclusionReason::CanonicalDenial,
+                        reason: VerboseLoggingExclusionReason::Actionable,
                         pid: 1,
                         access_type: Some(AccessType::Read),
                         resource_type: Some(ResourceType::File),
@@ -363,7 +363,7 @@ mod tests {
                 }],
                 total_occurrences: u64::MAX,
                 overflow_occurrences: u64::MAX - 1,
-                canonical_overflow_occurrences: u64::MAX - 1,
+                actionable_overflow_occurrences: u64::MAX - 1,
                 ..Default::default()
             },
         };
@@ -374,16 +374,16 @@ mod tests {
             .unwrap());
         assert_eq!(result.verbose_logging.overflow_occurrences, u64::MAX);
         assert_eq!(
-            result.verbose_logging.canonical_overflow_occurrences,
+            result.verbose_logging.actionable_overflow_occurrences,
             u64::MAX
         );
     }
 
     #[test]
-    fn serialized_size_limit_never_discards_canonical_denials() {
+    fn serialized_size_limit_never_discards_actionable_denials() {
         let mut result = AnalysisResult {
             denials: vec![DeniedResource {
-                resource: "canonical".repeat(512),
+                resource: "actionable".repeat(512),
                 resource_type: ResourceType::File,
                 access_type: AccessType::Read,
                 pid: 1,
@@ -396,7 +396,7 @@ mod tests {
                         provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
-                        reason: VerboseLoggingExclusionReason::CanonicalDenial,
+                        reason: VerboseLoggingExclusionReason::Actionable,
                         pid: 1,
                         access_type: Some(AccessType::Read),
                         resource_type: Some(ResourceType::File),

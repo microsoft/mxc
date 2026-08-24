@@ -1350,7 +1350,7 @@ fn current_filetime() -> u64 {
 /// [`GuardedSession::stop_analyzed_with_trace`], never as a value. The ETL
 /// transfer is reported independently in `trace_transfer` so a transfer failure
 /// that occurs *after* a successful analysis never discards the decoded
-/// denials — the caller can still publish the canonical denials JSON while
+/// denials — the caller can still publish the actionable denials JSON while
 /// surfacing the retention failure separately.
 #[derive(Debug)]
 pub struct AnalyzedTraceTransfer {
@@ -2329,7 +2329,7 @@ fn read_analysis_and_trace_response(
     let analysis = read_analysis_response(source, on_stopped)?;
     // The analysis is decoded and owned. From here, a trace-transfer failure is
     // carried as *data* in `trace_transfer` — it must never discard the analysis
-    // (the canonical denials JSON is still publishable).
+    // (the actionable denials JSON is still publishable).
     let trace_transfer = receive_analyzed_trace(source, trace_destination);
     Ok(AnalyzedTraceTransfer {
         analysis,

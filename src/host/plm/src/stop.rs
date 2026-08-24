@@ -31,12 +31,12 @@ pub struct StopOptions {
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
-    /// Exit code recorded in the canonical denials document.
+    /// Exit code recorded in the actionable denials document.
     pub exit_code: i32,
     pub verbose: bool,
 }
 
-/// Inputs for generating compatibility artifacts from canonical denials.
+/// Inputs for generating compatibility artifacts from actionable denials.
 #[derive(Debug, Clone)]
 pub struct PostProcessOptions {
     pub log_dir: PathBuf,
@@ -262,7 +262,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
     })
 }
 
-/// Generates the source-config snapshot and adjusted config from canonical denials.
+/// Generates the source-config snapshot and adjusted config from actionable denials.
 pub fn postprocess_denials(
     document: &DenialsDocument,
     opts: &PostProcessOptions,
@@ -295,7 +295,7 @@ fn postprocess_denials_with_paths(
     }
 
     // Load the source config before copying or mutating it. The trace and
-    // canonical denials remain useful even if this compatibility-only
+    // actionable denials remain useful even if this compatibility-only
     // adjusted-config phase fails.
     let base_config = load_config(&config_outputs.source)?;
 
@@ -501,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_denials_generate_snapshot_and_adjusted_config() {
+    fn actionable_denials_generate_snapshot_and_adjusted_config() {
         let document = DenialsDocument::new(
             vec![DeniedResource {
                 resource: "internetClient".to_string(),
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_canonical_denials_snapshot_but_skip_adjusted_config() {
+    fn truncated_actionable_denials_snapshot_but_skip_adjusted_config() {
         let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, true));
 
         let (_directory, log_dir, adjusted) = postprocess_fixture(&document);

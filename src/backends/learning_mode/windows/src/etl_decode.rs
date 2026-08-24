@@ -254,11 +254,7 @@ impl<'visitor> Accumulator<'visitor> {
         } else {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
-        self.record_raw_denial_outcome(
-            &raw,
-            &resource,
-            VerboseLoggingExclusionReason::CanonicalDenial,
-        );
+        self.record_raw_denial_outcome(&raw, &resource, VerboseLoggingExclusionReason::Actionable);
         let dedup_resource = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
                 resource.to_ascii_lowercase()
@@ -271,13 +267,13 @@ impl<'visitor> Accumulator<'visitor> {
         {
             return;
         }
-        // The canonical unique-denial bound is reached: keep reading (up to
+        // The actionable unique-denial bound is reached: keep reading (up to
         // the processed-event bound) so every remaining outcome is still
         // aggregated into the verbose logging summary, rather than stopping the
         // trace early.
         if self.denials.len() >= MAX_UNIQUE_DENIALS {
             self.truncated = true;
-            self.verbose_logging.mark_canonical_denial_limit_reached();
+            self.verbose_logging.mark_actionable_limit_reached();
             return;
         }
         self.seen.insert((dedup_resource, raw.access_type));
@@ -500,7 +496,7 @@ impl<'visitor> Accumulator<'visitor> {
         ) {
             Ok(true) => Ok(result),
             Ok(false) => Err(AnalyzeError::Decode(
-                "canonical Learning Mode analysis exceeds the guarded transport limit".to_string(),
+                "actionable Learning Mode analysis exceeds the guarded transport limit".to_string(),
             )),
             Err(error) => Err(AnalyzeError::Decode(format!(
                 "failed to size Learning Mode analysis: {error}"
@@ -1517,20 +1513,20 @@ mod tests {
             "hitting the unique-denial cap must not halt the trace early"
         );
         assert!(accumulator.truncated);
-        assert!(accumulator.verbose_logging.canonical_denial_limit_reached);
+        assert!(accumulator.verbose_logging.actionable_limit_reached);
         assert_eq!(
             exclusion_count(
                 &accumulator.verbose_logging,
                 learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                VerboseLoggingExclusionReason::CanonicalDenial
+                VerboseLoggingExclusionReason::Actionable
             ),
             1
         );
 
         // Processing continues past the cap: a further overflow candidate is
         // still aggregated (not silently discarded), and a duplicate of an
-        // already-canonical denial retains the same canonical classification.
+        // already-actionable denial retains the same actionable classification.
         accumulator.add_raw_denial(raw(
             r"C:\data\overflow-2.txt",
             AccessType::Read,
@@ -1544,7 +1540,7 @@ mod tests {
                 &accumulator.verbose_logging,
                 learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                VerboseLoggingExclusionReason::CanonicalDenial
+                VerboseLoggingExclusionReason::Actionable
             ),
             3
         );
@@ -1682,8 +1678,8 @@ mod tests {
         )
     }
 
-    /// Mirrors the real `Mode="Normal"` (`block`) capture: file/registry
-    /// access checks as event 14 plus a compact capability denial as event 28.
+    /// Mirrors the real `Mode="Normal"` (`block`) capture: an actionable file
+    /// check, a non-actionable registry check, and a compact capability denial.
     #[test]
     fn block_shape_decodes_and_classifies() {
         let events = vec![
@@ -1699,7 +1695,8 @@ mod tests {
                     ("AccessMask", "0x10001"),
                 ],
             ),
-            // Registry read (KEY_READ 0x20019 -> Read) stays kernel-form.
+            // Registry write (KEY_SET_VALUE) remains verbose-only because MXC
+            // has no policy grant that could make it actionable.
             kernel_event(
                 14,
                 6860,
@@ -1708,7 +1705,7 @@ mod tests {
                     ("Mode", "\"Normal\""),
                     ("ObjectType", "\"Key\""),
                     ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
-                    ("AccessMask", "0x20019"),
+                    ("AccessMask", "0x2"),
                 ],
             ),
             // Capability denial (event 28) with a decoded identifier.
@@ -1726,31 +1723,41 @@ mod tests {
             kernel_event(27, 5480, 13, &[("Category", "2"), ("Detail", "4")]),
         ];
 
-        let out = resources_from_events(&events).denials;
-        assert_eq!(out.len(), 4);
+        let analysis = resources_from_events(&events);
+        let out = &analysis.denials;
+        assert_eq!(out.len(), 3);
 
         assert_eq!(out[0].resource, r"C:\data\test\bin\");
         assert_eq!(out[0].resource_type, ResourceType::File);
         assert_eq!(out[0].access_type, AccessType::Write);
         assert_eq!(out[0].pid, 5480);
 
-        assert_eq!(out[1].resource, r"\REGISTRY\USER\.DEFAULT\Console");
-        assert_eq!(out[1].resource_type, ResourceType::Other);
-        assert_eq!(out[1].access_type, AccessType::Read);
+        assert_eq!(out[1].resource, "internetClient");
+        assert_eq!(out[1].resource_type, ResourceType::Capability);
+        assert_eq!(out[1].access_type, AccessType::Unknown);
+        assert_eq!(out[1].pid, 0x1acc, "pid from payload ProcessId");
 
-        assert_eq!(out[2].resource, "internetClient");
-        assert_eq!(out[2].resource_type, ResourceType::Capability);
+        assert_eq!(out[2].resource, "WriteClipboard");
+        assert_eq!(out[2].resource_type, ResourceType::Ui);
         assert_eq!(out[2].access_type, AccessType::Unknown);
-        assert_eq!(out[2].pid, 0x1acc, "pid from payload ProcessId");
 
-        assert_eq!(out[3].resource, "WriteClipboard");
-        assert_eq!(out[3].resource_type, ResourceType::Ui);
-        assert_eq!(out[3].access_type, AccessType::Unknown);
+        let registry = analysis
+            .verbose_logging
+            .signatures
+            .iter()
+            .find(|group| property(&group.signature, "ObjectType") == "Key")
+            .expect("registry event should remain in verbose logging");
+        assert_eq!(
+            registry.signature.reason,
+            VerboseLoggingExclusionReason::NotActionable
+        );
+        assert_eq!(registry.signature.access_type, Some(AccessType::Write));
+        assert_eq!(registry.signature.resource_type, Some(ResourceType::Other));
     }
 
     /// Mirrors the real `Mode="Permissive"` (`allow`) capture: the same
-    /// file/registry checks plus a capability check folded into an
-    /// empty-`ObjectType` event 14 (there is no event 28 in this mode).
+    /// file checks plus a capability check folded into an empty-`ObjectType`
+    /// event 14 (there is no event 28 in this mode).
     #[test]
     fn allow_shape_recovers_capability_from_dacl() {
         // DWORD-padded allow ACE containing the decimal SID S-1-15-3-1
@@ -1947,8 +1954,8 @@ mod tests {
             .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial)
-            .expect("canonical capability event retained");
+            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::Actionable)
+            .expect("actionable capability event retained");
         assert_eq!(group.signature.pid, 42);
         assert_eq!(group.signature.access_type, Some(AccessType::Unknown));
         assert_eq!(
@@ -2100,7 +2107,7 @@ mod tests {
     }
 
     #[test]
-    fn long_section_names_with_shared_prefix_remain_distinct() {
+    fn long_section_names_remain_distinct_verbose_diagnostics() {
         let prefix = format!(
             r"\Sessions\1\AppContainerNamedObjects\S-1-15-2-{}\C:*ProgramData*Microsoft*Windows*Caches*",
             "1-".repeat(100)
@@ -2130,22 +2137,19 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        assert_eq!(out.denials.len(), names.len());
-        assert!(out.denials.iter().all(|denial| {
-            denial.resource_type == ResourceType::Other
-                && denial.access_type == AccessType::Write
-                && names.contains(&denial.resource)
-        }));
+        assert!(out.denials.is_empty());
         assert_eq!(out.verbose_logging.signatures.len(), names.len());
         assert!(out.verbose_logging.signatures.iter().all(|group| {
-            group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial
+            group.signature.reason == VerboseLoggingExclusionReason::NotActionable
+                && group.signature.resource_type == Some(ResourceType::Other)
+                && group.signature.access_type == Some(AccessType::Write)
                 && group.count == 1
                 && property(&group.signature, "ObjectName").contains("<sha256=")
         }));
     }
 
     #[test]
-    fn observed_timer_and_event_28_ui_checks_are_canonical() {
+    fn observed_timer_is_verbose_only_while_event_28_ui_is_actionable() {
         let events = vec![
             kernel_event(
                 14,
@@ -2180,20 +2184,34 @@ mod tests {
 
         let out = resources_from_events(&events);
 
-        assert_eq!(out.denials.len(), 2);
-        assert!(out.denials.iter().any(|denial| {
-            denial.resource == r"\Sessions\1\BaseNamedObjects\MXC-NS20-Time-test"
-                && denial.resource_type == ResourceType::Other
-                && denial.access_type == AccessType::Read
-        }));
-        assert!(out.denials.iter().any(|denial| {
-            denial.resource == "Handles"
-                && denial.resource_type == ResourceType::Ui
-                && denial.access_type == AccessType::Unknown
-        }));
-        assert!(out.verbose_logging.signatures.iter().all(|group| {
-            group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial
-        }));
+        assert_eq!(out.denials.len(), 1);
+        assert_eq!(out.denials[0].resource, "Handles");
+        assert_eq!(out.denials[0].resource_type, ResourceType::Ui);
+        assert_eq!(out.denials[0].access_type, AccessType::Unknown);
+
+        let timer = out
+            .verbose_logging
+            .signatures
+            .iter()
+            .find(|group| property(&group.signature, "ObjectType") == "Timer")
+            .expect("timer should remain in verbose logging");
+        assert_eq!(
+            timer.signature.reason,
+            VerboseLoggingExclusionReason::NotActionable
+        );
+        assert_eq!(timer.signature.resource_type, Some(ResourceType::Other));
+        assert_eq!(timer.signature.access_type, Some(AccessType::Read));
+
+        let ui = out
+            .verbose_logging
+            .signatures
+            .iter()
+            .find(|group| group.signature.resource_type == Some(ResourceType::Ui))
+            .expect("UI denial should remain actionable");
+        assert_eq!(
+            ui.signature.reason,
+            VerboseLoggingExclusionReason::Actionable
+        );
     }
 
     #[test]
@@ -2273,7 +2291,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_candidates_and_duplicates_share_one_verbose_logging_signature() {
+    fn actionable_candidates_and_duplicates_share_one_verbose_logging_signature() {
         let make_event = |sequence_no: u64| {
             kernel_event(
                 14,
@@ -2293,38 +2311,38 @@ mod tests {
         assert_eq!(out.denials.len(), 1, "duplicates collapse to one denial");
         assert_eq!(
             out.denials[0].resource, r"D:\profiles\jsmith\dup.txt",
-            "canonical output must retain the actionable path"
+            "actionable output must retain the actionable path"
         );
 
-        let canonical_group = out
+        let actionable_group = out
             .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial)
-            .expect("canonical outcome recorded");
+            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::Actionable)
+            .expect("actionable outcome recorded");
         assert_eq!(
-            canonical_group.signature.provider,
+            actionable_group.signature.provider,
             VerboseLoggingProvider::KernelGeneral
         );
-        assert_eq!(canonical_group.signature.event_id, 14);
+        assert_eq!(actionable_group.signature.event_id, 14);
         assert_eq!(
-            canonical_group.count, 3,
+            actionable_group.count, 3,
             "all three occurrences are retained"
         );
         assert_eq!(
-            canonical_group.signature.access_type,
+            actionable_group.signature.access_type,
             Some(AccessType::Read)
         );
         assert_eq!(
-            canonical_group.signature.resource_type,
+            actionable_group.signature.resource_type,
             Some(ResourceType::File)
         );
         assert_eq!(
-            property(&canonical_group.signature, "ObjectName"),
+            property(&actionable_group.signature, "ObjectName"),
             "<REDACTED>"
         );
         assert_eq!(
-            property(&canonical_group.signature, "UserName"),
+            property(&actionable_group.signature, "UserName"),
             "<redacted-user>"
         );
     }
@@ -2351,12 +2369,12 @@ mod tests {
 
         assert_eq!(out.denials.len(), MAX_UNIQUE_DENIALS);
         assert!(out.denied_resources_truncated);
-        assert!(out.verbose_logging.canonical_denial_limit_reached);
+        assert!(out.verbose_logging.actionable_limit_reached);
         assert!(!out.verbose_logging.processed_events_truncated);
 
         // If the trace had stopped as soon as the cap was reached, only the
         // The verbose logging accounts for every denial candidate, including those
-        // observed after the canonical unique-denial cap.
+        // observed after the actionable unique-denial cap.
         assert_eq!(
             out.verbose_logging.total_occurrences,
             (MAX_UNIQUE_DENIALS + overflow_candidates) as u64
@@ -2388,10 +2406,7 @@ mod tests {
         assert_eq!(out.denials[0].resource, "internetClient");
         assert_eq!(out.verbose_logging.signatures.len(), 1);
         let signature = &out.verbose_logging.signatures[0].signature;
-        assert_eq!(
-            signature.reason,
-            VerboseLoggingExclusionReason::CanonicalDenial
-        );
+        assert_eq!(signature.reason, VerboseLoggingExclusionReason::Actionable);
         assert_eq!(signature.access_type, Some(AccessType::Unknown));
         assert_eq!(signature.resource_type, Some(ResourceType::Capability));
     }
@@ -2435,7 +2450,7 @@ mod tests {
             accumulator.record_exclusion(
                 VerboseLoggingProvider::KernelGeneral,
                 14,
-                VerboseLoggingExclusionReason::CanonicalDenial,
+                VerboseLoggingExclusionReason::Actionable,
                 pid,
                 properties.clone(),
             );

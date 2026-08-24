@@ -1,8 +1,8 @@
 # PLM — Permissive Learning Mode
 
-`plm.exe` is the Windows-only legacy WPR trace helper for Learning Mode. It captures both `learningModeLogging` block events and `permissiveLearningMode` allow events, then delegates ETL decoding to the same canonical `learning_mode_windows::EtlDenialAnalyzer` used by `captureDenials`.
+`plm.exe` is the Windows-only legacy WPR trace helper for Learning Mode. It captures both `learningModeLogging` block events and `permissiveLearningMode` allow events, then delegates ETL decoding to the same actionable-output `learning_mode_windows::EtlDenialAnalyzer` used by `captureDenials`.
 
-The canonical analyzer decodes filesystem, capability, registry, and UI findings from both provider shapes. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
+The actionable analyzer decodes filesystem, capability, registry-read, and UI findings from both provider shapes. Registry writes are retained as non-actionable verbose diagnostics. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
 
 PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI provides interactive capture through `plm log` and existing-ETL analysis through `plm stop --trace-file`.
 
@@ -11,7 +11,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC once to launch a retained restricted child. That child acquires the host-wide singleton, starts WPR with the embedded profile, and remains alive through explicit stop or uncertain teardown.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
 3. **Stop** — the retained child returns ETL bytes and status over the original authenticated named pipe. The unelevated parent owns the trace, log, and config destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
-4. **Emit** — canonical findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
+4. **Emit** — actionable findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
 5. **Merge (temporary compatibility)** — file and capability denials are adapted into the existing adjusted-config generator until the shared regeneration engine replaces it.
 
 > **Capability merge caveats.** Capabilities are only merged into a `processContainer` block — backends that cannot express AppContainer capabilities (LXC, Windows Sandbox, …) are left untouched and the discovered set is reported on stderr instead. The reserved names `learningModeLogging` and `permissiveLearningMode` are never written back, because `processContainer.capabilities` rejects them.
@@ -26,7 +26,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 | `src/start.rs`          | Bounded fixed `wpr -start …!AccessFailureProfile -filemode` and shared WPR command monitoring |
 | `src/stop.rs`           | Existing-ETL analysis + FS/capability merge                                       |
 | `src/log.rs`            | Interactive mode: Enter to start, Enter to stop, then diff vs a blank config      |
-| `src/analysis.rs`       | Canonical ETL analysis, denials JSON emission, and temporary config-generator adapter |
+| `src/analysis.rs`       | Actionable ETL analysis, denials JSON emission, and temporary config-generator adapter |
 | `src/access_event.rs`   | `LearningModeAccessEvent` plain struct                                            |
 | `src/extract_caps.rs`   | DACL ACE blob decoder; resolves capability SIDs via `DeriveCapabilitySidsFromName` |
 | `src/config.rs`         | JSON load/mutate; FS + capability merge into containment-backend section          |
@@ -80,7 +80,7 @@ plm.exe stop [--config-path <path>] [--log-dir <path>] [--bin-path <path>]
              [--exit-code <code>] [--verbose-logging]
 ```
 
-The retained guardian transfers its ETL to the unelevated caller before this command is launched. `--exit-code` is copied into the canonical `denials.json` summary.
+The retained guardian transfers its ETL to the unelevated caller before this command is launched. `--exit-code` is copied into the actionable `denials.json` summary.
 
 When `--log-dir` is omitted, artifacts are written beneath `%LOCALAPPDATA%\Microsoft\MXC\PLM\logs\<timestamp>_pid<pid>`; if `%LOCALAPPDATA%` is unavailable, PLM falls back to the equivalent directory beneath `%TEMP%`. `--verbose-logging` prints per-event and per-ACE diagnostics while the trace is analyzed.
 
@@ -98,7 +98,7 @@ plm.exe extract-caps --hex-bytes <hex> [--verbose-logging]
 
 ### `plm log`
 
-Interactive iteration mode: press Enter to start a host-wide trace, run the operator-selected workload, then press Enter again to stop. Because this standalone flow has no sandbox job to define a process scope, the elevated guardian analyzes the source trace in protected scratch and returns only the bounded canonical findings; the host-wide ETL never crosses the privilege boundary. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview. Automated `--audit` and `captureDenials` flows instead attach an authenticated sandbox job and analyze or retain only the process-scoped filtered trace.
+Interactive iteration mode: press Enter to start a host-wide trace, run the operator-selected workload, then press Enter again to stop. Because this standalone flow has no sandbox job to define a process scope, the elevated guardian analyzes the source trace in protected scratch and returns only the bounded actionable findings; the host-wide ETL never crosses the privilege boundary. It then synthesizes a blank config, runs the filesystem merge, and prints the resulting config as a "diff against a blank config" preview. Automated `--audit` and `captureDenials` flows instead attach an authenticated sandbox job and analyze or retain only the process-scoped filtered trace.
 
 It also has no public `--wprp` or destination override flags.
 

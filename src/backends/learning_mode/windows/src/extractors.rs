@@ -29,8 +29,10 @@
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
 //!   resource type: `File` → [`ResourceType::File`], `Key` →
 //!   [`ResourceType::Other`] (registry), and an **empty** `ObjectType` is a
-//!   brokered-capability check → [`ResourceType::Capability`]. Named Section,
-//!   SymbolicLink, and Timer objects also map to [`ResourceType::Other`].
+//!   brokered-capability check → [`ResourceType::Capability`]. Registry writes
+//!   are retained only as non-actionable verbose diagnostics. Named Section,
+//!   SymbolicLink, and Timer objects are likewise verbose-only because MXC has
+//!   no corresponding policy grants.
 //!   Other object types are dropped until their access-mask vocabulary is
 //!   understood. The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
@@ -155,7 +157,7 @@ pub fn extract_denial(
 }
 
 /// Returns typed denial classifications that can be determined independently
-/// of whether the event contains every property required for canonical output.
+/// of whether the event contains every property required for actionable output.
 pub(crate) fn verbose_logging_classification(
     parts: &DecodedEventParts,
 ) -> (Option<AccessType>, Option<ResourceType>) {
@@ -607,9 +609,10 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
 /// brokered-capability check, and the observed named-object types `Section`,
-/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Other object
-/// types are dropped until their access-mask vocabulary is understood. An
-/// absent `ObjectType` field drops the event.
+/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Registry writes
+/// and those named-object types are excluded because MXC has no corresponding
+/// policy grants. Other object types are dropped until their access-mask
+/// vocabulary is understood. An absent `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
 /// event's `AccessMask` field (the desired access the caller was denied;
@@ -628,8 +631,9 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// [`VerboseLoggingExclusionReason::MissingObjectName`]; capability: an
 /// unidentified brokered check,
 /// [`VerboseLoggingExclusionReason::UnresolvedCapability`] — [`crate::capability_dacl`]
-/// may still recover it from the event's DACL payload), or a self-access
-/// check that isn't actionable ([`VerboseLoggingExclusionReason::NotActionable`]).
+/// may still recover it from the event's DACL payload), or a self-access,
+/// registry-write, or recognized named-object check that isn't actionable
+/// ([`VerboseLoggingExclusionReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
@@ -686,6 +690,12 @@ pub fn build_denial_from_access_check(
             })
             .unwrap_or(AccessType::Unknown)
     };
+
+    if (object_type_str == "Key" && access_type == AccessType::Write)
+        || matches!(object_type_str, "Section" | "SymbolicLink" | "Timer")
+    {
+        return Err(VerboseLoggingExclusionReason::NotActionable);
+    }
 
     Ok(RawDenial {
         pid,
@@ -1213,6 +1223,27 @@ mod tests {
     }
 
     #[test]
+    fn access_check_key_write_is_not_actionable() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+                // KEY_SET_VALUE.
+                ("AccessMask", "0x2"),
+            ],
+        );
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingExclusionReason::NotActionable
+        );
+        assert_eq!(
+            verbose_logging_classification(&p),
+            (Some(AccessType::Write), Some(ResourceType::Other))
+        );
+    }
+
+    #[test]
     fn access_check_empty_capability_identifier_is_dropped() {
         // Permissive-mode capability check: present-but-empty ObjectType,
         // empty ObjectName, mask 0x1 (not a file read verb here).
@@ -1260,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn access_check_observed_named_object_types_are_retained() {
+    fn access_check_observed_named_object_types_are_not_actionable() {
         for (object_type, object_name, mask, expected_access) in [
             (
                 "Section",
@@ -1284,10 +1315,14 @@ mod tests {
                     ("AccessMask", mask),
                 ],
             );
-            let denial = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
-            assert_eq!(denial.resource_type, ResourceType::Other);
-            assert_eq!(denial.object_name, object_name);
-            assert_eq!(denial.access_type, expected_access);
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingExclusionReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(expected_access), Some(ResourceType::Other))
+            );
         }
     }
 

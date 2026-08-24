@@ -12,7 +12,7 @@
 //!    [`DeniedResource`] records. The per-OS decoder implements
 //!    [`DenialAnalyzer`]; this crate owns the trait and the model.
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
-//!    written to the canonical JSON output that host applications read to
+//!    written to the actionable JSON output that host applications read to
 //!    regenerate policy. A deterministic verbose logging sibling contains bounded,
 //!    sensitive-value-redacted signatures for excluded decoder outcomes.
 //!

@@ -50,9 +50,9 @@ pub struct DenialsOutputPaths {
     pub etl: Option<PathBuf>,
 }
 
-/// Writes a bounded [`AnalysisResult`] as the canonical denials document and
+/// Writes a bounded [`AnalysisResult`] as the actionable denials document and
 /// deterministic verbose logging sibling, then returns caller-facing metadata for
-/// the canonical document.
+/// the actionable document.
 ///
 /// Never overwrites an existing file: a run whose output path collides with a
 /// leftover file from a previous run fails loudly rather than clobbering it.
@@ -339,7 +339,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: VerboseLoggingExclusionReason::CanonicalDenial,
+            reason: VerboseLoggingExclusionReason::Actionable,
             pid: 42,
             access_type: Some(learning_mode_core::AccessType::Read),
             resource_type: Some(learning_mode_core::ResourceType::File),
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn verbose_logging_collision_leaves_canonical_output_absent() {
+    fn verbose_logging_collision_leaves_actionable_output_absent() {
         let directory = tempfile::tempdir().expect("temp directory");
         let output_path = directory.path().join("denials.json");
         let verbose_logging_path = verbose_logging_output_path(&output_path).unwrap();

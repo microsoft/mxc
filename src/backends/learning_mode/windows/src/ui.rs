@@ -5,7 +5,7 @@
 //!
 //! Event 27 reports a category and detail value. UI-operation details use the
 //! `JOB_OBJECT_UILIMIT_*` constants from winnt.h; keeping the mapping here gives
-//! the canonical ETL analyzer one source of truth for both block and allow
+//! the actionable ETL analyzer one source of truth for both block and allow
 //! traces.
 
 /// The workload attempted an operation requiring the Win32k GUI subsystem.
@@ -27,7 +27,7 @@ const UI_LIMIT_NAMES: &[(u32, &str)] = &[
     (0x0200, "Injection"),
 ];
 
-/// Returns the canonical denial resource for an Event 27 category/detail pair.
+/// Returns the actionable denial resource for an Event 27 category/detail pair.
 ///
 /// Category zero means no violation and is omitted. Unknown nonzero categories
 /// remain diagnostic so a new OS category is visible without being mistaken
@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_job_ui_limit_has_a_canonical_resource_name() {
+    fn every_job_ui_limit_has_a_actionable_resource_name() {
         let expected = [
             (0x0001, "Handles"),
             (0x0002, "ReadClipboard"),
