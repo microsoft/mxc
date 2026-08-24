@@ -136,11 +136,12 @@ pub(super) fn select_network_format(
 }
 
 /// Allow or deny a network action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum NetworkAction {
     Allow,
+    #[default]
     Deny,
 }
 
@@ -256,9 +257,14 @@ pub(crate) fn has_host_rules(network: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        proxy_to_wire, select_network_format, NetworkEgressSection, NetworkFormat,
+        proxy_to_wire, select_network_format, NetworkAction, NetworkEgressSection, NetworkFormat,
         NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection, ProxySpec,
     };
+
+    #[test]
+    fn network_action_defaults_to_deny() {
+        assert_eq!(NetworkAction::default(), NetworkAction::Deny);
+    }
 
     #[test]
     fn format_selection_defaults_to_legacy_without_directional_intent() {
