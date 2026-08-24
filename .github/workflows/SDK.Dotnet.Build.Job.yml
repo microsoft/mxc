@@ -1,0 +1,36 @@
+name: SDK .NET Build
+
+on:
+  workflow_call:
+
+jobs:
+  sdk-dotnet-build:
+    name: SDK .NET Build (${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            runner: windows-latest
+          - os_label: linux
+            runner: ubuntu-latest
+          - os_label: macos
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: sdk/dotnet
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      # The csproj regenerates the P/Invoke layer by invoking cargo, so this
+      # lane needs the Rust toolchain.
+      - name: Setup Rust toolchain
+        run: rustup update stable
+
+      # No build settings are passed: feature selection lives in the csproj.
+      - run: dotnet build Microsoft.Mxc.Sdk.slnx

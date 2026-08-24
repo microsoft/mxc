@@ -197,9 +197,9 @@ Run native telemetry-consent integration tests in the **Debug** configuration.
 2. Next to the managed assembly, and `runtimes/<rid>/native/` (NuGet layout).
 3. The Cargo build output: `src/target/{debug,release}/` (for local dev/test).
 
-So after building the Rust workspace (`build.bat` / `cargo build`), the sample
-and tests find the native library with no extra steps. For packaging,
-`build.bat` copies `mxc_ffi.dll` into `runtimes/<rid>/native/` for `dotnet pack`.
+A build of this project puts the freshly built `mxc_ffi` next to the managed
+assembly. For packaging, `build.bat` populates `runtimes/<rid>/native/` for
+`dotnet pack`.
 
 ## Supported surface
 
@@ -237,7 +237,8 @@ MxcLifecycle.DeprovisionSandbox(id);
 
 The only state-aware backend, IsolationSession, is Windows-only and needs its
 OS-side service; on a host or build without it, these calls throw an
-`MxcException` with `ErrorCode.UnsupportedPhase` / `BackendUnavailable`.
+`MxcException` with `ErrorCode.UnsupportedPhase` / `BackendUnavailable`. Windows
+builds exclude it unless you pass `-p:MxcWithIsolationSession=true`.
 
 ## ABI stability
 
@@ -258,10 +259,10 @@ than linking third-party code directly against `mxc_ffi`.
   `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`dotnetsdk`** cargo
   feature (off by default, so normal/backend builds don't compile csbindgen).
   It is **not committed** (gitignored) — the `GenerateNativeBindings` MSBuild
-  target in the csproj (re)generates it before every C# compile by running
-  `cargo build -p mxc_ffi --features dotnetsdk`, so a plain `dotnet build`
-  produces fresh bindings that can never drift from the Rust FFI. (This means
-  building the C# SDK requires the Rust toolchain on PATH.)
+  target in the csproj regenerates it at build time by invoking cargo, so a
+  plain `dotnet build` produces fresh bindings that can never drift from the
+  Rust FFI. (This means building the C# SDK requires the Rust toolchain on
+  PATH.)
   `scripts/check-dotnet-bindings-codegen.js` runs that codegen and asserts the
   expected entry points are produced, catching a broken/renamed C ABI in CI.
 - The `ErrorCode` enum mirrors the native `MXC_STATUS_*` constants;
