@@ -10,18 +10,24 @@ reconstructs its exact Rust contract, advances exact development to
 `0.9.0-alpha`, and is complete on
 `user/gudge/version_specific_config_parsers_phase6.5`, awaiting a pull request
 and merge. Phase 7.1 is renamed Phase 7a and is open as PR #969. Phases 7.2-7.5
-and Phases 8-11 remain.
+and Phases 8-11 remain; the planned end state publishes `0.9.0-alpha` and opens
+`0.10.0-alpha` development.
 
-Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
-(2026-08-14)
+Original planning base: `origin/main` at
+`692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
 
-## Goals
+## 1. Goals, non-goals, and overall design
+
+### Goals
 
 - Require every config to declare an exact registered version.
 - Deserialize each published version through its own immutable Rust wire types.
 - Support exact published contracts for `0.6.0-alpha`, `0.7.0-alpha`, and
   `0.8.0-alpha`.
 - Use `0.9.0-alpha` as the current mutable development contract.
+- Publish `0.9.0-alpha` as the first stable schema released through the exact
+  contract publication path, with legacy Network fields removed, then advance
+  development to `0.10.0-alpha`.
 - Keep `experimental` completely absent from published contracts.
 - Make the development contract's `experimental` structure recursively closed,
   while allowing that entire unpublished contract to change freely.
@@ -30,7 +36,7 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 - Keep adapters from versioned wire types into the runtime model outside the
   immutable published modules.
 
-## Non-goals
+### Non-goals
 
 - Reproduce historical runtime bugs or security defaults.
 - Make a declared version select backend behavior or weaker validation.
@@ -41,9 +47,27 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 - Edit the existing immutable `0.6` or `0.7` stable schema files.
 - Reject positional JSON arrays that Serde can deserialize into structs. That
   object-root hardening is out of scope for this work in every phase.
-- Advance development beyond `0.9.0-alpha`; `1.0.0` remains a later milestone.
+- Publish `0.10.0-alpha` or advance development beyond it; `1.0.0` remains a
+  later milestone.
 
-## Contract reconstruction policy
+### Contract lifecycle and target state
+
+The legacy rolling stack shipped config schema `0.8.0-alpha` under product tag
+`v0.8.0`. Phase 6.5 reconstructs that immutable published contract and advances
+the exact development contract to `0.9.0-alpha`.
+
+| Point in the work | Published exact contracts | Mutable exact development contract |
+| --- | --- | --- |
+| After Phase 6.5 | `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha` | `0.9.0-alpha` |
+| End state after Phase 11 | `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, `0.9.0-alpha` | `0.10.0-alpha` |
+
+Published request types contain only the stable one-shot surface. They exclude
+`experimental`, `phase`, `sandboxId`, `correlationVector`, experimental
+containments, and the abstract `vm` intent while it resolves only to an
+experimental backend. The historical `0.5.0-alpha` schema remains unsupported;
+no runtime contract is added for it.
+
+### Contract reconstruction policy
 
 The published schema defines each version's canonical field set and spellings.
 The exact Rust contract additionally preserves an undocumented parser spelling
@@ -69,307 +93,11 @@ into the exact `0.6` contract. Arbitrary unknown fields, parse-and-ignore
 behavior, missing versions, experimental fields on published contracts, and
 `experimental.macos_sandbox` after Seatbelt promotion are not preserved.
 
-## Design note under discussion: experimental fields in published contracts
-
-> **Status: recorded discussion, not part of the plan of record.**
->
-> The goals, target contracts, and phases below still describe the earlier
-> assumption that published contracts exclude `experimental`. Do not implement
-> the alternative in this section until the requirement is ratified and the
-> normative parts of this plan are updated.
->
-> **Update, 2026-08-20.** The revised publication sequence brought this
-> forward, and it was decided against: stable `0.8.0-alpha` contains neither
-> experimental nor state-aware fields, answering decision 5 as "none" and
-> question 3 as "no". This section remains a recorded discussion for a future
-> publication. See "Revised publication sequence".
-
-A proposed requirement allows a published config contract (and therefore a
-stable schema artifact) to include explicitly selected experimental fields.
-The `experimental` object and every nested experimental object would remain
-recursively closed. A later published version could promote a feature by moving
-it from `experimental.<feature>` to a top-level `<feature>` field.
-
-This separates three concepts that the current plan partly conflates:
-
-| Concept | Meaning |
-| --- | --- |
-| Contract status | Whether a complete accepted JSON shape is mutable development work or an immutable published contract |
-| Feature status | Whether a field is experimental or part of the top-level stable surface |
-| Execution gate | Whether using the feature requires `--experimental` or another explicit opt-in |
-
-Under this requirement, publishing would freeze the **entire accepted shape**,
-including any experimental subtree included in that version. Published would
-mean immutable syntax, not that every field in the contract is a mature
-top-level feature.
-
-For example:
-
-```text
-0.8.0-alpha accepts: experimental.foo
-0.9.0-alpha accepts: foo
-```
-
-The two immutable contract modules would retain their respective paths while
-their mutable adapters normalize both into the same canonical runtime field:
-
-```text
-v0.8 experimental.foo --\
-                         +--> CanonicalRequest.foo
-v0.9 foo ----------------/
-```
-
-This works naturally with exact version dispatch and avoids putting a
-version-sensitive alias on one rolling wire type. The old path remains accepted
-only while its published contract remains supported; the newer contract may
-reject it and accept only the promoted top-level path.
-
-### Impact if adopted
-
-The following parts of the current plan would need revision:
-
-- Remove the goal and target-contract rule that published contracts never
-  contain `experimental`.
-- Reconstruct each historical version from what that version actually
-  published. The existing `0.6` and `0.7` stable schemas would still exclude
-  `experimental`; a future `0.8` publication could include only the explicitly
-  selected experimental fields intended for that contract.
-- Allow published modules to define self-contained, recursively closed
-  experimental types. Development would remain mutable, but would no longer be
-  the only contract status allowed to contain experimental fields.
-- Make shadow-parser expectations version-specific rather than treating
-  `published version + experimental` as universally invalid.
-- Classify corpus migrations by the first exact contract that defines each
-  experimental field. Do not mechanically move every experimental config to
-  the development version.
-- Dispatch state-aware requests according to the selected contract if
-  state-aware experimental shapes are ever included in a published version.
-- Change publication tooling to freeze the complete selected contract rather
-  than copying only a stable candidate surface. Experimental and state-aware
-  types would be excluded or included deliberately per publication, not by a
-  global rule.
-- Generate schemas and SDK wire types that expose the exact experimental field
-  set for each version.
-
-Phase 1's exact version model, registry, and source-text probe would not change.
-The per-version Rust contract and adapter architecture would also remain the
-same.
-
-### Cost and trade-off
-
-An experimental field included in a published contract loses shape-level
-mutability for that version. Adding, removing, renaming, or restructuring one
-of its fields requires a new config version even though the feature remains
-experimental. This is the principal cost of making experimental structures
-closed and publishable.
-
-The benefit is deterministic parsing: an experimental typo or unsupported
-field is rejected rather than silently ignored, and a published version's
-accepted JSON shape cannot change underneath its users.
-
-### Decisions required before adoption
-
-1. Does a published contract structurally accept its experimental fields even
-   when `--experimental` is absent, with the flag controlling execution only?
-2. If an experimental field is present without the execution opt-in, should MXC
-   reject the request or preserve the current parse-and-ignore behavior?
-3. Can state-aware request shapes be included in a published contract, or does
-   this requirement initially apply only to one-shot experimental fields?
-4. When a feature is promoted, does the new contract reject its old
-   `experimental` path immediately, or provide a version-scoped transition
-   spelling?
-5. Which experimental fields, if any, should be selected for the first
-   `0.8.0-alpha` published contract?
-
-## Target contracts
-
-| Status | Exact version | Contract |
-| --- | --- | --- |
-| Published | `0.6.0-alpha` | Stable one-shot config only |
-| Published | `0.7.0-alpha` | Stable one-shot config only |
-| Published | `0.8.0-alpha` | Stable one-shot config only |
-| Development | `0.9.0-alpha` | Mutable closed one-shot experimental and state-aware config |
-
-Published request types do not contain:
-
-- `experimental`
-- `phase`
-- `sandboxId`
-- `correlationVector`
-- experimental containment values such as `windows_sandbox`, `wslc`,
-  `microvm`, `isolation_session`, or `hyperlight`
-- the abstract `vm` intent while it resolves only to an experimental backend
-
-The existing `schemas/stable/mxc-config.schema.0.5.0-alpha.json` experimental
-section remains an unsupported historical artifact. No `0.5` runtime contract
-will be added.
-
-## Revised publication sequence
-
-Agreed 2026-08-20, after PR #961 shipped directional networking on the rolling
-model ahead of this work. It replaces the implicit ordering in Phases 8 through
-11, which assumed publication happened last.
-
-The order is:
-
-1. PRs #961 and #962 land: directional networking and its backend validation,
-   on the rolling wire model, version-gated to `0.8`. **Done.**
-2. Port the same fields into `mxc_config_contract::dev` and its adapters —
-   `network.egress`, `network.ingress`, and
-   `processContainer.network.allowedProxyPeer`. **This is a prerequisite, not
-   an option:** publishing a `0.8.0-alpha` contract that cannot express a
-   feature the same version ships to customers would be incoherent. **Done, in
-   PR #968 rather than separately:** a review of that pull request identified
-   the same gap, so the port landed there alongside a `NonEmptyVec` primitive
-   that restores the shipped schema's `minItems` constraint on a rule's `to`
-   and `ports`.
-3. Land Phase 6, so exact development artifacts derive from the contract crate.
-   **Done in PR #968.**
-4. Publish `0.8.0-alpha`. **Done by the legacy rolling stack in PR #996 and
-   released under annotated tag `v0.8.0` at `7dac1a95`.** The tagged stable
-   schema is immutable blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b`;
-   Phase 6.5 reconstructs the exact Rust contract but does not regenerate or
-   rewrite that artifact.
-5. Move remaining rolling and exact development work to `0.9.0-alpha`.
-   **Rolling development moved in PR #996; exact development moves in Phase
-   6.5.** The contract artifact suffix is `-alpha`; `-dev` remains reserved for
-   the rolling family being retired.
-
-### Phase 6.5 final implementation
-
-Phase 6.5 is complete on
-`user/gudge/version_specific_config_parsers_phase6.5`. It:
-
-- reconstructs `published/v0_8_0_alpha` from the tagged stable schema using the
-  same policy as v0.6/v0.7: exact required version, closed objects, explicit
-  null rejection, string-only enums, local value constraints, and preservation
-  only of explicit compatibility aliases
-- adds the frozen `config_contract_adapters::v0_8` adapter without changing the
-  tagged stable schema or generating a published TypeScript oracle
-- renames the mutable development contract to `0.9.0-alpha`, moving its tests,
-  fixtures, and adapters to the v0.9 line
-- registers v0.8 as published and v0.9 as development, and commits the generated
-  v0.9 exact schema and TypeScript oracle
-- covers cross-version boundaries and the published adapter's directional
-  conversion, including `egress`, `ingress`, `runtimeConfig`, and
-  `allowedProxyPeer`
-- preserves the released v0.8 schema byte-for-byte and keeps
-  `mxc_schema_gen`/`check-contract-codegen.js` scoped to mutable development
-  artifacts
-
-Two consequences of the rebase are worth recording, because both were found by
-a failing test rather than by inspection. The 0.8 test suite inherited from
-#968 assumed `0.8` was still the development contract, so it listed
-`"experimental": {}` as an acceptable empty optional object; under publication
-that document must be rejected. And the adapter and one-shot tests added to
-#968 for `runtimeConfig` carried `0.8.0-alpha` version markers into the renamed
-`0.9` suites, where the exact version marker rejects them. Both are the same
-class of error: a version-specific test moving between contracts without its
-version string moving with it.
-
-### Phase 6.5 completion status
-
-Implementation and local validation are complete as of 2026-08-24.
-
-| Area | Final state |
-| --- | --- |
-| v0.8 release identity | Annotated tag `v0.8.0` resolves to `7dac1a95`; stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` is preserved byte-for-byte |
-| Published v0.8 contract | Reconstructed with the v0.6/v0.7 bootstrap-tightening policy and explicit compatibility aliases; no experimental or state-aware surface |
-| Published v0.8 adapter | Exhaustive stable one-shot mapping, including legacy and directional network families, runtime proxy configuration, and ProcessContainer proxy identity |
-| Development rollover | Exact development contract, adapters, fixtures, schema, and TypeScript oracle moved to `0.9.0-alpha` |
-| Generated artifacts | Only rolling `0.9.0-dev` and exact development `0.9.0-alpha` artifacts are regenerated; published v0.8 artifacts are immutable |
-| Cross-version coverage | Directional networking and runtime configuration are introduced at v0.8; experimental containment and state-aware roots are introduced at v0.9 |
-| Published contract coverage | All v0.8 fixtures are discovered automatically; version, null, command, LXC, proxy, capability, alias, enum, experimental, and state-aware boundaries are covered |
-| Review remediation | Stable-schema rewrite, obsolete v0.8 TypeScript generation, validation-claim drift, documentation errors, fixture omissions, and the v0.8 capability boundary assertion are resolved |
-
-The only remaining Phase 6.5 work is to open its pull request, complete normal
-review and CI, and merge it. General published-contract digest/freeze automation
-remains part of Phase 11 rather than a Phase 6.5 merge blocker.
-
-### The adapter's no-wildcard rule is enforced by the compiler
-
-Phase 3 requires adapters to destructure every contract field explicitly, with
-no catch-all `..`. Mutation testing during Phase 6.5 showed this rule is
-stronger than the plan claims, and worth stating precisely:
-
-- **A dropped field cannot compile.** Removing a field's mapping leaves its
-  binding unused, and the crate denies warnings, so `unused variable: except`
-  fails the build.
-- **A swapped field usually cannot compile either.** Mapping `allow` from the
-  `deny` binding produces `use of moved value: deny`.
-- **A misrouted *value* compiles and must be caught by tests.** Changing
-  `NetworkAction::Deny => wire::NetworkAction::Allow` builds cleanly; it failed
-  four adapter tests, and `NetworkProtocol::Udp => Tcp` failed three.
-
-So adapter tests are not guarding against omission — the compiler already does
-that. They guard against a mapping that points at the wrong value, which is
-exactly what the wire-equivalence comparison detects best. Write them for enum
-arms and for fields whose types are interchangeable, and do not pad them with
-presence assertions the build already guarantees.
-
-
-
-The old rolling stack published v0.8 before exact dispatch became
-authoritative. Phase 6.5 therefore treats the tagged stable schema as immutable
-and reconstructs a Rust input contract using the same bootstrap-tightening
-policy as v0.6/v0.7; it does not publish a second schema artifact under the
-same identity.
-
-### Published `0.8.0-alpha` scope: stable candidate only
-
-**Decided 2026-08-20: neither state-aware nor experimental enters stable
-`0.8.0-alpha`.** The original target-contract rule therefore stands unchanged,
-and design-note decision 5 is answered "none" while its question 3 is answered
-"no". `published::v0_8_0_alpha` is the stable-candidate one-shot surface only:
-no `experimental`, no `phase`, no `sandboxId`, no `correlationVector`, and the
-containment enum narrowed to `process`, `processcontainer` with its
-`appcontainer` alias, `lxc`, `bubblewrap`, and `seatbelt` with its
-`macos_sandbox` alias.
-
-The directional network fields ported in step 2 are unaffected: `network.egress`,
-`network.ingress`, and `processContainer.network.allowedProxyPeer` are all
-stable-surface fields, so they publish with the rest of the one-shot contract.
-
-The corpus cost is small and entirely predictable. Of the thirty configs
-declaring `0.8.0-alpha` today, twenty-four are stable-candidate only and stay;
-six move to `0.9.0-alpha`, and they are the same six documents — every one is a
-WSLC config that uses both the development-only `wslc` containment and an
-`experimental` block:
-
-```text
-wslc_denied_dotdot_alias.json        wslc_most_specific_denied_parent.json
-wslc_denied_masking.json             wslc_port_mapping_multiple.json
-wslc_filesystem_object.json          wslc_port_mapping_tcp.json
-```
-
-No corpus config declares `0.8.0-alpha` together with a `phase`, so excluding
-state-aware costs nothing in the corpus. It does, however, decide where
-state-aware lives: with no published version to declare, state-aware requests
-move from the `0.6.0-alpha` they hard-code today onto `0.9.0-alpha`, so the
-lifecycle ships only against a development contract until it is promoted. That
-is the intended consequence of the Phase 11 rule, recorded here as a choice.
-
-### Resolved schedule consequences
-
-- The released schema version remains the literal `0.8.0-alpha`; product
-  release tag `v0.8.0` does not change the config-version spelling.
-- `schemas/schema-version.json` and the rolling parser/SDK moved to the v0.9
-  development line in PR #996.
-- The exact registry marks v0.8 published and v0.9 development.
-- `ProcessContainerCapability` is frozen into the v0.8 Rust contract as a
-  deliberate parse-time tightening; v0.6/v0.7 retain conversion-time rejection.
-- Per-version policy-builder forking remains deferred until that builder exists.
-- State-aware producer migration to v0.9 remains Phase 8 work.
-- Phase 10 retains only work not already shipped by the rolling v0.8 networking
-  implementation, notably the IsolationSession acknowledgment redesign and
-  published-version translation.
-
-## Two coexisting versioning models
-
+### Two coexisting versioning models
 The rolling and exact models coexist until Phase 9 makes exact dispatch
 authoritative and Phase 11 retires the remaining rolling metadata.
 
-### The two models
+#### The two models
 
 | | Rolling (old stack) | Contract (new stack) |
 | --- | --- | --- |
@@ -380,7 +108,7 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 | Gates | `check-schema-versions`, `check-schema-codegen`, `validate-configs` | `check-contract-codegen` |
 | Enforced at runtime | yes, parser and SDK | no, until Phase 9 |
 
-### Current resolution
+#### Current resolution
 
 - v0.8 shipped under the legacy rolling scheme and its tagged stable schema is
   immutable; the exact Rust module reconstructs that contract but does not
@@ -392,8 +120,7 @@ authoritative and Phase 11 retires the remaining rolling metadata.
 - Phase 11 still replaces duplicated version metadata and adds general
   published-contract freeze/digest enforcement.
 
-## Intended parse flow
-
+### Intended parse flow
 ```text
 raw JSON source
     |
@@ -424,7 +151,7 @@ ExecutionRequest / ParsedStateAwareRequest
 The request is deserialized directly from its source text. It is not converted
 to `serde_json::Value` before structural validation.
 
-### Entry-point-dependent command requirements
+#### Entry-point-dependent command requirements
 
 The published `Request` types represent complete JSON requests and retain the
 schema requirement for `process.commandLine`. The existing CLI policy mode that
@@ -513,7 +240,7 @@ after it.
 Phase 7 shadow dispatch must cover this path, and Phase 9 cannot enable exact
 dispatch until its behavior matches the current CLI override flow.
 
-## Work plan
+## 2. Phases 1-11
 
 ### Phase 1: Add the contract crate and exact version probe
 
@@ -992,6 +719,33 @@ together.
 The detailed design, the resolved decisions, and the implementation record are
 in the Phase 6 detailed design section below. Phase 6 merged in PR #968.
 
+### Phase 6.5: Reconstruct published v0.8 and advance exact development to v0.9
+
+Status: implementation complete on
+`user/gudge/version_specific_config_parsers_phase6.5`; awaiting pull request,
+review, CI, and merge.
+
+The legacy rolling stack shipped v0.8 before exact dispatch was authoritative.
+This phase bridges that release into the exact-contract model without changing
+its tagged stable schema:
+
+- reconstruct `published::v0_8_0_alpha` from the released stable one-shot
+  surface using the v0.6/v0.7 bootstrap-tightening policy
+- add an exhaustive frozen v0.8 adapter into the current rolling wire model
+- preserve the tagged v0.8 schema byte-for-byte and do not generate a published
+  v0.8 TypeScript oracle
+- move the mutable exact contract, adapters, tests, fixtures, schema, and
+  TypeScript oracle from v0.8 to `0.9.0-alpha`
+- register v0.8 as published and v0.9 as development
+- add directional-network adapter coverage and cross-version boundary tests
+- update codegen and authoring documentation to distinguish immutable
+  published artifacts from mutable development artifacts
+
+Done when the published v0.8 contract and adapter are fully covered, the exact
+v0.9 artifacts pass their drift gate, the tagged stable schema is unchanged,
+and no production parser behavior changes. Appendix B records the final
+implementation details.
+
 ### Phase 7: Add shadow exact-contract dispatch
 
 Add a private exact-contract path in `config_parser` while retaining the current
@@ -1027,10 +781,10 @@ classify intentional tightening and other known expected incompatibilities,
 especially configs that declare `0.6.0-alpha` while carrying experimental
 fields.
 
-Shadow comparison uses the current legacy Network syntax for all versions. The
-GA Network change is intentionally deferred until exact dispatch is
-authoritative, because the rolling parser cannot accept the new `0.8.0-alpha`
-shape without repeating the version-insensitive break introduced by PR #676.
+Shadow comparison covers the shipped v0.8 legacy and directional Network
+surfaces and the inherited v0.9 development surface. Any remaining removal of
+legacy Network syntax happens only on the authoritative v0.9 exact contract;
+published v0.6/v0.7/v0.8 syntax remains immutable.
 
 ### Phase 8: Migrate producers and the config corpus
 
@@ -1050,12 +804,13 @@ The most recent focused audit (2026-08-11, `tests/configs` plus
 These counts are evidence that migration is required, not a frozen Phase 8
 input.
 
-Experimental and state-aware configs move to `0.8.0-alpha`. Stable configs are
-classified and assigned an exact published version.
+Experimental and state-aware configs move to the `0.9.0-alpha` development
+contract. Stable configs are classified and assigned an exact published
+version (`0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`).
 
-This migration retains the current legacy Network syntax. Development configs
-that use Network policy receive a second, focused migration when Phase 10
-changes the authoritative `0.8.0-alpha` contract to the GA shape.
+Published-version configs retain their version-specific Network syntax.
+Development configs still using legacy Network fields migrate to the v0.9
+stable-candidate directional shape in Phase 10.
 
 Update Node, C#, Rust SDK, FFI, examples, tests, and `$schema` references.
 State-aware producers must stop hard-coding `0.6.0-alpha`.
@@ -1067,12 +822,12 @@ This step is primarily mechanical and is suitable for delegation.
 Replace the major/minor range check with exact registry dispatch.
 
 Add `allow_development_contract` to parser load options. Initially, the
-existing `--experimental` option authorizes parsing `0.8.0-alpha` as well as
+existing `--experimental` option authorizes parsing `0.9.0-alpha` as well as
 enabling experimental execution.
 
-Published versions reject `experimental` as an ordinary unknown field.
-Development requests without opt-in receive a specific error. There is no
-fallback to the latest version.
+Published v0.6/v0.7/v0.8 versions reject `experimental` as an ordinary unknown
+field. Development requests without opt-in receive a specific error. There is
+no fallback to the latest version.
 
 After parity tests pass, remove the direct version-insensitive wire
 deserialization path.
@@ -1084,95 +839,67 @@ phase in which any of that code is reachable in a production build. Removing
 them earlier would produce dead-code warnings, since an uncalled exact path
 leaves everything it calls dead too.
 
-Exact dispatch must be authoritative before the development Network contract
-changes. This sequencing is what protects `0.6.0-alpha` and `0.7.0-alpha`
-callers from the breaking-change failure mode that caused PR #676 to be
-reverted.
+Exact dispatch must be authoritative before the v0.9 stable-candidate contract
+removes legacy Network syntax. This sequencing protects all published
+v0.6/v0.7/v0.8 callers from the version-insensitive breaking-change failure
+mode that caused PR #676 to be reverted.
 
-### Phase 10: Reintroduce the GA network contract on the authoritative development version
+### Phase 10: Finalize the v0.9 stable candidate
 
-Redo the work originally attempted by PR #676 and reverted by PR #707, but
-apply it only to the now-authoritative version-specific `0.8.0-alpha` contract.
-Do not replace or widen a rolling version-insensitive wire shape.
+Directional networking shipped in v0.8 through the rolling stack and is already
+present in the exact v0.8 and v0.9 contracts. Phase 10 therefore does not
+reintroduce that surface. It finalizes the authoritative v0.9 stable candidate
+before publication:
 
-The `0.8.0-alpha` development contract adds:
+- remove legacy Network syntax from v0.9 while leaving published
+  v0.6/v0.7/v0.8 contracts immutable
+- migrate v0.9 development configs, SDK emitters, and state-aware request
+  surfaces to directional networking
+- preserve adapters that translate each published legacy Network contract into
+  the canonical runtime model
+- resolve the IsolationSession unrestricted-network acknowledgment without
+  pretending MXC enforces policy values that the backend cannot honor
+- retain presence information equivalent to `network_specified` and
+  `ui_specified`, so backend validation can distinguish omission from an
+  explicit policy request
 
-- `network.egress` and `network.ingress`
-- `NetworkEgress`, rule, destination, port, protocol, and ingress policy types
-- destination `except` ranges and inclusive `endPort`
-- `tcp`, `udp`, `icmp`, and `any` protocol values
-- `processContainer.network.allowedPeers`
-- the GA runtime location for network proxy configuration
+The IsolationSession acknowledgment requires a deliberate design. A dedicated
+acknowledgment field, rather than borrowed Network policy values, would remain
+stable across future Network vocabulary changes and describe caller intent
+honestly. Any spelling change includes corpus, SDK, backend validation, and
+documentation updates.
 
-State-aware `0.8.0-alpha` requests carry the legacy Network shape in three
-places, all introduced by Phase 5C/5D, and all of them change in this phase:
+The removed v0.9 fields are `network.defaultPolicy`,
+`network.enforcementMode`, `network.allowedHosts`, `network.blockedHosts`,
+`network.allowLocalNetwork`, and `network.proxy`. Their behavior is represented
+through directional egress/ingress, runtime proxy configuration, explicit
+backend acknowledgments, or a specific migration error; it is never silently
+dropped. Publication must fail if any of these legacy fields remains reachable
+from a v0.9 one-shot or state-aware root.
 
-- the IsolationSession provision **unrestricted-network acknowledgment**, today
-  encoded structurally as the exact markers `network.defaultPolicy: "allow"`
-  plus `network.allowLocalNetwork: true` on
-  `IsolationSessionProvisionRequest`. The GA equivalent must be defined
-  deliberately — an acknowledgment that no longer has `defaultPolicy` or
-  `allowLocalNetwork` to point at is not a mechanical rename — and the backend's
-  `validate_provision_network_policy` must be updated with it.
-- `ExecRequest.network`, the per-exec cooperative proxy path used by WSLC.
-- `WslcProvisionRequest.network`, the provision-time WSLC network policy.
-
-Decide explicitly, rather than mechanically porting, whether the IsolationSession
-acknowledgment should remain expressed as network *policy values* at all. It is
-an assertion about the caller's understanding, encoded as two fields MXC cannot
-enforce; that is exactly why it needs a bespoke translation whenever the network
-vocabulary changes. A dedicated field (for example `network.acknowledgeUnrestricted`
-or a backend-level acknowledgment inside the ISO provision payload) would be
-invariant across this change, would read honestly in the generated schema, and
-would decouple the acknowledgment from `network_specified`. The cost is a corpus
-and SDK migration plus documentation updates in `docs/isolation-session/`, since
-the current spelling has shipped.
-
-The state-aware development adapters (`config_contract_adapters::dev`) move with
-them, including the hardcoded acknowledgment mapping in
-`convert_isolation_session_network`.
-
-The backends' presence-based gates must keep working. `network_specified` and
-`ui_specified` exist because a default-deny policy is value-indistinguishable
-from an absent one; the GA shape needs an equivalent notion of "the caller
-supplied a network policy" or those backends lose the distinction that makes
-their `policy_validation` errors correct.
-
-The phase must be end-to-end and leave the tree green. It includes the
-development contract, adapters from the legacy `0.6`/`0.7` network shapes,
-canonical runtime models, semantic validation, backend enforcement, Rust and
-TypeScript SDK surfaces, generated artifacts, fixtures, and applicable unit,
-integration, and E2E tests. Do not merge a schema-only change that intentionally
-breaks the parser, codegen, SDK, or test gates.
-
-The published `0.6` and `0.7` contracts retain their immutable legacy Network
-syntax and continue to parse through their exact contract modules. Their
-adapters normalize legacy fields into the canonical runtime model. Migrations
-must not silently drop DNS host rules, enforcement choices, local-network
-intent, or proxy configuration; each legacy behavior must be translated,
-rejected with a specific migration error, or retained through a documented
-compatibility representation.
-
-The GA fields are available only in the mutable `0.8.0-alpha` development
-contract. Update the development schema, TypeScript oracle, SDK emitters, and
-the `0.8.0-alpha` Network config corpus in this phase. Because exact dispatch is
-already authoritative, these changes cannot alter the accepted syntax of
-published `0.6.0-alpha` or `0.7.0-alpha` requests.
+The phase must be end-to-end and leave the tree green. It includes the v0.9
+contract and adapters, published-version translations, canonical runtime
+models, semantic validation, backend enforcement, Rust/TypeScript/C# SDK
+surfaces, generated artifacts, fixtures, and applicable unit, integration, and
+E2E tests. No published schema or contract may change.
 
 ### Phase 11: Add publication and freeze checks
 
 The v0.8 release shipped through the legacy publication stack, and Phase 6.5
 manually reconstructed its immutable Rust contract and adapter. Phase 11
-generalizes that process for future exact-contract publications with a command
-of the form:
+publishes the completed v0.9 stable candidate through the exact-contract path
+and opens v0.10 development:
 
 ```text
-mxc_schema_gen publish --version <current-dev> --next-dev <next-dev>
+mxc_schema_gen publish --version 0.9.0-alpha --next-dev 0.10.0-alpha
 ```
 
 Publication copies only the development stable-candidate request;
 experimental and state-aware types never enter a published contract. Generate
 the lifecycle registry and version constants from the publication metadata.
+After publication, the registry marks v0.9 published and v0.10 development;
+the mutable `dev` module and its schema, fixtures, adapters, and TypeScript
+oracle all advance to `0.10.0-alpha`.
 
 Publication is not a byte-for-byte copy of every stable-candidate type. A
 development one-shot `Containment` enum may carry both
@@ -1213,12 +940,9 @@ match any variant" for every misspelled containment.
 Narrowing at publication has a recurring cost that must be planned for, not
 discovered: at every publication, each config using a development-only
 containment must be re-versioned to the new development version. A document
-declaring `0.8.0-alpha` with `containment: "windows_sandbox"` becomes a hard
-error the moment `0.8.0-alpha` is published. Phase 8's migration is therefore
-not a one-off; a smaller version of it recurs at each publication. This is also
-the strongest practical argument for the recorded design discussion on including
-selected experimental fields in published contracts, and the two should be
-decided together.
+declaring `0.9.0-alpha` with `containment: "windows_sandbox"` must move to
+`0.10.0-alpha` when v0.9 is published. Phase 8's migration is therefore not a
+one-off; a smaller version recurs at each publication.
 
 Add CI checks that published Rust modules, stable generated schemas, registry
 identities, and recorded digests cannot be modified or deleted. Reuse
@@ -1232,8 +956,7 @@ current min/stable/dev constants as the exact-contract registry. Exact contracts
 are registered deliberately as their Rust modules are implemented; Phase 11
 replaces the old synchronization mechanism with generated registry metadata.
 
-## Suggested ownership
-
+### Suggested ownership
 Good substantive Rust work to keep with the primary implementer:
 
 - exact version probe and registry
@@ -1251,12 +974,13 @@ Good tasks to delegate:
 - SDK constants and documentation sweeps
 - CI JavaScript updates
 
-## Phase 1 detailed design
+## 3. Detailed implementation plans and records
 
+### Phase 1 detailed design
 Phase 1 was implemented by PR #807. The detailed design remains here as the
 record of the crate boundary and probe responsibilities.
 
-### Phase 1 objective
+#### Phase 1 objective
 
 Create a small independent crate that can answer:
 
@@ -1266,12 +990,12 @@ Create a small independent crate that can answer:
 It must reject malformed declarations without knowing anything about the rest
 of the config shape. It does not yet deserialize a version-specific request.
 
-### Phase 1 step breakdown
+#### Phase 1 step breakdown
 
 Phase 1 is intentionally split into six small implementation steps. Each step
 has a single responsibility and leaves the new crate in a buildable state.
 
-#### Phase 1.0: Prepare the implementation branch
+##### Phase 1.0: Prepare the implementation branch
 
 Start from the base commit named at the top of this document rather than the
 older detached worktree on which this plan was authored.
@@ -1285,7 +1009,7 @@ Done when:
 
 No source files are changed in this step.
 
-#### Phase 1.1: Scaffold the independent crate
+##### Phase 1.1: Scaffold the independent crate
 
 Files:
 
@@ -1314,7 +1038,7 @@ passes without changing any existing crate's behavior.
 
 Suggested commit boundary: `Add config contract crate scaffold`.
 
-#### Phase 1.2: Implement the exact version value type
+##### Phase 1.2: Implement the exact version value type
 
 Primary file:
 
@@ -1341,7 +1065,7 @@ Done when:
 
 Suggested commit boundary: `Add exact config contract versions`.
 
-#### Phase 1.3: Add lifecycle registry metadata
+##### Phase 1.3: Add lifecycle registry metadata
 
 Primary file:
 
@@ -1370,7 +1094,7 @@ Done when the version enum and lifecycle registry cannot silently drift.
 
 Suggested commit boundary: `Add config contract registry metadata`.
 
-#### Phase 1.4: Implement source-text version probing
+##### Phase 1.4: Implement source-text version probing
 
 Primary file:
 
@@ -1395,7 +1119,7 @@ or storing the rest of the config.
 
 Suggested commit boundary: `Add exact contract version probe`.
 
-#### Phase 1.5: Stabilize the initial public API
+##### Phase 1.5: Stabilize the initial public API
 
 Primary file:
 
@@ -1416,7 +1140,7 @@ implementation details.
 
 This step may be folded into Phase 1.4's commit if the API change is trivial.
 
-#### Phase 1.6: Run the phase quality gate
+##### Phase 1.6: Run the phase quality gate
 
 Run:
 
@@ -1435,7 +1159,7 @@ Also confirm:
 Suggested commit boundary: normally none; fix issues in the commit that
 introduced them.
 
-### Cargo wiring
+#### Cargo wiring
 
 Add `core/mxc_config_contract` to the workspace members in `src/Cargo.toml`.
 Declare the workspace path dependency when the first adapter, shadow-dispatch,
@@ -1454,7 +1178,7 @@ Schemars is deferred until Phase 6, when versioned schema generation consumes
 the contract types. Earlier phases validate deserialization behavior directly
 and do not add schema-generation dependencies without a consumer.
 
-### Public API
+#### Public API
 
 The initial `lib.rs` should expose only the version model and probe:
 
@@ -1469,7 +1193,7 @@ pub use version::{probe_version, ContractVersion, VersionProbeError};
 The `published` module begins with the first published request type in Phase 2.
 The `dev` module is deferred until the development contract in Phase 5.
 
-### Exact version model
+#### Exact version model
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1502,7 +1226,7 @@ pub const ALL: &[ContractVersion] = &[
 ];
 ```
 
-### Registry metadata
+#### Registry metadata
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1529,7 +1253,7 @@ pub fn descriptor(version: ContractVersion) -> &'static ContractDescriptor;
 pub fn supported_version_strings() -> impl Iterator<Item = &'static str>;
 ```
 
-### Source-text probe
+#### Source-text probe
 
 Use a deliberately small borrowed Serde type:
 
@@ -1575,7 +1299,7 @@ occurs.
 
 After deserialization, call `ContractVersion::parse_exact`.
 
-### Phase 1 tests
+#### Phase 1 tests
 
 Unit tests should cover:
 
@@ -1594,7 +1318,7 @@ Unit tests should cover:
 Avoid pinning complete Serde error strings. Assert the error variant and only
 stable, meaningful fragments where necessary.
 
-### Phase 1 exit criteria
+#### Phase 1 exit criteria
 
 - The new crate builds independently.
 - Exact version lookup is the only accepted lookup behavior.
@@ -1603,14 +1327,13 @@ stable, meaningful fragments where necessary.
 - No schema, generated SDK type, config file, or documentation migration has
   started.
 
-## Phase 6 detailed design
-
+### Phase 6 detailed design
 Phase 6 merged in PR #968 after review and CI.
 
 It adds versioned development-contract schema and TypeScript generation without
 changing parser dispatch, corpus validation, or runtime behavior.
 
-### Phase 6 objective
+#### Phase 6 objective
 
 Make the mutable `0.8.0-alpha` contract's generated artifacts derive from
 `mxc_config_contract::dev` rather than from the rolling `wxc_common::wire`
@@ -1623,7 +1346,7 @@ publish or freeze `0.8.0-alpha`, does not retire the rolling artifacts, does
 not repoint the corpus gate, and does not modify the parser or any runtime
 behavior.
 
-### Phase 6 relationship to adjacent phases
+#### Phase 6 relationship to adjacent phases
 
 Phase 6 is independent of Phase 7 and the two may proceed in parallel. It must
 land before Phase 10 and should land before Phase 8.
@@ -1655,7 +1378,7 @@ widening one of those types changes the deserializer and the generated const
 together. Adapters then fail to compile and the artifact drift gate fails,
 rather than either failing alone.
 
-**Phase 10's network rework becomes reviewable.** The IsolationSession
+**Phase 10's v0.9 Network cleanup becomes reviewable.** The IsolationSession
 unrestricted-network acknowledgment is encoded structurally as the exact
 values `network.defaultPolicy: "allow"` and `network.allowLocalNetwork: true`
 on the provision root. Once Phase 6 lands, that acknowledgment appears in a
@@ -1667,13 +1390,13 @@ and `WslcProvisionRequest.network`.
 
 **Phase 11 reuses the version dispatch.** The generator's `--version`
 selection is exact and registry-driven from the outset, with published
-versions reserved. Publication adds a `published/v0_8_0_alpha` arm rather
-than reworking the command line. The enum schema emission must derive its
-value set from the macro's own value table, never from a list written into
-the generator, so that Phase 11's `STABLE_CANDIDATE_CONTAINMENTS` narrowing
-yields the narrower published schema automatically.
+versions reserved. Phase 11 adds `published/v0_9_0_alpha`, advances `dev` to
+v0.10, and leaves the command-line shape unchanged. The enum schema emission
+must derive its value set from the macro's own value table, never from a list
+written into the generator, so publication narrowing yields the stable
+containment set automatically.
 
-### Phase 6 decisions resolved
+#### Phase 6 decisions resolved
 
 All six decisions were resolved during implementation.
 
@@ -1690,7 +1413,7 @@ Decisions 3 and 6 resolved together: the diagnostics concern raised by decision
 6 is what selected the `if`/`then` composition in decision 3, so the plan's
 original `oneOf` recommendation was deliberately not taken.
 
-### Phase 6 as implemented
+#### Phase 6 as implemented
 
 - `mxc_config_contract` gained optional `schema-gen` support and carries no
   Schemars dependency in its default build.
@@ -1715,13 +1438,13 @@ The fixture reorganization this section required was carried out: the gate
 demands valid and invalid fixtures per root, which is what makes the
 one-shot-scoped corpus problem recorded in Phase 6.7 impossible to reintroduce.
 
-### Phase 6 step breakdown
+#### Phase 6 step breakdown
 
 Steps 6.0 through 6.10 are all implemented on the branch. The text below is
 retained as the design record and as the review checklist for the pull request
 that has yet to be opened.
 
-#### Phase 6.0: Prepare the implementation branch
+##### Phase 6.0: Prepare the implementation branch
 
 Base the branch on PR #966, the top of the Phase 5 stack, or on `main` once the
 stack has merged. Do not base it on anything below #949: that pull request
@@ -1732,7 +1455,7 @@ so a later failure is unambiguously attributable to this phase.
 
 No source files are changed in this step.
 
-#### Phase 6.1: Add optional Schemars support to the contract crate
+##### Phase 6.1: Add optional Schemars support to the contract crate
 
 Hoist `schemars` into `src/Cargo.toml` `[workspace.dependencies]`. It is
 currently declared inline in `wxc_common`, against the repository convention,
@@ -1781,7 +1504,7 @@ default build carries no Schemars dependency.
 Suggested commit boundary: `Add optional schema generation to the config
 contract crate`.
 
-#### Phase 6.2: Implement contract primitive schemas
+##### Phase 6.2: Implement contract primitive schemas
 
 Derived output is insufficient for five families of contract type. Each needs
 a feature-gated hand-written implementation.
@@ -1809,7 +1532,7 @@ contracts share no field-bearing machinery.
 
 Suggested commit boundary: `Add contract primitive schema implementations`.
 
-#### Phase 6.3: Compose the multi-root development schema
+##### Phase 6.3: Compose the multi-root development schema
 
 Add a feature-gated `dev::schema` module exposing one entry point that returns
 an unrendered `serde_json::Value`.
@@ -1848,7 +1571,7 @@ state instead of discovering the defect afterwards.
 Suggested commit boundary: `Generate the 0.8.0-alpha development contract
 schema`.
 
-#### Phase 6.4: Share rendering and the TypeScript emitter
+##### Phase 6.4: Share rendering and the TypeScript emitter
 
 Integer-format normalization, root key ordering, and `$id` injection are
 private to `wxc_common::wire`, and the TypeScript emitter is
@@ -1885,7 +1608,7 @@ this step, so run them immediately before and after.
 Suggested commit boundary: `Share schema rendering between the wire model and
 the contract crate`.
 
-#### Phase 6 step 6.5: Rework the generator command line
+##### Phase 6 step 6.5: Rework the generator command line
 
 Replace the positional and `--ts` argument handling with subcommands. `clap` is
 already declared in `[workspace.dependencies]`, but `mxc_schema_gen`'s own
@@ -1915,7 +1638,7 @@ Requirements:
 
 Suggested commit boundary: `Add versioned subcommands to the schema generator`.
 
-#### Phase 6.6: Commit the generated development artifacts
+##### Phase 6.6: Commit the generated development artifacts
 
 Commit the schema and the TypeScript oracle at the paths chosen in decisions 1
 and 2, each carrying a banner that names the exact regeneration command and
@@ -1930,7 +1653,7 @@ constructs and keep its output deterministic.
 
 Suggested commit boundary: `Add generated 0.8.0-alpha contract artifacts`.
 
-#### Phase 6.7: Add the drift gate and schema tests
+##### Phase 6.7: Add the drift gate and schema tests
 
 Add `scripts/versioning/check-contract-codegen.js`, mirroring the two existing
 codegen gates:
@@ -1987,7 +1710,7 @@ names the rolling artifact and Phase 11 replaces that mechanism outright.
 Suggested commit boundary: `Gate the generated contract artifacts against
 drift`.
 
-#### Phase 6.8: Defer public SDK conformance
+##### Phase 6.8: Defer public SDK conformance
 
 Do not add public-SDK conformance tests against the versioned oracle. The SDK
 still emits rolling and `0.6.0-alpha` shapes, so binding it to the exact
@@ -1995,7 +1718,7 @@ contract is Phase 8 work. Phase 6 requires only that the generated file type
 checks in the SDK build and that the drift gate covers it. Record the
 deferral in the codegen documentation.
 
-#### Phase 6.9: Update documentation
+##### Phase 6.9: Update documentation
 
 - `docs/schema-codegen.md` — add a versioned contract codegen section covering
   the two coexisting generators and when the rolling one retires, the
@@ -2010,7 +1733,7 @@ deferral in the codegen documentation.
 - This plan — record the Phase 6 status and the resolutions of decisions 1
   through 5.
 
-#### Phase 6.10: Run the phase quality gate
+##### Phase 6.10: Run the phase quality gate
 
 ```text
 cargo fmt --all -- --check
@@ -2028,7 +1751,7 @@ cd sdk/node && npm run build && npm test
 Also confirm that `cargo tree -p mxc_config_contract --features schema-gen`
 contains no MXC runtime, engine, or backend crate.
 
-### Deliberate differences from the rolling schema
+#### Deliberate differences from the rolling schema
 
 Record each of these in `docs/schema-codegen.md`. They are improvements, not
 drift, and a reviewer comparing the two artifacts will otherwise read them as
@@ -2043,7 +1766,7 @@ regressions.
 | Compatibility aliases documented | The rolling schema omits `appContainer` and `macos_sandbox` |
 | The experimental subtree is closed | The rolling schema leaves it open by design; the exact contract closes it recursively |
 
-### Phase 6 tests
+#### Phase 6 tests
 
 Feature-gated Rust tests in the contract crate should cover:
 
@@ -2079,7 +1802,7 @@ Feature-gated Rust tests in the contract crate should cover:
     one representative malformed document, so the cost recorded in decision 6
     is measured rather than assumed.
 
-### Phase 6 exit criteria
+#### Phase 6 exit criteria
 
 Every exit criterion below is reported satisfied on the implementation branch.
 The rolling and exact generated artifact families coexist and are independently
@@ -2100,7 +1823,7 @@ Review and CI confirmed the implementation before PR #968 merged.
   contracts, and all runtime behavior are unchanged.
 
 
-### Phase 6 review finding: contract value-rule gaps
+#### Phase 6 review finding: contract value-rule gaps
 
 An adversarial review of the Phase 6 branch raised, at Medium severity on the
 security axis, that the exact contract accepts `processContainer.capabilities`
@@ -2203,19 +1926,17 @@ deserialization, with a contract-level message, while `0.6.0-alpha` and
 `convert_wire_config` with that function's message. Two consequences follow for
 the remaining phases. Phase 7.4 must classify the differing *diagnostic* for
 these inputs across versions, not only the accept/reject outcome, since all
-three versions still reject. And Phase 11 must decide whether publishing
-`0.8.0-alpha` freezes the newtype into `published/v0_8_0_alpha`, which would
-make the published contracts permanently inconsistent with each other on this
-rule.
+three versions still reject. Phase 6.5 freezes the newtype into
+`published/v0_8_0_alpha`, deliberately preserving that diagnostic asymmetry
+across published contracts.
 
 **Where the fix landed.** Remediation moved out of the Phase 6 branch and into
 the Phase 5 stack, as `user/gudge/version_specific_config_parsers_phase5a_2`
 stacked on #949. This is the better placement: the defect is in the Phase 5
 contract, not in Phase 6's generation of artifacts from it, and fixing it
 upstream means the Phase 6 schema and TypeScript oracle inherit the constraint
-on regeneration. It does mean the unpushed Phase 6 branch now carries its own
-`Validate exact contract capabilities` commit for the same defect; drop that
-commit during the rebase onto the merged stack, or the rule lands twice.
+on regeneration. The duplicate Phase 6 implementation was dropped when that
+branch rebased onto the merged stack.
 
 **Related finding, deliberately not addressed.** The review also records, at
 Medium severity and out of scope, that the exact parser accepts positional-array
@@ -2226,7 +1947,7 @@ between what the schema forbids and what `parse_request` accepts is visible in a
 shipped artifact — a stronger argument for revisiting the non-goal than existed
 when it was written, but not one being acted on yet.
 
-### Phase 6 risks
+#### Phase 6 risks
 
 | Risk | Mitigation |
 | --- | --- |
@@ -2238,8 +1959,7 @@ when it was written, but not one being acted on yet.
 | The TypeScript emitter cannot express the root `oneOf` | Emit a discriminated union type alias; the drift gate and the SDK build cover it |
 | The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the generator CLI commit |
 
-## Phase 7 detailed design
-
+### Phase 7 detailed design
 Phase 7 is independent of Phase 6 and the two proceeded in parallel. It depends
 on the complete Phase 5 stack and should be branched from PR #966, the current
 top of that stack, or from `main` once the stack merges. Its only overlap with
@@ -2251,7 +1971,7 @@ also does not touch.
 Phase 6 merged first, so later exact-contract branches build on its generated
 artifact and drift-gate foundation.
 
-### Phase 7 objective
+#### Phase 7 objective
 
 Run the exact-contract parser beside the rolling parser, prove the two agree
 on the runtime model for every input the corpus and the test suite can supply,
@@ -2273,7 +1993,7 @@ security-sensitive path, in exchange for inputs that do not exist. Decision 2
 resolves this; the phase name is retained only for continuity with earlier
 sections.
 
-### How Phase 7 differs from the Phase 5 adapter tests
+#### How Phase 7 differs from the Phase 5 adapter tests
 
 The Phase 5D adapters already ship an equivalence helper that looks like the
 same idea:
@@ -2313,7 +2033,7 @@ last one is a defect to repair rather than a gap to fill:
    Repair them in Phase 7.2, when the seam makes the real pre-normalization
    value available to compare against.
 
-### Phase 7 parser surface
+#### Phase 7 parser surface
 
 The loader has six public entry points, all in `wxc_common::config_parser`,
 and they do not all carry the same information:
@@ -2339,7 +2059,7 @@ and column diagnostics and what the non-goals protect when they exclude a JSON
 same way as the others, and Phase 9 cannot simply repoint it. Resolve it as
 decision 3 below.
 
-### Phase 7 decisions required
+#### Phase 7 decisions required
 
 Resolve these before implementation; each changes the shape of the work.
 
@@ -2353,7 +2073,7 @@ Resolve these before implementation; each changes the shape of the work.
 | 6 | When the script reaches `mxc_engine::policy` | **Resolved.** At build time. `build_request` and `build_request_with_containment` take the script as an argument, so the required `process.commandLine` is satisfied structurally. See "Phase 7 decision 3 resolved" below |
 | 7 | Whether `SandboxRequest::set_script` survives decision 6 | **Resolved: remove it.** Keeping it as a post-build override would preserve mutation of an already-validated model, which is the pattern decision 6 exists to remove. Both `mxc_ffi` call sites already hold the command at build time, so neither needs it. `set_experimental` stays: it gates execution rather than altering the validated shape |
 
-#### Phase 7 decision 1 resolved: split structural and semantic authority
+##### Phase 7 decision 1 resolved: split structural and semantic authority
 
 **Resolution.** The exact contract is the **structural** authority for the
 state-aware experimental subtree: recursive closure, unknown-field rejection,
@@ -2444,7 +2164,7 @@ with no normalization — `appId`, `image`, `imageTarPath`. The moment a payload
 field gains defaulting or canonicalization, the two authorities could interpret
 the same bytes differently, and that is the trigger to move to option B.
 
-#### Phase 7 decision 3 resolved: build the declared version's contract root
+##### Phase 7 decision 3 resolved: build the declared version's contract root
 
 **Resolution.** `mxc_engine::policy` constructs the contract root for the
 version the policy declares, then reuses the existing per-version adapter to
@@ -2491,16 +2211,16 @@ no `wslc` field, so a WSLC section under a `0.6.0-alpha` policy cannot be
 written at all. The declared version stops being an assertion about the
 document and becomes the thing that selects the type.
 
-**Recurring cost, accepted.** One builder per supported version — three today,
-plus one at each publication, frozen alongside the frozen adapter that Phase 11
-forks. Phase 10 makes this unavoidable in any design: `0.8.0-alpha` gains
-`network.egress` and `network.ingress` while `0.6` and `0.7` keep the legacy
-shape, so construction must branch on version regardless. The only question is
-whether that branching lives in the type system or in `json!` literals.
+**Recurring cost, accepted.** One builder per supported version — published
+v0.6/v0.7/v0.8 plus mutable v0.9, then another mutable builder when publication
+opens v0.10. Phase 10 makes this unavoidable: published versions retain their
+legacy-compatible shapes while the v0.9 stable candidate removes old Network
+fields, so construction must branch on version. The only question is whether
+that branching lives in the type system or in `json!` literals.
 
 **Cross-version combinations need explicit errors.** A `Containment::Wslc`
 under a `0.6.0-alpha` policy must fail with a message naming the requirement,
-for example "wslc requires 0.8.0-alpha", produced at the version match arm.
+for example "wslc requires 0.9.0-alpha", produced at the version match arm.
 
 **The script becomes a build-time argument.** This is the second consumer of
 `allow_missing_command`, and the reason Phase 7.1 is not only a CLI concern.
@@ -2531,7 +2251,7 @@ stays, because it gates execution rather than altering the validated shape.
 With this and the CLI splice in place, `allow_missing_command` has no consumers
 and is deleted outright.
 
-### Phase 7 production surface
+#### Phase 7 production surface
 
 Decision 2 keeps the comparison in tests, but the phase still carries a
 production diff. Three changes land in non-test code:
@@ -2549,7 +2269,7 @@ grows no public API, and no runtime behavior differs. The seam in particular
 must be real production code rather than a test-only copy — a copy would
 validate a fork of the logic rather than the logic the rolling parser runs.
 
-### Phase 7 status
+#### Phase 7 status
 
 Phase 7.1 is renamed **Phase 7a** and is complete on
 `user/gudge/version_specific_config_parsers_phase7a`. Its six development
@@ -2586,15 +2306,15 @@ Phases 7.2 through 7.5 remain. The parser-parity remediation that paused the
 phase is PR #966, which is open against `main`; see "Phase 6 review finding:
 contract value-rule gaps".
 
-### Phase 7 step breakdown
+#### Phase 7 step breakdown
 
-#### Phase 7.0: Prepare the implementation branch
+##### Phase 7.0: Prepare the implementation branch
 
 Base on PR #949 or on `main` once the Phase 5 stack merges. Confirm
 `cargo test -p wxc_common` is green first, so a later failure is attributable
 to this phase. No source files change in this step.
 
-#### Phase 7.1: Remove `allow_missing_command` from both of its consumers
+##### Phase 7.1: Remove `allow_missing_command` from both of its consumers
 
 `allow_missing_command` has two consumers, not one, and both follow the same
 parse-then-patch pattern. Remove the flag, the `command_required` relaxation in
@@ -2622,7 +2342,7 @@ reviewable. Land them first so the rest of the phase shadows the real shape.
 Suggested commit boundary: one commit per consumer.
 
 
-##### Phase 7.1.1: The CLI consumer
+###### Phase 7.1.1: The CLI consumer
 
 Grounding facts, verified against the branch: there is exactly one production
 call site (`wxc/src/main.rs:973` on the Phase 7 worktree); everything from line 1366 onward is
@@ -2729,7 +2449,7 @@ state-aware requests. And the ordering is fixed — probe phase, probe context,
 convert argv, splice, parse — because obtaining the command string before the
 backend is known is the defect this design exists to prevent.
 
-#### Phase 7.2: Extract the shared state-aware normalization seam
+##### Phase 7.2: Extract the shared state-aware normalization seam
 
 `convert_wire_state_aware` currently interleaves three concerns: recovering
 `experimental_raw` and the masked base JSON, a series of validations that read
@@ -2767,7 +2487,7 @@ paths, and the state-aware adapter stops emitting `config.experimental`.
 
 Suggested commit boundary: `Extract the shared state-aware normalization seam`.
 
-#### Phase 7.3: Add the private exact-contract path
+##### Phase 7.3: Add the private exact-contract path
 
 Add a private path in `config_parser` that probes the version, dispatches to
 the exact registry, calls `dev::adapt_request`, and produces the same runtime
@@ -2801,7 +2521,7 @@ entry point reaches a request.
 
 Suggested commit boundary: `Add the shadow exact-contract parser path`.
 
-#### Phase 7.4: Build the equivalence harness and classify differences
+##### Phase 7.4: Build the equivalence harness and classify differences
 
 Put the harness in an inline `#[cfg(test)]` module in `config_parser.rs`, the
 crate's dominant convention and the only placement that keeps the exact path
@@ -2814,9 +2534,10 @@ For each input, parse with both paths, adapt both to the runtime model, and
 assert semantic equivalence by the mechanism chosen in decision 5.
 
 Inputs must cover every loader mode, both request kinds, every state-aware
-phase, every provision backend, `0.6`, `0.7`, and `0.8` declarations, the
-command-splice path from Phase 7.1, immutable post-provision policy, telemetry,
-required envelope fields, and source-position diagnostics.
+phase, every provision backend, published `0.6`/`0.7`/`0.8` declarations, the
+`0.9` development declaration, the command-splice path from Phase 7.1,
+immutable post-provision policy, telemetry, required envelope fields, and
+source-position diagnostics.
 
 Differences are not failures; unclassified differences are. Record each one in
 a table with its input, both behaviors, and the reason.
@@ -2865,18 +2586,18 @@ not only the valid ones, and assert that both paths reject the same inputs.
 
 Suggested commit boundary: `Add rolling-versus-exact parser equivalence tests`.
 
-#### Phase 7.5: Record the classification in this plan
+##### Phase 7.5: Record the classification in this plan
 
 Fold the difference table into the plan as the input to Phase 8's migration and
 Phase 9's cutover. A difference that survives to Phase 9 unclassified is a
 break MXC would be shipping without deciding to.
 
-### Phase 7 tests
+#### Phase 7 tests
 
 1. Rolling-path behavior is unchanged, proven by the existing `wxc_common`
    suite before and after the Phase 7.2 extraction.
-2. Both paths converge for every representative one-shot request across `0.6`,
-   `0.7`, and `0.8`.
+2. Both paths converge for every representative one-shot request across
+   published `0.6`/`0.7`/`0.8` and development `0.9`.
 3. Both paths converge for every state-aware phase and provision backend.
 4. Both paths converge across every loader mode, including the spliced
    command-override path.
@@ -2885,7 +2606,7 @@ break MXC would be shipping without deciding to.
 7. The corpus parses through the exact path with its acceptance classified,
    which is the direct input to Phase 8.
 
-### Phase 7 exit criteria
+#### Phase 7 exit criteria
 
 - The rolling parser is still authoritative and its behavior is unchanged.
 - The exact path produces the same runtime model for every convergent input.
@@ -2893,7 +2614,7 @@ break MXC would be shipping without deciding to.
 - `allow_missing_command` is gone and the command splice is covered by tests.
 - Decisions 1 through 5 are resolved and recorded.
 
-### Phase 7 risks
+#### Phase 7 risks
 
 | Risk | Mitigation |
 | --- | --- |
@@ -2903,7 +2624,7 @@ break MXC would be shipping without deciding to.
 | The experimental authority question is deferred again | It is decision 1 and it gates Phase 7.2; after Phase 9 the asymmetry is permanent |
 | `load_request_from_value` is discovered to have no exact path during Phase 9 | It is decision 3, resolved here rather than at cutover |
 
-### Phase 7.1.1.0 tests
+#### Phase 7.1.1.0 tests
 
 **File:** `src/core/wxc/src/main.rs`, inside the existing `mod tests`, which
 begins at line 1366 on the Phase 7 worktree branch. Add them beside the current
@@ -2977,3 +2698,291 @@ The three `allow_missing_command` tests in `config_parser.rs` (lines 1604,
 Line references in this section are against the Phase 7 worktree branch. That
 branch predates the rebased #949 tip, so the numbers shift once it is rebased,
 though the override machinery itself is identical in both.
+
+## 4. Decisions adopted along the way
+
+### Decision summary
+
+| Decision | Adopted result |
+| --- | --- |
+| Published contract contents | Published contracts contain stable one-shot fields only; experimental and state-aware structures remain on the mutable development line |
+| Legacy v0.8 release | Treat tag `v0.8.0` and stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` as immutable; reconstruct Rust types without regenerating the released schema |
+| Version progression | Phase 6.5 moves exact development to `0.9.0-alpha`; Phase 11 publishes v0.9 and opens `0.10.0-alpha` development |
+| v0.9 Network surface | Remove legacy Network fields from every v0.9 one-shot and state-aware root before publication; published v0.6/v0.7/v0.8 contracts retain their immutable syntax |
+| Contract authority | Versioned Rust types own structure and local value rules; shared conversion and validators own cross-field and backend semantics |
+| Differential validation | Compare rolling and exact paths in tests rather than dual-running both parsers in production |
+| Programmatic policy construction | Build the selected version's typed contract directly rather than round-tripping synthesized JSON |
+| Command overrides | Resolve and splice the command before exact parsing so every effective request satisfies the required process shape |
+| Publication mechanics | Future publication freezes contract, adapter, and policy builder together and adds immutable artifact/digest checks |
+
+### Publication and version-transition decision record
+
+The current forward sequence is Phase 8 migration, Phase 9 exact dispatch,
+Phase 10 removal of legacy v0.9 Network fields and stable-candidate completion,
+then Phase 11 publication of `0.9.0-alpha` with `0.10.0-alpha` opened for
+development.
+
+The historical sequence that established the v0.8/v0.9 starting point was
+agreed 2026-08-20, after PR #961 shipped directional networking on the rolling
+model ahead of this work:
+
+The order is:
+
+1. PRs #961 and #962 land: directional networking and its backend validation,
+   on the rolling wire model, version-gated to `0.8`. **Done.**
+2. Port the same fields into `mxc_config_contract::dev` and its adapters —
+   `network.egress`, `network.ingress`, and
+   `processContainer.network.allowedProxyPeer`. **This is a prerequisite, not
+   an option:** publishing a `0.8.0-alpha` contract that cannot express a
+   feature the same version ships to customers would be incoherent. **Done, in
+   PR #968 rather than separately:** a review of that pull request identified
+   the same gap, so the port landed there alongside a `NonEmptyVec` primitive
+   that restores the shipped schema's `minItems` constraint on a rule's `to`
+   and `ports`.
+3. Land Phase 6, so exact development artifacts derive from the contract crate.
+   **Done in PR #968.**
+4. Publish `0.8.0-alpha`. **Done by the legacy rolling stack in PR #996 and
+   released under annotated tag `v0.8.0` at `7dac1a95`.** The tagged stable
+   schema is immutable blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b`;
+   Phase 6.5 reconstructs the exact Rust contract but does not regenerate or
+   rewrite that artifact.
+5. Move remaining rolling and exact development work to `0.9.0-alpha`.
+   **Rolling development moved in PR #996; exact development moves in Phase
+   6.5.** The contract artifact suffix is `-alpha`; `-dev` remains reserved for
+   the rolling family being retired.
+
+#### Published `0.8.0-alpha` scope: stable candidate only
+
+**Decided 2026-08-20: neither state-aware nor experimental enters stable
+`0.8.0-alpha`.** The original target-contract rule therefore stands unchanged,
+and design-note decision 5 is answered "none" while its question 3 is answered
+"no". `published::v0_8_0_alpha` is the stable-candidate one-shot surface only:
+no `experimental`, no `phase`, no `sandboxId`, no `correlationVector`, and the
+containment enum narrowed to `process`, `processcontainer` with its
+`appcontainer` alias, `lxc`, `bubblewrap`, and `seatbelt` with its
+`macos_sandbox` alias.
+
+The directional network fields ported in step 2 are unaffected: `network.egress`,
+`network.ingress`, and `processContainer.network.allowedProxyPeer` are all
+stable-surface fields, so they publish with the rest of the one-shot contract.
+
+The corpus cost is small and entirely predictable. Of the thirty configs
+declaring `0.8.0-alpha` today, twenty-four are stable-candidate only and stay;
+six move to `0.9.0-alpha`, and they are the same six documents — every one is a
+WSLC config that uses both the development-only `wslc` containment and an
+`experimental` block:
+
+```text
+wslc_denied_dotdot_alias.json        wslc_most_specific_denied_parent.json
+wslc_denied_masking.json             wslc_port_mapping_multiple.json
+wslc_filesystem_object.json          wslc_port_mapping_tcp.json
+```
+
+No corpus config declares `0.8.0-alpha` together with a `phase`, so excluding
+state-aware costs nothing in the corpus. It does, however, decide where
+state-aware lives: with no published version to declare, state-aware requests
+move from the `0.6.0-alpha` they hard-code today onto `0.9.0-alpha`, so the
+lifecycle ships only against a development contract until it is promoted. That
+is the intended consequence of the Phase 11 rule, recorded here as a choice.
+
+#### Resolved schedule consequences
+
+- The released schema version remains the literal `0.8.0-alpha`; product
+  release tag `v0.8.0` does not change the config-version spelling.
+- `schemas/schema-version.json` and the rolling parser/SDK moved to the v0.9
+  development line in PR #996.
+- The exact registry marks v0.8 published and v0.9 development.
+- `ProcessContainerCapability` is frozen into the v0.8 Rust contract as a
+  deliberate parse-time tightening; v0.6/v0.7 retain conversion-time rejection.
+- Per-version policy-builder forking remains deferred until that builder exists.
+- State-aware producer migration to v0.9 remains Phase 8 work.
+- Phase 10 retains only work not already shipped by the rolling v0.8 networking
+  implementation, notably the IsolationSession acknowledgment redesign and
+  published-version translation.
+
+## 5. Appendices
+
+### Appendix A: Experimental fields in published contracts
+
+> **Status: recorded discussion, not part of the plan of record.**
+>
+> The plan of record excludes `experimental` from published contracts,
+> including the planned v0.9 publication. Do not implement the alternative in
+> this section until the requirement is ratified and the normative plan is
+> updated.
+>
+> **Update, 2026-08-20.** The revised publication sequence brought this
+> forward, and it was decided against: stable `0.8.0-alpha` contains neither
+> experimental nor state-aware fields, answering decision 5 as "none" and
+> question 3 as "no". This section remains a recorded discussion for a future
+> publication. See the decision record in section 4.
+
+A proposed requirement allows a published config contract (and therefore a
+stable schema artifact) to include explicitly selected experimental fields.
+The `experimental` object and every nested experimental object would remain
+recursively closed. A later published version could promote a feature by moving
+it from `experimental.<feature>` to a top-level `<feature>` field.
+
+This separates three concepts that the current plan partly conflates:
+
+| Concept | Meaning |
+| --- | --- |
+| Contract status | Whether a complete accepted JSON shape is mutable development work or an immutable published contract |
+| Feature status | Whether a field is experimental or part of the top-level stable surface |
+| Execution gate | Whether using the feature requires `--experimental` or another explicit opt-in |
+
+Under this requirement, publishing would freeze the **entire accepted shape**,
+including any experimental subtree included in that version. Published would
+mean immutable syntax, not that every field in the contract is a mature
+top-level feature.
+
+For example:
+
+```text
+version N accepts:   experimental.foo
+version N+1 accepts: foo
+```
+
+The two immutable contract modules would retain their respective paths while
+their mutable adapters normalize both into the same canonical runtime field:
+
+```text
+vN experimental.foo --\
+                       +--> CanonicalRequest.foo
+vN+1 foo --------------/
+```
+
+This works naturally with exact version dispatch and avoids putting a
+version-sensitive alias on one rolling wire type. The old path remains accepted
+only while its published contract remains supported; the newer contract may
+reject it and accept only the promoted top-level path.
+
+#### Impact if adopted
+
+The following parts of the current plan would need revision:
+
+- Remove the goal and target-contract rule that published contracts never
+  contain `experimental`.
+- Reconstruct each historical version from what that version actually
+  published. Existing v0.6/v0.7/v0.8 contracts remain unchanged; a future
+  publication could include only explicitly selected experimental fields.
+- Allow published modules to define self-contained, recursively closed
+  experimental types. Development would remain mutable, but would no longer be
+  the only contract status allowed to contain experimental fields.
+- Make shadow-parser expectations version-specific rather than treating
+  `published version + experimental` as universally invalid.
+- Classify corpus migrations by the first exact contract that defines each
+  experimental field. Do not mechanically move every experimental config to
+  the development version.
+- Dispatch state-aware requests according to the selected contract if
+  state-aware experimental shapes are ever included in a published version.
+- Change publication tooling to freeze the complete selected contract rather
+  than copying only a stable candidate surface. Experimental and state-aware
+  types would be excluded or included deliberately per publication, not by a
+  global rule.
+- Generate schemas and SDK wire types that expose the exact experimental field
+  set for each version.
+
+Phase 1's exact version model, registry, and source-text probe would not change.
+The per-version Rust contract and adapter architecture would also remain the
+same.
+
+#### Cost and trade-off
+
+An experimental field included in a published contract loses shape-level
+mutability for that version. Adding, removing, renaming, or restructuring one
+of its fields requires a new config version even though the feature remains
+experimental. This is the principal cost of making experimental structures
+closed and publishable.
+
+The benefit is deterministic parsing: an experimental typo or unsupported
+field is rejected rather than silently ignored, and a published version's
+accepted JSON shape cannot change underneath its users.
+
+#### Decisions required before adoption
+
+1. Does a published contract structurally accept its experimental fields even
+   when `--experimental` is absent, with the flag controlling execution only?
+2. If an experimental field is present without the execution opt-in, should MXC
+   reject the request or preserve the current parse-and-ignore behavior?
+3. Can state-aware request shapes be included in a published contract, or does
+   this requirement initially apply only to one-shot experimental fields?
+4. When a feature is promoted, does the new contract reject its old
+   `experimental` path immediately, or provide a version-scoped transition
+   spelling?
+5. Which experimental fields, if any, should be selected for the next
+   publication?
+
+### Appendix B: Phase 6.5 implementation record
+
+#### Phase 6.5 final implementation
+
+Phase 6.5 is complete on
+`user/gudge/version_specific_config_parsers_phase6.5`. It:
+
+- reconstructs `published/v0_8_0_alpha` from the tagged stable schema using the
+  same policy as v0.6/v0.7: exact required version, closed objects, explicit
+  null rejection, string-only enums, local value constraints, and preservation
+  only of explicit compatibility aliases
+- adds the frozen `config_contract_adapters::v0_8` adapter without changing the
+  tagged stable schema or generating a published TypeScript oracle
+- renames the mutable development contract to `0.9.0-alpha`, moving its tests,
+  fixtures, and adapters to the v0.9 line
+- registers v0.8 as published and v0.9 as development, and commits the generated
+  v0.9 exact schema and TypeScript oracle
+- covers cross-version boundaries and the published adapter's directional
+  conversion, including `egress`, `ingress`, `runtimeConfig`, and
+  `allowedProxyPeer`
+- preserves the released v0.8 schema byte-for-byte and keeps
+  `mxc_schema_gen`/`check-contract-codegen.js` scoped to mutable development
+  artifacts
+
+Two consequences of the rebase are worth recording, because both were found by
+a failing test rather than by inspection. The 0.8 test suite inherited from
+#968 assumed `0.8` was still the development contract, so it listed
+`"experimental": {}` as an acceptable empty optional object; under publication
+that document must be rejected. And the adapter and one-shot tests added to
+#968 for `runtimeConfig` carried `0.8.0-alpha` version markers into the renamed
+`0.9` suites, where the exact version marker rejects them. Both are the same
+class of error: a version-specific test moving between contracts without its
+version string moving with it.
+
+#### Phase 6.5 completion status
+
+Implementation and local validation are complete as of 2026-08-24.
+
+| Area | Final state |
+| --- | --- |
+| v0.8 release identity | Annotated tag `v0.8.0` resolves to `7dac1a95`; stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` is preserved byte-for-byte |
+| Published v0.8 contract | Reconstructed with the v0.6/v0.7 bootstrap-tightening policy and explicit compatibility aliases; no experimental or state-aware surface |
+| Published v0.8 adapter | Exhaustive stable one-shot mapping, including legacy and directional network families, runtime proxy configuration, and ProcessContainer proxy identity |
+| Development rollover | Exact development contract, adapters, fixtures, schema, and TypeScript oracle moved to `0.9.0-alpha` |
+| Generated artifacts | Only rolling `0.9.0-dev` and exact development `0.9.0-alpha` artifacts are regenerated; published v0.8 artifacts are immutable |
+| Cross-version coverage | Directional networking and runtime configuration are introduced at v0.8; experimental containment and state-aware roots are introduced at v0.9 |
+| Published contract coverage | All v0.8 fixtures are discovered automatically; version, null, command, LXC, proxy, capability, alias, enum, experimental, and state-aware boundaries are covered |
+| Review remediation | Stable-schema rewrite, obsolete v0.8 TypeScript generation, validation-claim drift, documentation errors, fixture omissions, and the v0.8 capability boundary assertion are resolved |
+
+The only remaining Phase 6.5 work is to open its pull request, complete normal
+review and CI, and merge it. General published-contract digest/freeze automation
+remains part of Phase 11 rather than a Phase 6.5 merge blocker.
+
+#### The adapter's no-wildcard rule is enforced by the compiler
+
+Phase 3 requires adapters to destructure every contract field explicitly, with
+no catch-all `..`. Mutation testing during Phase 6.5 showed this rule is
+stronger than the plan claims, and worth stating precisely:
+
+- **A dropped field cannot compile.** Removing a field's mapping leaves its
+  binding unused, and the crate denies warnings, so `unused variable: except`
+  fails the build.
+- **A swapped field usually cannot compile either.** Mapping `allow` from the
+  `deny` binding produces `use of moved value: deny`.
+- **A misrouted *value* compiles and must be caught by tests.** Changing
+  `NetworkAction::Deny => wire::NetworkAction::Allow` builds cleanly; it failed
+  four adapter tests, and `NetworkProtocol::Udp => Tcp` failed three.
+
+So adapter tests are not guarding against omission — the compiler already does
+that. They guard against a mapping that points at the wrong value, which is
+exactly what the wire-equivalence comparison detects best. Write them for enum
+arms and for fields whose types are interchangeable, and do not pad them with
+presence assertions the build already guarantees.
