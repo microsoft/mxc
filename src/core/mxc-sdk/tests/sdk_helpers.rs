@@ -163,10 +163,8 @@ fn build_request_host_rules_require_outbound() {
 }
 
 #[test]
-fn rust_sdk_builds_legacy_process_container_networking() {
-    use mxc_sdk::configs::ProcessContainer;
+fn rust_sdk_builds_legacy_networking() {
     use mxc_sdk::policy::NetworkSection;
-    use mxc_sdk::{build_request_with_containment, Containment};
 
     let mut network = NetworkSection::default();
     network.allow_outbound = true;
@@ -182,21 +180,14 @@ fn rust_sdk_builds_legacy_process_container_networking() {
         timeout_ms: None,
     };
 
-    build_request_with_containment(
-        &policy,
-        &Containment::ProcessContainer(ProcessContainer::default()),
-        None,
-    )
-    .expect("the Rust SDK should build legacy ProcessContainer networking");
+    build_request(&policy, None).expect("the Rust SDK should build legacy networking");
 }
 
 #[test]
-fn rust_sdk_builds_directional_process_container_networking() {
-    use mxc_sdk::configs::ProcessContainer;
+fn rust_sdk_builds_directional_networking() {
     use mxc_sdk::policy::{
         NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
     };
-    use mxc_sdk::{build_request_with_containment, Containment};
 
     let mut egress = NetworkEgressSection::default();
     egress.default = Some(NetworkAction::Deny);
@@ -215,12 +206,7 @@ fn rust_sdk_builds_directional_process_container_networking() {
         timeout_ms: None,
     };
 
-    build_request_with_containment(
-        &policy,
-        &Containment::ProcessContainer(ProcessContainer::default()),
-        None,
-    )
-    .expect("the Rust SDK should build directional ProcessContainer networking");
+    build_request(&policy, None).expect("the Rust SDK should build directional networking");
 }
 
 #[test]
