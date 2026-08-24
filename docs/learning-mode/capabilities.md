@@ -283,11 +283,12 @@ outcomes without those classifications omit the fields.
 Candidates excluded from the actionable output retain a closed diagnostic
 reason and their sanitized event properties:
 
-- `notActionable` includes registry writes and recognized Section,
-  SymbolicLink, and Timer checks. MXC has no corresponding policy grants, so
-  reporting them in the actionable `captureDenials` file would not give the
-  caller an action it could take. They remain available in verbose logging
-  with their classified access type and sanitized resource.
+- `notActionable` includes registry writes, registry checks whose access mask
+  cannot be classified as a read, and recognized Section, SymbolicLink, and
+  Timer checks. MXC has no corresponding policy grants, so reporting them in
+  the actionable `captureDenials` file would not give the caller an action it
+  could take. They remain available in verbose logging with their classified
+  access type and sanitized resource.
 - `unusableResourcePath` means a File access-check resource could not be
   converted to a safe absolute DOS or UNC path. For example,
   `\Device\MountPointManager` is useful Devices-namespace evidence, but it is

@@ -2,7 +2,7 @@
 
 `plm.exe` is the Windows-only legacy WPR trace helper for Learning Mode. It captures both `learningModeLogging` block events and `permissiveLearningMode` allow events, then delegates ETL decoding to the same actionable-output `learning_mode_windows::EtlDenialAnalyzer` used by `captureDenials`.
 
-The actionable analyzer decodes filesystem, capability, registry-read, and UI findings from both provider shapes. Registry writes are retained as non-actionable verbose diagnostics. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
+The actionable analyzer decodes filesystem, capability, positively classified registry-read, and UI findings from both provider shapes. Registry writes and unknown registry access are retained as non-actionable verbose diagnostics. The standalone `extract-caps` command remains available only as a low-level ACE diagnostic.
 
 PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mode-permissive-learning-mode); the standalone CLI provides interactive capture through `plm log` and existing-ETL analysis through `plm stop --trace-file`.
 

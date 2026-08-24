@@ -1695,8 +1695,9 @@ mod tests {
                     ("AccessMask", "0x10001"),
                 ],
             ),
-            // Registry write (KEY_SET_VALUE) remains verbose-only because MXC
-            // has no policy grant that could make it actionable.
+            // A registry check without a usable access mask remains
+            // verbose-only because it cannot be positively classified as a
+            // read.
             kernel_event(
                 14,
                 6860,
@@ -1705,7 +1706,6 @@ mod tests {
                     ("Mode", "\"Normal\""),
                     ("ObjectType", "\"Key\""),
                     ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
-                    ("AccessMask", "0x2"),
                 ],
             ),
             // Capability denial (event 28) with a decoded identifier.
@@ -1751,7 +1751,7 @@ mod tests {
             registry.signature.reason,
             VerboseLoggingOutcomeReason::NotActionable
         );
-        assert_eq!(registry.signature.access_type, Some(AccessType::Write));
+        assert_eq!(registry.signature.access_type, Some(AccessType::Unknown));
         assert_eq!(registry.signature.resource_type, Some(ResourceType::Other));
     }
 

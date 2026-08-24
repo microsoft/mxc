@@ -29,8 +29,9 @@
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
 //!   resource type: `File` → [`ResourceType::File`], `Key` →
 //!   [`ResourceType::Other`] (registry), and an **empty** `ObjectType` is a
-//!   brokered-capability check → [`ResourceType::Capability`]. Registry writes
-//!   are retained only as non-actionable verbose diagnostics. Named Section,
+//!   brokered-capability check → [`ResourceType::Capability`]. Only positively
+//!   classified registry reads are actionable; writes and unknown registry
+//!   access are retained only as verbose diagnostics. Named Section,
 //!   SymbolicLink, and Timer objects are likewise verbose-only because MXC has
 //!   no corresponding policy grants.
 //!   Other object types are dropped until their access-mask vocabulary is
@@ -609,10 +610,11 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
 /// brokered-capability check, and the observed named-object types `Section`,
-/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Registry writes
-/// and those named-object types are excluded because MXC has no corresponding
-/// policy grants. Other object types are dropped until their access-mask
-/// vocabulary is understood. An absent `ObjectType` field drops the event.
+/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Only registry
+/// reads are actionable; other registry access and those named-object types are
+/// excluded because MXC has no corresponding policy grants. Other object types
+/// are dropped until their access-mask vocabulary is understood. An absent
+/// `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
 /// event's `AccessMask` field (the desired access the caller was denied;
@@ -632,7 +634,7 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// unidentified brokered check,
 /// [`VerboseLoggingOutcomeReason::UnresolvedCapability`] — [`crate::capability_dacl`]
 /// may still recover it from the event's DACL payload), or a self-access,
-/// registry-write, or recognized named-object check that isn't actionable
+/// non-read registry, or recognized named-object check that isn't actionable
 /// ([`VerboseLoggingOutcomeReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
@@ -691,7 +693,7 @@ pub fn build_denial_from_access_check(
             .unwrap_or(AccessType::Unknown)
     };
 
-    if (object_type_str == "Key" && access_type == AccessType::Write)
+    if (object_type_str == "Key" && access_type != AccessType::Read)
         || matches!(object_type_str, "Section" | "SymbolicLink" | "Timer")
     {
         return Err(VerboseLoggingOutcomeReason::NotActionable);
@@ -1241,6 +1243,28 @@ mod tests {
             verbose_logging_classification(&p),
             (Some(AccessType::Write), Some(ResourceType::Other))
         );
+    }
+
+    #[test]
+    fn access_check_key_unknown_access_is_not_actionable() {
+        for access_mask in [None, Some("not-a-mask"), Some("0x0")] {
+            let mut properties = vec![
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+            ];
+            if let Some(access_mask) = access_mask {
+                properties.push(("AccessMask", access_mask));
+            }
+            let p = parts(14, &properties);
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(AccessType::Unknown), Some(ResourceType::Other))
+            );
+        }
     }
 
     #[test]
