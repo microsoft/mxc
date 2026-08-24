@@ -43,13 +43,13 @@ mod state_aware;
 pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
 pub use platform::isolation_session_available;
-pub use platform::{platform_support, PlatformSupport};
+pub use platform::{platform_support, BubblewrapNetworkSupport, PlatformSupport, ProxyEnforcement};
 pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
     user_profile_policy, Containment, FilesystemPolicyResult, SandboxPolicy, SandboxRequest,
     WslcSection,
 };
-pub use probe::{available_backends, AvailableBackend, BackendCapability};
+pub use probe::{available_backends, to_json_pretty, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]
 pub use run::resolve_runner_for_audit;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

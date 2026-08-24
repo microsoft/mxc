@@ -12,6 +12,8 @@ import {
   _parseBwrapVersion,
   _probeBubblewrap,
   _setBwrapVersionRunner,
+  _probeBubblewrapNetwork,
+  _setLinuxProbeRunner,
   findWxcExecutable,
 } from '../../src/platform.js';
 
@@ -566,5 +568,67 @@ describe('bwrap minimum-version gate', () => {
     withVersion('bubblewrap 0.5.0\n');
     _resetPlatformSupportCache();
     assert.ok(getPlatformSupport().availableMethods.includes('bubblewrap'));
+  });
+});
+
+describe('_probeBubblewrapNetwork', () => {
+  afterEach(() => {
+    _setLinuxProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('reports supported when the probe advertises proxyEnforcement', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', capabilities: ['proxyEnforcement'] }]),
+    );
+    assert.deepStrictEqual(_probeBubblewrapNetwork(), {
+      proxyEnforcement: 'supported',
+      warnings: [],
+    });
+  });
+
+  it('reports unsupported with the probe reason when the capability is absent', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([{ backend: 'bubblewrap', warnings: ['slirp4netns not found'] }]),
+    );
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.deepStrictEqual(result.warnings, ['slirp4netns not found']);
+  });
+
+  it('ignores capabilities reported for other backends', () => {
+    _setLinuxProbeRunner(() =>
+      JSON.stringify([
+        { backend: 'lxc', capabilities: ['proxyEnforcement'] },
+        { backend: 'bubblewrap', capabilities: [] },
+      ]),
+    );
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when the probe binary cannot run', () => {
+    _setLinuxProbeRunner(() => {
+      throw new Error('lxc-exec not found');
+    });
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.match(result.warnings[0], /lxc-exec not found/);
+  });
+
+  it('fails closed on malformed JSON', () => {
+    _setLinuxProbeRunner(() => 'not json');
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when the payload is not an array', () => {
+    _setLinuxProbeRunner(() => JSON.stringify({ backend: 'bubblewrap' }));
+    assert.strictEqual(_probeBubblewrapNetwork().proxyEnforcement, 'unsupported');
+  });
+
+  it('fails closed when bubblewrap is absent from the payload', () => {
+    _setLinuxProbeRunner(() => JSON.stringify([{ backend: 'lxc' }]));
+    const result = _probeBubblewrapNetwork();
+    assert.strictEqual(result.proxyEnforcement, 'unsupported');
+    assert.match(result.warnings[0], /did not report bubblewrap/);
   });
 });

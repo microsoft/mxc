@@ -12,6 +12,20 @@
 //! `dispatch.rs`, so both the public SDK and the executor binaries can share a
 //! single implementation.
 
+/// Whether the host can enforce Bubblewrap proxy-only egress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyEnforcement {
+    Supported,
+    Unsupported,
+}
+
+/// Bubblewrap host network capability, with the reason when it is unsupported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BubblewrapNetworkSupport {
+    pub proxy_enforcement: ProxyEnforcement,
+    pub warnings: Vec<String>,
+}
+
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
 #[derive(Debug, Clone, Default)]
@@ -23,6 +37,9 @@ pub struct PlatformSupport {
     /// Containment backends available on this host, by wire name
     /// (e.g. `"seatbelt"`, `"bubblewrap"`, `"processcontainer"`).
     pub available_methods: Vec<String>,
+    /// Bubblewrap host network capability. `None` off Linux, and when
+    /// `bubblewrap` itself is unavailable.
+    pub bubblewrap_network: Option<BubblewrapNetworkSupport>,
 }
 
 /// Detect MXC support on the current host.
@@ -65,6 +82,9 @@ pub fn platform_support() -> PlatformSupport {
             Ok(_) => PlatformSupport {
                 is_supported: true,
                 available_methods: vec!["bubblewrap".to_string()],
+                bubblewrap_network: Some(bubblewrap_network_support(
+                    bwrap_common::proxy_network::probe_proxy_enforcement(),
+                )),
                 ..Default::default()
             },
             Err(err) => PlatformSupport {
@@ -103,6 +123,22 @@ pub fn platform_support() -> PlatformSupport {
     }
 }
 
+/// Split from [`platform_support`] so the reporting is testable without a host
+/// that has (or lacks) the private-network dependencies.
+#[cfg(target_os = "linux")]
+fn bubblewrap_network_support(probe: Result<(), String>) -> BubblewrapNetworkSupport {
+    match probe {
+        Ok(()) => BubblewrapNetworkSupport {
+            proxy_enforcement: ProxyEnforcement::Supported,
+            warnings: Vec::new(),
+        },
+        Err(reason) => BubblewrapNetworkSupport {
+            proxy_enforcement: ProxyEnforcement::Unsupported,
+            warnings: vec![reason],
+        },
+    }
+}
+
 /// Whether this host can run the WSL Container backend, probing the WSLC
 /// runtime the same way the runner's preflight does. Always `false` when the
 /// backend isn't compiled in, so the caller needs no `cfg` of its own.
@@ -138,7 +174,25 @@ pub fn isolation_session_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::platform_support;
+    #[cfg(target_os = "linux")]
+    use super::{bubblewrap_network_support, ProxyEnforcement};
     use wxc_common::wire::Containment;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_network_is_supported_when_probe_succeeds() {
+        let support = bubblewrap_network_support(Ok(()));
+        assert_eq!(support.proxy_enforcement, ProxyEnforcement::Supported);
+        assert!(support.warnings.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn bubblewrap_network_is_unsupported_with_reason_when_probe_fails() {
+        let support = bubblewrap_network_support(Err("slirp4netns not found".to_string()));
+        assert_eq!(support.proxy_enforcement, ProxyEnforcement::Unsupported);
+        assert_eq!(support.warnings, vec!["slirp4netns not found".to_string()]);
+    }
 
     fn wire_name(containment: &Containment) -> String {
         serde_json::to_string(containment)

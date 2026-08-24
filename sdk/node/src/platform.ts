@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
 import { fileURLToPath } from 'node:url';
-import { ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import { BubblewrapNetworkSupport, ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
 import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -63,10 +63,11 @@ function isWindowsSandboxAvailable(): boolean {
  *
  * On Windows, this also invokes `wxc-exec --probe` to populate
  * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
- * capability facts. Linux and macOS currently do not expose native probe data,
- * so `uiCapabilities` is omitted on those platforms. The result is cached for
- * the lifetime of the SDK module — the underlying machine state is not
- * expected to change at runtime.
+ * capability facts. On Linux, when bubblewrap is available, it invokes
+ * `lxc-exec --available-backends` to populate `bubblewrapNetwork`. macOS
+ * currently does not expose native probe data. `uiCapabilities` is omitted
+ * outside Windows. The result is cached for the lifetime of the SDK module —
+ * the underlying machine state is not expected to change at runtime.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -173,6 +174,84 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
   }
 }
 
+/**
+ * Linux probe runner injection seam. Spawns `lxc-exec --available-backends` and
+ * returns its stdout. Replaceable in unit tests via {@link _setLinuxProbeRunner}.
+ */
+type LinuxProbeRunner = () => string;
+
+let linuxProbeRunner: LinuxProbeRunner = defaultLinuxProbeRunner;
+
+/** @internal Test-only: override the Linux probe runner. */
+export function _setLinuxProbeRunner(runner: LinuxProbeRunner | null): void {
+  linuxProbeRunner = runner ?? defaultLinuxProbeRunner;
+}
+
+function defaultLinuxProbeRunner(): string {
+  const lxcPath = findLxcExecutable();
+  if (!lxcPath) {
+    throw new Error('lxc-exec not found');
+  }
+  return execFileSync(lxcPath, ['--available-backends'], {
+    timeout: 5000,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * Ask `lxc-exec --available-backends` whether this host can enforce Bubblewrap
+ * proxy-only egress.
+ *
+ * Unlike the Windows isolation probe, this reports **fail closed**: a missing
+ * binary, timeout, or malformed payload yields `'unsupported'` with the reason
+ * as a warning, never an absent field. Reporting "unknown" as "supported"
+ * would let a caller launch a 0.8 proxy policy the host cannot satisfy, and
+ * that policy has no fallback.
+ */
+export function _probeBubblewrapNetwork(): BubblewrapNetworkSupport {
+  let stdout: string;
+  try {
+    stdout = linuxProbeRunner();
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    diagLog(`getPlatformSupport: bubblewrap network probe failed — ${reason}`);
+    return { proxyEnforcement: 'unsupported', warnings: [`probe failed: ${reason}`] };
+  }
+
+  let backends: unknown;
+  try {
+    backends = JSON.parse(stdout);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    diagLog(`getPlatformSupport: bubblewrap network probe returned invalid JSON — ${reason}`);
+    return { proxyEnforcement: 'unsupported', warnings: [`probe returned invalid JSON: ${reason}`] };
+  }
+
+  if (!Array.isArray(backends)) {
+    return { proxyEnforcement: 'unsupported', warnings: ['probe returned an unexpected payload'] };
+  }
+  const entry = backends.find(
+    (b: unknown): b is Record<string, unknown> =>
+      !!b && typeof b === 'object' && (b as Record<string, unknown>).backend === 'bubblewrap',
+  );
+  if (!entry) {
+    return { proxyEnforcement: 'unsupported', warnings: ['probe did not report bubblewrap'] };
+  }
+
+  const capabilities = Array.isArray(entry.capabilities) ? entry.capabilities : [];
+  const warnings = Array.isArray(entry.warnings)
+    ? entry.warnings.filter((w: unknown): w is string => typeof w === 'string')
+    : [];
+  if (capabilities.includes('proxyEnforcement')) {
+    return { proxyEnforcement: 'supported', warnings: [] };
+  }
+  return {
+    proxyEnforcement: 'unsupported',
+    warnings: warnings.length > 0 ? warnings : ['proxy-only egress is not supported on this host'],
+  };
+}
+
 function computeSupport(): PlatformSupport {
   const platform = os.platform();
   const support: PlatformSupport = { isSupported: false, reason: '', availableMethods: [] };
@@ -200,6 +279,7 @@ function computeSupport(): PlatformSupport {
     const bubblewrap = _probeBubblewrap();
     if (bubblewrap.available) {
       methods.push('bubblewrap');
+      support.bubblewrapNetwork = _probeBubblewrapNetwork();
     } else {
       // Always surface why bwrap is unavailable. When LXC is present the
       // platform is still supported, so `reason` — documented as why the

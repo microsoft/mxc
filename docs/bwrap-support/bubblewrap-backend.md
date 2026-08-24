@@ -662,6 +662,42 @@ request fails if its private namespace cannot be configured.
 > so the same config on `0.6`/`0.7` runs the legacy shared-host-network proxy
 > path instead.
 
+### Checking host support before you run
+
+There is deliberately **no automatic fallback**: a `0.8.0-alpha`+ proxy config
+that cannot configure private networking fails rather than silently degrading to
+the weaker shared-host-network model, because a silent degradation would
+reintroduce exactly the proxy-bypass this mode exists to close.
+
+So that callers do not have to discover a missing dependency by failing a run,
+the host requirements are reported ahead of time.
+
+From the command line:
+
+```bash
+lxc-exec --available-backends
+```
+
+This emits the available backends as JSON and exits without launching anything.
+Bubblewrap advertises a `proxyEnforcement` capability when the host can enforce
+proxy-only egress, and a `warnings` entry explaining why when it cannot:
+
+```json
+[
+  { "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] },
+  { "backend": "lxc" }
+]
+```
+
+From the TypeScript SDK, `getPlatformSupport()` surfaces the same fact as
+`bubblewrapNetwork`; from Rust, `mxc_engine::platform_support()` surfaces it as
+`bubblewrap_network`. Both are reported **fail closed** — if the probe cannot
+run, the result is `unsupported`, never "unknown".
+
+This check is advisory, not a gate. The runner still probes the dependencies at
+launch: the probe runs in a different process and at an earlier time, so a
+package can be removed in between.
+
 ### Caveats
 
 - **Host loopback moves to the gateway address (breaking change in 0.8+

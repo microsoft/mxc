@@ -1229,6 +1229,16 @@ impl PrivateNetworkUse {
     }
 }
 
+/// Whether this host can enforce proxy-only egress, and why not when it cannot.
+///
+/// Pre-flight counterpart to the launch-path check in
+/// [`crate::bwrap_runner`]: schema 0.8 proxy policy has no fallback, so a
+/// caller that cannot ask this ahead of time only learns the answer when the
+/// run fails. Advisory — the runner still probes before it launches.
+pub fn probe_proxy_enforcement() -> Result<(), String> {
+    probe_dependencies(PrivateNetworkUse::ProxyOnlyEgress)
+}
+
 pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
     // Probing costs five subprocess spawns, and the host's tooling does not
     // change under a running process often enough to pay that on every

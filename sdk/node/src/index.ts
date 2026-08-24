@@ -55,6 +55,7 @@ export {
   RuntimeConfig,
   PlatformSupport,
   UiCapabilitySupport,
+  BubblewrapNetworkSupport,
 } from './types.js';
 
 // Export platform detection functions

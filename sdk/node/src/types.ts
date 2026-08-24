@@ -583,6 +583,24 @@ export interface UiCapabilitySupport {
 }
 
 /**
+ * Host support for enforcing Bubblewrap proxy-only egress.
+ *
+ * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
+ * namespace and default-drop everything except the proxy endpoint. That
+ * requires host tooling (`slirp4netns`, `unshare`, `nsenter`, `iptables`) and
+ * there is deliberately no fallback to the weaker shared-host-network model,
+ * so a request that cannot configure private networking fails rather than
+ * silently degrading. This reports, before launching, whether the host can
+ * satisfy such a policy.
+ */
+export interface BubblewrapNetworkSupport {
+  /** Whether proxy-only egress can be enforced on this host. */
+  proxyEnforcement: 'supported' | 'unsupported';
+  /** Why enforcement is unsupported. Empty when it is supported. */
+  warnings: string[];
+}
+
+/**
  * Platform support information
  */
 export interface PlatformSupport {
@@ -607,4 +625,10 @@ export interface PlatformSupport {
    * determine them, including on Linux and macOS today.
    */
   uiCapabilities?: UiCapabilitySupport;
+  /**
+   * Bubblewrap host network capability. Omitted on non-Linux platforms and
+   * when bubblewrap itself is unavailable. Reported fail-closed: if the probe
+   * cannot run, `proxyEnforcement` is `'unsupported'`, never absent.
+   */
+  bubblewrapNetwork?: BubblewrapNetworkSupport;
 }
