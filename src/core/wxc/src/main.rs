@@ -247,7 +247,7 @@ fn apply_command_override(
                 cmd
             );
         }
-        request.script_code = cmd.to_string();
+        request.set_script(cmd);
     }
 }
 
