@@ -97,45 +97,6 @@ pub struct LoadOptions {
     pub allow_missing_command: bool,
 }
 
-#[derive(Debug)]
-struct ParsedRequestParts<T> {
-    request: T,
-    command_line: Option<String>,
-}
-
-impl<T> ParsedRequestParts<T> {
-    fn map<U>(self, map_request: impl FnOnce(T) -> U) -> ParsedRequestParts<U> {
-        ParsedRequestParts {
-            request: map_request(self.request),
-            command_line: self.command_line,
-        }
-    }
-}
-
-impl ParsedRequestParts<ExecutionRequest> {
-    fn into_execution_request(mut self) -> ExecutionRequest {
-        if let Some(command) = self.command_line {
-            self.request.script_code = command;
-        }
-
-        self.request
-    }
-}
-
-impl ParsedRequestParts<MxcRequest> {
-    fn into_request(mut self) -> MxcRequest {
-        if let Some(command) = self.command_line {
-            let execution_request = match &mut self.request {
-                MxcRequest::OneShot(request) => request,
-                MxcRequest::StateAware(parsed) => &mut parsed.request,
-            };
-            execution_request.script_code = command;
-        }
-
-        self.request
-    }
-}
-
 /// Loads and parses a JSON-based code execution request.
 ///
 /// If `is_base64` is true, `input` is treated as a base64-encoded JSON string.
@@ -172,7 +133,6 @@ pub fn load_request_with_options(
         validate_directional_network_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command)
-            .map(ParsedRequestParts::into_execution_request)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -197,7 +157,6 @@ pub fn load_request_from_value(
         validate_directional_network_field_versions(&raw)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command)
-            .map(ParsedRequestParts::into_execution_request)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -229,14 +188,6 @@ pub fn load_mxc_request_with_options(
     logger: &mut Logger,
     opts: LoadOptions,
 ) -> Result<MxcRequest, ParseError> {
-    load_mxc_request_parts_with_options(input, logger, opts).map(ParsedRequestParts::into_request)
-}
-
-fn load_mxc_request_parts_with_options(
-    input: &str,
-    logger: &mut Logger,
-    opts: LoadOptions,
-) -> Result<ParsedRequestParts<MxcRequest>, ParseError> {
     let result = (|| {
         let json_str = decode_request_input_without_logging(input, opts.is_base64)
             .map_err(ParseError::Decode)?;
@@ -246,7 +197,6 @@ fn load_mxc_request_parts_with_options(
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
-
     result
 }
 
@@ -262,7 +212,7 @@ pub fn load_mxc_request_from_json(
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
-    result.map(ParsedRequestParts::into_request)
+    result
 }
 
 /// Shared parse core over an already-decoded JSON string.
@@ -274,7 +224,7 @@ fn parse_mxc_request_json(
     json_str: &str,
     logger: &mut Logger,
     allow_missing_command: bool,
-) -> Result<ParsedRequestParts<MxcRequest>, ParseError> {
+) -> Result<MxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
 
@@ -290,7 +240,7 @@ fn parse_mxc_request_json(
             logger,
             allow_missing_command,
         )
-        .map(|parts| parts.map(MxcRequest::StateAware))
+        .map(MxcRequest::StateAware)
         .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
@@ -300,7 +250,7 @@ fn parse_mxc_request_json(
         validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command)
-            .map(|parts| parts.map(MxcRequest::OneShot))
+            .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
 }
@@ -758,7 +708,7 @@ fn convert_wire_config(
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
-) -> Result<ParsedRequestParts<ExecutionRequest>, WxcError> {
+) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
     // input is a state-aware-shaped payload sent to a one-shot entry point;
@@ -1435,11 +1385,11 @@ fn convert_wire_config(
         };
     }
 
-    let request = ExecutionRequest {
+    Ok(ExecutionRequest {
         schema_version,
         container_id,
         env,
-        script_code: String::new(),
+        script_code: command_line.unwrap_or_default(),
         working_directory,
         script_timeout,
         containment,
@@ -1451,10 +1401,6 @@ fn convert_wire_config(
         testing_features_enabled: false,
         experimental,
         dry_run: false,
-    };
-    Ok(ParsedRequestParts {
-        request,
-        command_line,
     })
 }
 
@@ -1463,7 +1409,7 @@ fn convert_wire_state_aware(
     experimental: Option<&RawValue>,
     logger: &mut Logger,
     allow_missing_command: bool,
-) -> Result<ParsedRequestParts<ParsedStateAwareRequest>, WxcError> {
+) -> Result<ParsedStateAwareRequest, WxcError> {
     let experimental_raw = experimental
         .map(|raw| {
             config_deserialize::from_str::<serde_json::Value>(raw.get())
@@ -1590,10 +1536,7 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let ParsedRequestParts {
-        mut request,
-        command_line,
-    } = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -1623,20 +1566,17 @@ fn convert_wire_state_aware(
         request.experimental.telemetry = Some(telemetry);
     }
 
-    Ok(ParsedRequestParts {
-        request: ParsedStateAwareRequest {
-            request,
-            phase,
-            containment,
-            sandbox_id,
-            correlation_vector,
-            experimental_raw,
-            // Retain the decoded request text so the dispatcher can deserialize each
-            // `experimental.<backend>.<phase>` sub-slice positionally and report
-            // typed errors with whole-file line/column (parity with base config).
-            source_text: Some(json.to_owned().into_boxed_str()),
-        },
-        command_line,
+    Ok(ParsedStateAwareRequest {
+        request,
+        phase,
+        containment,
+        sandbox_id,
+        correlation_vector,
+        experimental_raw,
+        // Retain the decoded request text so the dispatcher can deserialize each
+        // `experimental.<backend>.<phase>` sub-slice positionally and report
+        // typed errors with whole-file line/column (parity with base config).
+        source_text: Some(json.to_owned().into_boxed_str()),
     })
 }
 
@@ -1735,65 +1675,8 @@ mod tests {
         )
     }
 
-    fn load_mxc_parts_with_opts(
-        json: &str,
-        opts: LoadOptions,
-    ) -> Result<ParsedRequestParts<MxcRequest>, ParseError> {
-        let encoded = base64_encode(json.as_bytes());
-        let mut logger = test_logger();
-        load_mxc_request_parts_with_options(
-            &encoded,
-            &mut logger,
-            LoadOptions {
-                is_base64: true,
-                ..opts
-            },
-        )
-    }
-
     #[test]
-    fn parts_loader_surfaces_one_shot_command_line() {
-        let json = r#"{
-            "process": {
-                "commandLine": "echo from policy",
-                "cwd": "C:\\workspace"
-            }
-        }"#;
-
-        let parts = load_mxc_parts_with_opts(json, LoadOptions::default()).unwrap();
-
-        assert_eq!(parts.command_line.as_deref(), Some("echo from policy"));
-        match parts.request {
-            MxcRequest::OneShot(request) => {
-                assert!(request.script_code.is_empty());
-                assert_eq!(request.working_directory, "C:\\workspace");
-            }
-            MxcRequest::StateAware(_) => panic!("expected one-shot"),
-        }
-    }
-
-    #[test]
-    fn parts_loader_surfaces_state_aware_exec_command_line() {
-        let json = r#"{
-            "phase": "exec",
-            "sandboxId": "iso:abcd1234",
-            "process": {"commandLine": "echo from lifecycle"}
-        }"#;
-
-        let parts = load_mxc_parts_with_opts(json, LoadOptions::default()).unwrap();
-
-        assert_eq!(parts.command_line.as_deref(), Some("echo from lifecycle"));
-        match parts.request {
-            MxcRequest::StateAware(parsed) => {
-                assert_eq!(parsed.phase, Phase::Exec);
-                assert!(parsed.request.script_code.is_empty());
-            }
-            MxcRequest::OneShot(_) => panic!("expected state-aware"),
-        }
-    }
-
-    #[test]
-    fn compatibility_loader_reapplies_surfaced_command_line() {
+    fn mxc_loader_preserves_one_shot_command_line() {
         let json = r#"{"process": {"commandLine": "echo compatibility"}}"#;
 
         match load_mxc_with_opts(json, LoadOptions::default()).unwrap() {
@@ -1801,6 +1684,23 @@ mod tests {
                 assert_eq!(request.script_code, "echo compatibility");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        }
+    }
+
+    #[test]
+    fn mxc_loader_preserves_state_aware_exec_command_line() {
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "echo from lifecycle"}
+        }"#;
+
+        match load_mxc_with_opts(json, LoadOptions::default()).unwrap() {
+            MxcRequest::StateAware(parsed) => {
+                assert_eq!(parsed.phase, Phase::Exec);
+                assert_eq!(parsed.request.script_code, "echo from lifecycle");
+            }
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
