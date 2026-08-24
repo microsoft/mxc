@@ -122,9 +122,9 @@ impl SandboxBackend for SeatbeltScriptRunner {
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
 
-        // Shared with the config parser so a caller that builds an
-        // ExecutionRequest directly gets the same rules.
-        wxc_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
+        // Seatbelt's own invariants — the only home for them, so a caller that
+        // builds an ExecutionRequest directly gets the same rules.
+        crate::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
             .map_err(error_response)?;
 
         // Seatbelt cannot filter network by hostname — reject blockedHosts
@@ -883,9 +883,10 @@ mod tests {
         assert!(response.error_message.contains("cannot be enforced"));
     }
 
-    /// The parser is not the only door: `mxc_engine::run` takes an
-    /// `ExecutionRequest` built by hand. These assert `validate` rejects the
-    /// same policies the parser does, in both the legacy and directional shape.
+    /// The parser is not a door at all for these rules: `validate` is the only
+    /// place they live, and `mxc_engine` will happily take an `ExecutionRequest`
+    /// built by hand. These assert `validate` rejects them without any help from
+    /// the parser, in both the legacy and directional shape.
     #[test]
     fn rejects_proxy_with_egress_allow_bypassing_the_parser() {
         let runner = SeatbeltScriptRunner::new();

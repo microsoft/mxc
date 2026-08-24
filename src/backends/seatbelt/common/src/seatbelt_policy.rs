@@ -3,15 +3,15 @@
 
 //! Seatbelt network invariants, enforced by the backend's own `validate`.
 //!
-//! `validate` runs on every execution path -- the JSON parser and a Rust caller
-//! that hands `mxc_engine::run` an `ExecutionRequest` it built itself both
-//! reach it -- so one home here covers both.
+//! `validate` runs on every execution path -- the JSON parser feeds one here,
+//! and a Rust caller that hands `mxc_engine` an `ExecutionRequest` it built
+//! itself reaches the same check -- so this is the only home the rules need.
 //!
 //! Each check returns the caller-facing message; the backend wraps it as a
 //! `ScriptResponse`.
 
-use crate::host_is_canonical_loopback;
-use crate::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
+use wxc_common::host_is_canonical_loopback;
+use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
 
 /// Effective outbound posture, preferring the directional `network.egress`
 /// over the legacy `defaultPolicy` when both are present.
@@ -115,7 +115,7 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ProxyAddress, ProxyConfig};
+    use wxc_common::models::{ProxyAddress, ProxyConfig};
 
     fn policy() -> ContainerPolicy {
         ContainerPolicy::default()
@@ -149,19 +149,44 @@ mod tests {
 
     #[test]
     fn rejects_proxy_with_firewall_enforcement_mode() {
-        let mut p = policy();
-        p.network_proxy = proxy("127.0.0.1");
-        p.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
+            let mut p = policy();
+            p.network_proxy = proxy("127.0.0.1");
+            p.network_enforcement_mode = mode.clone();
 
-        let msg = validate_seatbelt_network_policy(&p).unwrap_err();
-        assert!(msg.contains("enforcementMode"), "got: {msg}");
+            let msg = validate_seatbelt_network_policy(&p).unwrap_err();
+            assert!(msg.contains("enforcementMode"), "{mode:?} got: {msg}");
+        }
+    }
+
+    #[test]
+    fn accepts_builtin_test_proxy_under_block() {
+        // builtinTestServer binds a loopback port at runtime, so it has no
+        // address here — port-scoped and therefore safe under a deny default.
+        let mut p = policy();
+        p.default_network_policy = NetworkPolicy::Block;
+        p.network_proxy = ProxyConfig {
+            address: None,
+            builtin_test_server: true,
+        };
+
+        assert!(validate_seatbelt_network_policy(&p).is_ok());
     }
 
     /// The guard compared unbracketed literals only, so `http://[::1]` — the
     /// documented IPv6 form — was misread as remote and rejected.
     #[test]
     fn accepts_loopback_proxy_under_block_in_every_spelling() {
-        for host in ["127.0.0.1", "[::1]", "localhost", "[0:0:0:0:0:0:0:1]"] {
+        for host in [
+            "127.0.0.1",
+            "[::1]",
+            "localhost",
+            "[0:0:0:0:0:0:0:1]",
+            "[0000:0000:0000:0000:0000:0000:0000:0001]",
+        ] {
             let mut p = policy();
             p.default_network_policy = NetworkPolicy::Block;
             p.network_proxy = proxy(host);
@@ -175,7 +200,18 @@ mod tests {
 
     #[test]
     fn rejects_remote_proxy_under_block() {
-        for host in ["proxy.corp.example", "10.0.0.5", "[2001:db8::1]"] {
+        // The last three are the other half of the widening above: accepting
+        // every ::1 spelling must not spill into the rest of 127.0.0.0/8, since
+        // the profile's `(remote ip "localhost:<port>")` covers only the
+        // canonical addresses.
+        for host in [
+            "proxy.corp.example",
+            "10.0.0.5",
+            "[2001:db8::1]",
+            "127.0.0.2",
+            "127.0.0.53",
+            "0.0.0.0",
+        ] {
             let mut p = policy();
             p.default_network_policy = NetworkPolicy::Block;
             p.network_proxy = proxy(host);
