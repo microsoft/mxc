@@ -313,11 +313,10 @@ fn run_inner(policy_json_utf8: *const c_char, command_utf8: *const c_char) -> Mx
         }
     };
 
-    let mut request = match build_request(&policy, None) {
+    let request = match build_request(&policy, command, None) {
         Ok(r) => r,
         Err(e) => return MxcRunResult::from_sdk_error(&e),
     };
-    request.set_script(command);
 
     match run(request) {
         Ok(output) => {

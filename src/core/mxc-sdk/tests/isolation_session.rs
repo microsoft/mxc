@@ -106,10 +106,9 @@ fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
 #[test]
 fn one_shot_run_refuses_the_backend() {
     let mut request =
-        build_request_with_containment(&iso_policy(), &Containment::IsolationSession, None)
+        build_request_with_containment(&iso_policy(), &Containment::IsolationSession, "cmd.exe /c echo hi", None)
             .expect("building the request must succeed — the refusal is at dispatch, not build");
     request
-        .set_script("cmd.exe /c echo hi")
         .set_experimental(true);
 
     let err = mxc_sdk::run(request).expect_err("one-shot run must refuse IsolationSession");
@@ -125,10 +124,9 @@ fn one_shot_run_refuses_the_backend() {
 #[test]
 fn one_shot_spawn_refuses_the_backend() {
     let mut request =
-        build_request_with_containment(&iso_policy(), &Containment::IsolationSession, None)
+        build_request_with_containment(&iso_policy(), &Containment::IsolationSession, "cmd.exe /c echo hi", None)
             .expect("building the request must succeed — the refusal is at dispatch, not build");
     request
-        .set_script("cmd.exe /c echo hi")
         .set_experimental(true);
 
     // `Sandbox` is not `Debug`, so match rather than `expect_err`.

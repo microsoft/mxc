@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use std::{borrow::Cow, fs};
-
+use crate::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
 use crate::config_deserialize;
 use crate::encoding::base64_decode;
 use crate::error::WxcError;
@@ -20,8 +19,10 @@ use crate::network_parser::{
 };
 use crate::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
 use crate::wire;
+use mxc_config_contract::dev::{probe_phase, Phase as ContractPhase};
 use serde::{Deserialize, Deserializer};
 use serde_json::value::RawValue;
+use std::{borrow::Cow, fs};
 
 /// Categorised error from `load_mxc_request`. The `wxc-exec` driver uses the
 /// variant to choose the failure-output convention: state-aware failures
@@ -85,16 +86,12 @@ where
 /// loader-tuning knobs can be threaded through without re-spinning every
 /// caller.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct LoadOptions {
+pub struct LoadOptions<'a> {
     /// Treat `input` as a base64-encoded JSON blob rather than a file path.
     pub is_base64: bool,
-    /// Allow `process.commandLine` to be absent or empty in the policy.
-    ///
-    /// The driver sets this when it has a CLI-provided command-line
-    /// override to splice into `script_code` after parsing. Without it,
-    /// missing/empty `commandLine` is a hard parse error in one-shot
-    /// and state-aware exec requests (matching the legacy contract).
-    pub allow_missing_command: bool,
+    /// Trailing CLI argv spliced into `process.commandLine` before parsing.
+    /// Empty means no override.
+    pub cli_command: &'a [String],
 }
 
 /// Loads and parses a JSON-based code execution request.
@@ -106,25 +103,8 @@ pub fn load_request(
     logger: &mut Logger,
     is_base64: bool,
 ) -> Result<ExecutionRequest, WxcError> {
-    load_request_with_options(
-        input,
-        logger,
-        LoadOptions {
-            is_base64,
-            allow_missing_command: false,
-        },
-    )
-}
-
-/// Options-aware variant of [`load_request`] used by drivers that may
-/// override `process.commandLine` from the CLI. See [`LoadOptions`].
-pub fn load_request_with_options(
-    input: &str,
-    logger: &mut Logger,
-    opts: LoadOptions,
-) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
-        let json_str = decode_request_input_without_logging(input, opts.is_base64)?;
+        let json_str = decode_request_input_without_logging(input, is_base64)?;
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
@@ -132,23 +112,22 @@ pub fn load_request_with_options(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         validate_directional_network_field_versions(&raw)?;
 
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true)
     })();
     log_one_shot_error(logger, &result);
     result
 }
 
 /// Build a request from an already-parsed wire-format config [`Value`], running
-/// the same validation and wire→model mapping as [`load_request_with_options`]
-/// but without a base64 (or file) round-trip. For in-process callers (e.g. the
-/// `mxc` crate) that already hold the config as JSON and would otherwise pay to
+/// the same validation and wire→model mapping as [`load_request`] but without a
+/// base64 (or file) round-trip. For in-process callers (e.g. the `mxc` crate)
+/// that already hold the config as JSON and would otherwise pay to
 /// serialise → base64 → decode → re-parse it.
 ///
 /// [`Value`]: serde_json::Value
 pub fn load_request_from_value(
     config: serde_json::Value,
     logger: &mut Logger,
-    allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
         let raw = config.clone();
@@ -156,7 +135,7 @@ pub fn load_request_from_value(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         validate_directional_network_field_versions(&raw)?;
 
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -174,29 +153,37 @@ pub fn load_mxc_request(
         logger,
         LoadOptions {
             is_base64,
-            allow_missing_command: false,
+            cli_command: &[],
         },
     )
 }
 
 /// Options-aware variant of [`load_mxc_request`]. When
-/// `LoadOptions::allow_missing_command` is set, a missing or empty
-/// `process.commandLine` in the policy is tolerated and `script_code`
-/// is left empty for the driver to fill in from a CLI override.
+/// `LoadOptions::cli_command` is non-empty, it is rendered for the request's
+/// backend and spliced into `process.commandLine` before parsing, so the
+/// parsed request is complete rather than being patched afterwards.
 pub fn load_mxc_request_with_options(
     input: &str,
     logger: &mut Logger,
-    opts: LoadOptions,
+    opts: LoadOptions<'_>,
 ) -> Result<MxcRequest, ParseError> {
     let result = (|| {
         let json_str = decode_request_input_without_logging(input, opts.is_base64)
             .map_err(ParseError::Decode)?;
-        parse_mxc_request_json(&json_str, logger, opts.allow_missing_command)
+
+        let json_str = if opts.cli_command.is_empty() {
+            json_str
+        } else {
+            apply_cli_command(&json_str, opts.cli_command, logger)?
+        };
+
+        parse_mxc_request_json(&json_str, logger)
     })();
 
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
+
     result
 }
 
@@ -208,11 +195,87 @@ pub fn load_mxc_request_from_json(
     json_str: &str,
     logger: &mut Logger,
 ) -> Result<MxcRequest, ParseError> {
-    let result = parse_mxc_request_json(json_str, logger, /*allow_missing_command=*/ false);
+    let result = parse_mxc_request_json(json_str, logger);
     if let Err(error) = &result {
         log_error(logger, &error.message(), error.output());
     }
     result
+}
+
+/// Resolves a CLI command override by splicing it into the request source,
+/// returning the effective document to parse.
+///
+/// Returns the input **unchanged** whenever the override cannot be applied for
+/// a reason the parser will itself report. Those inputs then keep today's error
+/// text and output routing rather than inheriting a probe's stricter, and
+/// differently routed, diagnostic.
+///
+/// Probing the phase first is load-bearing: it selects which [`ParseError`]
+/// variant a later failure uses, and that selects the stdout envelope versus
+/// the stderr diagnostic.
+///
+/// [`load_mxc_request_with_options`] calls this only after confirming that
+/// `LoadOptions::cli_command` is non-empty. The explicit empty-command
+/// rejection remains defensive for direct internal callers and future call
+/// sites rather than relying solely on that upstream guard.
+fn apply_cli_command(
+    json: &str,
+    argv: &[String],
+    logger: &mut Logger,
+) -> Result<String, ParseError> {
+    // An unreadable phase declaration is the parser's to report.
+    let Ok(phase) = probe_phase(json) else {
+        return Ok(json.to_string());
+    };
+
+    let context = match phase {
+        None => match crate::probe::probe_one_shot_backend(json) {
+            Some(backend) => CommandLineContext::for_backend(&backend),
+            // Likewise an unreadable containment: the typed parse rejects it.
+            None => return Ok(json.to_string()),
+        },
+        Some(ContractPhase::Exec) => {
+            // Not a passthrough: `resolve_backend` raises this same error after
+            // parsing today, so surfacing it here preserves current behavior.
+            // Swallowing it would silently drop the caller's override.
+            let backend =
+                crate::probe::probe_state_aware_backend(json).map_err(ParseError::StateAware)?;
+            CommandLineContext::for_backend(&backend)
+        }
+        Some(_) => {
+            return Err(ParseError::StateAware(MxcError::malformed_request(
+                "CLI command override is only supported for state-aware exec requests",
+            )))
+        }
+    };
+
+    let command = cmdline_from_argv_for_context(argv, context).map_err(|e| match phase {
+        None => ParseError::Decode(WxcError::ConfigParse(format!(
+            "invalid CLI command override: {e}"
+        ))),
+        Some(_) => ParseError::StateAware(MxcError::malformed_request(format!(
+            "invalid CLI command override: {e}"
+        ))),
+    })?;
+
+    if command.is_empty() {
+        return Err(ParseError::Decode(WxcError::ConfigParse(
+            "CLI command override must not be empty".to_string(),
+        )));
+    }
+
+    // A document the splice cannot transform is one the parser rejects anyway.
+    let Some(spliced) = crate::splice::splice_command(json, &command) else {
+        return Ok(json.to_string());
+    };
+
+    if spliced.replaced_existing {
+        logger.log_line(&format!(
+            "Overriding policy process.commandLine with CLI command: {command}"
+        ));
+    }
+
+    Ok(spliced.json)
 }
 
 /// Shared parse core over an already-decoded JSON string.
@@ -220,11 +283,7 @@ pub fn load_mxc_request_from_json(
 /// Borrows only the discriminator and the raw state-aware backend block, then
 /// deserialises the typed model directly from source text so policy errors
 /// retain line and column information (`serde_json::Value` would discard it).
-fn parse_mxc_request_json(
-    json_str: &str,
-    logger: &mut Logger,
-    allow_missing_command: bool,
-) -> Result<MxcRequest, ParseError> {
+fn parse_mxc_request_json(json_str: &str, logger: &mut Logger) -> Result<MxcRequest, ParseError> {
     let discriminator: RequestDiscriminator<'_> = config_deserialize::from_str(json_str)
         .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
 
@@ -234,21 +293,16 @@ fn parse_mxc_request_json(
         validate_directional_network_field_versions(&raw).map_err(|error| {
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
-        convert_wire_state_aware(
-            json_str,
-            discriminator.experimental,
-            logger,
-            allow_missing_command,
-        )
-        .map(MxcRequest::StateAware)
-        .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
+        convert_wire_state_aware(json_str, discriminator.experimental, logger)
+            .map(MxcRequest::StateAware)
+            .map_err(|e| ParseError::StateAware(MxcError::malformed_request(e.to_string())))
     } else {
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
@@ -628,7 +682,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
 /// An omitted `containment` (`None`) resolves identically to the abstract
 /// `process` intent: the OS-native process sandbox. Concrete and abstract
 /// variants are mapped by `From<wire::Containment>`.
-fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
+pub(crate) fn map_wire_containment(c: Option<&wire::Containment>) -> ContainmentBackend {
     match c {
         Some(c) => c.clone().into(),
         None => wire::Containment::Process.into(),
@@ -698,15 +752,10 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
     }
 }
 
-// `allow_missing_command` relaxes the `require_process == true` arms so that a
-// CLI command-line override (provided by the driver after parsing) can stand in
-// for `process.commandLine`. When set, a missing or empty `commandLine` is
-// silently accepted and `script_code` is left empty.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
-    allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -738,19 +787,17 @@ fn convert_wire_config(
     let container_id = cfg.container_id.unwrap_or_default();
 
     // Process section: required for one-shot and state-aware exec; optional for
-    // non-exec state-aware phases (require_process == false) or when the driver
-    // signalled a CLI command-line override (allow_missing_command).
-    let command_required = require_process && !allow_missing_command;
+    // non-exec state-aware phases (require_process == false)
     let (script_code, working_directory, script_timeout, env) = match cfg.process {
         Some(process) => {
             let script_code = match process.command_line {
                 Some(s) if !s.is_empty() => s,
-                Some(_) if command_required => {
+                Some(_) if require_process => {
                     return Err(WxcError::ConfigParse(
                         "process.commandLine cannot be empty".to_string(),
                     ));
                 }
-                None if command_required => {
+                None if require_process => {
                     return Err(WxcError::ConfigParse(
                         "Missing required field: process.commandLine".to_string(),
                     ));
@@ -772,7 +819,7 @@ fn convert_wire_config(
                 process.env.unwrap_or_default(),
             )
         }
-        None if command_required => {
+        None if require_process => {
             return Err(WxcError::ConfigParse(
                 "'process' section is required".into(),
             ));
@@ -1404,7 +1451,6 @@ fn convert_wire_state_aware(
     json: &str,
     experimental: Option<&RawValue>,
     logger: &mut Logger,
-    allow_missing_command: bool,
 ) -> Result<ParsedStateAwareRequest, WxcError> {
     let experimental_raw = experimental
         .map(|raw| {
@@ -1532,7 +1578,7 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let mut request = convert_wire_config(cfg, logger, require_process)?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -1648,6 +1694,10 @@ mod tests {
     use crate::logger::Mode;
     use crate::models::{ClipboardPolicy, NetworkAction, ProxyAddress};
 
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
     }
@@ -1658,7 +1708,7 @@ mod tests {
         load_mxc_request(&encoded, &mut logger, true)
     }
 
-    fn load_mxc_with_opts(json: &str, opts: LoadOptions) -> Result<MxcRequest, ParseError> {
+    fn load_mxc_with_cli(json: &str, cli_command: &[String]) -> Result<MxcRequest, ParseError> {
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         load_mxc_request_with_options(
@@ -1666,24 +1716,17 @@ mod tests {
             &mut logger,
             LoadOptions {
                 is_base64: true,
-                ..opts
+                cli_command,
             },
         )
     }
 
     #[test]
-    fn allow_missing_command_lets_one_shot_skip_command_line() {
-        // No process.commandLine in the policy — without the flag this would
-        // be a parse error; with allow_missing_command set the parser yields
-        // an empty script_code for the driver to fill in.
+    fn cli_command_supplies_a_missing_one_shot_command_line() {
         let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
-        let opts = LoadOptions {
-            is_base64: true,
-            allow_missing_command: true,
-        };
-        match load_mxc_with_opts(json, opts).unwrap() {
+        match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::OneShot(req) => {
-                assert!(req.script_code.is_empty());
+                assert_eq!(req.script_code, "app.exe --flag");
                 assert_eq!(req.working_directory, "C:\\tmp");
             }
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
@@ -1691,48 +1734,262 @@ mod tests {
     }
 
     #[test]
-    fn allow_missing_command_lets_one_shot_skip_process_block_entirely() {
+    fn cli_command_supplies_an_absent_one_shot_process_block() {
         let json = r#"{"containment": "processcontainer"}"#;
-        let opts = LoadOptions {
-            is_base64: true,
-            allow_missing_command: true,
-        };
-        match load_mxc_with_opts(json, opts).unwrap() {
-            MxcRequest::OneShot(req) => assert!(req.script_code.is_empty()),
+        match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
+            MxcRequest::OneShot(req) => assert_eq!(req.script_code, "app.exe --flag"),
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         }
     }
 
     #[test]
-    fn allow_missing_command_lets_state_aware_exec_skip_command_line() {
+    fn cli_command_supplies_a_missing_state_aware_exec_command_line() {
         let json = r#"{
-            "phase": "exec",
-            "sandboxId": "iso:abcd1234",
-            "process": {"cwd": "C:\\tmp"}
-        }"#;
-        let opts = LoadOptions {
-            is_base64: true,
-            allow_missing_command: true,
-        };
-        match load_mxc_with_opts(json, opts).unwrap() {
+        "phase": "exec",
+        "sandboxId": "iso:abcd1234",
+        "process": {"cwd": "C:\\tmp"}
+    }"#;
+        match load_mxc_with_cli(json, &argv(&["app.exe", "--flag"])).unwrap() {
             MxcRequest::StateAware(p) => {
                 assert_eq!(p.phase, Phase::Exec);
-                assert!(p.request.script_code.is_empty());
+                assert_eq!(p.request.script_code, "app.exe --flag");
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
     }
 
     #[test]
-    fn default_options_still_reject_missing_command_line() {
+    fn cli_command_preserves_duplicate_field_errors() {
+        for (field, json) in [
+            (
+                "filesystem",
+                r#"{
+                    "process": {"commandLine": "policy.exe"},
+                    "filesystem": {"readwritePaths": ["first"]},
+                    "filesystem": {"readwritePaths": ["second"]}
+                }"#,
+            ),
+            (
+                "process",
+                r#"{
+                    "process": {"commandLine": "first.exe"},
+                    "process": {"commandLine": "second.exe"}
+                }"#,
+            ),
+            (
+                "commandLine",
+                r#"{
+                    "process": {
+                        "commandLine": "first.exe",
+                        "commandLine": "second.exe"
+                    }
+                }"#,
+            ),
+        ] {
+            assert!(load_mxc(json).is_err(), "sanity: duplicate {field}");
+            assert!(
+                load_mxc_with_cli(json, &argv(&["cli.exe"])).is_err(),
+                "CLI override must not hide duplicate {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_command_preserves_invalid_command_line_type_errors() {
+        for value in ["42", "true", "[]", "{}"] {
+            let json = format!(r#"{{"process":{{"commandLine":{value}}}}}"#);
+
+            assert!(load_mxc(&json).is_err(), "sanity: commandLine={value}");
+            assert!(
+                load_mxc_with_cli(&json, &argv(&["cli.exe"])).is_err(),
+                "CLI override must not hide commandLine={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_command_preserves_the_source_line_of_later_errors() {
+        let json = r#"{
+  "process": {"commandLine": "policy.exe"},
+  "network": {
+    "defaultPolicy": 42
+  }
+}"#;
+
+        let original_error = load_mxc(json).unwrap_err().message();
+        assert!(
+            original_error.contains("line 4 column"),
+            "test input should fail on its fourth line: {original_error}"
+        );
+
+        let override_error = load_mxc_with_cli(json, &argv(&["cli.exe"]))
+            .unwrap_err()
+            .message();
+        assert!(
+            override_error.contains("line 4 column"),
+            "CLI override moved the source location: {override_error}"
+        );
+    }
+
+    #[test]
+    fn missing_command_line_is_rejected_without_a_cli_command() {
         // Sanity: without the flag, the legacy contract holds — missing
         // commandLine is a hard parse error.
         let json = r#"{"process": {"cwd": "C:\\tmp"}}"#;
-        let opts = LoadOptions {
-            is_base64: true,
-            allow_missing_command: false,
-        };
-        assert!(load_mxc_with_opts(json, opts).is_err());
+        assert!(load_mxc_with_cli(json, &[]).is_err());
+    }
+
+    #[test]
+    fn apply_cli_command_splices_into_a_one_shot_request() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = apply_cli_command(
+            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["process"]["commandLine"], "app.exe --flag");
+        assert!(logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
+    fn apply_cli_command_does_not_log_when_the_policy_had_no_command() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let out = apply_cli_command(
+            r#"{"process":{"cwd":"/usr/tmp"}}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["process"]["commandLine"], "app.exe --flag");
+        assert!(!logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
+    fn apply_cli_command_splices_into_a_state_aware_exec_request() {
+        // The `sandboxId` prefix selects the quoting context, so the argument
+        // carries `&`: cmd.exe quotes it because `&` separates commands, a
+        // POSIX shell single-quotes it, and the direct Windows path leaves it
+        // bare. An argument needing no quoting would render identically under
+        // all three and prove nothing about the prefix.
+        for (sandbox_id, expected) in [
+            // iso -> IsolationSession -> WindowsCommandProcessor
+            ("iso:abcd1234", "app.exe \"a&b\""),
+            // wslc -> Wslc -> PosixShell
+            ("wslc:abcd1234", "app.exe 'a&b'"),
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let json = format!(r#"{{"phase":"exec","sandboxId":"{sandbox_id}"}}"#);
+            let out = apply_cli_command(&json, &argv(&["app.exe", "a&b"]), &mut logger).unwrap();
+
+            let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert_eq!(
+                doc["process"]["commandLine"], expected,
+                "wrong quoting context for {sandbox_id}"
+            );
+            assert!(!logger
+                .get_buffer()
+                .contains("Overriding policy process.commandLine"));
+        }
+    }
+
+    #[test]
+    fn apply_cli_command_rejects_a_non_exec_phase_with_an_envelope_error() {
+        let err = apply_cli_command(
+            r#"{"phase":"start","sandboxId":"iso:abcd1234"}"#,
+            &argv(&["echo", "hi"]),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::StateAware(_)));
+    }
+
+    #[test]
+    fn apply_cli_command_surfaces_an_unregistered_sandbox_id_prefix() {
+        let mut logger = Logger::new(Mode::Buffer);
+        let err = apply_cli_command(
+            r#"{"phase":"exec","sandboxId":"zzz:abcd"}"#,
+            &argv(&["app.exe", "--flag"]),
+            &mut logger,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::StateAware(_)));
+    }
+
+    #[test]
+    fn apply_cli_command_returns_the_source_unchanged_when_it_cannot_classify() {
+        // Each passthrough path: unreadable phase ({"phase":null}), unreadable
+        // containment ({"containment":"nope"}), unspliceable document
+        // ({"process":42}). Assert the output is byte-identical to the input.
+
+        for json in [
+            r#"{"phase":null,"sandboxId":"iso:abcd1234"}"#,
+            r#"{"containment":"nope"}"#,
+            r#"{"process":42}"#,
+        ] {
+            let mut logger = Logger::new(Mode::Buffer);
+            let out = apply_cli_command(json, &argv(&["app.exe", "--flag"]), &mut logger).unwrap();
+            assert_eq!(out, json);
+            assert!(!logger
+                .get_buffer()
+                .contains("Overriding policy process.commandLine"));
+        }
+    }
+
+    #[test]
+    fn apply_cli_command_rejects_an_empty_argv() {
+        let err = apply_cli_command(
+            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            &[],
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ParseError::Decode(_)));
+    }
+
+    #[test]
+    fn apply_cli_command_rejects_an_unconvertible_command() {
+        // A null byte fails argv rendering, which is an entry-point error
+        // rather than a parse error: the document is never spliced.
+        let err = apply_cli_command(
+            r#"{"process":{"commandLine":"policy.exe"}}"#,
+            &argv(&["app.exe", "hidden\0payload"]),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::Decode(_)));
+        assert!(
+            err.message().contains("invalid CLI command override"),
+            "unexpected message: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn apply_cli_command_routes_an_unconvertible_state_aware_exec_command_to_an_envelope() {
+        let err = apply_cli_command(
+            r#"{"phase":"exec","sandboxId":"iso:abcd1234"}"#,
+            &argv(&["app.exe", "hidden\0payload"]),
+            &mut Logger::new(Mode::Buffer),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ParseError::StateAware(_)));
+        assert!(
+            err.message().contains("invalid CLI command override"),
+            "unexpected message: {}",
+            err.message()
+        );
     }
 
     #[test]
@@ -1855,14 +2112,11 @@ mod tests {
                 r#"{{
                     "phase": "{phase}",
                     "sandboxId": "iso:abcd1234",
-                    "containment": "wslc"
+                    "containment": "wslc",
+                    "process": {{"commandLine": "echo hi"}}
                 }}"#
             );
-            let opts = LoadOptions {
-                is_base64: true,
-                allow_missing_command: true,
-            };
-            let r = load_mxc_with_opts(&json, opts);
+            let r = load_mxc_with_cli(&json, &[]);
             assert!(
                 matches!(r, Err(ParseError::StateAware(_))),
                 "phase {phase}: expected state-aware rejection, got {:?}",
@@ -2268,7 +2522,7 @@ mod tests {
         });
         let mut logger = test_logger();
 
-        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        let error = load_request_from_value(config, &mut logger).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Invalid configuration at `process.timeout`"));
         assert!(message.contains("expected u32"));
@@ -2301,7 +2555,7 @@ mod tests {
             }),
         ] {
             let mut logger = test_logger();
-            assert!(load_request_from_value(config, &mut logger, false).is_err());
+            assert!(load_request_from_value(config, &mut logger).is_err());
         }
     }
 
