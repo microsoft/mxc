@@ -28,28 +28,103 @@ else
     fi
 fi
 
+# CI builds to a target-triple subdirectory, so prefer the directory holding
+# LXC_EXEC before the repo-relative fallbacks.
+resolve_test_proxy() {
+    local candidate
+    for candidate in "$(dirname "$LXC_EXEC")/unix-test-proxy" \
+        "$REPO_DIR/src/target/release/unix-test-proxy" \
+        "$REPO_DIR/src/target/debug/unix-test-proxy"; do
+        if [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# A host-side listener on a port the proxy policy does not allow: proxy mode
+# accepts only the proxy's own port on slirp's gateway (EgressPlan::for_proxy).
+# Direct-egress assertions aim at it rather than an internet address, so a
+# refusal is evidence of the drop and not of a runner with no outbound route.
+# It doubles as the CONNECT target below, which is what proves it was live.
+CONTROL_PROXY="$(resolve_test_proxy)" || {
+    echo "Error: unix-test-proxy not found. Run build.sh first."
+    exit 1
+}
+CONTROL_DIR="$(mktemp -d)"
+CONTROL_PID=""
+cleanup_control() {
+    if [ -n "$CONTROL_PID" ]; then
+        kill "$CONTROL_PID" 2>/dev/null || true
+        wait "$CONTROL_PID" 2>/dev/null || true
+    fi
+    exec 8>&- 2>/dev/null || true
+    rm -rf "$CONTROL_DIR"
+}
+trap cleanup_control EXIT
+
+# The listener exits when its stdin reaches EOF; the fifo is opened read-write
+# so the open does not block and the script holding it keeps the listener up.
+mkfifo "$CONTROL_DIR/parent.pipe"
+exec 8<>"$CONTROL_DIR/parent.pipe"
+# 8>&- keeps the listener from inheriting the write end: holding one itself
+# would mean its stdin never reports EOF, orphaning it if this script is killed.
+"$CONTROL_PROXY" --ready-file "$CONTROL_DIR/ready.port" --bind-address 127.0.0.1 \
+    <"$CONTROL_DIR/parent.pipe" >"$CONTROL_DIR/listener.log" 2>&1 8>&- &
+CONTROL_PID=$!
+for _ in $(seq 1 100); do
+    [ -s "$CONTROL_DIR/ready.port" ] && break
+    if ! kill -0 "$CONTROL_PID" 2>/dev/null; then
+        cat "$CONTROL_DIR/listener.log"
+        echo "FAIL: the control listener exited before publishing its port."
+        exit 1
+    fi
+    sleep 0.1
+done
+CONTROL_PORT="$(cat "$CONTROL_DIR/ready.port" 2>/dev/null || true)"
+if [ -z "$CONTROL_PORT" ]; then
+    cat "$CONTROL_DIR/listener.log"
+    echo "FAIL: the control listener did not publish a port."
+    exit 1
+fi
+echo "  control listener on 127.0.0.1:$CONTROL_PORT (10.0.2.2:$CONTROL_PORT from the sandbox)"
+
+# The control port is assigned by the OS per run, so configs carry a
+# placeholder and are rendered into the run's scratch directory.
+render_config() {
+    sed -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" \
+        "$REPO_DIR/tests/configs/$1" >"$CONTROL_DIR/$1"
+    printf '%s\n' "$CONTROL_DIR/$1"
+}
+
+# Every sentinel named must appear. A workload that reports only its deny leg
+# would pass while its allowed request was silently failing, which is the class
+# of false result these tests exist to catch.
 run_one() {
     local label="$1"
     local config="$2"
-    local sentinel="$3"
+    shift 2
     echo "Running Bubblewrap network proxy test: $label..."
-    local out
-    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$REPO_DIR/tests/configs/$config" 2>&1); then
+    local out sentinel
+    if ! out=$("$LXC_EXEC" --experimental --allow-testing-features "$(render_config "$config")" 2>&1); then
         echo "$out"
         echo "FAIL: $label (lxc-exec returned non-zero)"
         return 1
     fi
-    if ! grep -q "$sentinel" <<<"$out"; then
-        echo "$out"
-        echo "FAIL: $label (sentinel '$sentinel' not found in output)"
-        return 1
-    fi
+    for sentinel in "$@"; do
+        if ! grep -q "$sentinel" <<<"$out"; then
+            echo "$out"
+            echo "FAIL: $label (sentinel '$sentinel' not found in output)"
+            return 1
+        fi
+    done
     echo "PASS: $label"
 }
 
 run_one "builtin proxy"    "bubblewrap_network_proxy_builtin.json"    "PROXY_OK"
-run_one "proxy allowlist"  "bubblewrap_network_proxy_allowlist.json"  "BLOCKED_OK"
-run_one "proxy blocklist"  "bubblewrap_network_proxy_blocklist.json"  "BLOCKED_OK"
+run_one "proxy allowlist"  "bubblewrap_network_proxy_allowlist.json"  "SENTINEL_OK" "BLOCKED_OK"
+run_one "proxy blocklist"  "bubblewrap_network_proxy_blocklist.json"  "SENTINEL_OK" "BLOCKED_OK"
 
 # Regression: host lists alongside a proxy at 0.8 once suppressed --unshare-net
 # while the proxy was only cooperative env vars, so `curl --noproxy '*'` walked
@@ -59,7 +134,7 @@ run_one "proxy blocklist"  "bubblewrap_network_proxy_blocklist.json"  "BLOCKED_O
 echo "Running Bubblewrap proxy host-rules egress test..."
 HOST_NETNS="$(readlink /proc/self/ns/net)"
 if ! HOSTRULES_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_host_rules.json" 2>&1); then
+    "$(render_config bubblewrap_network_proxy_host_rules.json)" 2>&1); then
     echo "$HOSTRULES_OUT"
     echo "FAIL: proxy host-rules egress (lxc-exec returned non-zero)"
     exit 1
@@ -138,7 +213,7 @@ echo "PASS: proxy-namespace capability drop"
 # slirp4netns is what proves the dependency is 0.8-only.
 echo "Running Bubblewrap legacy (schema 0.7) proxy compatibility test..."
 STUB_DIR="$(mktemp -d)"
-trap 'rm -rf "$STUB_DIR"' EXIT
+trap 'cleanup_control; rm -rf "$STUB_DIR"' EXIT
 printf '#!/bin/sh\necho "slirp4netns must not be used on the legacy proxy path" >&2\nexit 1\n' \
     > "$STUB_DIR/slirp4netns"
 chmod +x "$STUB_DIR/slirp4netns"
@@ -184,7 +259,7 @@ echo "PASS: legacy (schema 0.7) proxy compatibility"
 # seconds so the kill lands inside it deterministically.
 echo "Running Bubblewrap supervisor orphan-reaping test..."
 BWRAP_STUB_DIR="$(mktemp -d)"
-trap 'rm -rf "$STUB_DIR" "$BWRAP_STUB_DIR"' EXIT
+trap 'cleanup_control; rm -rf "$STUB_DIR" "$BWRAP_STUB_DIR"' EXIT
 cat > "$BWRAP_STUB_DIR/bwrap" <<STUB
 #!/bin/sh
 case "\$*" in
@@ -246,7 +321,7 @@ echo "PASS: supervisor orphan reaping"
 
 echo "Running Bubblewrap proxy-only egress enforcement test..."
 if ! EGRESS_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
-    "$REPO_DIR/tests/configs/bubblewrap_network_proxy_egress_denied.json" 2>&1); then
+    "$(render_config bubblewrap_network_proxy_egress_denied.json)" 2>&1); then
     echo "$EGRESS_OUT"
     echo "FAIL: proxy-only egress (lxc-exec returned non-zero)"
     exit 1
@@ -260,6 +335,26 @@ for sentinel in CONTROL_PROXY_REACHABLE_OK DIRECT_EGRESS_BLOCKED_OK LOOPBACK_EXE
     fi
 done
 echo "PASS: proxy-only egress enforcement"
+
+# Every other proxied request here is plain HTTP, so without this the tunnel
+# path could regress while the suite stayed green. The target is the control
+# listener, so the sentinel coming back proves both that the tunnel carried
+# bytes and that the endpoint refused above was live.
+echo "Running Bubblewrap proxy CONNECT tunnel test..."
+if ! CONNECT_OUT=$("$LXC_EXEC" --experimental --allow-testing-features \
+    "$(render_config bubblewrap_network_proxy_connect.json)" 2>&1); then
+    echo "$CONNECT_OUT"
+    echo "FAIL: proxy CONNECT tunnel (lxc-exec returned non-zero)"
+    exit 1
+fi
+for sentinel in CONNECT_DIRECT_BLOCKED_OK CONNECT_TUNNEL_ESTABLISHED_OK CONNECT_TUNNEL_BODY_OK; do
+    if ! grep -q "$sentinel" <<<"$CONNECT_OUT"; then
+        echo "$CONNECT_OUT"
+        echo "FAIL: proxy CONNECT tunnel (sentinel '$sentinel' not found in output)"
+        exit 1
+    fi
+done
+echo "PASS: proxy CONNECT tunnel"
 
 # Hostname proxy endpoints. The endpoint is resolved on the host and pinned
 # into the sandbox's /etc/hosts, because DNS is closed inside the sandbox.
@@ -289,17 +384,10 @@ echo "  host name '$PROXY_HOST' resolves to $PROXY_BIND"
 # repo-relative fallbacks below do not cover. Every other case in this file
 # reaches the proxy through the coordinator, which already resolves it that
 # way -- this is the one that spawns it directly.
-TEST_PROXY="$(dirname "$LXC_EXEC")/unix-test-proxy"
-if [ ! -x "$TEST_PROXY" ]; then
-    TEST_PROXY="$REPO_DIR/src/target/release/unix-test-proxy"
-fi
-if [ ! -x "$TEST_PROXY" ]; then
-    TEST_PROXY="$REPO_DIR/src/target/debug/unix-test-proxy"
-fi
-if [ ! -x "$TEST_PROXY" ]; then
+TEST_PROXY="$(resolve_test_proxy)" || {
     echo "FAIL: hostname proxy pin (unix-test-proxy not built)"
     exit 1
-fi
+}
 
 PIN_DIR="$(mktemp -d)"
 PIN_PROXY_PID=""
@@ -310,6 +398,7 @@ cleanup_pin() {
     fi
     exec 9>&- 2>/dev/null || true
     rm -rf "$PIN_DIR"
+    cleanup_control
 }
 trap cleanup_pin EXIT
 
@@ -342,6 +431,7 @@ if [ -z "$PROXY_PORT" ]; then
 fi
 
 sed -e "s/{{PROXY_HOST}}/$PROXY_HOST/g" -e "s/{{PROXY_PORT}}/$PROXY_PORT/g" \
+    -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" \
     "$REPO_DIR/tests/configs/bubblewrap_network_proxy_hostname.json" \
     >"$PIN_DIR/hostname.json"
 
@@ -359,14 +449,14 @@ for sentinel in PIN_PRESENT_OK PIN_PROXY_OK PIN_DIRECT_BLOCKED_OK; do
     fi
 done
 cleanup_pin
-trap - EXIT
+trap cleanup_control EXIT
 echo "PASS: hostname proxy pin"
 
 # The pin outranks every filesystem-policy mount, so a policy that denies
 # /etc/hosts has to be refused rather than silently handed the file back.
 echo "Running Bubblewrap hostname pin vs denied /etc/hosts test..."
 DENY_DIR="$(mktemp -d)"
-trap 'rm -rf "$DENY_DIR"' EXIT
+trap 'cleanup_control; rm -rf "$DENY_DIR"' EXIT
 cat >"$DENY_DIR/denied.json" <<JSON
 {
   "version": "0.8.0-alpha",
@@ -398,7 +488,7 @@ if ! grep -qF "deniedPaths" <<<"$DENY_OUT"; then
     exit 1
 fi
 rm -rf "$DENY_DIR"
-trap - EXIT
+trap cleanup_control EXIT
 echo "PASS: hostname pin vs denied /etc/hosts"
 
 # The same denial spelled with `..` normalizes to /etc/hosts before the masks
@@ -406,7 +496,7 @@ echo "PASS: hostname pin vs denied /etc/hosts"
 # through and the pin handed the file back.
 echo "Running Bubblewrap hostname pin vs dot-dot denied /etc/hosts test..."
 DOTDOT_DIR="$(mktemp -d)"
-trap 'rm -rf "$DOTDOT_DIR"' EXIT
+trap 'cleanup_control; rm -rf "$DOTDOT_DIR"' EXIT
 cat >"$DOTDOT_DIR/dotdot.json" <<JSON
 {
   "version": "0.8.0-alpha",
@@ -438,14 +528,14 @@ if ! grep -qF "deniedPaths" <<<"$DOTDOT_OUT"; then
     exit 1
 fi
 rm -rf "$DOTDOT_DIR"
-trap - EXIT
+trap cleanup_control EXIT
 echo "PASS: hostname pin vs dot-dot denied /etc/hosts"
 
 # The same policy on the legacy schema pins nothing, so it must still run --
 # 0.6/0.7 behaviour is unchanged by the rejection above.
 echo "Running Bubblewrap legacy (schema 0.7) denied /etc/hosts compatibility test..."
 LEGACY_DIR="$(mktemp -d)"
-trap 'rm -rf "$LEGACY_DIR"' EXIT
+trap 'cleanup_control; rm -rf "$LEGACY_DIR"' EXIT
 cat >"$LEGACY_DIR/legacy.json" <<JSON
 {
   "version": "0.7.0-alpha",
@@ -472,7 +562,7 @@ if ! grep -q LEGACY_DENIED_HOSTS_OK <<<"$LEGACY_OUT"; then
     exit 1
 fi
 rm -rf "$LEGACY_DIR"
-trap - EXIT
+trap cleanup_control EXIT
 echo "PASS: legacy (schema 0.7) denied /etc/hosts compatibility"
 
 echo "Bubblewrap network proxy tests complete."

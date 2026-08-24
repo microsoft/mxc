@@ -1,0 +1,13 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-Bubblewrap-Network-Proxy-Connect",
+  "containment": "bubblewrap",
+  "process": {
+    "commandLine": "bash -c 'set -u; pu=\"${HTTP_PROXY:-${http_proxy:-}}\"; if [ -z \"$pu\" ]; then echo CONNECT_NO_PROXY_ENV; exit 1; fi; pa=\"${pu#*://}\"; pa=\"${pa%%/*}\"; ph=\"${pa%%:*}\"; pp=\"${pa##*:}\"; if [ \"$pp\" = \"$ph\" ]; then pp=80; fi; if timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{CONTROL_PORT}}\" >/dev/null 2>&1; then echo CONNECT_DIRECT_LEAKED; exit 1; fi; echo CONNECT_DIRECT_BLOCKED_OK; exec 3<>/dev/tcp/$ph/$pp; printf \"CONNECT 127.0.0.1:{{CONTROL_PORT}} HTTP/1.1\\r\\nHost: 127.0.0.1:{{CONTROL_PORT}}\\r\\n\\r\\n\" >&3; if ! IFS= read -r -t 10 status <&3; then echo CONNECT_NO_RESPONSE; exit 1; fi; case \"$status\" in *200*) echo CONNECT_TUNNEL_ESTABLISHED_OK;; *) echo \"CONNECT_TUNNEL_REFUSED:$status\"; exit 1;; esac; printf \"GET http://mxc-test.invalid/ HTTP/1.1\\r\\nHost: mxc-test.invalid\\r\\nConnection: close\\r\\n\\r\\n\" >&3; resp=\"$(timeout 10 cat <&3)\"; case \"$resp\" in *MXC_TEST_ORIGIN_OK*) echo CONNECT_TUNNEL_BODY_OK;; *) echo CONNECT_TUNNEL_BODY_MISSING; exit 1;; esac'"
+  },
+  "network": {
+    "defaultPolicy": "block",
+    "proxy": { "builtinTestServer": true },
+    "allowedHosts": ["127.0.0.1"]
+  }
+}
