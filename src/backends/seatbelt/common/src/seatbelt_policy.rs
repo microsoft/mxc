@@ -32,6 +32,15 @@ pub fn local_network_allowed(policy: &ContainerPolicy) -> bool {
     }
 }
 
+/// Effective host-loopback posture, or `None` for the legacy shape, which has
+/// no `hostLoopback` concept and keeps its 0.6/0.7 behavior untouched.
+pub fn host_loopback_allowed(policy: &ContainerPolicy) -> Option<bool> {
+    policy
+        .network_ingress
+        .as_ref()
+        .map(|ingress| ingress.host_loopback == NetworkAction::Allow)
+}
+
 /// Check every Seatbelt network invariant. Covers both the legacy and the
 /// directional shape via [`egress_allowed`].
 pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), String> {
@@ -116,6 +125,32 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
 mod tests {
     use super::*;
     use wxc_common::models::{ProxyAddress, ProxyConfig};
+
+    #[test]
+    fn host_loopback_allowed_is_none_for_the_legacy_shape() {
+        // 0.6/0.7 has no hostLoopback concept; the caller must not synthesize
+        // one, or legacy configs would change behavior.
+        let mut p = policy();
+        p.allow_local_network = true;
+        assert_eq!(host_loopback_allowed(&p), None);
+        p.allow_local_network = false;
+        assert_eq!(host_loopback_allowed(&p), None);
+    }
+
+    #[test]
+    fn host_loopback_allowed_reads_the_directional_field() {
+        let mut p = policy();
+        for (action, expected) in [
+            (NetworkAction::Allow, Some(true)),
+            (NetworkAction::Deny, Some(false)),
+        ] {
+            p.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+                default: action,
+                host_loopback: action,
+            });
+            assert_eq!(host_loopback_allowed(&p), expected);
+        }
+    }
 
     fn policy() -> ContainerPolicy {
         ContainerPolicy::default()

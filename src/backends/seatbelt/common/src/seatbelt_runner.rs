@@ -30,7 +30,9 @@ use std::time::Duration;
 
 use wxc_common::interruptible_reader::{wrap_pipe, InterruptibleReader, ReadCanceller};
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LaunchMethod, ProxyAddress, ScriptResponse};
+use wxc_common::models::{
+    ExecutionRequest, LaunchMethod, NetworkAction, ProxyAddress, ScriptResponse,
+};
 use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, group_kill, spawn_discard, take_boxed_read,
     take_boxed_write, wait_with_timeout, SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
@@ -138,20 +140,27 @@ impl SandboxBackend for SeatbeltScriptRunner {
             ));
         }
 
-        // Seatbelt has no private loopback, so it cannot enforce an
-        // independent `hostLoopback` posture: `ingress.default` alone drives
-        // the `(allow network-inbound (local ip))` rule. Reject configs where
-        // `hostLoopback` diverges from `default` instead of silently applying
-        // one and ignoring the other.
+        // `hostLoopback` is bidirectional, but Seatbelt can only enforce its
+        // outbound half (see `write_host_loopback_rules`): an inbound filter
+        // scoped to loopback is either a no-op or breaks `bind()` outright.
+        // Requiring it to match `ingress.default` — which drives the one
+        // `network-inbound` rule — keeps the inbound half consistent instead of
+        // enforcing one direction and silently ignoring the other.
         if let Some(ingress) = request.policy.network_ingress.as_ref() {
             if ingress.host_loopback != ingress.default {
-                return Err(error_response(
-                    "macOS Seatbelt has no private loopback and cannot enforce an \
-                     independent network.ingress.hostLoopback posture. Set \
-                     'hostLoopback' equal to 'default', or omit 'hostLoopback' to \
-                     inherit 'default'."
-                        .to_string(),
-                ));
+                let name = |action: NetworkAction| match action {
+                    NetworkAction::Allow => "allow",
+                    NetworkAction::Deny => "deny",
+                };
+                return Err(error_response(format!(
+                    "macOS Seatbelt cannot enforce a network.ingress.hostLoopback \
+                     posture ('{}') that differs from network.ingress.default \
+                     ('{}'): the inbound half is not expressible in a Seatbelt \
+                     profile. Set both to the same value. Note that an omitted \
+                     'hostLoopback' is 'deny', not an inherit of 'default'.",
+                    name(ingress.host_loopback),
+                    name(ingress.default),
+                )));
             }
         }
 
@@ -998,7 +1007,10 @@ mod tests {
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
         assert!(response.error_message.contains("hostLoopback"));
-        assert!(response.error_message.contains("independent"));
+        // Names both values so the caller can see which pair was rejected.
+        assert!(response.error_message.contains("('allow')"));
+        assert!(response.error_message.contains("('deny')"));
+        assert!(!response.error_message.contains("inherit 'default'"));
     }
 
     #[test]

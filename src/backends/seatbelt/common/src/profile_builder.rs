@@ -288,9 +288,6 @@ fn write_network_rules(
         (false, false) => {
             // Pure deny — implicit from `(deny default)`.
             out.push_str(";; --- network: default-deny (no allow-network rules emitted) ---\n");
-            if let Some(address) = proxy_address {
-                write_proxy_reachability_rules(out, address);
-            }
         }
         (false, true) => {
             // An allowlist under deny must never widen to allow-all. This is
@@ -300,9 +297,6 @@ fn write_network_rules(
             out.push_str(";; --- network: default-deny; allowedHosts enforced by the MXC-run\n");
             out.push_str(";;     builtin test proxy, not the profile (Seatbelt cannot filter\n");
             out.push_str(";;     by host) ---\n");
-            if let Some(address) = proxy_address {
-                write_proxy_reachability_rules(out, address);
-            }
         }
         (true, false) => {
             out.push_str(";; --- network: outbound allowed (any host) ---\n");
@@ -321,7 +315,53 @@ fn write_network_rules(
         }
     }
 
+    write_host_loopback_rules(out, policy, allow_outbound);
+
+    // Emitted last on purpose: among rules whose filters both match, Seatbelt
+    // takes the *last* one, so the proxy's port-scoped allow has to follow the
+    // host-loopback deny to survive it.
+    if !allow_outbound {
+        if let Some(address) = proxy_address {
+            write_proxy_reachability_rules(out, address);
+        }
+    }
+
     write_local_network_rules(out, seatbelt_policy::local_network_allowed(policy));
+}
+
+/// Apply `network.ingress.hostLoopback` to the container-to-host direction.
+///
+/// The posture is bidirectional per the 0.8 contract, but Seatbelt can only
+/// enforce the outbound half: an inbound filter scoped to loopback is either a
+/// no-op (`remote ip`) or kills `bind()` outright (`local ip`). The backend's
+/// `validate` therefore refuses a `hostLoopback` that diverges from
+/// `ingress.default`, which keeps the inbound half consistent by construction —
+/// `default` alone drives the one `network-inbound` rule.
+///
+/// Only the two combinations that actually change the profile emit anything;
+/// deny-under-deny is already covered by `(deny default)`, and allow-under-allow
+/// is already covered by the blanket outbound allow.
+fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_outbound: bool) {
+    // The legacy shape has no hostLoopback concept — leave 0.6/0.7 untouched.
+    let Some(loopback_allowed) = seatbelt_policy::host_loopback_allowed(policy) else {
+        return;
+    };
+
+    match (loopback_allowed, allow_outbound) {
+        (false, true) => {
+            // `localhost` matches this machine on any of its addresses, so this
+            // also closes the "reach the host via its LAN IP" path.
+            out.push_str(";; --- network: ingress.hostLoopback=deny — close host loopback,\n");
+            out.push_str(";;     including this host's own non-loopback addresses ---\n");
+            out.push_str("(deny network-outbound (remote ip \"localhost:*\"))\n");
+        }
+        (true, false) => {
+            out.push_str(";; --- network: ingress.hostLoopback=allow — open host loopback\n");
+            out.push_str(";;     under an otherwise-deny egress default ---\n");
+            out.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+        }
+        _ => {}
+    }
 }
 
 fn write_outbound_allow_rules(out: &mut String) {
@@ -1027,6 +1067,113 @@ mod tests {
         });
         let p = build_profile(&r).unwrap();
         assert!(!p.contains("network-inbound"));
+    }
+
+    // --- network.ingress.hostLoopback (issue #1021) -------------------------
+    //
+    // The posture only changes the profile in the two cells where it disagrees
+    // with the egress default; the other two are already covered by the
+    // baseline or by the blanket allow.
+
+    fn ingress(action: NetworkAction) -> wxc_common::models::NetworkIngressPolicy {
+        wxc_common::models::NetworkIngressPolicy {
+            default: action,
+            host_loopback: action,
+        }
+    }
+
+    fn egress(action: NetworkAction) -> wxc_common::models::NetworkEgressPolicy {
+        wxc_common::models::NetworkEgressPolicy {
+            default: action,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn host_loopback_deny_closes_loopback_under_open_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(p.contains("(deny network-outbound (remote ip \"localhost:*\"))"));
+        // Between two rules that both match, Seatbelt takes the last one.
+        assert!(
+            p.find("(deny network-outbound (remote ip \"localhost:*\"))")
+                > p.find("(allow network-outbound)"),
+            "the loopback deny must follow the blanket allow to take effect"
+        );
+    }
+
+    #[test]
+    fn host_loopback_allow_keeps_loopback_open_under_open_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound)"));
+        assert!(!p.contains("localhost:*"));
+    }
+
+    #[test]
+    fn host_loopback_allow_opens_loopback_under_deny_egress() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
+        let p = build_profile(&r).unwrap();
+
+        assert!(p.contains("(allow network-outbound (remote ip \"localhost:*\"))"));
+        assert!(!p.contains("(allow network-outbound)\n"));
+    }
+
+    #[test]
+    fn host_loopback_deny_under_deny_egress_needs_no_rule() {
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        let p = build_profile(&r).unwrap();
+
+        // `(deny default)` already covers it.
+        assert!(!p.contains("localhost:*"));
+        assert!(!p.contains("(allow network-outbound"));
+    }
+
+    #[test]
+    fn legacy_shape_emits_no_host_loopback_rule() {
+        // 0.6/0.7 configs have no hostLoopback concept and must be untouched.
+        for allow_local in [false, true] {
+            let mut r = req();
+            r.policy.default_network_policy = NetworkPolicy::Allow;
+            r.policy.allow_local_network = allow_local;
+            let p = build_profile(&r).unwrap();
+            assert!(
+                !p.contains("localhost:*"),
+                "legacy shape must not gain a host-loopback rule"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_allow_is_emitted_after_the_host_loopback_deny() {
+        // `validate` rejects proxy + egress allow today, so this pairing is
+        // unreachable in practice. The ordering still has to hold: a later deny
+        // would silently swallow the proxy exception and fail closed.
+        let mut r = req();
+        r.policy.network_egress = Some(egress(NetworkAction::Allow));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        let addr = ProxyAddress::new("127.0.0.1".into(), 44444);
+        let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+
+        let deny = p.find("(deny network-outbound (remote ip \"localhost:*\"))");
+        let proxy = p.find("(allow network-outbound (remote ip \"localhost:44444\"))");
+        if let (Some(deny), Some(proxy)) = (deny, proxy) {
+            assert!(
+                proxy > deny,
+                "the proxy allow must survive the loopback deny"
+            );
+        }
     }
 
     #[test]
