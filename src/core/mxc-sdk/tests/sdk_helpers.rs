@@ -127,7 +127,6 @@ fn build_request_rejects_empty_version() {
         network: None,
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
 
     let err = build_request(&policy, None).expect_err("an empty policy version must be rejected");
@@ -136,19 +135,15 @@ fn build_request_rejects_empty_version() {
 
 #[test]
 fn build_request_host_rules_require_outbound() {
+    let mut network = mxc_sdk::policy::NetworkSection::default();
+    network.allowed_hosts = vec!["192.0.2.10".to_string()];
+
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(mxc_sdk::policy::NetworkSection {
-            allow_outbound: false,
-            allow_local_network: false,
-            allowed_hosts: vec!["example.com".to_string()],
-            blocked_hosts: vec![],
-            proxy: None,
-        }),
+        network: Some(network),
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
 
     // Unix backends accept host rules without `allowOutbound`; only Windows
@@ -167,6 +162,95 @@ fn build_request_host_rules_require_outbound() {
     }
 }
 
+#[test]
+fn rust_sdk_builds_legacy_networking() {
+    use mxc_sdk::policy::NetworkSection;
+
+    let mut network = NetworkSection::default();
+    network.allow_outbound = true;
+    network.allow_local_network = true;
+    network.allowed_hosts = vec!["192.0.2.10".to_string()];
+    network.blocked_hosts = vec!["198.51.100.10".to_string()];
+
+    let policy = SandboxPolicy {
+        version: "0.7.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    build_request(&policy, None).expect("the Rust SDK should build legacy networking");
+}
+
+#[test]
+fn rust_sdk_builds_directional_networking() {
+    use mxc_sdk::policy::{
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+    };
+
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Deny);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Deny);
+    ingress.host_loopback = Some(NetworkAction::Deny);
+    let mut network = NetworkSection::default();
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
+
+    let policy = SandboxPolicy {
+        version: "0.8.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    build_request(&policy, None).expect("the Rust SDK should build directional networking");
+}
+
+#[test]
+fn rust_sdk_builds_directional_process_container_networking_and_capture() {
+    use mxc_sdk::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
+    use mxc_sdk::policy::{
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+        RuntimeConfigSection,
+    };
+    use mxc_sdk::{build_request_with_containment, Containment};
+
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Deny);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Allow);
+    ingress.host_loopback = Some(NetworkAction::Deny);
+    let mut runtime_config = RuntimeConfigSection::default();
+    runtime_config.network_proxy = Some("http://127.0.0.1:8080".to_string());
+    let mut network = NetworkSection::default();
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
+    network.runtime_config = Some(runtime_config);
+
+    let policy = SandboxPolicy {
+        version: "0.8.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+    let mut process_network = ProcessContainerNetwork::default();
+    process_network.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+    let mut process_container = ProcessContainer::default();
+    process_container.capture_denials = Some(CaptureDenials::default());
+    process_container.network = Some(process_network);
+
+    build_request_with_containment(
+        &policy,
+        &Containment::ProcessContainer(process_container),
+        None,
+    )
+    .expect("public re-exports should build a schema 0.8 ProcessContainer request");
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn build_request_then_run_seatbelt() {
@@ -181,7 +265,6 @@ fn build_request_then_run_seatbelt() {
         network: None,
         ui: None,
         timeout_ms: Some(10000),
-        capture_denials: None,
     };
 
     let mut request = build_request(&policy, None).expect("build_request should succeed");

@@ -24,7 +24,6 @@
 //!     network: None,
 //!     ui: None,
 //!     timeout_ms: None,
-//!     capture_denials: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
@@ -41,15 +40,14 @@
 //!
 //! The selected backend is driven by the `containment` field in the request:
 //! [`build_request`] resolves the host's native one, and
-//! [`build_request_with_containment`] takes an explicit [`Containment`] — the
-//! same choice the TypeScript SDK makes with
-//! `createConfigFromPolicy(policy, containment)`.
+//! [`build_request_with_containment`] takes an explicit [`Containment`].
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] |
 //! | Seatbelt | macOS | [`Containment::Process`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
@@ -85,12 +83,13 @@
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+//! use mxc_sdk::{
+//!     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
+//! };
 //!
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
-//! #     capture_denials: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
@@ -142,13 +141,15 @@
 
 mod sandbox;
 
+pub use mxc_engine::configs;
 pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
     BackendCapability, BubblewrapNetworkSupport, Containment, Error, ErrorCode,
-    FilesystemPolicyResult, PlatformSupport, ProxyEnforcement, SandboxPolicy, SandboxRequest,
-    WslcSection,
+    FilesystemPolicyResult, NetworkAction, NetworkEgressSection, NetworkIngressSection,
+    NetworkPeerSection, NetworkPortSection, NetworkProtocol, NetworkRuleSection, PlatformSupport,
+    ProxyEnforcement, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{
