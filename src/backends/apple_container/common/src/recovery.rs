@@ -79,12 +79,12 @@ impl RecoveryGuard {
         create_private_directory(&directory)?;
         let path = directory.join(format!("{}.json", plan.ownership_token.as_str()));
         let temporary_path = directory.join(format!(".{}.tmp", plan.ownership_token.as_str()));
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary_path)?;
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true).mode(0o600);
+        #[cfg(target_os = "macos")]
+        options.custom_flags(libc::O_EXLOCK);
+        let mut file = options.open(&temporary_path)?;
+        #[cfg(not(target_os = "macos"))]
         lock_exclusive(&file, false)?;
         let write_result = (|| {
             serde_json::to_writer(&mut file, &RecoveryRecord::from_plan(plan, container_hint))?;
@@ -137,11 +137,16 @@ pub fn stale_recoveries() -> Result<Vec<StaleRecovery>, RecoveryError> {
         if !matches!(extension, Some("json" | "tmp")) {
             continue;
         }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         record_count += 1;
         if record_count > MAX_RECOVERY_RECORDS {
             return Err(RecoveryError::TooManyRecords);
         }
-        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+        if !metadata.file_type().is_file() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("recovery record {path:?} is not a regular file"),

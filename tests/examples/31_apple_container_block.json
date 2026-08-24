@@ -1,0 +1,29 @@
+{
+    "$schema": "../../schemas/dev/mxc-config.schema.0.8.0-dev.json",
+    "version": "0.8.0-alpha",
+    "containment": "apple_container",
+    "containerId": "apple-container-block",
+    "process": {
+        "commandLine": "printf 'workspace output\\n' > result.txt && cat /tmp/mxc-apple-inputs/message.txt && cat result.txt",
+        "cwd": "/tmp/mxc-apple-workspace",
+        "timeout": 30000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp/mxc-apple-workspace"
+        ],
+        "readonlyPaths": [
+            "/tmp/mxc-apple-inputs"
+        ]
+    },
+    "network": {
+        "defaultPolicy": "block"
+    },
+    "experimental": {
+        "apple_container": {
+            "image": "docker.io/library/alpine:3.22",
+            "cpuCount": 2,
+            "memoryMb": 1024
+        }
+    }
+}

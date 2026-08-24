@@ -371,8 +371,9 @@ export function createConfigFromPolicy(
 /**
  * Creates an experimental Apple Container config for macOS.
  *
- * Runtime execution is not implemented yet; spawning the returned config
- * currently fails with `unsupported_containment` before creating resources.
+ * The returned config runs a Linux OCI image through the separately installed
+ * Apple Container runtime. Pass `{ experimental: true }` to
+ * `spawnSandboxFromConfig`.
  */
 export function createAppleContainerConfig(
     policy: SandboxPolicy,

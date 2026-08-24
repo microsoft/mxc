@@ -20,7 +20,7 @@ pub enum PolicyError {
     Plan(#[from] PlanError),
     #[error("{0}")]
     Resource(#[from] ResourceError),
-    #[error("failed to canonicalize Apple Container mount path {path:?}: {source}")]
+    #[error("failed to canonicalize Apple Container policy path {path:?}: {source}")]
     Canonicalize {
         path: String,
         #[source]
@@ -190,17 +190,26 @@ fn build_mounts(request: &ExecutionRequest) -> Result<Vec<MountPlan>, PolicyErro
     ] {
         for requested in paths {
             let requested_path = Path::new(requested);
-            if !requested_path.is_absolute() {
+            let guest_path = normalize_absolute(requested_path).ok_or_else(|| {
+                rejected(format!(
+                    "Apple Container mount path {requested:?} must be absolute and normalized"
+                ))
+            })?;
+            let guest_text = guest_path.to_str().ok_or_else(|| {
+                rejected(format!(
+                    "Apple Container mount path {requested:?} is not valid UTF-8"
+                ))
+            })?;
+            if guest_text.contains(',') {
                 return Err(rejected(format!(
-                    "Apple Container mount path {requested:?} must be absolute"
+                    "Apple Container mount path {guest_text:?} contains ',' and cannot be represented safely"
                 )));
             }
-            let canonical = std::fs::canonicalize(requested_path).map_err(|source| {
-                PolicyError::Canonicalize {
+            let canonical =
+                std::fs::canonicalize(&guest_path).map_err(|source| PolicyError::Canonicalize {
                     path: requested.clone(),
                     source,
-                }
-            })?;
+                })?;
             let canonical_text = canonical.to_str().ok_or_else(|| {
                 rejected(format!(
                     "Apple Container mount path {requested:?} resolves to a non-UTF-8 path"
@@ -221,7 +230,7 @@ fn build_mounts(request: &ExecutionRequest) -> Result<Vec<MountPlan>, PolicyErro
                     "Apple Container has {conflict} mount destination {canonical:?}"
                 )));
             }
-            mounts.push(MountPlan::new(&canonical, &canonical, access)?);
+            mounts.push(MountPlan::new(&canonical, guest_path, access)?);
         }
     }
 
@@ -231,16 +240,53 @@ fn build_mounts(request: &ExecutionRequest) -> Result<Vec<MountPlan>, PolicyErro
                 "Apple Container denied path {denied:?} must be an absolute normalized path"
             ))
         })?;
+        let denied =
+            resolve_existing_prefix(&denied).map_err(|source| PolicyError::Canonicalize {
+                path: denied.to_string_lossy().into_owned(),
+                source,
+            })?;
         if destinations
             .keys()
-            .any(|mapped| denied == *mapped || denied.starts_with(mapped))
+            .any(|mapped| denied.starts_with(mapped) || mapped.starts_with(&denied))
         {
             return Err(rejected(format!(
-                "Apple Container cannot deny {denied:?} because it is within a mapped path"
+                "Apple Container cannot combine denied path {denied:?} with an overlapping mapped path"
             )));
         }
     }
     Ok(mounts)
+}
+
+fn resolve_existing_prefix(path: &Path) -> std::io::Result<PathBuf> {
+    let mut prefix = path;
+    let mut absent_tail = Vec::new();
+    loop {
+        match std::fs::canonicalize(prefix) {
+            Ok(mut canonical) => {
+                for component in absent_tail.iter().rev() {
+                    canonical.push(component);
+                }
+                return Ok(canonical);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(prefix) {
+                    Ok(_) => return Err(error),
+                    Err(metadata_error)
+                        if metadata_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(metadata_error) => return Err(metadata_error),
+                }
+                let Some(name) = prefix.file_name() else {
+                    return Err(error);
+                };
+                absent_tail.push(name.to_os_string());
+                let Some(parent) = prefix.parent() else {
+                    return Err(error);
+                };
+                prefix = parent;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn normalize_absolute(path: &Path) -> Option<PathBuf> {
@@ -325,5 +371,47 @@ mod tests {
     #[test]
     fn accepts_default_deny_policy() {
         assert!(validate_policy(&request()).is_ok());
+    }
+
+    #[test]
+    fn rejects_denied_and_mapped_path_overlap_in_either_direction() {
+        let root =
+            std::env::temp_dir().join(format!("mxc-apple-policy-overlap-{}", std::process::id()));
+        let child = root.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        for (mapped, denied) in [(&root, &child), (&child, &root)] {
+            let mut request = request();
+            request.policy.readwrite_paths = vec![mapped.to_string_lossy().into_owned()];
+            request.policy.denied_paths = vec![denied.to_string_lossy().into_owned()];
+
+            let error = build_run_plan(&request, None).unwrap_err();
+
+            assert!(
+                error.to_string().contains("overlapping mapped path"),
+                "{error}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mount_preserves_requested_guest_path_after_host_canonicalization() {
+        let root = std::env::temp_dir().join(format!(
+            "mxc-apple-policy-destination-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut request = request();
+        request.policy.readwrite_paths = vec![root.to_string_lossy().into_owned()];
+
+        let plan = build_run_plan(&request, None).unwrap();
+
+        assert_eq!(plan.mounts[0].guest_path, root);
+        assert_eq!(
+            plan.mounts[0].host_path,
+            std::fs::canonicalize(&root).unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

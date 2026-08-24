@@ -73,7 +73,7 @@ Pick `0.7.0-alpha` for new code on any supported platform.
 | --- | --- | --- | --- |
 | Windows 11 24H2+ (verified on 25H2) | `processcontainer` | `windows_sandbox`, `wslc`, `microvm`, `isolation_session` | `processcontainer`: 26100 (24H2)<br>`isolation_session`: 26300.8553 ([Insider Preview](https://learn.microsoft.com/en-us/windows-insider/release-notes/experimental/preview-build-26300-8553)) |
 | Linux x64 / ARM64 | `bubblewrap` | `lxc` | — |
-| macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | `apple_container` (config only) | — |
+| macOS ARM64 (schema `0.7.0-alpha`+) | `seatbelt` | `apple_container` | `apple_container`: macOS 26 on Apple silicon |
 
 The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends work out of the box. **Experimental backends** (`windows_sandbox`, `wslc`, `microvm`, `isolation_session`, `hyperlight`, `apple_container`) require `{ experimental: true }` in `SandboxSpawnOptions` when you spawn — see [Choosing a Backend](#choosing-a-backend).
 
@@ -201,7 +201,7 @@ console.log(result.stdout);
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
 | `isolation_session` | (concrete only) | Windows | Experimental | [`docs/isolation-session/oneshot.md`](https://github.com/microsoft/mxc/blob/main/docs/isolation-session/oneshot.md) |
-| `apple_container` | (concrete only) | macOS ARM64 | Experimental, config only | — |
+| `apple_container` | (concrete only) | macOS 26 ARM64 | Experimental | — |
 
 Experimental backends require `{ experimental: true }` in `SandboxSpawnOptions`:
 
@@ -216,15 +216,26 @@ schema version `0.8.0-alpha`:
 
 ```typescript
 const config = createAppleContainerConfig(
-  { version: '0.8.0-alpha' },
+  {
+    version: '0.8.0-alpha',
+    timeoutMs: 30_000,
+    network: { allowOutbound: true },
+  },
   { image: 'docker.io/library/alpine:3.23', cpuCount: 2, memoryMb: 1024 },
 );
-config.process!.commandLine = 'echo hello';
+config.process!.commandLine = 'printf "hello from "; uname -srm';
+
+const child = spawnSandboxFromConfig(config, { experimental: true });
+child.onExit(({ exitCode }) => {
+  console.log(`Apple Container exited with ${exitCode}`);
+});
 ```
 
-This increment exposes and validates the configuration contract only.
-`spawnSandboxFromConfig(config, { experimental: true })` currently fails with
-`unsupported_containment` before creating Apple Container resources.
+Apple Container must be installed at `/usr/local/bin/container`, its service
+must already be running, and the installed CLI must match the version qualified
+by MXC. The backend runs Linux images rather than macOS executables. A
+default-block network policy additionally requires the digest-qualified MXC
+guest-init image to be installed locally.
 
 Backend-specific tuning lives on the returned `ContainerConfig`. The full set of fields per backend is in the JSON schemas — they're the source of truth:
 

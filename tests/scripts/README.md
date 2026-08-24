@@ -53,6 +53,17 @@ Linux / macOS (`.sh`):
 Individual `run_bwrap_*.sh` / `run_lxc_*.sh` scripts run one case each; the
 aggregate scripts above are what CI dispatches to.
 
+### macOS qualification
+
+| Script | Description | Extra prerequisites |
+|--------|-------------|---------------------|
+| `run_apple_container_network_qualification.sh` | Local Apple Container network-boundary qualification | macOS 26+, Apple silicon, Apple Container 1.2.2 with its service running, Node.js |
+
+The Apple Container wrapper reproducibly builds and verifies the fixed MXC
+guest-init image before testing IPv4/IPv6 loopback, public and host access,
+unsolicited host-to-guest access, and workload firewall tampering. It is a
+local qualification gate and is not dispatched by CI.
+
 Not every script runs in CI: several depend on local OS features such as
 Windows Sandbox, WHP, proxy setup, or stress-test duration. The ones CI does
 run are reached through the dispatchers below rather than being invoked

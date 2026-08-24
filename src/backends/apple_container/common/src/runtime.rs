@@ -447,8 +447,52 @@ fn cleanup_resource(
             return Ok(());
         }
     }
-    run_checked(runner, &delete_command(resource))?;
-    Ok(())
+    match run_checked(runner, &delete_command(resource)) {
+        Ok(_) => Ok(()),
+        Err(delete_error) if resource.name.kind() == ResourceKind::Container && !stop_container => {
+            // The foreground CLI can exit a few milliseconds before Apple's
+            // persisted container state becomes terminal. Re-prove ownership
+            // before escalating to the same bounded stop/delete path used for
+            // timeout cleanup.
+            match verify_ownership(runner, resource) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(probe_error) => {
+                    return Err(CliError::Command(format!(
+                        "{delete_error}; ownership re-check failed: {probe_error}"
+                    )));
+                }
+            }
+            let stop_result = run_checked(runner, &stop_container_command(resource));
+            match verify_ownership(runner, resource) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(probe_error) => {
+                    let stop_detail = stop_result
+                        .err()
+                        .map(|error| format!("; fallback stop failed: {error}"))
+                        .unwrap_or_default();
+                    return Err(CliError::Command(format!(
+                        "{delete_error}{stop_detail}; ownership check after fallback stop failed: \
+                         {probe_error}"
+                    )));
+                }
+            }
+            run_checked(runner, &delete_command(resource))
+                .map(|_| ())
+                .map_err(|retry_error| {
+                    let stop_detail = stop_result
+                        .err()
+                        .map(|error| format!("; fallback stop failed: {error}"))
+                        .unwrap_or_default();
+                    CliError::Command(format!(
+                        "{delete_error}{stop_detail}; delete after fallback stop also failed: \
+                         {retry_error}"
+                    ))
+                })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 struct SecureEnvironmentFile {
