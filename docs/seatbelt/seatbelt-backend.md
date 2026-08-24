@@ -325,11 +325,9 @@ backend-specific is *enforcement* — each backend declares which parts of the
 shape it actually supports via `SandboxBackend::network_policy_support()`
 (`wxc_common::validator::NetworkPolicySupport`), and a backend that hasn't
 declared a given feature rejects a config that sets it, before ever reaching
-backend-specific code. Seatbelt is currently the only backend that declares
-support (`EGRESS_DEFAULT | INGRESS_DEFAULT | HOST_LOOPBACK | RUNTIME_PROXY`,
-in `seatbelt_runner.rs`); other backends still declare `LEGACY` only, so the
-same config would be rejected under a different `containment` until each adds
-its own declaration as separate follow-up work.
+backend-specific code. Seatbelt declares
+`EGRESS_DEFAULT | INGRESS_DEFAULT | HOST_LOOPBACK | RUNTIME_PROXY` (in
+`seatbelt_runner.rs`) — notably **not** `EGRESS_RULES`, which is what carries per-CIDR/port rules.
 
 | Field | Behavior |
 |---|---|

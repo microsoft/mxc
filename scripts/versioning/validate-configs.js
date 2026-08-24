@@ -99,6 +99,18 @@ for (const rel of files) {
     continue;
   }
 
+  // A `$schema` is an editor-facing pointer, so nothing else resolves it and a
+  // wrong path silently stops providing completion/validation in the editor.
+  if (typeof data.$schema === "string") {
+    const target = resolve(join(repoRoot, rel), "..", data.$schema);
+    if (!existsSync(target)) {
+      unexpectedInvalid++;
+      unexpectedInvalidDetails.push(
+        `${relNorm}: $schema '${data.$schema}' does not resolve to a committed schema file`
+      );
+    }
+  }
+
   const ok = validate(data);
   if (ok && isExempt) {
     unexpectedValid++;
