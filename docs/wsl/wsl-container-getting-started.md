@@ -198,10 +198,13 @@ let wslc = WslcSection {
     ..Default::default()
 };
 
-let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-request
-    .set_script("python3 -c \"print('Hello from WSLC')\"")
-    .set_experimental(true);
+let mut request = build_request_with_containment(
+    &policy,
+    &Containment::Wslc(wslc),
+    "python3 -c \"print('Hello from WSLC')\"",
+    None,
+)?;
+request.set_experimental(true);
 
 // Run to completion, capturing output…
 let output = run(request.clone())?;

@@ -34,9 +34,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         },
         capture_denials: None,
     };
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script(command);
-    request
+    build_request(&policy, command, None).expect("build_request should succeed")
 }
 
 /// A Windows ProcessContainer request exposing `C:\Windows\Temp` read-write.
@@ -60,9 +58,7 @@ fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> S
         },
         capture_denials: None,
     };
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script(command);
-    request
+    build_request(&policy, command, None).expect("build_request should succeed")
 }
 
 /// Outcome of running a sandbox to completion via the streaming API.
@@ -128,8 +124,8 @@ fn version_older_than_supported_is_rejected() {
         capture_denials: None,
     };
 
-    let err =
-        build_request(&policy, None).expect_err("an out-of-range schema version must be rejected");
+    let err = build_request(&policy, "echo hello", None)
+        .expect_err("an out-of-range schema version must be rejected");
     assert_eq!(err.code, ErrorCode::MalformedRequest);
 }
 

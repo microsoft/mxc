@@ -5,8 +5,7 @@
 //! Seatbelt-specific cases run only on macOS.
 //!
 //! These drive the real consumer path: build a [`SandboxRequest`] from a
-//! [`SandboxPolicy`] via `build_request`, fill in the command, then
-//! `spawn_sandbox`.
+//! [`SandboxPolicy`] and a command via `build_request`, then `spawn_sandbox`.
 
 #![cfg(target_os = "macos")]
 
@@ -33,8 +32,7 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         },
         capture_denials: None,
     };
-    let mut request = build_request(&policy, None).expect("build_request should succeed");
-    request.set_script(command);
+    let request = build_request(&policy, command, None).expect("build_request should succeed");
     request
 }
 

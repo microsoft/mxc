@@ -692,11 +692,9 @@ pub struct SandboxPolicy {
     pub capture_denials: Option<CaptureDenialsSection>,
 }
 
-/// A spawnable sandbox request, built from a [`SandboxPolicy`] by
-/// [`build_request`]. Fill in the command with
-/// [`set_script`](Self::set_script) — and optionally a working
-/// directory or environment — then hand it to
-/// [`spawn`](crate::spawn).
+/// A spawnable sandbox request, built from a [`SandboxPolicy`] and a command by
+/// [`build_request`]. Optionally adjust the working directory or environment,
+/// then hand it to [`spawn`](crate::spawn).
 ///
 /// This is the SDK's own request type; the internal execution model it maps to
 /// is an implementation detail callers don't depend on.
@@ -708,18 +706,6 @@ pub struct SandboxRequest {
 }
 
 impl SandboxRequest {
-    /// Set the command the sandbox runs — the `/bin/sh -c` body on Unix, the
-    /// command line on Windows.
-    ///
-    /// This is the raw command string, mapped to the same `script_code` the
-    /// executor binaries run, so it is interpreted exactly as the SDK's
-    /// `spawnSandbox(script)` / `process.commandLine` is — behavior is identical
-    /// across the SDK and this crate.
-    pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
-        self.inner.script_code = script.into();
-        self
-    }
-
     /// Override the working directory the sandboxed child starts in. Left unset,
     /// it defaults to the policy's resolution.
     pub fn set_working_directory(&mut self, working_directory: impl Into<String>) -> &mut Self {
@@ -789,9 +775,9 @@ impl SandboxRequest {
 /// Build a [`SandboxRequest`] from a [`SandboxPolicy`], resolving the host's
 /// containment backend — the Rust port of the SDK's `createConfigFromPolicy`.
 ///
-/// The returned request has an empty command line; set the command with
-/// [`SandboxRequest::set_script`] (and any working directory / env) before
-/// streaming it via [`crate::spawn`].
+/// The `script` becomes the request's command line, so the returned request is
+/// complete and needs no post-build patching before streaming it via
+/// [`crate::spawn`]. An empty script is rejected.
 ///
 /// Mirrors the SDK field mapping and validation (network proxy/host-filtering
 /// constraints) for the supported backends. Internally it builds the same
@@ -802,9 +788,10 @@ impl SandboxRequest {
 /// [`build_request_with_containment`] to select a specific backend.
 pub fn build_request(
     policy: &SandboxPolicy,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
-    build_request_with_containment(policy, &Containment::Process, container_name)
+    build_request_with_containment(policy, &Containment::Process, script, container_name)
 }
 
 /// Build a [`SandboxRequest`] for an explicitly chosen [`Containment`] backend
@@ -828,13 +815,14 @@ pub fn build_request(
 ///     capture_denials: None,
 /// };
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
-/// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-/// request.set_script("python3 -c 'print(1)'").set_experimental(true);
+/// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), "python3 -c 'print(1)'", None)?;
+/// request.set_experimental(true);
 /// # Ok::<(), mxc_engine::Error>(())
 /// ```
 pub fn build_request_with_containment(
     policy: &SandboxPolicy,
     containment: &Containment,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<SandboxRequest, crate::Error> {
     // The shared parser tolerates an empty schema version (treats it as
@@ -842,13 +830,11 @@ pub fn build_request_with_containment(
     if policy.version.is_empty() {
         return Err(MxcError::malformed_request("Policy version is required").into());
     }
-    let config = build_wire_config(policy, containment, container_name)?;
+    let config = build_wire_config(policy, containment, script, container_name)?;
 
     let mut logger = Logger::new(Mode::Buffer);
-    // Map the wire config straight to a request — no base64/file round-trip.
-    // The command line is intentionally empty here (the caller fills
-    // `script_code` before running), so tolerate a missing command.
-    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+    // Map the wire config straight to a request
+    let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
     Ok(SandboxRequest { inner })
 }
@@ -858,9 +844,14 @@ pub fn build_request_with_containment(
 fn build_wire_config(
     policy: &SandboxPolicy,
     containment: &Containment,
+    script: &str,
     container_name: Option<&str>,
 ) -> Result<serde_json::Value, MxcError> {
     use serde_json::json;
+
+    if script.is_empty() {
+        return Err(MxcError::malformed_request("script parameter is required"));
+    }
 
     let container_id = container_name
         .map(str::to_string)
@@ -873,7 +864,7 @@ fn build_wire_config(
         "version": policy.version,
         "containerId": container_id,
         "lifecycle": { "destroyOnExit": true, "preservePolicy": !clear_policy },
-        "process": { "commandLine": "", "timeout": policy.timeout_ms.unwrap_or(0) },
+        "process": { "commandLine": script, "timeout": policy.timeout_ms.unwrap_or(0) },
         "filesystem": {
             "readwritePaths": fs.readwrite_paths,
             "readonlyPaths": fs.readonly_paths,
@@ -1073,6 +1064,8 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 mod tests {
     use super::ProxySpec;
 
+    const TEST_COMMAND: &str = "echo hello";
+
     // `ui` must be emitted only when the caller supplied one.
     //
     // These pin the fix for a defect that was invisible by value: the builder
@@ -1092,8 +1085,9 @@ mod tests {
             serde_json::from_str(r#"{ "version": "0.7.0-alpha" }"#).expect("minimal policy parses");
         assert!(policy.ui.is_none(), "precondition: no ui supplied");
 
-        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
-            .expect("minimal policy builds a wire config");
+        let config =
+            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
+                .expect("minimal policy builds a wire config");
 
         assert!(
             config.get("ui").is_none(),
@@ -1110,8 +1104,9 @@ mod tests {
                 .expect("policy with ui parses");
         assert!(policy.ui.is_some(), "precondition: ui supplied");
 
-        let config = super::build_wire_config(&policy, &super::Containment::Process, None)
-            .expect("policy with ui builds a wire config");
+        let config =
+            super::build_wire_config(&policy, &super::Containment::Process, TEST_COMMAND, None)
+                .expect("policy with ui builds a wire config");
 
         assert!(
             config.get("ui").is_some(),
@@ -1242,7 +1237,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            build_request(&policy, None).is_ok(),
+            build_request(&policy, TEST_COMMAND, None).is_ok(),
             "macOS must accept allowedHosts without allowOutbound, matching the SDK"
         );
     }
@@ -1258,7 +1253,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            build_request(&policy, None).is_ok(),
+            build_request(&policy, TEST_COMMAND, None).is_ok(),
             "outbound-allowed host filter should build"
         );
     }
@@ -1270,8 +1265,8 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..Default::default()
         });
-        let request =
-            build_request(&policy, None).expect("macOS must accept Seatbelt proxy configuration");
+        let request = build_request(&policy, TEST_COMMAND, None)
+            .expect("macOS must accept Seatbelt proxy configuration");
         let proxy = &request.inner.policy.network_proxy;
 
         assert!(proxy.is_enabled());
@@ -1300,14 +1295,14 @@ mod tests {
         // Inspect the internal model the SDK maps to — a unit concern; the public
         // API only hands back the opaque `SandboxRequest`.
         let request =
-            build_request(&policy, Some("test-container")).expect("build_request should succeed");
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
         assert_eq!(request.inner.script_timeout, 5000);
         assert!(request
             .inner
             .policy
             .readwrite_paths
             .contains(&"/tmp".to_string()));
-        assert!(request.inner.script_code.is_empty());
+        assert!(request.inner.script_code.contains(TEST_COMMAND));
     }
 
     #[test]
@@ -1323,7 +1318,8 @@ mod tests {
             timeout_ms: None,
             capture_denials: None,
         };
-        let mut request = build_request(&policy, None).expect("build_request should succeed");
+        let mut request =
+            build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
         request.set_env([("FIRST", "1"), ("SECOND", "2")]);
         assert_eq!(request.inner.env, vec!["FIRST=1", "SECOND=2"]);
     }
@@ -1351,7 +1347,8 @@ mod tests {
                 timeout_ms: None,
                 capture_denials: None,
             };
-            let request = build_request(&policy, None).expect("build_request should succeed");
+            let request =
+                build_request(&policy, TEST_COMMAND, None).expect("build_request should succeed");
             assert_eq!(
                 request.inner.policy.ui.clipboard, expected,
                 "clipboard {input:?} should map to {expected:?}"
@@ -1368,7 +1365,7 @@ mod tests {
             blocked_hosts: vec!["blocked.example".to_string()],
             ..Default::default()
         });
-        let request = build_request(&policy, None)
+        let request = build_request(&policy, TEST_COMMAND, None)
             .expect("build_request should accept host rules with allowOutbound");
         assert!(request
             .inner
@@ -1396,7 +1393,7 @@ mod tests {
         };
         // build_request resolves Seatbelt on macOS, so the config is present and
         // the consumer can read its defaults and write back.
-        let mut request = build_request(&policy, None).expect("build_request");
+        let mut request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         let mut union: Vec<String> = request.seatbelt_extra_mach_lookups().to_vec();
         union.push("com.example.service".to_string());
         request.set_seatbelt_extra_mach_lookups(union.clone());
@@ -1463,7 +1460,7 @@ mod tests {
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
 
         let captured = request
             .inner
@@ -1480,12 +1477,12 @@ mod tests {
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
         let policy = policy_with_capture_denials(CaptureDenialsSection::default());
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         assert!(request.inner.policy.capture_denials.is_some());
 
         let mut policy = policy;
         policy.capture_denials = None;
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         assert!(request.inner.policy.capture_denials.is_none());
     }
 
@@ -1499,7 +1496,7 @@ mod tests {
             output_path: Some("/tmp/denials.json".to_string()),
             retain_etl: true,
         });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request(&policy, TEST_COMMAND, None).expect("build_request");
         assert!(request.inner.policy.capture_denials.is_none());
     }
 
@@ -1547,7 +1544,7 @@ mod tests {
     #[test]
     fn wire_contract_accepts_capture_denials_together_with_a_network_proxy() {
         let config = serde_json::json!({
-            "process": { "commandLine": "echo hello" },
+            "process": { "commandLine": TEST_COMMAND },
             "containment": "processcontainer",
             "network": {
                 "defaultPolicy": "allow",
@@ -1559,7 +1556,7 @@ mod tests {
         });
 
         let mut logger = super::Logger::new(super::Mode::Buffer);
-        let request = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
+        let request = wxc_common::config_parser::load_request_from_value(config, &mut logger)
             .expect("captureDenials alongside network.proxy satisfies the wire contract");
 
         assert!(
@@ -1593,7 +1590,7 @@ mod tests {
             retain_etl: true,
         });
 
-        let request = build_request(&policy, None)
+        let request = build_request(&policy, TEST_COMMAND, None)
             .expect("captureDenials and network.proxy are accepted together");
 
         let captured = request
@@ -1625,7 +1622,7 @@ mod tests {
     fn default_containment_resolves_the_host_backend() {
         // `build_request` must keep resolving the host's native backend — the
         // WSLC selection is strictly opt-in and must not change the default.
-        let request = build_request(&minimal_policy(), None).expect("build_request");
+        let request = build_request(&minimal_policy(), TEST_COMMAND, None).expect("build_request");
         assert_ne!(request.inner.containment, ContainmentBackend::Wslc);
     }
 
@@ -1643,9 +1640,13 @@ mod tests {
             port_mappings: vec![(8080, 80)],
             ..Default::default()
         };
-        let request =
-            build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
-                .expect("build_request_with_containment");
+        let request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Wslc(wslc),
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
 
         assert_eq!(request.inner.containment, ContainmentBackend::Wslc);
         let config = request
@@ -1672,6 +1673,7 @@ mod tests {
         let request = build_request_with_containment(
             &minimal_policy(),
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("build_request_with_containment");
@@ -1695,6 +1697,7 @@ mod tests {
         let mut request = build_request_with_containment(
             &minimal_policy(),
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect("build_request_with_containment");
@@ -1711,8 +1714,13 @@ mod tests {
             port_mappings: vec![(8080, 80), (8080, 81)],
             ..Default::default()
         };
-        let err = build_request_with_containment(&minimal_policy(), &Containment::Wslc(wslc), None)
-            .expect_err("duplicate windowsPort must be rejected");
+        let err = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::Wslc(wslc),
+            TEST_COMMAND,
+            None,
+        )
+        .expect_err("duplicate windowsPort must be rejected");
         assert!(
             err.message.contains("duplicate windowsPort"),
             "got: {}",
@@ -1733,6 +1741,7 @@ mod tests {
         let err = build_request_with_containment(
             &policy,
             &Containment::Wslc(WslcSection::default()),
+            TEST_COMMAND,
             None,
         )
         .expect_err("WSLc must reject per-host egress filtering");
@@ -1760,8 +1769,9 @@ mod tests {
         // wire config must name the backend and add nothing else — unlike
         // WSLc, which also writes an `experimental.wslc` block.
         let policy = policy_with_network(isolation_session_network());
-        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
-            .expect("build_wire_config");
+        let config =
+            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
+                .expect("build_wire_config");
         assert_eq!(config["containment"], "isolation_session");
         assert!(
             config.get("experimental").is_none(),
@@ -1774,8 +1784,9 @@ mod tests {
         // The backend accepts *only* this shape and refuses an absent policy,
         // so the SDK types must be able to express it.
         let policy = policy_with_network(isolation_session_network());
-        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
-            .expect("build_wire_config");
+        let config =
+            super::build_wire_config(&policy, &Containment::IsolationSession, TEST_COMMAND, None)
+                .expect("build_wire_config");
         assert_eq!(config["network"]["defaultPolicy"], "allow");
         assert_eq!(config["network"]["allowLocalNetwork"], true);
         assert_eq!(
@@ -1797,9 +1808,13 @@ mod tests {
         // Selecting an experimental backend must not silently satisfy the
         // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
         let policy = policy_with_network(isolation_session_network());
-        let mut request =
-            build_request_with_containment(&policy, &Containment::IsolationSession, None)
-                .expect("build_request_with_containment");
+        let mut request = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         assert!(!request.inner.experimental_enabled);
         request.set_experimental(true);
         assert!(request.inner.experimental_enabled);
@@ -1808,8 +1823,13 @@ mod tests {
     #[test]
     fn isolation_session_selects_the_backend() {
         let policy = policy_with_network(isolation_session_network());
-        let request = build_request_with_containment(&policy, &Containment::IsolationSession, None)
-            .expect("build_request_with_containment");
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::IsolationSession,
+            TEST_COMMAND,
+            None,
+        )
+        .expect("build_request_with_containment");
         assert_eq!(
             request.inner.containment,
             ContainmentBackend::IsolationSession

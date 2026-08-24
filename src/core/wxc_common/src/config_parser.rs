@@ -148,7 +148,6 @@ pub fn load_request_with_options(
 pub fn load_request_from_value(
     config: serde_json::Value,
     logger: &mut Logger,
-    allow_missing_command: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     let result = (|| {
         let raw = config.clone();
@@ -156,7 +155,7 @@ pub fn load_request_from_value(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         validate_directional_network_field_versions(&raw)?;
 
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, /*allow_missing_command=*/ false)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -2268,7 +2267,7 @@ mod tests {
         });
         let mut logger = test_logger();
 
-        let error = load_request_from_value(config, &mut logger, false).unwrap_err();
+        let error = load_request_from_value(config, &mut logger).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("Invalid configuration at `process.timeout`"));
         assert!(message.contains("expected u32"));
@@ -2301,7 +2300,7 @@ mod tests {
             }),
         ] {
             let mut logger = test_logger();
-            assert!(load_request_from_value(config, &mut logger, false).is_err());
+            assert!(load_request_from_value(config, &mut logger).is_err());
         }
     }
 
