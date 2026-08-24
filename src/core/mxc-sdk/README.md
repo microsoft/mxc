@@ -47,8 +47,8 @@ To target a specific backend instead of the host default, use
 [`build_request_with_containment`] with a [`Containment`].
 
 Configure a Windows ProcessContainer with
-`Containment::ProcessContainer(ProcessContainerConfig::default())`.
-`ProcessContainerConfig` controls learning mode, capabilities,
+`Containment::ProcessContainer(ProcessContainer::default())`.
+`ProcessContainer` controls learning mode, capabilities,
 BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
 Schema 0.8 directional networking is available through
 `NetworkSection::{egress, ingress, runtime_config}`.
@@ -59,7 +59,7 @@ Construct them with `Default`, then assign the settings the request needs.
 ```rust,no_run
 use mxc_sdk::{
     build_request_with_containment,
-    configs::{CaptureDenialsConfig, ProcessContainerConfig},
+    configs::{CaptureDenials, ProcessContainer},
     Containment, SandboxPolicy,
 };
 
@@ -70,9 +70,9 @@ let policy = SandboxPolicy {
     ui: None,
     timeout_ms: None,
 };
-let mut process_container = ProcessContainerConfig::default();
+let mut process_container = ProcessContainer::default();
 process_container.capabilities = vec!["registryRead".to_string()];
-process_container.capture_denials = Some(CaptureDenialsConfig::default());
+process_container.capture_denials = Some(CaptureDenials::default());
 let request = build_request_with_containment(
     &policy,
     &Containment::ProcessContainer(process_container),
@@ -181,17 +181,17 @@ for that.
 
 ## Denial capture (Windows)
 
-`ProcessContainerConfig::capture_denials` enables learning-mode capture: the
+`ProcessContainer::capture_denials` enables learning-mode capture: the
 runner records every access the policy does not grant and writes them to a JSON
 denials document.
 
 ```rust
 use mxc_sdk::configs::{
-    CaptureDenialsConfig, CaptureDenialsMode, ProcessContainerConfig,
+    CaptureDenials, CaptureDenialsMode, ProcessContainer,
 };
 use mxc_sdk::Containment;
 
-let mut capture = CaptureDenialsConfig::default();
+let mut capture = CaptureDenials::default();
 // `Block` (the default) keeps deny-by-default and records the denial;
 // `Allow` runs permissively and records what *would* have been denied.
 capture.mode = CaptureDenialsMode::Block;
@@ -201,7 +201,7 @@ capture.output_path = None;
 // Preserve the sealed ETL and report its path in output metadata.
 capture.retain_etl = false;
 
-let mut process_container = ProcessContainerConfig::default();
+let mut process_container = ProcessContainer::default();
 process_container.capture_denials = Some(capture);
 let containment = Containment::ProcessContainer(process_container);
 ```
@@ -400,19 +400,19 @@ WSLC runs a Linux container on a Windows host through the WSLC SDK. It is
 opt-in on two axes: build this crate with its **`wslc` feature**, and call
 [`SandboxRequest::set_experimental(true)`] on the request (the library-side
 equivalent of the executor's `--experimental`). Its settings — image, vCPUs,
-memory, GPU, storage path, port forwards — are carried by the [`WslcConfig`]
+memory, GPU, storage path, port forwards — are carried by the [`Wslc`]
 inside [`Containment::Wslc`], mirroring the SDK's `experimental.wslc` block, and
 go through the same parser the executor uses — so a rejected value (e.g. a port
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
-use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcConfig};
+use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, Wslc};
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
 #     filesystem: None, network: None, ui: None, timeout_ms: None,
 # };
-let wslc = WslcConfig { image: "python:3.12".to_string(), ..Default::default() };
+let wslc = Wslc { image: "python:3.12".to_string(), ..Default::default() };
 let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 request.set_script("python3 -c 'print(42)'").set_experimental(true);
 let output = run(request)?;

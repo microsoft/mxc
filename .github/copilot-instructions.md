@@ -289,7 +289,7 @@ The workspace is organized into six top-level directories under `src/`:
   a `WaitOutcome` (`Exited(i32)` / `TimedOut`) as `io::Result`,
   `output_metadata()` after terminal completion, or `wait_with_output()`). It
   re-exports the engine's config-building surface (`build_request`,
-  `build_request_with_containment` + `Containment`/`WslcConfig`,
+  `build_request_with_containment` + `Containment`/`Wslc`,
   `mxc_sdk::policy::{SandboxPolicy sections}`, discovery helpers) and
   `platform_support`; `mod sandbox` (wrapping the engine's `SandboxProcess` in
   `Sandbox`) is its only local module. `exec_attached` relays a state-aware exec

@@ -49,7 +49,7 @@ pub use policy::{
     available_tools_policy, build_request, build_request_with_containment, temporary_files_policy,
     user_profile_policy, Containment, FilesystemPolicyResult, NetworkAction, NetworkEgressSection,
     NetworkIngressSection, NetworkPeerSection, NetworkPortSection, NetworkProtocol,
-    NetworkRuleSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, WslcConfig,
+    NetworkRuleSection, RuntimeConfigSection, SandboxPolicy, SandboxRequest, Wslc,
 };
 pub use probe::{available_backends, AvailableBackend, BackendCapability};
 #[cfg(target_os = "windows")]

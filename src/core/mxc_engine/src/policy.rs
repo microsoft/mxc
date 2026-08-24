@@ -18,9 +18,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use crate::configs::process_container;
-use crate::configs::ProcessContainerConfig;
+use crate::configs::ProcessContainer;
 #[cfg(test)]
-use crate::configs::{CaptureDenialsConfig, CaptureDenialsMode};
+use crate::configs::{CaptureDenials, CaptureDenialsMode};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::ExecutionRequest;
 use wxc_common::mxc_error::MxcError;
@@ -471,14 +471,14 @@ pub enum Containment {
     Process,
     /// Windows ProcessContainer with explicit AppContainer/BaseContainer
     /// settings.
-    ProcessContainer(ProcessContainerConfig),
+    ProcessContainer(ProcessContainer),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
-    /// SDK, configured by the carried [`WslcConfig`]
-    /// (`WslcConfig::default()` matches the SDK's defaults).
+    /// SDK, configured by the carried [`Wslc`]
+    /// (`Wslc::default()` matches the SDK's defaults).
     ///
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
-    Wslc(WslcConfig),
+    Wslc(Wslc),
     /// IsolationSession backend: a Windows isolated user session.
     ///
     /// Not served by [`crate::spawn`]; reach it through the state-aware
@@ -501,7 +501,7 @@ pub enum Containment {
 /// Until enforcement moves to a VM-level API, prefer expressing WSLC network
 /// intent with `allowOutbound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WslcConfig {
+pub struct Wslc {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
     /// The image must already be in the WSLC image store unless
     /// `image_tar_path` is set — MXC never pulls images itself.
@@ -527,7 +527,7 @@ pub struct WslcConfig {
     pub port_mappings: Vec<(u16, u16)>,
 }
 
-impl Default for WslcConfig {
+impl Default for Wslc {
     fn default() -> Self {
         Self {
             image: "alpine:latest".to_string(),
@@ -541,7 +541,7 @@ impl Default for WslcConfig {
     }
 }
 
-impl WslcConfig {
+impl Wslc {
     /// The wire-format `experimental.wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
     fn wire(&self) -> serde_json::Value {
@@ -718,7 +718,7 @@ pub fn build_request(
 /// before they will spawn.
 ///
 /// ```no_run
-/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, WslcConfig};
+/// use mxc_engine::policy::{build_request_with_containment, Containment, SandboxPolicy, Wslc};
 ///
 /// let policy = SandboxPolicy {
 ///     version: "0.7.0-alpha".to_string(),
@@ -727,7 +727,7 @@ pub fn build_request(
 ///     ui: None,
 ///     timeout_ms: None,
 /// };
-/// let wslc = WslcConfig { image: "python:3.12".to_string(), ..Default::default() };
+/// let wslc = Wslc { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
 /// request.set_script("python3 -c 'print(1)'").set_experimental(true);
 /// # Ok::<(), mxc_engine::Error>(())
@@ -932,7 +932,7 @@ fn apply_host_process_backend(
         process_container::apply(
             config,
             policy,
-            &ProcessContainerConfig::default(),
+            &ProcessContainer::default(),
             network_format,
             "process",
         )?;
@@ -951,7 +951,7 @@ fn apply_host_process_backend(
 /// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
 /// its settings live under `experimental.wslc` because the backend is
 /// experimental.
-fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcConfig) {
+fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &Wslc) {
     use serde_json::json;
     config["containment"] = json!("wslc");
     config["experimental"] = json!({ "wslc": wslc.wire() });
@@ -1070,8 +1070,7 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenialsConfig, CaptureDenialsMode, NetworkSection, ProxySpec,
-        SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, NetworkSection, ProxySpec, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1266,8 +1265,8 @@ mod tests {
             .contains(&"com.example.service".to_string()));
     }
 
-    fn process_container_with_capture_denials(config: CaptureDenialsConfig) -> Containment {
-        Containment::ProcessContainer(ProcessContainerConfig {
+    fn process_container_with_capture_denials(config: CaptureDenials) -> Containment {
+        Containment::ProcessContainer(ProcessContainer {
             capture_denials: Some(config),
             ..Default::default()
         })
@@ -1275,7 +1274,7 @@ mod tests {
 
     #[test]
     fn capture_denials_config_deserializes_from_camel_case_json() {
-        let config: CaptureDenialsConfig = serde_json::from_value(serde_json::json!({
+        let config: CaptureDenials = serde_json::from_value(serde_json::json!({
             "mode": "allow",
             "outputPath": "/tmp/denials.json",
             "retainEtl": true,
@@ -1289,7 +1288,7 @@ mod tests {
 
     #[test]
     fn capture_denials_config_defaults_to_block_without_output_path() {
-        let config: CaptureDenialsConfig =
+        let config: CaptureDenials =
             serde_json::from_value(serde_json::json!({})).expect("config deserializes");
 
         assert_eq!(config.mode, CaptureDenialsMode::Block);
@@ -1307,7 +1306,7 @@ mod tests {
         let output_path = std::env::temp_dir().join("denials.json");
         let expected = output_path.to_string_lossy().into_owned();
         let policy = minimal_policy();
-        let containment = process_container_with_capture_denials(CaptureDenialsConfig {
+        let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
@@ -1330,14 +1329,14 @@ mod tests {
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
         let policy = minimal_policy();
-        let containment = process_container_with_capture_denials(CaptureDenialsConfig::default());
+        let containment = process_container_with_capture_denials(CaptureDenials::default());
         let request = build_request_with_containment(&policy, &containment, None)
             .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_some());
 
         let request = build_request_with_containment(
             &policy,
-            &Containment::ProcessContainer(ProcessContainerConfig::default()),
+            &Containment::ProcessContainer(ProcessContainer::default()),
             None,
         )
         .expect("build_request_with_containment");
@@ -1428,7 +1427,7 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
-        let containment = process_container_with_capture_denials(CaptureDenialsConfig {
+        let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
@@ -1448,7 +1447,7 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, ProcessContainerConfig, WslcConfig};
+    use super::{build_request_with_containment, Containment, ProcessContainer, Wslc};
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1474,7 +1473,7 @@ mod tests {
         // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
         // `experimental.wslc` block: the wire config goes through the shared
         // parser, so the mapped request carries the WSLC settings verbatim.
-        let wslc = WslcConfig {
+        let wslc = Wslc {
             image: "python:3.12".to_string(),
             cpu_count: Some(2),
             memory_mb: Some(2048),
@@ -1507,11 +1506,11 @@ mod tests {
 
     #[test]
     fn wslc_defaults_match_the_sdk() {
-        // `WslcConfig::default()` must produce the same block the TypeScript
+        // `Wslc::default()` must produce the same block the TypeScript
         // SDK's `buildWslcContainerConfig` emits (image only, alpine:latest).
         let request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(WslcConfig::default()),
+            &Containment::Wslc(Wslc::default()),
             None,
         )
         .expect("build_request_with_containment");
@@ -1534,7 +1533,7 @@ mod tests {
         // `SandboxSpawnOptions.experimental`.
         let mut request = build_request_with_containment(
             &minimal_policy(),
-            &Containment::Wslc(WslcConfig::default()),
+            &Containment::Wslc(Wslc::default()),
             None,
         )
         .expect("build_request_with_containment");
@@ -1547,7 +1546,7 @@ mod tests {
     fn wslc_rejects_an_invalid_port_mapping() {
         // Validation is the shared parser's, so a bad mapping is rejected at
         // build time rather than at spawn.
-        let wslc = WslcConfig {
+        let wslc = Wslc {
             port_mappings: vec![(8080, 80), (8080, 81)],
             ..Default::default()
         };
@@ -1570,12 +1569,9 @@ mod tests {
             allowed_hosts: vec!["example.com".to_string()],
             ..Default::default()
         });
-        let err = build_request_with_containment(
-            &policy,
-            &Containment::Wslc(WslcConfig::default()),
-            None,
-        )
-        .expect_err("WSLc must reject per-host egress filtering");
+        let err =
+            build_request_with_containment(&policy, &Containment::Wslc(Wslc::default()), None)
+                .expect_err("WSLc must reject per-host egress filtering");
         assert!(
             err.message.contains("per-host egress filtering"),
             "got: {}",
