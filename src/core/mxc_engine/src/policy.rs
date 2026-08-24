@@ -1093,7 +1093,7 @@ mod tests {
         // Rust port must too (the guard only applies to Windows ProcessContainer).
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         assert!(
@@ -1109,7 +1109,7 @@ mod tests {
         // builds (allowedHosts simply isn't enforceable on Seatbelt).
         let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         assert!(
@@ -1216,8 +1216,8 @@ mod tests {
         let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
             allow_local_network: true,
-            allowed_hosts: vec!["allowed.example".to_string()],
-            blocked_hosts: vec!["blocked.example".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
+            blocked_hosts: vec!["198.51.100.10".to_string()],
             ..Default::default()
         });
         let request = build_request(&policy, None)
@@ -1226,12 +1226,12 @@ mod tests {
             .inner
             .policy
             .allowed_hosts
-            .contains(&"allowed.example".to_string()));
+            .contains(&"192.0.2.10".to_string()));
         assert!(request
             .inner
             .policy
             .blocked_hosts
-            .contains(&"blocked.example".to_string()));
+            .contains(&"198.51.100.10".to_string()));
         assert!(request.inner.policy.allow_local_network);
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         // rejected at build time rather than silently ignored.
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         let err =

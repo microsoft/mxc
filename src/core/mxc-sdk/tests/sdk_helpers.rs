@@ -136,7 +136,7 @@ fn build_request_rejects_empty_version() {
 #[test]
 fn build_request_host_rules_require_outbound() {
     let mut network = mxc_sdk::policy::NetworkSection::default();
-    network.allowed_hosts = vec!["example.com".to_string()];
+    network.allowed_hosts = vec!["192.0.2.10".to_string()];
 
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
@@ -169,8 +169,8 @@ fn rust_sdk_builds_legacy_networking() {
     let mut network = NetworkSection::default();
     network.allow_outbound = true;
     network.allow_local_network = true;
-    network.allowed_hosts = vec!["allowed.example".to_string()];
-    network.blocked_hosts = vec!["blocked.example".to_string()];
+    network.allowed_hosts = vec!["192.0.2.10".to_string()];
+    network.blocked_hosts = vec!["198.51.100.10".to_string()];
 
     let policy = SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
