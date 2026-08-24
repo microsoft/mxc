@@ -7,11 +7,10 @@ the schema 0.8 ProcessContainer proxy tests:
 - `fulltrust`: packaged classic app at medium integrity.
 
 Both packages contain `wxc-test-proxy.exe`, declare an inbound TCP firewall
-rule for loopback port 8080, and use a short-lived self-signed certificate.
+rule for loopback port 8080, and are registered as loose development packages.
 Activate either package application with
 `--port 8080 --standalone`; the E2E harness owns process termination.
-Build them from an ordinary Windows PowerShell session with the Windows SDK
-installed:
+Stage them from an ordinary Windows PowerShell session:
 
 ```powershell
 .\build-proxy-test-packages.ps1 `
@@ -19,7 +18,8 @@ installed:
   -OutputDirectory .\out
 ```
 
-The script returns the two package paths and the exported public certificate.
-The E2E harness installs the certificate into the current user's trusted store,
-installs the packages, and removes both during cleanup. These assets are for
-testing only and must not be distributed as product packages.
+The script returns the two staged manifest paths. The E2E harness registers
+them with `Add-AppxPackage -Register`, which does not require package signing or
+certificate trust, then unregisters the packages and removes the staged files
+during cleanup. These loose packages are for testing only and must not be
+distributed as product packages.

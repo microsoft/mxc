@@ -27,6 +27,8 @@ enum Command {
         app_user_model_id: String,
         #[arg(long)]
         port: u16,
+        #[arg(long)]
+        ready_file: PathBuf,
     },
     /// Launch this executable in an unpackaged AppContainer and print its process ID.
     LaunchAppcontainer {
@@ -88,7 +90,8 @@ async fn main() {
             Command::ActivatePackage {
                 app_user_model_id,
                 port,
-            } => windows_launcher::activate_package(app_user_model_id, *port)
+                ready_file,
+            } => windows_launcher::activate_package(app_user_model_id, *port, ready_file)
                 .map(|process_id| process_id.to_string()),
             Command::LaunchAppcontainer { profile, port } => {
                 windows_launcher::launch_appcontainer(profile, *port)

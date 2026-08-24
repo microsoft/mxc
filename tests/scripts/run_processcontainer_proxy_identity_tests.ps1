@@ -21,7 +21,7 @@ $packageBuilder = Join-Path $repoRoot 'tests\assets\processcontainer-proxy-packa
 $testRoot = Join-Path $env:TEMP "mxc-proxy-identity-$PID"
 $firewallRules = @()
 $processes = @()
-$trustedCertificate = $null
+$packages = $null
 $appContainerProfile = "MXC-Unpackaged-AppContainer-Proxy-$PID"
 
 if (-not (Test-Path $wxc) -or -not (Test-Path $proxy)) {
@@ -69,7 +69,8 @@ function Invoke-ProxyLauncherPid {
 function Wait-Proxy {
     param(
         [int]$Port,
-        [Parameter(Mandatory)][Diagnostics.Process]$Process
+        [Parameter(Mandatory)][Diagnostics.Process]$Process,
+        [string]$ReadyFile
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -78,10 +79,22 @@ function Wait-Proxy {
         if ($Process.HasExited) {
             throw "Proxy process $($Process.Id) exited with code $($Process.ExitCode)"
         }
-        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen `
-            -OwningProcess $Process.Id -ErrorAction SilentlyContinue
-        if ($listener) {
-            return
+        if ($ReadyFile) {
+            if (Test-Path $ReadyFile) {
+                $readyPort = (Get-Content $ReadyFile -Raw).Trim()
+                if ($readyPort -eq "$Port") {
+                    return
+                }
+                if ($readyPort) {
+                    throw "Proxy process $($Process.Id) reported unexpected port '$readyPort'"
+                }
+            }
+        } else {
+            $listener = Get-NetTCPConnection -LocalPort $Port -State Listen `
+                -OwningProcess $Process.Id -ErrorAction SilentlyContinue
+            if ($listener) {
+                return
+            }
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
@@ -156,14 +169,19 @@ function Start-PackagedProxy {
     if (-not $package) {
         throw "Installed package $PackageName was not found"
     }
+    $readyFile = Join-Path $env:LOCALAPPDATA `
+        "Packages\$($package.PackageFamilyName)\LocalState\proxy-ready-$PID"
+    Remove-Item $readyFile -Force -ErrorAction SilentlyContinue
     $pidValue = Invoke-ProxyLauncherPid @(
         'activate-package',
         '--app-user-model-id', "$($package.PackageFamilyName)!Proxy",
-        '--port', "$proxyPort"
+        '--port', "$proxyPort",
+        '--ready-file', $readyFile
     )
     $process = Get-Process -Id $pidValue
     $script:processes += $process
-    Wait-Proxy -Port $proxyPort -Process $process
+    Wait-Proxy -Port $proxyPort -Process $process -ReadyFile $readyFile
+    Remove-Item $readyFile -Force -ErrorAction SilentlyContinue
     return $package.PackageFamilyName
 }
 
@@ -176,11 +194,8 @@ function Start-UnpackagedProxy {
 New-Item -ItemType Directory $testRoot -Force | Out-Null
 try {
     $packages = & $packageBuilder -ProxyBinary $proxy -OutputDirectory $PackageOutput
-    $trustedCertificate = Import-Certificate -FilePath $packages.Certificate `
-        -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
-
-    foreach ($packagePath in $packages.AppContainerPackage, $packages.FullTrustPackage) {
-        Add-AppxPackage $packagePath
+    foreach ($manifestPath in $packages.AppContainerManifest, $packages.FullTrustManifest) {
+        Add-AppxPackage -Path $manifestPath -Register
     }
 
     $wrongPeer = (Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.FullTrust').PackageFamilyName
@@ -233,9 +248,10 @@ try {
         Remove-AppxPackage -ErrorAction SilentlyContinue
     Get-AppxPackage -Name 'Microsoft.MXC.TestProxy.FullTrust' |
         Remove-AppxPackage -ErrorAction SilentlyContinue
-    if ($trustedCertificate) {
-        Remove-Item "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" `
-            -Force -ErrorAction SilentlyContinue
+    if ($packages) {
+        foreach ($directory in $packages.AppContainerDirectory, $packages.FullTrustDirectory) {
+            Remove-Item $directory -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
     $previousErrorActionPreference = $ErrorActionPreference
     try {

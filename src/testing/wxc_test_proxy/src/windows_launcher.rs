@@ -147,10 +147,17 @@ fn create_profile(
     Ok(ProfileSid(sid))
 }
 
-pub fn activate_package(app_user_model_id: &str, port: u16) -> Result<u32, String> {
+pub fn activate_package(
+    app_user_model_id: &str,
+    port: u16,
+    ready_file: &Path,
+) -> Result<u32, String> {
     let _apartment = ComApartment::enter()?;
     let app_user_model_id = wide(app_user_model_id);
-    let arguments = wide(&format!("--port {port} --standalone"));
+    let arguments = wide(&format!(
+        "--port {port} --ready-file \"{}\" --standalone",
+        ready_file.display()
+    ));
 
     // SAFETY: COM is initialized and both strings remain alive for the
     // synchronous activation call.
