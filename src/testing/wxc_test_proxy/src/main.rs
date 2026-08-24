@@ -11,8 +11,41 @@ use std::fs;
 use std::path::PathBuf;
 
 use clap::Parser;
+#[cfg(target_os = "windows")]
+use clap::Subcommand;
 
 mod proxy;
+#[cfg(target_os = "windows")]
+mod windows_launcher;
+
+#[cfg(target_os = "windows")]
+#[derive(Subcommand)]
+enum Command {
+    /// Activate an installed packaged proxy and print its process ID.
+    ActivatePackage {
+        #[arg(long)]
+        app_user_model_id: String,
+        #[arg(long)]
+        port: u16,
+    },
+    /// Launch this executable in an unpackaged AppContainer and print its process ID.
+    LaunchAppcontainer {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        port: u16,
+    },
+    /// Print the SID derived from an AppContainer profile name.
+    DeriveAppcontainerSid {
+        #[arg(long)]
+        profile: String,
+    },
+    /// Delete an AppContainer profile created by the test launcher.
+    DeleteAppcontainer {
+        #[arg(long)]
+        profile: String,
+    },
+}
 
 #[derive(Parser)]
 #[command(
@@ -20,6 +53,10 @@ mod proxy;
     about = "Builtin test proxy for wxc integration testing (NOT for production use)"
 )]
 struct Cli {
+    #[cfg(target_os = "windows")]
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Loopback port to listen on. Zero selects an OS-assigned port.
     #[arg(long, default_value_t = 0)]
     port: u16,
@@ -43,12 +80,46 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    let cli = Cli::parse();
+
+    #[cfg(target_os = "windows")]
+    if let Some(command) = &cli.command {
+        let result = match command {
+            Command::ActivatePackage {
+                app_user_model_id,
+                port,
+            } => windows_launcher::activate_package(app_user_model_id, *port)
+                .map(|process_id| process_id.to_string()),
+            Command::LaunchAppcontainer { profile, port } => {
+                windows_launcher::launch_appcontainer(profile, *port)
+                    .map(|process_id| process_id.to_string())
+            }
+            Command::DeriveAppcontainerSid { profile } => {
+                windows_launcher::derive_appcontainer_sid(profile)
+            }
+            Command::DeleteAppcontainer { profile } => {
+                windows_launcher::delete_appcontainer_profile(profile).map(|()| String::new())
+            }
+        };
+
+        match result {
+            Ok(output) => {
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            }
+            Err(error) => {
+                eprintln!("[wxc-test-proxy] Launcher failed: {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     eprintln!(
         "[wxc-test-proxy] *** SECURITY WARNING ***: This is a testing-only proxy. \
          Do NOT use in production."
     );
-
-    let cli = Cli::parse();
 
     let port = proxy::start(cli.port).await;
     eprintln!("[wxc-test-proxy] Listening on 127.0.0.1:{}", port);

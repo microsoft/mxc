@@ -35,262 +35,35 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     throw 'Proxy identity E2E tests require an elevated PowerShell session.'
 }
 
-if (-not ([System.Management.Automation.PSTypeName]'MxcProxyActivation').Type) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
+function Invoke-ProxyLauncher {
+    param([Parameter(Mandatory)][string[]]$Arguments)
 
-public static class MxcProxyActivation
-{
-    [ComImport, Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-    private class ApplicationActivationManager {}
-
-    [ComImport, Guid("2e941141-7f97-4756-ba1d-9decde894a3d"),
-     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IApplicationActivationManager
-    {
-        int ActivateApplication(
-            [MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,
-            [MarshalAs(UnmanagedType.LPWStr)] string arguments,
-            uint options,
-            out uint processId);
-        int ActivateForFile(string appUserModelId, IntPtr itemArray, string verb, out uint processId);
-        int ActivateForProtocol(string appUserModelId, IntPtr itemArray, out uint processId);
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $proxy @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
-
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    private static extern int DeriveAppContainerSidFromAppContainerName(
-        string name, out IntPtr sid);
-
-    [DllImport("advapi32.dll", SetLastError = true)]
-    private static extern uint GetLengthSid(IntPtr sid);
-
-    [DllImport("advapi32.dll")]
-    private static extern IntPtr FreeSid(IntPtr sid);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-
-    public static uint Activate(string appUserModelId, string arguments)
-    {
-        var manager = (IApplicationActivationManager)new ApplicationActivationManager();
-        uint pid;
-        int hr = manager.ActivateApplication(appUserModelId, arguments, 0, out pid);
-        Marshal.ThrowExceptionForHR(hr);
-        return pid;
+    if ($exitCode -ne 0) {
+        $details = ($output | ForEach-Object { "$_" }) -join '; '
+        throw "wxc-test-proxy $($Arguments[0]) failed with exit code $exitCode`: $details"
     }
-
-    public static string DeriveSid(string profile)
-    {
-        IntPtr sid;
-        int hr = DeriveAppContainerSidFromAppContainerName(profile, out sid);
-        Marshal.ThrowExceptionForHR(hr);
-        try
-        {
-            byte[] bytes = new byte[GetLengthSid(sid)];
-            Marshal.Copy(sid, bytes, 0, bytes.Length);
-            return new System.Security.Principal.SecurityIdentifier(bytes, 0).Value;
-        }
-        finally { FreeSid(sid); }
+    if ($output.Count -ne 1) {
+        throw "wxc-test-proxy $($Arguments[0]) returned $($output.Count) output lines; expected one"
     }
+    return "$($output[0])".Trim()
 }
 
-public static class MxcUnpackagedAppContainer
-{
-    private const uint SE_GROUP_ENABLED = 0x00000004;
-    private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
-    private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
-    private static readonly IntPtr SecurityCapabilitiesAttribute = new IntPtr(0x00020009);
+function Invoke-ProxyLauncherPid {
+    param([Parameter(Mandatory)][string[]]$Arguments)
 
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SID_AND_ATTRIBUTES
-    {
-        public IntPtr Sid;
-        public uint Attributes;
+    $output = Invoke-ProxyLauncher $Arguments
+    if ($output -notmatch '^[1-9][0-9]*$') {
+        throw "wxc-test-proxy $($Arguments[0]) returned invalid PID '$output'"
     }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct SECURITY_CAPABILITIES
-    {
-        public IntPtr AppContainerSid;
-        public IntPtr Capabilities;
-        public uint CapabilityCount;
-        public uint Reserved;
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct STARTUPINFO
-    {
-        public int cb;
-        public string lpReserved;
-        public string lpDesktop;
-        public string lpTitle;
-        public uint dwX;
-        public uint dwY;
-        public uint dwXSize;
-        public uint dwYSize;
-        public uint dwXCountChars;
-        public uint dwYCountChars;
-        public uint dwFillAttribute;
-        public uint dwFlags;
-        public short wShowWindow;
-        public short cbReserved2;
-        public IntPtr lpReserved2;
-        public IntPtr hStdInput;
-        public IntPtr hStdOutput;
-        public IntPtr hStdError;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct STARTUPINFOEX
-    {
-        public STARTUPINFO StartupInfo;
-        public IntPtr lpAttributeList;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct PROCESS_INFORMATION
-    {
-        public IntPtr hProcess;
-        public IntPtr hThread;
-        public uint dwProcessId;
-        public uint dwThreadId;
-    }
-
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    private static extern int CreateAppContainerProfile(
-        string name, string displayName, string description,
-        IntPtr capabilities, uint capabilityCount, out IntPtr sid);
-
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    private static extern int DeriveAppContainerSidFromAppContainerName(
-        string name, out IntPtr sid);
-
-    [DllImport("userenv.dll", CharSet = CharSet.Unicode)]
-    public static extern int DeleteAppContainerProfile(string name);
-
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool ConvertStringSidToSid(string text, out IntPtr sid);
-
-    [DllImport("advapi32.dll")]
-    private static extern IntPtr FreeSid(IntPtr sid);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool InitializeProcThreadAttributeList(
-        IntPtr list, int count, int flags, ref IntPtr size);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool UpdateProcThreadAttribute(
-        IntPtr list, uint flags, IntPtr attribute, IntPtr value,
-        IntPtr size, IntPtr previousValue, IntPtr returnSize);
-
-    [DllImport("kernel32.dll")]
-    private static extern void DeleteProcThreadAttributeList(IntPtr list);
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-    private static extern bool CreateProcess(
-        string applicationName, System.Text.StringBuilder commandLine,
-        IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles,
-        uint creationFlags, IntPtr environment, string currentDirectory,
-        ref STARTUPINFOEX startupInfo, out PROCESS_INFORMATION processInformation);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr LocalFree(IntPtr memory);
-
-    private static void ThrowLastError(string operation)
-    {
-        throw new System.ComponentModel.Win32Exception(
-            Marshal.GetLastWin32Error(), operation);
-    }
-
-    public static uint Launch(string profile, string executable, string arguments)
-    {
-        IntPtr internetClient = IntPtr.Zero;
-        IntPtr privateNetwork = IntPtr.Zero;
-        IntPtr capabilityArray = IntPtr.Zero;
-        IntPtr appContainerSid = IntPtr.Zero;
-        IntPtr attributeList = IntPtr.Zero;
-        IntPtr securityCapabilities = IntPtr.Zero;
-        try
-        {
-            if (!ConvertStringSidToSid("S-1-15-3-1", out internetClient))
-                ThrowLastError("ConvertStringSidToSid(internetClient)");
-            if (!ConvertStringSidToSid("S-1-15-3-3", out privateNetwork))
-                ThrowLastError("ConvertStringSidToSid(privateNetworkClientServer)");
-
-            int sidAttributeSize = Marshal.SizeOf<SID_AND_ATTRIBUTES>();
-            capabilityArray = Marshal.AllocHGlobal(sidAttributeSize * 2);
-            Marshal.StructureToPtr(new SID_AND_ATTRIBUTES {
-                Sid = internetClient, Attributes = SE_GROUP_ENABLED
-            }, capabilityArray, false);
-            Marshal.StructureToPtr(new SID_AND_ATTRIBUTES {
-                Sid = privateNetwork, Attributes = SE_GROUP_ENABLED
-            }, IntPtr.Add(capabilityArray, sidAttributeSize), false);
-
-            int hr = CreateAppContainerProfile(
-                profile, profile, profile, capabilityArray, 2, out appContainerSid);
-            if (hr == unchecked((int)0x800700B7))
-                hr = DeriveAppContainerSidFromAppContainerName(profile, out appContainerSid);
-            Marshal.ThrowExceptionForHR(hr);
-
-            var capabilities = new SECURITY_CAPABILITIES {
-                AppContainerSid = appContainerSid,
-                Capabilities = capabilityArray,
-                CapabilityCount = 2,
-                Reserved = 0
-            };
-            securityCapabilities = Marshal.AllocHGlobal(
-                Marshal.SizeOf<SECURITY_CAPABILITIES>());
-            Marshal.StructureToPtr(capabilities, securityCapabilities, false);
-
-            IntPtr attributeSize = IntPtr.Zero;
-            InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref attributeSize);
-            attributeList = Marshal.AllocHGlobal(attributeSize);
-            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeSize))
-                ThrowLastError("InitializeProcThreadAttributeList");
-            if (!UpdateProcThreadAttribute(
-                attributeList, 0, SecurityCapabilitiesAttribute,
-                securityCapabilities,
-                new IntPtr(Marshal.SizeOf<SECURITY_CAPABILITIES>()),
-                IntPtr.Zero, IntPtr.Zero))
-                ThrowLastError("UpdateProcThreadAttribute(SECURITY_CAPABILITIES)");
-
-            var startup = new STARTUPINFOEX();
-            startup.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
-            startup.lpAttributeList = attributeList;
-            string command = "\"" + executable + "\" " + arguments;
-            PROCESS_INFORMATION process;
-            if (!CreateProcess(
-                executable, new System.Text.StringBuilder(command),
-                IntPtr.Zero, IntPtr.Zero, false,
-                EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
-                IntPtr.Zero, System.IO.Path.GetDirectoryName(executable),
-                ref startup, out process))
-                ThrowLastError("CreateProcessW(AppContainer proxy)");
-
-            CloseHandle(process.hThread);
-            CloseHandle(process.hProcess);
-            return process.dwProcessId;
-        }
-        finally
-        {
-            if (attributeList != IntPtr.Zero) {
-                DeleteProcThreadAttributeList(attributeList);
-                Marshal.FreeHGlobal(attributeList);
-            }
-            if (securityCapabilities != IntPtr.Zero)
-                Marshal.FreeHGlobal(securityCapabilities);
-            if (appContainerSid != IntPtr.Zero) FreeSid(appContainerSid);
-            if (capabilityArray != IntPtr.Zero) Marshal.FreeHGlobal(capabilityArray);
-            if (privateNetwork != IntPtr.Zero) LocalFree(privateNetwork);
-            if (internetClient != IntPtr.Zero) LocalFree(internetClient);
-        }
-    }
-}
-'@
+    return [uint32]$output
 }
 
 function Wait-Proxy {
@@ -313,6 +86,15 @@ function Wait-Proxy {
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Proxy process $($Process.Id) did not listen on port $Port"
+}
+
+function Stop-Proxy {
+    param([Parameter(Mandatory)][Diagnostics.Process]$Process)
+
+    $Process | Stop-Process -Force
+    if (-not $Process.WaitForExit(10000)) {
+        throw "Proxy process $($Process.Id) did not exit after termination"
+    }
 }
 
 function Invoke-Client {
@@ -348,27 +130,36 @@ function Invoke-Client {
         ($config | ConvertTo-Json -Depth 10),
         [Text.UTF8Encoding]::new($false)
     )
-    & $wxc --config $configPath
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $wxc --config $configPath
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     if ($ExpectFailure) {
-        if ($LASTEXITCODE -eq 0) {
+        if ($exitCode -eq 0) {
             throw "$Name unexpectedly succeeded"
         }
         return
     }
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Name client failed with exit code $LASTEXITCODE"
+    if ($exitCode -ne 0) {
+        throw "$Name client failed with exit code $exitCode"
     }
 }
 
 function Start-PackagedProxy {
     param([Parameter(Mandatory)][string]$PackageName)
+
     $package = Get-AppxPackage -Name $PackageName
     if (-not $package) {
         throw "Installed package $PackageName was not found"
     }
-    $pidValue = [MxcProxyActivation]::Activate(
-        "$($package.PackageFamilyName)!Proxy",
-        "--port $proxyPort --standalone"
+    $pidValue = Invoke-ProxyLauncherPid @(
+        'activate-package',
+        '--app-user-model-id', "$($package.PackageFamilyName)!Proxy",
+        '--port', "$proxyPort"
     )
     $process = Get-Process -Id $pidValue
     $script:processes += $process
@@ -397,22 +188,23 @@ try {
     Invoke-Client -Name 'packaged-appcontainer-wrong-peer' -AllowedPeer $wrongPeer `
         -ExpectFailure
     Invoke-Client -Name 'packaged-appcontainer' -AllowedPeer $peer
-    $processes[-1] | Stop-Process -Force
-    $processes[-1].WaitForExit()
+    Stop-Proxy $processes[-1]
 
     $peer = Start-PackagedProxy 'Microsoft.MXC.TestProxy.FullTrust'
     Invoke-Client -Name 'packaged-fulltrust' -AllowedPeer $peer
-    $processes[-1] | Stop-Process -Force
-    $processes[-1].WaitForExit()
+    Stop-Proxy $processes[-1]
 
-    $proxyPid = [MxcUnpackagedAppContainer]::Launch(
-        $appContainerProfile,
-        $proxy,
-        "--port $proxyPort --standalone"
+    $proxyPid = Invoke-ProxyLauncherPid @(
+        'launch-appcontainer',
+        '--profile', $appContainerProfile,
+        '--port', "$proxyPort"
     )
     $process = Get-Process -Id $proxyPid
     $processes += $process
-    $profileSid = [MxcProxyActivation]::DeriveSid($appContainerProfile)
+    $profileSid = Invoke-ProxyLauncher @(
+        'derive-appcontainer-sid',
+        '--profile', $appContainerProfile
+    )
     $rule = "MXC proxy test $PID appcontainer"
     New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
         -Protocol TCP -LocalPort $proxyPort -Program $proxy -Package $profileSid | Out-Null
@@ -420,8 +212,7 @@ try {
 
     Wait-Proxy -Port $proxyPort -Process $process
     Invoke-Client -Name 'unpackaged-appcontainer' -AllowedPeer $appContainerProfile
-    $process | Stop-Process -Force
-    $process.WaitForExit()
+    Stop-Proxy $process
 
     $rule = "MXC proxy test $PID fulltrust"
     New-NetFirewallRule -DisplayName $rule -Direction Inbound -Action Allow `
@@ -446,8 +237,12 @@ try {
         Remove-Item "Cert:\LocalMachine\TrustedPeople\$($trustedCertificate.Thumbprint)" `
             -Force -ErrorAction SilentlyContinue
     }
-    [MxcUnpackagedAppContainer]::DeleteAppContainerProfile(
-        $appContainerProfile
-    ) | Out-Null
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $proxy delete-appcontainer --profile $appContainerProfile 2>$null | Out-Null
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
     Remove-Item $testRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
