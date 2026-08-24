@@ -14,7 +14,7 @@ use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
 use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
-    load_mxc_request_with_options, load_request, LoadOptions, ParseError,
+    load_mxc_request_parts_with_options, load_request, LoadOptions, ParseError, ParsedRequestParts,
 };
 use wxc_common::diagnostic::DiagnosticConfig;
 use wxc_common::logger::{Logger, Mode};
@@ -234,20 +234,22 @@ fn command_override_context_for_state_aware(
     resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
 }
 
-fn apply_command_override(
+fn apply_effective_command(
     request: &mut ExecutionRequest,
-    command_override: Option<&str>,
+    policy_command: Option<&str>,
+    cli_command: Option<&str>,
     logger: &mut Logger,
 ) {
-    if let Some(cmd) = command_override {
-        if !request.script_code.is_empty() {
+    if let Some(command) = cli_command {
+        if policy_command.is_some() {
             let _ = writeln!(
                 logger,
-                "Overriding policy process.commandLine with CLI command: {}",
-                cmd
+                "Overriding policy process.commandLine with CLI command: {command}"
             );
         }
-        request.script_code = cmd.to_string();
+        request.set_script(command);
+    } else if let Some(command) = policy_command {
+        request.set_script(command);
     }
 }
 
@@ -951,9 +953,25 @@ fn main() {
         is_base64,
         allow_missing_command: has_command_override,
     };
-    let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
-        Ok(MxcRequest::OneShot(req)) => req,
-        Ok(MxcRequest::StateAware(mut parsed)) => {
+    let ParsedRequestParts {
+        request: parsed_request,
+        command_line: policy_command,
+    } = match load_mxc_request_parts_with_options(&config_data, &mut logger, load_opts) {
+        Ok(parts) => parts,
+        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
+            eprint!("Request error\n{}", logger.get_buffer());
+            process::exit(1);
+        }
+        Err(ParseError::StateAware(error)) => {
+            print_error_envelope(&error);
+            eprint!("{}", logger.get_buffer());
+            process::exit(1);
+        }
+    };
+
+    let request = match parsed_request {
+        MxcRequest::OneShot(request) => request,
+        MxcRequest::StateAware(mut parsed) => {
             let context =
                 match command_override_context_for_state_aware(&parsed, has_command_override) {
                     Ok(context) => context,
@@ -963,6 +981,7 @@ fn main() {
                         process::exit(1);
                     }
                 };
+
             let command_override = match context
                 .map(|context| command_override_from_cli(&cli, context))
                 .transpose()
@@ -976,31 +995,17 @@ fn main() {
                     process::exit(1);
                 }
             };
-            apply_command_override(
+
+            apply_effective_command(
                 &mut parsed.request,
+                policy_command.as_deref(),
                 command_override.as_deref(),
                 &mut logger,
             );
-            // Mirror what the one-shot path does at the post-dispatch stage
-            // below: copy the CLI `--experimental` flag into the parsed
-            // request so backends that gate on it (e.g. Windows Sandbox
-            // experimental features) see the same value regardless of which
-            // dispatch branch the request entered through. Without this, the
-            // state-aware path runs without the gate -- a phase-envelope request
-            // could provision/start/exec experimental backends with no
-            // `--experimental` on the CLI.
+
             parsed.request.experimental_enabled = cli.experimental;
             parsed.request.dry_run = cli.dry_run;
             run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
-        }
-        Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
-            eprint!("Request error\n{}", logger.get_buffer());
-            process::exit(1);
-        }
-        Err(ParseError::StateAware(e)) => {
-            print_error_envelope(&e);
-            eprint!("{}", logger.get_buffer());
-            process::exit(1);
         }
     };
 
@@ -1048,7 +1053,12 @@ fn main() {
             process::exit(1);
         }
     };
-    apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+    apply_effective_command(
+        &mut request,
+        policy_command.as_deref(),
+        command_override.as_deref(),
+        &mut logger,
+    );
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
@@ -1600,17 +1610,21 @@ mod tests {
             allow_missing_command: command_override.is_some(),
         };
 
-        let mut request = match load_mxc_request_with_options(
-            &encoded_policy(policy),
-            &mut logger,
-            opts,
-        )
-        .unwrap()
-        {
+        let ParsedRequestParts {
+            request,
+            command_line: policy_command,
+        } = load_mxc_request_parts_with_options(&encoded_policy(policy), &mut logger, opts)
+            .unwrap();
+        let mut request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
-        apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+        apply_effective_command(
+            &mut request,
+            policy_command.as_deref(),
+            command_override.as_deref(),
+            &mut logger,
+        );
 
         assert_eq!(request.script_code, "cli-app.exe --from-cli");
         assert_eq!(request.working_directory, "C:\\workspace");
@@ -1648,7 +1662,10 @@ mod tests {
             }
         }"#;
 
-        let policy_request = match load_mxc_request_with_options(
+        let ParsedRequestParts {
+            request,
+            command_line: policy_command,
+        } = load_mxc_request_parts_with_options(
             &encoded_policy(policy),
             &mut policy_logger,
             LoadOptions {
@@ -1656,12 +1673,22 @@ mod tests {
                 allow_missing_command: false,
             },
         )
-        .unwrap()
-        {
+        .unwrap();
+        let mut policy_request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
-        let mut cli_request = match load_mxc_request_with_options(
+        apply_effective_command(
+            &mut policy_request,
+            policy_command.as_deref(),
+            None,
+            &mut policy_logger,
+        );
+
+        let ParsedRequestParts {
+            request,
+            command_line: policy_command,
+        } = load_mxc_request_parts_with_options(
             &encoded_policy(cli_policy),
             &mut cli_logger,
             LoadOptions {
@@ -1669,13 +1696,18 @@ mod tests {
                 allow_missing_command: true,
             },
         )
-        .unwrap()
-        {
+        .unwrap();
+        let mut cli_request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
 
-        apply_command_override(&mut cli_request, Some(&command_override), &mut cli_logger);
+        apply_effective_command(
+            &mut cli_request,
+            policy_command.as_deref(),
+            Some(&command_override),
+            &mut cli_logger,
+        );
 
         assert_eq!(cli_request.script_code, policy_request.script_code);
         assert_eq!(
@@ -1710,6 +1742,50 @@ mod tests {
             .unwrap();
 
         assert_eq!(command_override, "echo 'safe&whoami'");
+    }
+
+    #[test]
+    fn state_aware_exec_cli_command_overrides_surfaced_policy_command() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "app.exe", "safe&whoami"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "policy.exe --from-policy"}
+        }"#;
+
+        let ParsedRequestParts {
+            request,
+            command_line: policy_command,
+        } = load_mxc_request_parts_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut parsed = match request {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        };
+        let context = command_override_context_for_state_aware(&parsed, true)
+            .unwrap()
+            .expect("exec command context");
+        let command_override = command_override_from_cli(&cli, context).unwrap().unwrap();
+
+        apply_effective_command(
+            &mut parsed.request,
+            policy_command.as_deref(),
+            Some(&command_override),
+            &mut logger,
+        );
+
+        assert_eq!(parsed.request.script_code, "app.exe \"safe&whoami\"");
+        assert!(logger.get_buffer().contains(
+            "Overriding policy process.commandLine with CLI command: app.exe \"safe&whoami\""
+        ));
     }
 
     #[test]

@@ -998,6 +998,15 @@ pub struct ResolvedWorkingDirectory<'a> {
 }
 
 impl ExecutionRequest {
+    /// Set the command the sandbox runs.
+    ///
+    /// The command is consumed directly by the selected backend: as a Windows
+    /// command line or as a shell body on Linux and shell-backed backends.
+    pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
+        self.script_code = script.into();
+        self
+    }
+
     /// Resolve the working directory for the sandboxed child: an explicit
     /// `working_directory`, else the first filesystem-policy grant that is an
     /// existing directory (`readwrite` paths before `readonly` ones), else
@@ -1213,6 +1222,17 @@ mod tests {
         dirs: &'a [&'a str],
     ) -> Option<ResolvedWorkingDirectory<'a>> {
         req.resolved_working_directory_with(|path| dirs.contains(&path))
+    }
+
+    #[test]
+    fn set_script_replaces_the_command_and_supports_chaining() {
+        let mut request = ExecutionRequest::default();
+
+        request
+            .set_script("first command")
+            .set_script(String::from("second command"));
+
+        assert_eq!(request.script_code, "second command");
     }
 
     #[test]

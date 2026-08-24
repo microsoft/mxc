@@ -716,7 +716,7 @@ impl SandboxRequest {
     /// `spawnSandbox(script)` / `process.commandLine` is — behavior is identical
     /// across the SDK and this crate.
     pub fn set_script(&mut self, script: impl Into<String>) -> &mut Self {
-        self.inner.script_code = script.into();
+        self.inner.set_script(script);
         self
     }
 
@@ -1308,6 +1308,23 @@ mod tests {
             .readwrite_paths
             .contains(&"/tmp".to_string()));
         assert!(request.inner.script_code.is_empty());
+    }
+
+    #[test]
+    fn set_script_updates_the_internal_execution_request() {
+        let policy = SandboxPolicy {
+            version: "0.7.0-alpha".to_string(),
+            filesystem: None,
+            network: None,
+            ui: None,
+            timeout_ms: None,
+            capture_denials: None,
+        };
+        let mut request = build_request(&policy, None).expect("build_request should succeed");
+
+        request.set_script("echo from the SDK");
+
+        assert_eq!(request.inner.script_code, "echo from the SDK");
     }
 
     #[test]
