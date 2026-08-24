@@ -36,7 +36,7 @@ impl CaptureDenialsMode {
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 #[non_exhaustive]
-pub struct CaptureDenialsSection {
+pub struct CaptureDenialsConfig {
     /// How each ungranted access check is handled while it is recorded.
     pub mode: CaptureDenialsMode,
     /// Absolute path for the JSON denials document.
@@ -53,7 +53,7 @@ pub struct CaptureDenialsSection {
 /// ProcessContainer settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ProcessContainerSection {
+pub struct ProcessContainerConfig {
     /// Enable least-privilege process creation.
     pub least_privilege: bool,
     /// Enable deny-and-record AppContainer learning mode.
@@ -61,21 +61,21 @@ pub struct ProcessContainerSection {
     /// Additional AppContainer capability names.
     pub capabilities: Vec<String>,
     /// Optional denial-capture settings.
-    pub capture_denials: Option<CaptureDenialsSection>,
+    pub capture_denials: Option<CaptureDenialsConfig>,
     /// Optional BaseProcessContainer user-interface settings.
-    pub ui: Option<ProcessContainerUiSection>,
+    pub ui: Option<ProcessContainerUiConfig>,
     /// Optional ProcessContainer-specific network settings.
-    pub network: Option<ProcessContainerNetworkSection>,
+    pub network: Option<ProcessContainerNetworkConfig>,
 }
 
-impl Default for ProcessContainerSection {
+impl Default for ProcessContainerConfig {
     fn default() -> Self {
         Self {
             least_privilege: false,
             learning_mode: false,
             capabilities: Vec::new(),
             capture_denials: None,
-            ui: Some(ProcessContainerUiSection::default()),
+            ui: Some(ProcessContainerUiConfig::default()),
             network: None,
         }
     }
@@ -84,7 +84,7 @@ impl Default for ProcessContainerSection {
 /// ProcessContainer-specific network settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ProcessContainerNetworkSection {
+pub struct ProcessContainerNetworkConfig {
     /// Package family name or AppContainer profile authorized as proxy peer.
     pub allowed_proxy_peer: Option<String>,
 }
@@ -92,7 +92,7 @@ pub struct ProcessContainerNetworkSection {
 /// BaseProcessContainer user-interface settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct ProcessContainerUiSection {
+pub struct ProcessContainerUiConfig {
     /// Desktop-resource isolation level.
     pub isolation: ProcessContainerUiIsolation,
     /// Permit desktop system control.
@@ -103,7 +103,7 @@ pub struct ProcessContainerUiSection {
     pub ime: bool,
 }
 
-impl Default for ProcessContainerUiSection {
+impl Default for ProcessContainerUiConfig {
     fn default() -> Self {
         Self {
             isolation: ProcessContainerUiIsolation::Container,
@@ -139,7 +139,7 @@ impl ProcessContainerUiIsolation {
 pub(crate) fn apply(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
-    process_container: &ProcessContainerSection,
+    process_container: &ProcessContainerConfig,
     network_format: NetworkFormat,
     containment: &str,
 ) -> Result<(), wxc_common::mxc_error::MxcError> {
@@ -242,22 +242,22 @@ mod tests {
 
     #[test]
     fn maps_backend_specific_config() {
-        let process_container = ProcessContainerSection {
+        let process_container = ProcessContainerConfig {
             least_privilege: true,
             learning_mode: true,
             capabilities: vec!["registryRead".to_string()],
-            capture_denials: Some(CaptureDenialsSection {
+            capture_denials: Some(CaptureDenialsConfig {
                 mode: CaptureDenialsMode::Allow,
                 output_path: Some("C:\\capture\\denials.json".to_string()),
                 retain_etl: true,
             }),
-            ui: Some(ProcessContainerUiSection {
+            ui: Some(ProcessContainerUiConfig {
                 isolation: ProcessContainerUiIsolation::Atoms,
                 desktop_system_control: true,
                 system_settings: "read".to_string(),
                 ime: true,
             }),
-            network: Some(ProcessContainerNetworkSection {
+            network: Some(ProcessContainerNetworkConfig {
                 allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
             }),
         };
@@ -308,8 +308,8 @@ mod tests {
             }),
             ..Default::default()
         };
-        let process_container = ProcessContainerSection {
-            network: Some(ProcessContainerNetworkSection {
+        let process_container = ProcessContainerConfig {
+            network: Some(ProcessContainerNetworkConfig {
                 allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
             }),
             ..Default::default()
@@ -337,8 +337,8 @@ mod tests {
             allow_outbound: true,
             ..Default::default()
         };
-        let process_container = ProcessContainerSection {
-            network: Some(ProcessContainerNetworkSection {
+        let process_container = ProcessContainerConfig {
+            network: Some(ProcessContainerNetworkConfig {
                 allowed_proxy_peer: Some("Contoso.Proxy_123".to_string()),
             }),
             ..Default::default()
