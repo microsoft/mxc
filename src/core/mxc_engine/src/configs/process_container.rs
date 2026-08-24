@@ -3,7 +3,7 @@
 
 //! ProcessContainer-specific configuration types and wire mapping.
 
-use crate::policy::network::{has_host_rules, supports_schema_v0_8, NetworkFormat};
+use crate::policy::network::{has_host_rules, NetworkFormat};
 use crate::policy::{NetworkAction, SandboxPolicy};
 
 /// How denial capture handles ungranted access checks.
@@ -173,7 +173,7 @@ pub(crate) fn apply(
 
     config["containment"] = json!(containment);
 
-    if !supports_schema_v0_8(&policy.version) {
+    if wxc_common::directional_network_support(&policy.version) == Some(false) {
         if process_container.learning_mode {
             return Err(wxc_common::mxc_error::MxcError::malformed_request(
                 "processContainer.learningMode requires schema version 0.8 or later",

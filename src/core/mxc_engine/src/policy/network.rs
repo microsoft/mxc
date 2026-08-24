@@ -76,7 +76,12 @@ pub struct NetworkSection {
 
 impl NetworkSection {
     pub(super) fn has_directional_fields(&self) -> bool {
-        self.egress.is_some() || self.ingress.is_some() || self.runtime_config.is_some()
+        self.egress.is_some()
+            || self.ingress.is_some()
+            || self
+                .runtime_config
+                .as_ref()
+                .is_some_and(|runtime| runtime.network_proxy.is_some())
     }
 
     pub(super) fn has_legacy_fields(&self) -> bool {
@@ -95,16 +100,6 @@ pub(crate) enum NetworkFormat {
     Directional,
 }
 
-pub(crate) fn supports_schema_v0_8(version: &str) -> bool {
-    version
-        .split_once('.')
-        .and_then(|(major, rest)| {
-            let minor = rest.split_once('.').map_or(rest, |(minor, _)| minor);
-            Some((major.parse::<u64>().ok()?, minor.parse::<u64>().ok()?))
-        })
-        .is_some_and(|(major, minor)| major > 0 || minor >= 8)
-}
-
 /// Selects one wire format before backend-specific fields are applied.
 pub(super) fn select_network_format(
     version: &str,
@@ -114,7 +109,7 @@ pub(super) fn select_network_format(
     let has_legacy = network.is_some_and(NetworkSection::has_legacy_fields);
     let has_directional = has_process_container_network
         || network.is_some_and(NetworkSection::has_directional_fields);
-    let supports_directional = supports_schema_v0_8(version);
+    let supports_directional = wxc_common::directional_network_support(version);
 
     if has_legacy && has_directional {
         return Err(wxc_common::mxc_error::MxcError::malformed_request(
@@ -122,7 +117,7 @@ pub(super) fn select_network_format(
         ));
     }
 
-    if has_directional && !supports_directional {
+    if has_directional && supports_directional == Some(false) {
         return Err(wxc_common::mxc_error::MxcError::malformed_request(
             "network egress/ingress/runtimeConfig and processContainer.network require schema version 0.8 or later",
         ));
@@ -259,6 +254,7 @@ mod tests {
     use super::{
         proxy_to_wire, select_network_format, NetworkAction, NetworkEgressSection, NetworkFormat,
         NetworkPeerSection, NetworkPortSection, NetworkRuleSection, NetworkSection, ProxySpec,
+        RuntimeConfigSection,
     };
 
     #[test]
@@ -293,6 +289,37 @@ mod tests {
         .expect_err("directional fields must be rejected before schema 0.8");
 
         assert!(error.message.contains("require schema version 0.8"));
+    }
+
+    #[test]
+    fn empty_runtime_config_does_not_conflict_with_legacy_fields() {
+        let format = select_network_format(
+            "0.8.0-alpha",
+            Some(&NetworkSection {
+                allow_outbound: true,
+                runtime_config: Some(RuntimeConfigSection::default()),
+                ..Default::default()
+            }),
+            false,
+        )
+        .expect("an empty runtime config does not select directional networking");
+
+        assert_eq!(format, NetworkFormat::Legacy);
+    }
+
+    #[test]
+    fn malformed_version_is_deferred_to_the_schema_parser() {
+        let format = select_network_format(
+            "0.8x",
+            Some(&NetworkSection {
+                egress: Some(NetworkEgressSection::default()),
+                ..Default::default()
+            }),
+            false,
+        )
+        .expect("network selection should not replace malformed-version diagnostics");
+
+        assert_eq!(format, NetworkFormat::Directional);
     }
 
     #[test]

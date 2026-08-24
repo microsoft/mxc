@@ -1093,7 +1093,8 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenials, CaptureDenialsMode, NetworkSection, ProxySpec, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, NetworkEgressSection, NetworkSection,
+        ProxySpec, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1105,6 +1106,25 @@ mod tests {
             ui: None,
             timeout_ms: None,
         }
+    }
+
+    #[test]
+    fn malformed_schema_version_precedes_directional_field_gate() {
+        let mut policy = policy_with_network(NetworkSection {
+            egress: Some(NetworkEgressSection::default()),
+            ..Default::default()
+        });
+        policy.version = "0.8x".to_string();
+
+        let error = build_request(&policy, None)
+            .expect_err("a malformed schema version must be rejected")
+            .to_string();
+
+        assert!(error.contains("Invalid schema version"), "got: {error}");
+        assert!(
+            !error.contains("require schema version 0.8"),
+            "got: {error}"
+        );
     }
 
     // Accept `allowedHosts` with or without `allowOutbound`, even though
