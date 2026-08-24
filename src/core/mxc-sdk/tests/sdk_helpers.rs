@@ -191,6 +191,39 @@ fn rust_sdk_builds_legacy_process_container_networking() {
 }
 
 #[test]
+fn rust_sdk_builds_directional_process_container_networking() {
+    use mxc_sdk::configs::ProcessContainer;
+    use mxc_sdk::policy::{
+        NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkSection,
+    };
+    use mxc_sdk::{build_request_with_containment, Containment};
+
+    let mut egress = NetworkEgressSection::default();
+    egress.default = Some(NetworkAction::Deny);
+    let mut ingress = NetworkIngressSection::default();
+    ingress.default = Some(NetworkAction::Deny);
+    ingress.host_loopback = Some(NetworkAction::Deny);
+    let mut network = NetworkSection::default();
+    network.egress = Some(egress);
+    network.ingress = Some(ingress);
+
+    let policy = SandboxPolicy {
+        version: "0.8.0-alpha".to_string(),
+        filesystem: None,
+        network: Some(network),
+        ui: None,
+        timeout_ms: None,
+    };
+
+    build_request_with_containment(
+        &policy,
+        &Containment::ProcessContainer(ProcessContainer::default()),
+        None,
+    )
+    .expect("the Rust SDK should build directional ProcessContainer networking");
+}
+
+#[test]
 fn rust_sdk_builds_directional_process_container_networking_and_capture() {
     use mxc_sdk::configs::{CaptureDenials, ProcessContainer, ProcessContainerNetwork};
     use mxc_sdk::policy::{
