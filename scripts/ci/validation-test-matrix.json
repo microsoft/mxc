@@ -70,22 +70,16 @@
       }
     },
     {
-      "id": "windows-canary",
-      "displayName": "Windows canary",
+      "id": "windows-wslc",
+      "displayName": "Windows WSLc Test",
       "family": "windows",
       "architectures": {
         "x64": {
           "target": "x86_64-pc-windows-msvc",
           "artifact": "wxc-binaries-x86_64-pc-windows-msvc",
-          "pool": "",
+          "pool": "1es-mxc-e2e-windows-25h2-wsl2",
           "backends": [
-            "process-t1",
-            "process-t3",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "wslc"
           ]
         },
         "arm64": {
@@ -93,11 +87,7 @@
           "artifact": "wxc-binaries-aarch64-pc-windows-msvc",
           "pool": "",
           "backends": [
-            "process-t1",
-            "process-t3",
-            "isolation-session",
-            "wslc",
-            "windows-sandbox"
+            "wslc"
           ]
         }
       }
@@ -398,6 +388,13 @@
       }
     ],
     "weekly": [],
-    "enabled": []
+    "enabled": [
+      {
+        "os": "windows-wslc",
+        "backends": [
+          "wslc"
+        ]
+      }
+    ]
   }
 }
