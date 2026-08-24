@@ -234,21 +234,39 @@ fn command_override_context_for_state_aware(
     resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
 }
 
-fn apply_command_override(
+fn apply_cli_command_override(
     request: &mut ExecutionRequest,
-    command_override: Option<&str>,
+    cli: &Cli,
+    context: CommandLineContext,
     logger: &mut Logger,
-) {
-    if let Some(cmd) = command_override {
-        if !request.script_code.is_empty() {
-            let _ = writeln!(
-                logger,
-                "Overriding policy process.commandLine with CLI command: {}",
-                cmd
-            );
-        }
-        request.script_code = cmd.to_string();
+) -> Result<(), CommandLineError> {
+    let Some(command) = command_override_from_cli(cli, context)? else {
+        return Ok(());
+    };
+
+    if !request.script_code.is_empty() {
+        let _ = writeln!(
+            logger,
+            "Overriding policy process.commandLine with CLI command: {command}"
+        );
     }
+    request.script_code = command;
+    Ok(())
+}
+
+fn apply_state_aware_cli_command_override(
+    parsed: &mut ParsedStateAwareRequest,
+    cli: &Cli,
+    logger: &mut Logger,
+) -> Result<(), MxcError> {
+    let Some(context) = command_override_context_for_state_aware(parsed, has_cli_command(cli))?
+    else {
+        return Ok(());
+    };
+
+    apply_cli_command_override(&mut parsed.request, cli, context, logger).map_err(|error| {
+        MxcError::malformed_request(format!("invalid CLI command override: {error}"))
+    })
 }
 
 /// The plan for producing this phase's correlation vector, derived
@@ -951,56 +969,35 @@ fn main() {
         is_base64,
         allow_missing_command: has_command_override,
     };
-    let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
-        Ok(MxcRequest::OneShot(req)) => req,
-        Ok(MxcRequest::StateAware(mut parsed)) => {
-            let context =
-                match command_override_context_for_state_aware(&parsed, has_command_override) {
-                    Ok(context) => context,
-                    Err(e) => {
-                        print_error_envelope(&e);
-                        eprint!("{}", logger.get_buffer());
-                        process::exit(1);
-                    }
-                };
-            let command_override = match context
-                .map(|context| command_override_from_cli(&cli, context))
-                .transpose()
-            {
-                Ok(command_override) => command_override.flatten(),
-                Err(e) => {
-                    print_error_envelope(&MxcError::malformed_request(format!(
-                        "invalid CLI command override: {e}"
-                    )));
-                    eprint!("{}", logger.get_buffer());
-                    process::exit(1);
-                }
-            };
-            apply_command_override(
-                &mut parsed.request,
-                command_override.as_deref(),
-                &mut logger,
-            );
-            // Mirror what the one-shot path does at the post-dispatch stage
-            // below: copy the CLI `--experimental` flag into the parsed
-            // request so backends that gate on it (e.g. Windows Sandbox
-            // experimental features) see the same value regardless of which
-            // dispatch branch the request entered through. Without this, the
-            // state-aware path runs without the gate -- a phase-envelope request
-            // could provision/start/exec experimental backends with no
-            // `--experimental` on the CLI.
-            parsed.request.experimental_enabled = cli.experimental;
-            parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
-        }
+    let parsed_request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
+        Ok(request) => request,
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
-        Err(ParseError::StateAware(e)) => {
-            print_error_envelope(&e);
+        Err(ParseError::StateAware(error)) => {
+            print_error_envelope(&error);
             eprint!("{}", logger.get_buffer());
             process::exit(1);
+        }
+    };
+
+    let request = match parsed_request {
+        MxcRequest::OneShot(request) => request,
+        MxcRequest::StateAware(mut parsed) => {
+            if let Err(error) =
+                apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger)
+            {
+                print_error_envelope(&error);
+                eprint!("{}", logger.get_buffer());
+                process::exit(1);
+            }
+
+            // State-aware dispatch never reaches the one-shot flag setup below.
+            // Apply these flags first so experimental backends remain gated.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
+            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
         }
     };
 
@@ -1032,23 +1029,18 @@ fn main() {
 
     // Apply the CLI command-line override to one-shot requests. State-aware
     // exec is handled above before dispatch.
-    let command_override = match command_override_from_cli(
-        &cli,
-        CommandLineContext::for_backend(&request.containment),
-    ) {
-        Ok(command_override) => command_override,
-        Err(e) => {
-            eprintln!("Request error\ninvalid CLI command override: {e}");
-            eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
-                telemetry_active,
-                &request.containment,
-                telemetry::FailureReason::ConfigError,
-            );
-            process::exit(1);
-        }
-    };
-    apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+    let command_context = CommandLineContext::for_backend(&request.containment);
+    if let Err(error) = apply_cli_command_override(&mut request, &cli, command_context, &mut logger)
+    {
+        eprintln!("Request error\ninvalid CLI command override: {error}");
+        eprint!("{}", logger.get_buffer());
+        telemetry::emit_early_exit(
+            telemetry_active,
+            &request.containment,
+            telemetry::FailureReason::ConfigError,
+        );
+        process::exit(1);
+    }
 
     // --audit injects permissiveLearningMode so denied operations are logged
     // but allowed, and drives the WPR/ETW PLM trace pipeline below. This is the
@@ -1583,8 +1575,6 @@ mod tests {
     #[test]
     fn cli_command_overrides_policy_command_line_in_resolved_request() {
         let cli = parse_cli(&["wxc-exec", "policy.json", "--", "cli-app.exe", "--from-cli"]);
-        let command_override =
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess).unwrap();
         let mut logger = test_logger();
         let policy = r#"{
             "process": {
@@ -1597,20 +1587,22 @@ mod tests {
         }"#;
         let opts = LoadOptions {
             is_base64: true,
-            allow_missing_command: command_override.is_some(),
+            allow_missing_command: has_cli_command(&cli),
         };
 
-        let mut request = match load_mxc_request_with_options(
-            &encoded_policy(policy),
-            &mut logger,
-            opts,
-        )
-        .unwrap()
-        {
+        let request =
+            load_mxc_request_with_options(&encoded_policy(policy), &mut logger, opts).unwrap();
+        let mut request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
-        apply_command_override(&mut request, command_override.as_deref(), &mut logger);
+        apply_cli_command_override(
+            &mut request,
+            &cli,
+            CommandLineContext::WindowsCreateProcess,
+            &mut logger,
+        )
+        .unwrap();
 
         assert_eq!(request.script_code, "cli-app.exe --from-cli");
         assert_eq!(request.working_directory, "C:\\workspace");
@@ -1618,6 +1610,82 @@ mod tests {
         assert!(logger.get_buffer().contains(
             "Overriding policy process.commandLine with CLI command: cli-app.exe --from-cli"
         ));
+    }
+
+    #[test]
+    fn cli_command_fills_absent_policy_command_without_override_log() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "cli-app.exe", "--from-cli"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "process": {
+                "cwd": "C:\\workspace"
+            }
+        }"#;
+
+        let request = load_mxc_request_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut request = match request {
+            MxcRequest::OneShot(request) => request,
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        };
+
+        apply_cli_command_override(
+            &mut request,
+            &cli,
+            CommandLineContext::WindowsCreateProcess,
+            &mut logger,
+        )
+        .unwrap();
+
+        assert_eq!(request.script_code, "cli-app.exe --from-cli");
+        assert!(!logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
+    fn policy_command_survives_without_cli_command() {
+        let cli = parse_cli(&["wxc-exec", "policy.json"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "process": {
+                "commandLine": "policy-app.exe --from-policy"
+            }
+        }"#;
+
+        let request = load_mxc_request_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: false,
+            },
+        )
+        .unwrap();
+        let mut request = match request {
+            MxcRequest::OneShot(request) => request,
+            MxcRequest::StateAware(_) => panic!("expected one-shot"),
+        };
+
+        apply_cli_command_override(
+            &mut request,
+            &cli,
+            CommandLineContext::WindowsCreateProcess,
+            &mut logger,
+        )
+        .unwrap();
+
+        assert_eq!(request.script_code, "policy-app.exe --from-policy");
+        assert!(!logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
     }
 
     #[test]
@@ -1630,10 +1698,6 @@ mod tests {
             "--message",
             "hello world",
         ]);
-        let command_override =
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .unwrap();
         let mut policy_logger = test_logger();
         let mut cli_logger = test_logger();
         let policy = r#"{
@@ -1648,7 +1712,7 @@ mod tests {
             }
         }"#;
 
-        let policy_request = match load_mxc_request_with_options(
+        let request = load_mxc_request_with_options(
             &encoded_policy(policy),
             &mut policy_logger,
             LoadOptions {
@@ -1656,12 +1720,13 @@ mod tests {
                 allow_missing_command: false,
             },
         )
-        .unwrap()
-        {
+        .unwrap();
+        let policy_request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
-        let mut cli_request = match load_mxc_request_with_options(
+
+        let request = load_mxc_request_with_options(
             &encoded_policy(cli_policy),
             &mut cli_logger,
             LoadOptions {
@@ -1669,13 +1734,19 @@ mod tests {
                 allow_missing_command: true,
             },
         )
-        .unwrap()
-        {
+        .unwrap();
+        let mut cli_request = match request {
             MxcRequest::OneShot(req) => req,
             MxcRequest::StateAware(_) => panic!("expected one-shot"),
         };
 
-        apply_command_override(&mut cli_request, Some(&command_override), &mut cli_logger);
+        apply_cli_command_override(
+            &mut cli_request,
+            &cli,
+            CommandLineContext::WindowsCreateProcess,
+            &mut cli_logger,
+        )
+        .unwrap();
 
         assert_eq!(cli_request.script_code, policy_request.script_code);
         assert_eq!(
@@ -1713,8 +1784,71 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_exec_cli_command_overrides_surfaced_policy_command() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "app.exe", "safe&whoami"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "policy.exe --from-policy"}
+        }"#;
+
+        let request = load_mxc_request_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut parsed = match request {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        };
+        apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger).unwrap();
+
+        assert_eq!(parsed.request.script_code, "app.exe \"safe&whoami\"");
+        assert!(logger.get_buffer().contains(
+            "Overriding policy process.commandLine with CLI command: app.exe \"safe&whoami\""
+        ));
+    }
+
+    #[test]
+    fn state_aware_exec_cli_command_fills_absent_policy_command_without_override_log() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "app.exe", "--from-cli"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {}
+        }"#;
+
+        let request = load_mxc_request_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut parsed = match request {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        };
+
+        apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger).unwrap();
+
+        assert_eq!(parsed.request.script_code, "app.exe --from-cli");
+        assert!(!logger
+            .get_buffer()
+            .contains("Overriding policy process.commandLine"));
+    }
+
+    #[test]
     fn state_aware_command_override_only_applies_to_exec_phase() {
-        let parsed = ParsedStateAwareRequest {
+        let mut parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
             phase: Phase::Start,
             containment: None,
@@ -1723,13 +1857,71 @@ mod tests {
             experimental_raw: None,
             source_text: None,
         };
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "hello"]);
 
-        let err = command_override_context_for_state_aware(&parsed, true).unwrap_err();
+        let err = apply_state_aware_cli_command_override(&mut parsed, &cli, &mut test_logger())
+            .unwrap_err();
 
         assert_eq!(err.code, MxcErrorCode::MalformedRequest);
         assert!(err
             .message
             .contains("only supported for state-aware exec requests"));
+    }
+
+    #[test]
+    fn state_aware_without_cli_command_is_noop_for_non_exec_phase() {
+        let mut parsed = ParsedStateAwareRequest {
+            request: ExecutionRequest {
+                script_code: "unchanged".to_string(),
+                ..ExecutionRequest::default()
+            },
+            phase: Phase::Start,
+            containment: None,
+            sandbox_id: Some("iso:wxc-1234".into()),
+            correlation_vector: None,
+            experimental_raw: None,
+            source_text: None,
+        };
+        let cli = parse_cli(&["wxc-exec", "policy.json"]);
+        let mut logger = test_logger();
+
+        apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger).unwrap();
+
+        assert_eq!(parsed.request.script_code, "unchanged");
+        assert!(logger.get_buffer().is_empty());
+    }
+
+    #[test]
+    fn invalid_state_aware_cli_command_is_a_malformed_request() {
+        let mut cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "hello"]);
+        cli.command = vec!["bad\0argument".to_string()];
+        let mut logger = test_logger();
+        let policy = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "policy.exe --from-policy"}
+        }"#;
+
+        let request = load_mxc_request_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut parsed = match request {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        };
+
+        let error =
+            apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger).unwrap_err();
+
+        assert_eq!(error.code, MxcErrorCode::MalformedRequest);
+        assert!(error.message.contains("invalid CLI command override"));
+        assert_eq!(parsed.request.script_code, "policy.exe --from-policy");
     }
 
     #[cfg(target_os = "windows")]
