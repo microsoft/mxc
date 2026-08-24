@@ -374,6 +374,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn rejects_denied_and_mapped_path_overlap_in_either_direction() {
         let root =
             std::env::temp_dir().join(format!("mxc-apple-policy-overlap-{}", std::process::id()));
@@ -396,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "macos")]
     fn mount_preserves_requested_guest_path_after_host_canonicalization() {
         let root = std::env::temp_dir().join(format!(
             "mxc-apple-policy-destination-{}",
