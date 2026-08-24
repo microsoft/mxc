@@ -1745,6 +1745,50 @@ mod tests {
     }
 
     #[test]
+    fn state_aware_exec_cli_command_overrides_surfaced_policy_command() {
+        let cli = parse_cli(&["wxc-exec", "policy.json", "--", "app.exe", "safe&whoami"]);
+        let mut logger = test_logger();
+        let policy = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "policy.exe --from-policy"}
+        }"#;
+
+        let ParsedRequestParts {
+            request,
+            command_line: policy_command,
+        } = load_mxc_request_parts_with_options(
+            &encoded_policy(policy),
+            &mut logger,
+            LoadOptions {
+                is_base64: true,
+                allow_missing_command: true,
+            },
+        )
+        .unwrap();
+        let mut parsed = match request {
+            MxcRequest::StateAware(parsed) => parsed,
+            MxcRequest::OneShot(_) => panic!("expected state-aware"),
+        };
+        let context = command_override_context_for_state_aware(&parsed, true)
+            .unwrap()
+            .expect("exec command context");
+        let command_override = command_override_from_cli(&cli, context).unwrap().unwrap();
+
+        apply_effective_command(
+            &mut parsed.request,
+            policy_command.as_deref(),
+            Some(&command_override),
+            &mut logger,
+        );
+
+        assert_eq!(parsed.request.script_code, "app.exe \"safe&whoami\"");
+        assert!(logger.get_buffer().contains(
+            "Overriding policy process.commandLine with CLI command: app.exe \"safe&whoami\""
+        ));
+    }
+
+    #[test]
     fn state_aware_command_override_only_applies_to_exec_phase() {
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
