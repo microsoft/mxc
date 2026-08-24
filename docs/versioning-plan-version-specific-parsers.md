@@ -4,13 +4,13 @@ Status: implementation plan; Phases 1-4 merged in PRs #807, #816, #835, and
 #838. Phase 4.1 and Phase 4.2 merged in PRs #907 and #912. Phase 5 is complete
 and merged: Phase 5A in PR #909, Phase 5B in PR #910, Phase 5C in PR #929,
 Phase 5D in PR #941, the Phase 5A review follow-up in PR #949, and the
-capabilities parity remediation in PR #966. Phase 6 is complete and awaiting a
-final signoff in PR #968, which also carries the directional networking the
-exact `0.8` contract had been missing. Phase 6.5 — publication of
-`0.8.0-alpha` and the move of development to `0.9.0-alpha` — is a single commit
-on `user/gudge/version_specific_config_parsers_phase6.5`, rebased onto #968,
-with no pull request yet. Phase 7.1 is renamed Phase 7a and is open as PR #969.
-Phases 7.2-7.5 and Phases 8-11 remain.
+capabilities parity remediation in PR #966. Phase 6 merged in PR #968. The
+legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
+reconstructs its exact Rust contract, advances exact development to
+`0.9.0-alpha`, and is complete on
+`user/gudge/version_specific_config_parsers_phase6.5`, awaiting a pull request
+and merge. Phase 7.1 is renamed Phase 7a and is open as PR #969. Phases 7.2-7.5
+and Phases 8-11 remain.
 
 Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 (2026-08-14)
@@ -19,9 +19,9 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 
 - Require every config to declare an exact registered version.
 - Deserialize each published version through its own immutable Rust wire types.
-- Support exact published contracts for `0.6.0-alpha` and `0.7.0-alpha`.
-- Use the existing `0.8.0-alpha` version as the current mutable development
-  contract.
+- Support exact published contracts for `0.6.0-alpha`, `0.7.0-alpha`, and
+  `0.8.0-alpha`.
+- Use `0.9.0-alpha` as the current mutable development contract.
 - Keep `experimental` completely absent from published contracts.
 - Make the development contract's `experimental` structure recursively closed,
   while allowing that entire unpublished contract to change freely.
@@ -41,9 +41,7 @@ Base: `origin/main` at `692275b84eaa3f83cd8582dc774bc5f354f46ccf`
 - Edit the existing immutable `0.6` or `0.7` stable schema files.
 - Reject positional JSON arrays that Serde can deserialize into structs. That
   object-root hardening is out of scope for this work in every phase.
-- Introduce another development version as part of the initial parser
-  conversion. `0.9.0-alpha` is selected when `0.8.0-alpha` is published;
-  `1.0.0` remains a later milestone.
+- Advance development beyond `0.9.0-alpha`; `1.0.0` remains a later milestone.
 
 ## Contract reconstruction policy
 
@@ -189,7 +187,8 @@ accepted JSON shape cannot change underneath its users.
 | --- | --- | --- |
 | Published | `0.6.0-alpha` | Stable one-shot config only |
 | Published | `0.7.0-alpha` | Stable one-shot config only |
-| Development | `0.8.0-alpha` | Mutable closed one-shot experimental and state-aware config |
+| Published | `0.8.0-alpha` | Stable one-shot config only |
+| Development | `0.9.0-alpha` | Mutable closed one-shot experimental and state-aware config |
 
 Published request types do not contain:
 
@@ -204,13 +203,6 @@ Published request types do not contain:
 The existing `schemas/stable/mxc-config.schema.0.5.0-alpha.json` experimental
 section remains an unsupported historical artifact. No `0.5` runtime contract
 will be added.
-
-**Superseded by the revised publication sequence below.** `0.8.0-alpha` is
-being published early, so the table above describes the state up to that point
-only: after publication `0.8.0-alpha` is a published contract carrying the
-stable-candidate one-shot surface, and `0.9.0-alpha` becomes the development
-contract holding experimental and state-aware. The exclusion list immediately
-above therefore applies to `0.8.0-alpha` as well.
 
 ## Revised publication sequence
 
@@ -231,30 +223,39 @@ The order is:
    the same gap, so the port landed there alongside a `NonEmptyVec` primitive
    that restores the shipped schema's `minItems` constraint on a rule's `to`
    and `ports`.
-3. Land Phase 6, so the generated artifacts derive from the contract crate.
-   **Awaiting a final signoff in PR #968.**
-4. Publish `0.8.0-alpha` from the contract crate, forking the published module,
-   the frozen adapter, and (when it exists) the per-version policy builder.
-   **Implemented on the Phase 6.5 branch, rebased onto #968.**
-5. Move the remaining development work to `0.9.0-alpha`. **Implemented on the
-   same branch;** note the suffix is `-alpha`, not the `-dev` this plan
-   originally wrote — see "Two coexisting versioning models".
+3. Land Phase 6, so exact development artifacts derive from the contract crate.
+   **Done in PR #968.**
+4. Publish `0.8.0-alpha`. **Done by the legacy rolling stack in PR #996 and
+   released under annotated tag `v0.8.0` at `7dac1a95`.** The tagged stable
+   schema is immutable blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b`;
+   Phase 6.5 reconstructs the exact Rust contract but does not regenerate or
+   rewrite that artifact.
+5. Move remaining rolling and exact development work to `0.9.0-alpha`.
+   **Rolling development moved in PR #996; exact development moves in Phase
+   6.5.** The contract artifact suffix is `-alpha`; `-dev` remains reserved for
+   the rolling family being retired.
 
-### Phase 6.5 as rebased
+### Phase 6.5 final implementation
 
-Phase 6.5 is three commits on top of #968. It:
+Phase 6.5 is complete on
+`user/gudge/version_specific_config_parsers_phase6.5`. It:
 
-- forks `published/v0_8_0_alpha` from the development contract, carrying the
-  directional network surface, `RuntimeConfig`, `ProcessContainerNetwork`,
-  `NonEmptyVec`, and the `ProcessContainerCapability` newtype
-- adds the frozen `config_contract_adapters::v0_8` adapter
-- renames the development contract to `0.9.0-alpha`, moving its tests and
-  fixtures to `tests/v0_9_0_alpha`
-- registers both versions and commits the generated `0.9.0-alpha` schema and
-  TypeScript oracle
-- covers the published adapter's directional conversion, which had no tests at
-  all: every reference to `egress`, `ingress`, `runtimeConfig`, and
-  `allowedProxyPeer` was in the implementation and none in the test module
+- reconstructs `published/v0_8_0_alpha` from the tagged stable schema using the
+  same policy as v0.6/v0.7: exact required version, closed objects, explicit
+  null rejection, string-only enums, local value constraints, and preservation
+  only of explicit compatibility aliases
+- adds the frozen `config_contract_adapters::v0_8` adapter without changing the
+  tagged stable schema or generating a published TypeScript oracle
+- renames the mutable development contract to `0.9.0-alpha`, moving its tests,
+  fixtures, and adapters to the v0.9 line
+- registers v0.8 as published and v0.9 as development, and commits the generated
+  v0.9 exact schema and TypeScript oracle
+- covers cross-version boundaries and the published adapter's directional
+  conversion, including `egress`, `ingress`, `runtimeConfig`, and
+  `allowedProxyPeer`
+- preserves the released v0.8 schema byte-for-byte and keeps
+  `mxc_schema_gen`/`check-contract-codegen.js` scoped to mutable development
+  artifacts
 
 Two consequences of the rebase are worth recording, because both were found by
 a failing test rather than by inspection. The 0.8 test suite inherited from
@@ -266,19 +267,24 @@ that document must be rejected. And the adapter and one-shot tests added to
 class of error: a version-specific test moving between contracts without its
 version string moving with it.
 
-### Phase 6.5 remaining work
+### Phase 6.5 completion status
 
-As of 2026-08-21, with the directional port, `NonEmptyVec`, the capability
-newtype, the registry path correction, and the adapter and contract test
-coverage all landed:
+Implementation and local validation are complete as of 2026-08-24.
 
-| Item | Note |
+| Area | Final state |
 | --- | --- |
-| `version_boundaries` coverage | Nothing asserts directional networking and `runtimeConfig` are rejected at `0.6`/`0.7` and accepted at `0.8`, or that `experimental` and `phase` are rejected at `0.8` and accepted at `0.9`. This is the cross-version property the whole design exists to prove, and it is currently untested |
-| Published `0.8` doc comments | Eleven wrong strings survive: three say `0.7.0-alpha`, all four `NetworkProtocol` variants say "Enforce policy through containment capabilities", and `to`/`ports` are documented as "hostnames"/"IP addresses" rather than CIDRs and port selectors. **Freeze-permanent**, because these become the generated schema's descriptions |
-| Published contract generation | `mxc_schema_gen schema --version 0.8.0-alpha` still errors. Under the option-C decision this is the only route to a stable artifact, and it is the largest remaining piece |
-| `0.8` fixture tree | Flat `valid/`+`invalid/` rather than per-root. Probably fine: the published contract has one root and the gate walks development contracts only |
-| Legacy and directional on one `Network` | Accepted deliberately. The legacy fields are removed in `0.9`, not here; an attempt to remove them early was reverted after it cascaded through roughly 129 test references, 16 fixtures, and 94 adapter sites |
+| v0.8 release identity | Annotated tag `v0.8.0` resolves to `7dac1a95`; stable schema blob `78791e8ad9adcd8b96a632fc1d9471153a9fe20b` is preserved byte-for-byte |
+| Published v0.8 contract | Reconstructed with the v0.6/v0.7 bootstrap-tightening policy and explicit compatibility aliases; no experimental or state-aware surface |
+| Published v0.8 adapter | Exhaustive stable one-shot mapping, including legacy and directional network families, runtime proxy configuration, and ProcessContainer proxy identity |
+| Development rollover | Exact development contract, adapters, fixtures, schema, and TypeScript oracle moved to `0.9.0-alpha` |
+| Generated artifacts | Only rolling `0.9.0-dev` and exact development `0.9.0-alpha` artifacts are regenerated; published v0.8 artifacts are immutable |
+| Cross-version coverage | Directional networking and runtime configuration are introduced at v0.8; experimental containment and state-aware roots are introduced at v0.9 |
+| Published contract coverage | All v0.8 fixtures are discovered automatically; version, null, command, LXC, proxy, capability, alias, enum, experimental, and state-aware boundaries are covered |
+| Review remediation | Stable-schema rewrite, obsolete v0.8 TypeScript generation, validation-claim drift, documentation errors, fixture omissions, and the v0.8 capability boundary assertion are resolved |
+
+The only remaining Phase 6.5 work is to open its pull request, complete normal
+review and CI, and merge it. General published-contract digest/freeze automation
+remains part of Phase 11 rather than a Phase 6.5 merge blocker.
 
 ### The adapter's no-wildcard rule is enforced by the compiler
 
@@ -303,17 +309,11 @@ presence assertions the build already guarantees.
 
 
 
-The old stack's freeze generator would publish the rolling schema, which has no
-root `required` array at all, declares `phase`, `sandboxId`, and
-`correlationVector` at the root, and leaves `experimental` open. The exact
-`0.8.0-alpha` contract is closed, multi-root, and requires
-`process.commandLine`. Publishing both would ship two artifacts, days apart,
-that disagree about what `0.8.0-alpha` accepts — the `0.6`/`0.7` "bootstrap
-tightening" repeated deliberately rather than inherited.
-
-Generating the stable schema from the contract crate removes the disagreement
-by construction. This is why Phase 6 must land before publication rather than
-merely before Phase 10.
+The old rolling stack published v0.8 before exact dispatch became
+authoritative. Phase 6.5 therefore treats the tagged stable schema as immutable
+and reconstructs a Rust input contract using the same bootstrap-tightening
+policy as v0.6/v0.7; it does not publish a second schema artifact under the
+same identity.
 
 ### Published `0.8.0-alpha` scope: stable candidate only
 
@@ -349,55 +349,25 @@ move from the `0.6.0-alpha` they hard-code today onto `0.9.0-alpha`, so the
 lifecycle ships only against a development contract until it is promoted. That
 is the intended consequence of the Phase 11 rule, recorded here as a choice.
 
-### Version string
+### Resolved schedule consequences
 
-Freeze the literal `0.8.0-alpha`. Thirty corpus configs, #961's documentation,
-and its tests already declare it; minting a separate `0.8.0` re-versions all of
-them and strands the directional-networking examples. Settle the suffix
-convention at the same time: `schemas/schema-version.json` currently carries
-`maxSupported: 0.8.0-alpha` alongside `devSchemaFile: 0.8.0-dev` for the same
-line, which stops being harmless once a published and a development line
-coexist.
-
-### Knock-ons to schedule
-
-- `schemas/schema-version.json`: `stableLatest` to `0.8.0-alpha`,
-  `maxSupported` and `devSchemaFile` to the `0.9` line, then
-  `check-schema-versions.js` drags the Rust and SDK constants. **Sequencing
-  caveat:** these constants describe what the runtime accepts, so they must not
-  advance before Phase 9. See "Two coexisting versioning models".
-- The contract registry: flip `V0_8_0Alpha` to `Published` and add the `0.9`
-  development arm by hand; Phase 11 replaces that with generated metadata later.
-- The three-way fork of Phase 11, minus the `mxc_engine::policy` builder, which
-  does not exist until Phase 7.3. The builder fork is deferred, not skipped.
-- PR #966, if it lands before the freeze, puts `ProcessContainerCapability`
-  into the published `0.8.0-alpha` contract and makes the parse-time versus
-  conversion-time asymmetry against `0.6` and `0.7` permanent across published
-  contracts. Deliberate is fine; accidental is not.
-- Phase 8's "state-aware producers must stop hard-coding `0.6.0-alpha`" moves
-  up: that constant is more obviously wrong once `0.8.0-alpha` is published,
-  and the scope decision sends state-aware to `0.9.0-alpha` rather than to the
-  newly published version. `schemas/schema-version.json`'s `stateAware` field
-  moves with it.
-- Phase 6's branch must be rebased and its artifacts **regenerated** rather
-  than replayed, and its duplicate capabilities commit dropped in favor of
-  #966.
-- Phase 10 largely dissolves. #961 and #962 do the network work on the rolling
-  model and publication freezes it; what remains is the IsolationSession
-  acknowledgment redesign on `0.9` and the published-version translation.
-- Phase 9's blocker is resolved by this sequence: the exact path gains
-  directional networking through step 2, so enabling exact dispatch no longer
-  regresses a shipped feature.
+- The released schema version remains the literal `0.8.0-alpha`; product
+  release tag `v0.8.0` does not change the config-version spelling.
+- `schemas/schema-version.json` and the rolling parser/SDK moved to the v0.9
+  development line in PR #996.
+- The exact registry marks v0.8 published and v0.9 development.
+- `ProcessContainerCapability` is frozen into the v0.8 Rust contract as a
+  deliberate parse-time tightening; v0.6/v0.7 retain conversion-time rejection.
+- Per-version policy-builder forking remains deferred until that builder exists.
+- State-aware producer migration to v0.9 remains Phase 8 work.
+- Phase 10 retains only work not already shipped by the rolling v0.8 networking
+  implementation, notably the IsolationSession acknowledgment redesign and
+  published-version translation.
 
 ## Two coexisting versioning models
 
-Recorded 2026-08-21, after the early publication of `0.8.0-alpha` produced four
-contradictions between the two models inside a single day's work. The overlap
-was always intended — Phase 6 adds the second generator "alongside" the first,
-Phase 9 makes the contract authoritative, and Phase 11 replaces
-`schemas/schema-version.json` outright. What was not intended is that
-**publication moved earlier while retirement did not**, so the two models now
-disagree about the same version numbers rather than merely duplicating them.
+The rolling and exact models coexist until Phase 9 makes exact dispatch
+authoritative and Phase 11 retires the remaining rolling metadata.
 
 ### The two models
 
@@ -406,86 +376,21 @@ disagree about the same version numbers rather than merely duplicating them.
 | Source of truth | `schemas/schema-version.json` | `mxc_config_contract::registry` |
 | Shape authority | `wxc_common::wire` | per-version Rust modules |
 | Version model | a range, `min` to `maxSupported` | an exact enum |
-| Artifacts | `…0.8.0-dev.json`, `generated/wire.ts` | `…0.8.0-alpha.json`, `generated/v0_9_0_alpha/wire.ts` |
+| Artifacts | `…0.9.0-dev.json`, `generated/wire.ts` | immutable published modules plus `…0.9.0-alpha.json` and `generated/v0_9_0_alpha/wire.ts` |
 | Gates | `check-schema-versions`, `check-schema-codegen`, `validate-configs` | `check-contract-codegen` |
 | Enforced at runtime | yes, parser and SDK | no, until Phase 9 |
 
-### Observed contradictions
+### Current resolution
 
-1. **`0.8.0-alpha` means two different things.** The rolling model treats it as
-   `maxSupported` — the mutable dev line, as that file's own comment states —
-   while the contract registry marks it `Published` and therefore immutable.
-2. **Two files describe `0.8` and disagree.** `mxc-config.schema.0.8.0-dev.json`
-   carries directional networking and an open `experimental`;
-   `mxc-config.schema.0.8.0-alpha.json` carries neither and still describes the
-   pre-publication development contract. Both sit in `schemas/dev/`, and
-   neither is what published `0.8` will be.
-3. **`devSchemaFile` is a rolling concept with a contract-shaped name.**
-   Setting it to `0.9.0-dev` directs `check-schema-codegen` and
-   `validate-configs` at a *rolling* artifact for a line whose rolling model is
-   still `0.8` and is slated for deletion in Phase 9, while the contract emits
-   `0.9.0-alpha`. Two suffix conventions for one line.
-4. **Three places disagree on where the published `0.8` schema lives.**
-   `stableLatest` implies `schemas/stable/…0.8.0-alpha.json`; the registry's
-   `schema_path` says `schemas/dev/…`; its `schema_id` says `schemas/stable/…`.
-5. **The runtime cannot run the development contract.** `SUPPORTED_VERSION`,
-   `CURRENT_SCHEMA_VERSION`, and the SDK's `SUPPORTED_VERSION` all still cap at
-   `0.8.0-alpha`, so a `0.9` config is authorable and unrunnable.
-6. **A range cannot express the new reality.** `>=0.6, <=0.8` cannot say
-   "0.6, 0.7, 0.8 published; 0.9 development, opt-in" — which is exactly why the
-   contract model uses an exact enum. Widening it to `<=0.9` would silently make
-   an unfinished development contract runnable.
-
-### Remediation
-
-**Immediate.**
-
-- Do not advance `schemas/schema-version.json` ahead of Phase 9. Its constants
-  describe what the runtime accepts, and the runtime has not moved. Advancing
-  it red-lines three previously green gates for a state nothing can satisfy
-  until published-contract generation exists.
-- Fix one suffix convention: `-alpha` for contract artifacts, `-dev` reserved
-  for the rolling family being retired. An audit on 2026-08-21 found the
-  contract stack already compliant — `registry.rs` and `mxc_schema_gen` contain
-  no `-dev` reference — with a single exception: the `$schema` string in
-  `tests/v0_9_0_alpha/fixtures/one_shot/valid/annotations.json` pointed at a
-  nonexistent `0.9.0-dev` file. It was inert, since `$schema` is a free string
-  the contract does not resolve, which is why no gate caught it. **Fixed on the
-  Phase 6.5 branch.**
-- Move the published `0.8` artifact to `schemas/stable/` and make `schema_id`
-  and `schema_path` agree. A `Published` descriptor writing into `schemas/dev/`
-  is what makes contradiction 4 possible. **The registry now names the stable
-  path on the Phase 6.5 branch; the artifact itself is created by whoever
-  publishes `0.8` through the old stack, not by this work.**
-
-**Medium.** Split the three jobs "version" currently conflates: what the
-runtime accepts, what shape is frozen, and what artifact is generated. Narrow
-`schemas/schema-version.json` to the runtime-accepted range only, and let the
-registry own shape and artifacts. `check-schema-versions` then stops needing to
-know about contract files at all. This is most of Phase 11's replacement work,
-done incrementally instead of as one swap.
-
-**Add the missing gate.** Nothing asserts the two models agree. One check —
-every registry version falls within the rolling supported range, and each
-version's `status` matches whether its artifact lives in `stable/` or `dev/` —
-would have caught contradictions 1, 3, and 4 as they were introduced. Model it
-on the existing `check-dotnet-errorcode-parity.js` precedent.
-
-**Strategic.** Every contradiction above is a symptom of publishing before
-retiring. Two coherent resolutions:
-
-- *Pull Phase 9 forward for one-shot only.* Make exact dispatch authoritative
-  for one-shot requests, delete the rolling parse path for them, and let
-  state-aware keep the rolling parser until `0.9` stabilizes. This collapses the
-  duplication where it actually hurts.
-- *Or freeze the rolling model deliberately.* Declare `0.8.0-dev` the last
-  rolling artifact, stop regenerating it, and let the contract family own
-  everything from `0.9`. Cheaper, but leaves two live schemas for `0.8`
-  indefinitely.
-
-Avoid the current implicit third option — advancing both models version by
-version in lockstep. That is twice the work per version, with no gate proving
-the two agree, and it is how four contradictions appeared in one afternoon.
+- v0.8 shipped under the legacy rolling scheme and its tagged stable schema is
+  immutable; the exact Rust module reconstructs that contract but does not
+  regenerate the released artifact.
+- Both rolling and exact development now use the v0.9 line, with `-dev` reserved
+  for rolling artifacts and `-alpha` used by exact contracts.
+- The exact codegen gate covers mutable development artifacts only.
+- Runtime range metadata remains rolling until exact dispatch takes over.
+- Phase 11 still replaces duplicated version metadata and adds general
+  published-contract freeze/digest enforcement.
 
 ## Intended parse flow
 
@@ -500,7 +405,8 @@ exact registry lookup
     |
     +-- 0.6.0-alpha --> published::v0_6_0_alpha::Request
     +-- 0.7.0-alpha --> published::v0_7_0_alpha::Request
-    `-- 0.8.0-alpha --> dev one-shot or phase-specific state-aware request
+    +-- 0.8.0-alpha --> published::v0_8_0_alpha::Request
+    `-- 0.9.0-alpha --> dev one-shot or phase-specific state-aware request
     |
     v
 typed adapter outside the immutable contract module
@@ -1084,8 +990,7 @@ those changes update the Rust contract, JSON Schema, and TypeScript oracle
 together.
 
 The detailed design, the resolved decisions, and the implementation record are
-in the Phase 6 detailed design section below. Phase 6 is implemented on an
-unpushed local branch and has not been reviewed.
+in the Phase 6 detailed design section below. Phase 6 merged in PR #968.
 
 ### Phase 7: Add shadow exact-contract dispatch
 
@@ -1256,36 +1161,37 @@ published `0.6.0-alpha` or `0.7.0-alpha` requests.
 
 ### Phase 11: Add publication and freeze checks
 
-Extend `mxc_schema_gen` with the publication command:
+The v0.8 release shipped through the legacy publication stack, and Phase 6.5
+manually reconstructed its immutable Rust contract and adapter. Phase 11
+generalizes that process for future exact-contract publications with a command
+of the form:
 
 ```text
-mxc_schema_gen publish --version 0.8.0-alpha --next-dev 0.9.0-alpha
+mxc_schema_gen publish --version <current-dev> --next-dev <next-dev>
 ```
 
 Publication copies only the development stable-candidate request;
 experimental and state-aware types never enter a published contract. Generate
 the lifecycle registry and version constants from the publication metadata.
 
-Publication is not a byte-for-byte copy of every stable-candidate type. The
-development one-shot `Containment` enum deliberately carries both
+Publication is not a byte-for-byte copy of every stable-candidate type. A
+development one-shot `Containment` enum may carry both
 stable-candidate values (`process`, `processcontainer` + its `appcontainer`
 alias, `lxc`, `bubblewrap`, `seatbelt` + its `macos_sandbox` alias) and
 development-only values (`vm`, `windows_sandbox`, `microvm`, `hyperlight`,
-`wslc`, `isolation_session`). Publishing `0.8.0-alpha` therefore emits a
-`published/v0_8_0_alpha` module whose containment enum contains only the
-stable-candidate values, and a frozen `config_contract_adapters::v0_8` adapter
-mapping that narrower enum. The mutable `dev` contract keeps the full enum and
-advances to the next development version.
+`wslc`, `isolation_session`). Publication emits a versioned module containing
+only stable-candidate values and a frozen adapter mapping that narrower enum.
+The mutable `dev` contract keeps the full enum and advances.
 
 The published adapter is **forked**, not updated: freezing copies the current dev
-one-shot adapter into `v0_8`, and the `dev` adapter continues to evolve against
-`0.9`. Phase 5B's split of the adapter tests into `stable_candidate.rs` (copied
-at publication) and `experimental.rs` (retained by dev) exists for this fork.
+one-shot adapter into a versioned adapter, and the `dev` adapter continues to
+evolve. Phase 5B's split of the adapter tests into `stable_candidate.rs` and
+`experimental.rs` exists for this fork.
 
 The same fork applies to the `mxc_engine::policy` contract builder introduced by
 the Phase 7 decision 3 resolution. Each supported version has its own builder
 mapping `SandboxPolicy` onto that version's root, so publication freezes a
-`v0_8` builder beside the frozen `v0_8` adapter while `dev`'s builder advances.
+versioned builder beside the frozen adapter while `dev`'s builder advances.
 Publication is therefore a three-way fork — contract module, adapter, builder —
 and all three must be copied together.
 
@@ -1699,12 +1605,7 @@ stable, meaningful fragments where necessary.
 
 ## Phase 6 detailed design
 
-Phase 6 is implemented, but not yet reviewed: it exists as 11 commits on the
-local branch `user/gudge/version_specific_config_parsers_phase6`, branched from
-PR #949 as this section instructed. The branch has not been pushed and no pull
-request has been opened, so nothing here has been through review, and the
-branch predates the current `main`. It will need a rebase once the Phase 5
-stack merges.
+Phase 6 merged in PR #968 after review and CI.
 
 It adds versioned development-contract schema and TypeScript generation without
 changing parser dispatch, corpus validation, or runtime behavior.
@@ -1984,7 +1885,7 @@ this step, so run them immediately before and after.
 Suggested commit boundary: `Share schema rendering between the wire model and
 the contract crate`.
 
-#### Phase 6.5: Rework the generator command line
+#### Phase 6 step 6.5: Rework the generator command line
 
 Replace the positional and `--ts` argument handling with subcommands. `clap` is
 already declared in `[workspace.dependencies]`, but `mxc_schema_gen`'s own
@@ -2185,9 +2086,7 @@ The rolling and exact generated artifact families coexist and are independently
 gated. Parser dispatch, corpus validation, `schemas/schema-version.json`, the
 published contracts, and runtime behavior are unchanged.
 
-They remain unverified by review: the branch is unpushed and has no pull
-request, so no reviewer, no CI run, and no gate outside the author's machine has
-confirmed them.
+Review and CI confirmed the implementation before PR #968 merged.
 
 - The contract crate builds with and without `schema-gen`, the default build
   carries no Schemars dependency, and the crate's dependency boundary is
@@ -2337,7 +2236,7 @@ when it was written, but not one being acted on yet.
 | The one-shot-scoped fixture corpus makes the schema gate assert the wrong thing | Reorganize fixtures per root in Phase 6.7 before wiring the gate; see the worked `state_aware.json` case |
 | Eight-branch `oneOf` degrades editor diagnostics | Resolve decision 6 explicitly, and measure it with the Phase 6 authoring-diagnostics test |
 | The TypeScript emitter cannot express the root `oneOf` | Emit a discriminated union type alias; the drift gate and the SDK build cover it |
-| The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the Phase 6.5 commit |
+| The command line change lands without updating call sites | Only two script call sites and a handful of documentation references exist; update them all in the generator CLI commit |
 
 ## Phase 7 detailed design
 
@@ -2349,11 +2248,8 @@ Phase 6 is `wxc_common/src/lib.rs` and `Cargo.toml`; Phase 6 does not touch
 the one construction impl required by the decision 3 resolution, which Phase 6
 also does not touch.
 
-Because Phase 6 is now implemented on its own unpushed branch from the same
-base, the remaining question is merge order rather than conflict. Whichever
-lands second rebases; if that is Phase 6, its committed artifacts must be
-regenerated rather than merely replayed, or its drift gate will fail on a
-textually clean rebase.
+Phase 6 merged first, so later exact-contract branches build on its generated
+artifact and drift-gate foundation.
 
 ### Phase 7 objective
 
@@ -2660,8 +2556,8 @@ Phase 7.1 is renamed **Phase 7a** and is complete on
 commits, plus a follow-up covering the unconvertible-command entry-point error,
 were squashed into a single commit rebased onto `main` after the Phase 5 stack
 landed. The pre-squash history is retained locally on
-`user/gudge/version_specific_config_parsers_phase7_prerebase`. No pull request
-has been opened, so none of it is reviewed.
+`user/gudge/version_specific_config_parsers_phase7_prerebase`. The result is
+open as PR #969.
 
 The squashed commit covers the steps the plan broke out separately:
 
