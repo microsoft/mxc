@@ -1,25 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::{
-    DeprovisionRequest, ExecRequest, IsolationSessionProvisionRequest, OneShotRequest,
-    StartRequest, StopRequest, WindowsSandboxProvisionRequest, WslcProvisionRequest,
-};
-use serde::de::DeserializeOwned;
+use mxc_config_contract::published::v0_8_0_alpha::Request;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn fixture_directory(root: &str, kind: &str) -> PathBuf {
+fn fixture_directory(kind: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("v0_8_0_alpha")
         .join("fixtures")
-        .join(root)
         .join(kind)
 }
 
-fn read_fixtures(root: &str, kind: &str) -> Vec<(String, String)> {
-    let directory = fixture_directory(root, kind);
+fn read_fixtures(kind: &str) -> Vec<(String, String)> {
+    let directory = fixture_directory(kind);
     let mut paths = fs::read_dir(&directory)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
         .map(|entry| {
@@ -59,31 +54,20 @@ fn read_fixtures(root: &str, kind: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn assert_root_fixtures<T>(root: &str)
-where
-    T: DeserializeOwned,
-{
-    for (name, json) in read_fixtures(root, "valid") {
-        serde_json::from_str::<T>(&json)
-            .unwrap_or_else(|error| panic!("valid fixture '{root}/valid/{name}' failed: {error}"));
-    }
-
-    for (name, json) in read_fixtures(root, "invalid") {
-        assert!(
-            serde_json::from_str::<T>(&json).is_err(),
-            "invalid fixture '{root}/invalid/{name}' was accepted"
-        );
+#[test]
+fn accepts_every_discovered_valid_fixture() {
+    for (name, json) in read_fixtures("valid") {
+        serde_json::from_str::<Request>(&json)
+            .unwrap_or_else(|error| panic!("valid fixture '{name}' was rejected: {error}"));
     }
 }
 
 #[test]
-fn accepts_and_rejects_every_discovered_fixture() {
-    assert_root_fixtures::<OneShotRequest>("one_shot");
-    assert_root_fixtures::<WindowsSandboxProvisionRequest>("windows_sandbox_provision");
-    assert_root_fixtures::<IsolationSessionProvisionRequest>("isolation_session_provision");
-    assert_root_fixtures::<WslcProvisionRequest>("wslc_provision");
-    assert_root_fixtures::<StartRequest>("start");
-    assert_root_fixtures::<ExecRequest>("exec");
-    assert_root_fixtures::<StopRequest>("stop");
-    assert_root_fixtures::<DeprovisionRequest>("deprovision");
+fn rejects_every_discovered_invalid_fixture() {
+    for (name, json) in read_fixtures("invalid") {
+        assert!(
+            serde_json::from_str::<Request>(&json).is_err(),
+            "invalid fixture '{name}' was accepted"
+        );
+    }
 }

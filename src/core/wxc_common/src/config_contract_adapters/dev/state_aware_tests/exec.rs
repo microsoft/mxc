@@ -4,7 +4,7 @@
 use super::super::{contract, exec_into_wire, wire};
 
 const MINIMAL_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "exec",
     "sandboxId": "sandbox-id",
     "process": {
@@ -15,7 +15,7 @@ const MINIMAL_REQUEST_JSON: &str = r#"{
 const ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "$schema": "https://example.com/exec.schema.json",
     "_comment": "This is a comment",
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "exec",
     "sandboxId": "sandbox-id",
     "correlationVector": "correlation-vector",
@@ -45,7 +45,7 @@ const ALL_FIELDS_REQUEST_JSON: &str = r#"{
 fn request_with_fields(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "sandbox-id",
             "process": {{"commandLine": "echo hello"}},
@@ -67,7 +67,7 @@ fn minimal_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Exec)));
     assert_eq!(wire.sandbox_id, Some("sandbox-id".to_string()));
 
@@ -105,7 +105,7 @@ fn request_with_all_fields_maps_expected_wire_fields() {
         wire.comment.as_ref(),
         Some(&serde_json::json!("This is a comment"))
     );
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Exec)));
     assert_eq!(wire.sandbox_id, Some("sandbox-id".to_string()));
     assert_eq!(
@@ -197,7 +197,7 @@ fn empty_network_section_maps_to_present_empty_wire_section() {
 #[test]
 fn empty_identifier_strings_map_expected_wire_fields() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "",
         "correlationVector": "",
@@ -265,7 +265,7 @@ fn empty_network_section_matches_current_wire_deserialization() {
 #[test]
 fn empty_identifier_strings_match_current_wire_deserialization() {
     let json = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "exec",
         "sandboxId": "",
         "correlationVector": "",

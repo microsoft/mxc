@@ -73,8 +73,10 @@ fn development_schema(version: ContractVersion) -> Result<(Value, ContractDescri
     // Keep this exhaustive after the status gate so every future development
     // contract must explicitly wire its schema source into the generator.
     let mut schema = match version {
-        ContractVersion::V0_8_0Alpha => mxc_config_contract::dev::development_schema(),
-        ContractVersion::V0_6_0Alpha | ContractVersion::V0_7_0Alpha => {
+        ContractVersion::V0_9_0Alpha => mxc_config_contract::dev::development_schema(),
+        ContractVersion::V0_8_0Alpha
+        | ContractVersion::V0_6_0Alpha
+        | ContractVersion::V0_7_0Alpha => {
             unreachable!("published contracts were rejected above")
         }
     };
@@ -210,23 +212,23 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|record| record["version"] == "0.8.0-alpha")
+            .find(|record| record["version"] == "0.9.0-alpha")
             .unwrap();
 
         assert_eq!(development["status"], "development");
         assert_eq!(
             development["schemaPath"],
-            "schemas/dev/mxc-config.schema.0.8.0-alpha.json"
+            "schemas/dev/mxc-config.schema.0.9.0-alpha.json"
         );
         assert_eq!(
             development["typescriptPath"],
-            "sdk/node/src/generated/v0_8_0_alpha/wire.ts"
+            "sdk/node/src/generated/v0_9_0_alpha/wire.ts"
         );
     }
 
     #[test]
     fn published_generation_is_rejected() {
-        let error = development_schema(ContractVersion::V0_7_0Alpha).unwrap_err();
+        let error = development_schema(ContractVersion::V0_8_0Alpha).unwrap_err();
         assert!(error.contains("not supported"), "{error}");
     }
 }

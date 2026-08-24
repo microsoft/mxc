@@ -6,14 +6,14 @@ use super::common::{
 };
 
 const MINIMAL_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "echo hello"
     }
 }"#;
 
 const PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "container-id",
     "containment": "processcontainer",
     "lifecycle": {
@@ -64,7 +64,7 @@ const PROCESS_CONTAINER_REQUEST_JSON: &str = r#"{
 }"#;
 
 const PROCESS_CONTAINER_ADDITIONS_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "commandLine": "echo hello"
@@ -80,7 +80,7 @@ const PROCESS_CONTAINER_ADDITIONS_REQUEST_JSON: &str = r#"{
 }"#;
 
 const LXC_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containerId": "container-id",
     "containment": "lxc",
     "lifecycle": {
@@ -119,7 +119,7 @@ const LXC_REQUEST_JSON: &str = r#"{
 }"#;
 
 const SEATBELT_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hello",
@@ -152,7 +152,7 @@ const SEATBELT_REQUEST_JSON: &str = r#"{
 }"#;
 
 const EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "process": {
         "commandLine": "echo hello"
     },
@@ -164,7 +164,7 @@ const EMPTY_OPTIONAL_SECTIONS_REQUEST_JSON: &str = r#"{
 }"#;
 
 const EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "commandLine": "echo hello"
@@ -173,7 +173,7 @@ const EMPTY_PROCESS_CONTAINER_SECTION_REQUEST_JSON: &str = r#"{
 }"#;
 
 const EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "commandLine": "echo hello"
@@ -184,7 +184,7 @@ const EMPTY_PROCESS_CONTAINER_UI_SECTION_REQUEST_JSON: &str = r#"{
 }"#;
 
 const EMPTY_SEATBELT_SECTION_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hello"
@@ -193,7 +193,7 @@ const EMPTY_SEATBELT_SECTION_REQUEST_JSON: &str = r#"{
 }"#;
 
 const APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {
         "commandLine": "echo hello"
@@ -205,7 +205,7 @@ const APP_CONTAINER_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
 }"#;
 
 const MACOS_SANDBOX_SECTION_ALIAS_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "seatbelt",
     "process": {
         "commandLine": "echo hello"
@@ -294,7 +294,7 @@ const CAPTURE_DENIALS_MODE_CASES: &[&str] = &["block", "allow"];
 fn request_with_comment(comment: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "_comment": {comment},
             "process": {{"commandLine": "echo hello"}}
         }}"#
@@ -304,7 +304,7 @@ fn request_with_comment(comment: &str) -> String {
 fn request_with_proxy(proxy_json: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "network": {{"proxy": {proxy_json}}}
         }}"#
@@ -314,7 +314,7 @@ fn request_with_proxy(proxy_json: &str) -> String {
 fn request_with_default_network_policy(default_policy: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "network": {{"defaultPolicy": "{default_policy}"}}
         }}"#
@@ -324,7 +324,7 @@ fn request_with_default_network_policy(default_policy: &str) -> String {
 fn request_with_network_enforcement_mode(enforcement_mode: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "network": {{"enforcementMode": "{enforcement_mode}"}}
         }}"#
@@ -334,7 +334,7 @@ fn request_with_network_enforcement_mode(enforcement_mode: &str) -> String {
 fn request_with_ui_clipboard(clipboard: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "ui": {{"clipboard": "{clipboard}"}}
         }}"#
@@ -344,7 +344,7 @@ fn request_with_ui_clipboard(clipboard: &str) -> String {
 fn request_with_process_container_ui_isolation(isolation: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "processContainer": {{"ui": {{"isolation": "{isolation}"}}}}
         }}"#
@@ -354,7 +354,7 @@ fn request_with_process_container_ui_isolation(isolation: &str) -> String {
 fn request_with_capture_denials_mode(mode: &str) -> String {
     format!(
         r#"{{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "containment": "processcontainer",
         "process": {{"commandLine": "echo"}},
         "processContainer": {{
@@ -367,7 +367,7 @@ fn request_with_capture_denials_mode(mode: &str) -> String {
 fn request_with_seatbelt_launch_method(launch_method: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {{"commandLine": "echo hello"}},
             "seatbelt": {{"launchMethod": "{launch_method}"}}
         }}"#
@@ -382,7 +382,7 @@ fn minimal_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.correlation_vector.is_none());
@@ -414,7 +414,7 @@ fn process_container_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.correlation_vector.is_none());
@@ -516,7 +516,7 @@ fn lxc_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.correlation_vector.is_none());
@@ -588,7 +588,7 @@ fn seatbelt_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(wire.phase.is_none());
     assert!(wire.sandbox_id.is_none());
     assert!(wire.correlation_vector.is_none());
@@ -738,7 +738,7 @@ fn annotations_map_expected_wire_fields() {
     let json = r#"{
         "$schema": "https://example.com/schema.json",
         "_comment": "This is a comment",
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "process": {"commandLine": "echo hello"}
     }"#;
 
@@ -1124,7 +1124,7 @@ fn annotations_match_current_wire_deserialization() {
     let json = r#"{
             "$schema": "https://example.com/schema.json",
             "_comment": "This is a comment",
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {"commandLine": "echo hello"}
         }"#;
 
@@ -1132,7 +1132,7 @@ fn annotations_match_current_wire_deserialization() {
 }
 
 const DIRECTIONAL_NETWORK_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "processcontainer",
     "process": {"commandLine": "echo hello"},
     "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
@@ -1276,7 +1276,7 @@ fn every_network_action_maps_to_the_expected_wire_value() {
         let expected = declared;
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "network": {{
                     "egress": {{"default": "{declared}"}},
@@ -1311,7 +1311,7 @@ fn every_network_protocol_maps_to_the_expected_wire_value() {
         let expected = declared;
         let json = format!(
             r#"{{
-                "version": "0.8.0-alpha",
+                "version": "0.9.0-alpha",
                 "process": {{"commandLine": "echo hello"}},
                 "network": {{
                     "egress": {{"allow": [{{"ports": [{{"protocol": "{declared}"}}]}}]}}
