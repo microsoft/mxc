@@ -12,7 +12,6 @@ use std::time::Instant;
 
 use appcontainer_common::appcontainer_runner::delete_app_container_profile;
 use clap::Parser;
-use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext, CommandLineError};
 use wxc_common::config_parser::{
     load_mxc_request_with_options, load_request, LoadOptions, ParseError,
 };
@@ -22,7 +21,7 @@ use wxc_common::models::{ContainmentBackend, ExecutionRequest, ScriptResponse};
 use wxc_common::mxc_error::{MxcError, ResponseEnvelope};
 use wxc_common::script_runner::{handle_dry_run_exit, ScriptRunner};
 use wxc_common::state_aware_dispatch::{resolve_backend, DispatchOutcome};
-use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest, Phase};
+use wxc_common::state_aware_request::{MxcRequest, ParsedStateAwareRequest};
 use wxc_common::telemetry;
 
 #[derive(Parser)]
@@ -174,10 +173,6 @@ fn display_script_results(response: &ScriptResponse, logger: &mut Logger) {
     }
 }
 
-fn has_cli_command(cli: &Cli) -> bool {
-    !cli.command.is_empty()
-}
-
 fn apply_permissive_learning_mode(capabilities: &mut Vec<String>) -> bool {
     capabilities.retain(|capability| !capability.eq_ignore_ascii_case("learningModeLogging"));
     if capabilities
@@ -206,67 +201,6 @@ fn validate_audit_request(request: &ExecutionRequest) -> Result<(), String> {
         return Err(AUDIT_CAPTURE_DENIALS_CONFLICT_MSG.to_string());
     }
     Ok(())
-}
-
-fn command_override_from_cli(
-    cli: &Cli,
-    context: CommandLineContext,
-) -> Result<Option<String>, CommandLineError> {
-    if cli.command.is_empty() {
-        Ok(None)
-    } else {
-        cmdline_from_argv_for_context(&cli.command, context).map(Some)
-    }
-}
-
-fn command_override_context_for_state_aware(
-    parsed: &ParsedStateAwareRequest,
-    has_command_override: bool,
-) -> Result<Option<CommandLineContext>, MxcError> {
-    if !has_command_override {
-        return Ok(None);
-    }
-    if parsed.phase != Phase::Exec {
-        return Err(MxcError::malformed_request(
-            "CLI command override is only supported for state-aware exec requests",
-        ));
-    }
-    resolve_backend(parsed).map(|backend| Some(CommandLineContext::for_backend(&backend)))
-}
-
-fn apply_cli_command_override(
-    request: &mut ExecutionRequest,
-    cli: &Cli,
-    context: CommandLineContext,
-    logger: &mut Logger,
-) -> Result<(), CommandLineError> {
-    let Some(command) = command_override_from_cli(cli, context)? else {
-        return Ok(());
-    };
-
-    if !request.script_code.is_empty() {
-        let _ = writeln!(
-            logger,
-            "Overriding policy process.commandLine with CLI command: {command}"
-        );
-    }
-    request.script_code = command;
-    Ok(())
-}
-
-fn apply_state_aware_cli_command_override(
-    parsed: &mut ParsedStateAwareRequest,
-    cli: &Cli,
-    logger: &mut Logger,
-) -> Result<(), MxcError> {
-    let Some(context) = command_override_context_for_state_aware(parsed, has_cli_command(cli))?
-    else {
-        return Ok(());
-    };
-
-    apply_cli_command_override(&mut parsed.request, cli, context, logger).map_err(|error| {
-        MxcError::malformed_request(format!("invalid CLI command override: {error}"))
-    })
 }
 
 /// The plan for producing this phase's correlation vector, derived
@@ -964,40 +898,33 @@ fn main() {
     // one-shot. State-aware failures emit a JSON envelope on stdout; one-shot
     // and pre-discrimination failures keep the existing diagnostic-on-stderr
     // convention.
-    let has_command_override = has_cli_command(&cli);
     let load_opts = LoadOptions {
         is_base64,
-        allow_missing_command: has_command_override,
+        cli_command: &cli.command,
     };
-    let parsed_request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
-        Ok(request) => request,
+    let request = match load_mxc_request_with_options(&config_data, &mut logger, load_opts) {
+        Ok(MxcRequest::OneShot(req)) => req,
+        Ok(MxcRequest::StateAware(mut parsed)) => {
+            // Mirror what the one-shot path does at the post-dispatch stage
+            // below: copy the CLI `--experimental` flag into the parsed
+            // request so backends that gate on it (e.g. Windows Sandbox
+            // experimental features) see the same value regardless of which
+            // dispatch branch the request entered through. Without this, the
+            // state-aware path runs without the gate -- a phase-envelope request
+            // could provision/start/exec experimental backends with no
+            // `--experimental` on the CLI.
+            parsed.request.experimental_enabled = cli.experimental;
+            parsed.request.dry_run = cli.dry_run;
+            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
+        }
         Err(ParseError::OneShot(_)) | Err(ParseError::Decode(_)) => {
             eprint!("Request error\n{}", logger.get_buffer());
             process::exit(1);
         }
-        Err(ParseError::StateAware(error)) => {
-            print_error_envelope(&error);
+        Err(ParseError::StateAware(e)) => {
+            print_error_envelope(&e);
             eprint!("{}", logger.get_buffer());
             process::exit(1);
-        }
-    };
-
-    let request = match parsed_request {
-        MxcRequest::OneShot(request) => request,
-        MxcRequest::StateAware(mut parsed) => {
-            if let Err(error) =
-                apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger)
-            {
-                print_error_envelope(&error);
-                eprint!("{}", logger.get_buffer());
-                process::exit(1);
-            }
-
-            // State-aware dispatch never reaches the one-shot flag setup below.
-            // Apply these flags first so experimental backends remain gated.
-            parsed.request.experimental_enabled = cli.experimental;
-            parsed.request.dry_run = cli.dry_run;
-            run_state_aware_main(parsed, cli.dry_run, cli.experimental, &mut logger)
         }
     };
 
@@ -1025,21 +952,6 @@ fn main() {
     if telemetry_active {
         telemetry::set_process_context(&request.containment);
         telemetry::install_panic_hook();
-    }
-
-    // Apply the CLI command-line override to one-shot requests. State-aware
-    // exec is handled above before dispatch.
-    let command_context = CommandLineContext::for_backend(&request.containment);
-    if let Err(error) = apply_cli_command_override(&mut request, &cli, command_context, &mut logger)
-    {
-        eprintln!("Request error\ninvalid CLI command override: {error}");
-        eprint!("{}", logger.get_buffer());
-        telemetry::emit_early_exit(
-            telemetry_active,
-            &request.containment,
-            telemetry::FailureReason::ConfigError,
-        );
-        process::exit(1);
     }
 
     // --audit injects permissiveLearningMode so denied operations are logged
@@ -1315,11 +1227,11 @@ mod tests {
     use super::*;
 
     use clap::{CommandFactory, Parser};
+    use wxc_common::cmdline::{cmdline_from_argv_for_context, CommandLineContext};
     use wxc_common::encoding::base64_encode;
-    use wxc_common::error::WxcError;
     use wxc_common::logger::Mode;
     use wxc_common::mxc_error::MxcErrorCode;
-    use wxc_common::state_aware_request::MxcRequest;
+    use wxc_common::state_aware_request::{MxcRequest, Phase};
 
     fn parse_cli(argv: &[&str]) -> Cli {
         Cli::try_parse_from(argv)
@@ -1338,50 +1250,26 @@ mod tests {
     /// Resolves a CLI argv plus a policy document into the request the driver
     /// would dispatch, together with the logger buffer.
     ///
-    /// This mirrors `main()`'s load-then-override sequence in one place so the
-    /// tests below assert on **outcomes** — the resolved `script_code`, the
-    /// error and its routing, the override log — rather than on the
-    /// intermediate call shape. `main()` itself cannot be called from a test,
-    /// and the sequence it runs is exactly what is expected to be restructured
-    /// as command resolution moves earlier in the pipeline. Keeping the
-    /// assertions off the call shape means such a change edits this helper's
-    /// body and leaves every test below untouched, which is the only way these
-    /// tests can serve as evidence that the behavior was preserved.
+    /// This mirrors `main()`'s load sequence in one place so the tests below
+    /// assert on **outcomes** — the resolved `script_code`, the error and its
+    /// routing, the override log — rather than on the intermediate call shape.
+    /// `main()` itself cannot be called from a test. Every assertion below is
+    /// unchanged from before the command was resolved ahead of the parser; only
+    /// this helper's body moved, which is the evidence that the entry-point
+    /// behavior was preserved.
     ///
-    /// Errors are normalised onto [`ParseError`] so the variant records the
-    /// driver's output convention: `StateAware` is the JSON envelope on stdout,
-    /// `OneShot` and `Decode` are the stderr diagnostic.
+    /// Errors stay `ParseError` so the variant records the driver's output
+    /// convention: `StateAware` is the JSON envelope on stdout, `OneShot` and
+    /// `Decode` are the stderr diagnostic.
     fn resolve_with_cli(argv: &[&str], policy: &str) -> (Result<MxcRequest, ParseError>, String) {
         let cli = parse_cli(argv);
         let mut logger = test_logger();
         let opts = LoadOptions {
             is_base64: true,
-            allow_missing_command: has_cli_command(&cli),
+            cli_command: &cli.command,
         };
 
-        let result = (|| {
-            let request =
-                load_mxc_request_with_options(&encoded_policy(policy), &mut logger, opts)?;
-
-            match request {
-                MxcRequest::OneShot(mut request) => {
-                    let context = CommandLineContext::for_backend(&request.containment);
-                    apply_cli_command_override(&mut request, &cli, context, &mut logger).map_err(
-                        |error| {
-                            ParseError::Decode(WxcError::ConfigParse(format!(
-                                "invalid CLI command override: {error}"
-                            )))
-                        },
-                    )?;
-                    Ok(MxcRequest::OneShot(request))
-                }
-                MxcRequest::StateAware(mut parsed) => {
-                    apply_state_aware_cli_command_override(&mut parsed, &cli, &mut logger)
-                        .map_err(ParseError::StateAware)?;
-                    Ok(MxcRequest::StateAware(parsed))
-                }
-            }
-        })();
+        let result = load_mxc_request_with_options(&encoded_policy(policy), &mut logger, opts);
 
         (result, logger.get_buffer().to_string())
     }
@@ -1526,10 +1414,9 @@ mod tests {
             vec!["python".to_string(), "--version".to_string()]
         );
         assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::WindowsCreateProcess)
+                .unwrap(),
+            "python --version"
         );
     }
 
@@ -1551,10 +1438,9 @@ mod tests {
             vec!["python".to_string(), "--version".to_string()]
         );
         assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::WindowsCreateProcess)
+                .unwrap(),
+            "python --version"
         );
     }
 
@@ -1578,10 +1464,9 @@ mod tests {
             vec!["python".to_string(), "--version".to_string()]
         );
         assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::WindowsCreateProcess)
+                .unwrap(),
+            "python --version"
         );
     }
 
@@ -1604,10 +1489,9 @@ mod tests {
             vec!["python".to_string(), "--version".to_string()]
         );
         assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("python --version")
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::WindowsCreateProcess)
+                .unwrap(),
+            "python --version"
         );
     }
 
@@ -1629,10 +1513,9 @@ mod tests {
             vec!["-command".to_string(), "value".to_string()]
         );
         assert_eq!(
-            command_override_from_cli(&cli, CommandLineContext::WindowsCreateProcess)
-                .unwrap()
-                .as_deref(),
-            Some("-command value")
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::WindowsCreateProcess)
+                .unwrap(),
+            "-command value"
         );
     }
 
@@ -1730,7 +1613,7 @@ mod tests {
     fn cli_command_quoting_for_windows_create_process_in_resolved_request() {
         // The three `*_in_resolved_request` quoting tests assert what reaches
         // `script_code` after the whole pipeline, including the derivation of
-        // the context from the resolved backend. The `command_override_from_cli`
+        // the context from the resolved backend. The `cmdline_from_argv_for_context`
         // tests below assert the intermediate conversion only.
         let policy = r#"{"containment": "processcontainer", "process": {}}"#;
 
@@ -1829,10 +1712,11 @@ mod tests {
             "-c",
             "if 5 < 10: print('hello')",
         ]);
-        let command_override =
-            command_override_from_cli(&cli, CommandLineContext::WindowsCommandProcessor)
-                .unwrap()
-                .unwrap();
+        let command_override = cmdline_from_argv_for_context(
+            &cli.command,
+            CommandLineContext::WindowsCommandProcessor,
+        )
+        .unwrap();
 
         assert_eq!(command_override, "python -c \"if 5 < 10: print('hello')\"");
     }
@@ -1840,9 +1724,8 @@ mod tests {
     #[test]
     fn wslc_cli_command_uses_posix_shell_quoting() {
         let cli = parse_cli(&["wxc-exec", "policy.json", "--", "echo", "safe&whoami"]);
-        let command_override = command_override_from_cli(&cli, CommandLineContext::PosixShell)
-            .unwrap()
-            .unwrap();
+        let command_override =
+            cmdline_from_argv_for_context(&cli.command, CommandLineContext::PosixShell).unwrap();
 
         assert_eq!(command_override, "echo 'safe&whoami'");
     }

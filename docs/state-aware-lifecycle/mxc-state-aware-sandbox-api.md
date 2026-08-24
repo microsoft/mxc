@@ -1107,19 +1107,16 @@ dispatch-time typing.
 
 ```rust
 // In config_parser.rs — discrimination is by presence of the `phase` key in
-// the source JSON without building a full untyped request tree.
+// the source JSON without building a full untyped request tree. Any CLI
+// command override has already been spliced into `process.commandLine` by
+// this point, so the document is complete.
 let discriminator: RequestDiscriminator<'_> =
     config_deserialize::from_str(&json_str)?;
 if discriminator.phase.is_some() {
-    convert_wire_state_aware(
-        &json_str,
-        discriminator.experimental,
-        logger,
-        allow_missing_command,
-    )
+    convert_wire_state_aware(&json_str, discriminator.experimental, logger)
 } else {
     let cfg: wire::MxcConfig = config_deserialize::from_str(&json_str)?;
-    convert_wire_config(cfg, logger, true, allow_missing_command)
+    convert_wire_config(cfg, logger, true)
 }
 ```
 
