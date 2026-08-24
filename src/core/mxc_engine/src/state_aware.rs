@@ -381,6 +381,19 @@ mod tests {
     use wxc_common::state_aware_request::Phase;
 
     #[test]
+    fn parse_state_aware_restores_command_line() {
+        let json = r#"{
+            "phase": "exec",
+            "sandboxId": "iso:abcd1234",
+            "process": {"commandLine": "cmd.exe /c echo from sdk"}
+        }"#;
+
+        let parsed = parse_state_aware(json, true).unwrap();
+
+        assert_eq!(parsed.request.script_code, "cmd.exe /c echo from sdk");
+    }
+
+    #[test]
     fn experimental_backend_requires_optin() {
         let parsed = ParsedStateAwareRequest {
             request: ExecutionRequest::default(),
