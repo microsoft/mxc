@@ -1,0 +1,8 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "start",
+  "sandboxId": "example:12345678",
+  "process": {
+    "commandLine": "echo invalid"
+  }
+}

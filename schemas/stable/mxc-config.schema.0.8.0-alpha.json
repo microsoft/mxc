@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json",
+  "$id": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
   "title": "MXC Configuration",
-  "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
+  "description": "MXC container execution configuration. Defines the stable, non-experimental surface for one-shot sandbox execution requests.",
   "additionalProperties": false,
   "definitions": {
     "BaseProcessUi": {
@@ -106,7 +106,7 @@
       "type": "string"
     },
     "Containment": {
-      "description": "Containment backend (abstract intent or concrete backend).",
+      "description": "Stable containment backend (abstract process intent or concrete backend).",
       "oneOf": [
         {
           "description": "OS-native process sandbox (resolved per host).",
@@ -123,44 +123,9 @@
           "type": "string"
         },
         {
-          "description": "VM-class isolation (resolved per host).",
-          "enum": [
-            "vm"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Windows Sandbox (experimental).",
-          "enum": [
-            "windows_sandbox"
-          ],
-          "type": "string"
-        },
-        {
           "description": "Full Linux container.",
           "enum": [
             "lxc"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "NanVix micro-VM (experimental).",
-          "enum": [
-            "microvm"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "Hyperlight micro-VM (experimental).",
-          "enum": [
-            "hyperlight"
-          ],
-          "type": "string"
-        },
-        {
-          "description": "WSL container (experimental).",
-          "enum": [
-            "wslc"
           ],
           "type": "string"
         },
@@ -172,13 +137,6 @@
           "type": "string"
         },
         {
-          "description": "Windows IsolationSession (experimental).",
-          "enum": [
-            "isolation_session"
-          ],
-          "type": "string"
-        },
-        {
           "description": "Unprivileged Linux bubblewrap sandbox.",
           "enum": [
             "bubblewrap"
@@ -186,78 +144,6 @@
           "type": "string"
         }
       ]
-    },
-    "Experimental": {
-      "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
-      "properties": {
-        "isolation_session": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationSession"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "IsolationSession backend config (Windows)."
-        },
-        "seatbelt": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Seatbelt"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Seatbelt backend config (pre-promotion alias)."
-        },
-        "telemetry": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Telemetry"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Telemetry configuration."
-        },
-        "test": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/TestFeature"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Placeholder feature for testing experimental infrastructure."
-        },
-        "windows_sandbox": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WindowsSandbox"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Windows Sandbox backend config."
-        },
-        "wslc": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Wslc"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "WSL container backend config."
-        }
-      },
-      "type": "object"
     },
     "Fallback": {
       "additionalProperties": false,
@@ -304,36 +190,6 @@
           },
           "type": [
             "array",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "IsolationSession": {
-      "description": "IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.",
-      "properties": {
-        "provision": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/IsolationSessionProvisionPhase"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "State-aware provision-phase configuration."
-        }
-      },
-      "type": "object"
-    },
-    "IsolationSessionProvisionPhase": {
-      "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nThe only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
-      "properties": {
-        "appId": {
-          "description": "Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
-          "type": [
-            "string",
             "null"
           ]
         }
@@ -629,8 +485,8 @@
       "properties": {
         "endPort": {
           "description": "Inclusive end of a destination-port range. Requires `port`.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
+          "maximum": 65535,
+          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -638,8 +494,8 @@
         },
         "port": {
           "description": "Destination port. Omission matches every port.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
+          "maximum": 65535,
+          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -698,50 +554,6 @@
       },
       "type": "object"
     },
-    "Phase": {
-      "description": "State-aware lifecycle phase.",
-      "enum": [
-        "provision",
-        "start",
-        "exec",
-        "stop",
-        "deprovision"
-      ],
-      "type": "string"
-    },
-    "PortMapping": {
-      "description": "A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
-      "properties": {
-        "containerPort": {
-          "description": "Container port.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
-          "type": "integer"
-        },
-        "protocol": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/TransportProtocol"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Transport protocol for the mapping. Only `tcp` is currently supported."
-        },
-        "windowsPort": {
-          "description": "Host (Windows) port.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
-          "type": "integer"
-        }
-      },
-      "required": [
-        "containerPort",
-        "windowsPort"
-      ],
-      "type": "object"
-    },
     "Process": {
       "additionalProperties": false,
       "description": "Process execution settings.",
@@ -772,7 +584,8 @@
         },
         "timeout": {
           "description": "Wall-clock timeout in milliseconds.",
-          "minimum": 0.0,
+          "maximum": 4294967295,
+          "minimum": 0,
           "type": [
             "integer",
             "null"
@@ -872,8 +685,8 @@
         },
         "localhost": {
           "description": "External localhost proxy port.",
-          "maximum": 65535.0,
-          "minimum": 1.0,
+          "maximum": 65535,
+          "minimum": 1,
           "type": [
             "integer",
             "null"
@@ -959,39 +772,6 @@
       },
       "type": "object"
     },
-    "Telemetry": {
-      "description": "Telemetry configuration (`experimental.telemetry`).",
-      "properties": {
-        "enabled": {
-          "description": "Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "TestFeature": {
-      "description": "Placeholder experimental feature.",
-      "properties": {
-        "message": {
-          "description": "Message to log when the feature is applied.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "TransportProtocol": {
-      "description": "Port-forward transport protocol. Only `tcp` is currently supported by the vendored WSLC SDK runtime; `udp` is rejected at parse time.",
-      "enum": [
-        "tcp"
-      ],
-      "type": "string"
-    },
     "Ui": {
       "additionalProperties": false,
       "description": "Cross-platform UI isolation policy.",
@@ -1033,135 +813,11 @@
         "container"
       ],
       "type": "string"
-    },
-    "WindowsSandbox": {
-      "description": "Windows Sandbox backend config.",
-      "properties": {
-        "daemonPipeName": {
-          "description": "Daemon named-pipe override.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "idleTimeout": {
-          "description": "Idle timeout (legacy seconds field).",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "idleTimeoutMs": {
-          "description": "Idle timeout before teardown (ms).",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "Wslc": {
-      "description": "WSL container backend config.",
-      "properties": {
-        "cpuCount": {
-          "description": "vCPU count.",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "gpu": {
-          "description": "Enable GPU passthrough.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
-        "image": {
-          "description": "Container image reference.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "imageTarPath": {
-          "description": "Path to a local image tarball.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "memoryMb": {
-          "description": "Memory limit (MB).",
-          "minimum": 0.0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        },
-        "portMappings": {
-          "description": "Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.",
-          "items": {
-            "$ref": "#/definitions/PortMapping"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
-        "provision": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/WslcProvisionPhase"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases."
-        },
-        "storagePath": {
-          "description": "Storage path override.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "targetOs": {
-          "description": "OS inside the WSL container.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "WslcProvisionPhase": {
-      "description": "Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).\n\nFilesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.",
-      "properties": {
-        "image": {
-          "description": "Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "imageTarPath": {
-          "description": "Path to a local image tarball to import instead of pulling.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
     }
   },
+  "required": [
+    "process"
+  ],
   "properties": {
     "$schema": {
       "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.",
@@ -1189,25 +845,7 @@
           "type": "null"
         }
       ],
-      "description": "Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time."
-    },
-    "correlationVector": {
-      "description": "Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless experimental telemetry is enabled; not valid on one-shot requests.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "experimental": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Experimental"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "Experimental features. Only honored when `--experimental` is passed."
+      "description": "Containment backend to use for execution. Accepts the abstract `process` intent and stable concrete backends; the binary resolves the intent to a concrete backend per host at run time."
     },
     "fallback": {
       "anyOf": [
@@ -1264,17 +902,6 @@
       ],
       "description": "Network access policy. Shared across all backends."
     },
-    "phase": {
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Phase"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "description": "State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot."
-    },
     "process": {
       "anyOf": [
         {
@@ -1308,13 +935,6 @@
       ],
       "description": "Runtime values supplied alongside, but separate from, sandbox policy."
     },
-    "sandboxId": {
-      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",
-      "type": [
-        "string",
-        "null"
-      ]
-    },
     "seatbelt": {
       "anyOf": [
         {
@@ -1338,7 +958,7 @@
       "description": "Cross-platform UI isolation policy."
     },
     "version": {
-      "description": "MXC config schema version (semver), e.g. `\"0.8.0-alpha\"`.",
+      "description": "MXC config schema version (semver). Current stable: `0.8.0-alpha`.",
       "type": [
         "string",
         "null"

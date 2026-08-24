@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 
 use super::primitives::{NonEmptyString, OptionalField};
+use serde::{de, Deserialize, Deserializer};
 
 /// Container lifecycle settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lifecycle {
     /// Whether to destroy the container when execution ends.
@@ -17,6 +19,7 @@ pub struct Lifecycle {
 
 /// Process execution settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Process {
     /// The non-empty command line to execute.
@@ -34,6 +37,7 @@ pub struct Process {
 
 /// Filesystem access policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Filesystem {
     /// Optional paths granted read-write access.
@@ -49,6 +53,7 @@ pub struct Filesystem {
 
 /// Operator consent for containment fallback behavior.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Fallback {
     /// Whether the runtime may mutate host filesystem DACLs as a fallback.
@@ -73,6 +78,7 @@ string_enum! {
 
 /// Cross-platform user-interface policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Ui {
     /// Whether visible user interface is disabled.
@@ -103,6 +109,7 @@ string_enum! {
 
 /// ProcessContainer-specific user-interface policy.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainerUi {
     /// Optional desktop-resource isolation level.
@@ -132,6 +139,7 @@ string_enum! {
 
 /// Windows denial-capture settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaptureDenials {
     /// How each ungranted access is handled while it is recorded.
@@ -147,8 +155,110 @@ pub struct CaptureDenials {
     pub retain_etl: OptionalField<bool>,
 }
 
+/// An AppContainer capability name supplied by the caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessContainerCapability(String);
+
+const RESERVED_CAPABILITIES: &[&str] = &["learningModeLogging", "permissiveLearningMode"];
+
+impl ProcessContainerCapability {
+    /// Creates a validated capability name.
+    ///
+    /// Commas are rejected because BaseContainer uses them as its wire
+    /// delimiter. Learning-mode capabilities are reserved for MXC's dedicated
+    /// learning-mode and denial-capture controls.
+    pub fn new(value: String) -> Result<Self, String> {
+        if value.contains(',') {
+            return Err(
+                "capability must not contain a comma; provide multiple capabilities as separate array entries, for example [\"internetClient\", \"privateNetworkClientServer\"]"
+                    .to_string(),
+            );
+        }
+        if RESERVED_CAPABILITIES
+            .iter()
+            .any(|reserved| value.eq_ignore_ascii_case(reserved))
+        {
+            return Err(
+                "learningModeLogging and permissiveLearningMode are reserved; use learningMode, --audit, or captureDenials instead"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the validated capability name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the validated capability name.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ProcessContainerCapability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
+#[cfg(feature = "schema-gen")]
+fn ascii_case_insensitive_literal(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len() * 4);
+    for character in value.chars() {
+        if character.is_ascii_alphabetic() {
+            pattern.push('[');
+            pattern.push(character.to_ascii_lowercase());
+            pattern.push(character.to_ascii_uppercase());
+            pattern.push(']');
+        } else {
+            if r"\.^$|?*+()[]{}".contains(character) {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+        }
+    }
+    pattern
+}
+
+#[cfg(feature = "schema-gen")]
+fn capability_schema_pattern() -> String {
+    let reserved = RESERVED_CAPABILITIES
+        .iter()
+        .map(|value| ascii_case_insensitive_literal(value))
+        .collect::<Vec<_>>()
+        .join("|");
+    format!(r"^(?![\s\S]*,)(?!(?:{reserved})$)[\s\S]*$")
+}
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for ProcessContainerCapability {
+    fn schema_name() -> String {
+        "ProcessContainerCapability".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec, StringValidation};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                pattern: Some(capability_schema_pattern()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
 /// ProcessContainer-specific settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProcessContainer {
     /// Whether least-privilege mode is enabled.
@@ -157,19 +267,48 @@ pub struct ProcessContainer {
     /// Optional learning-mode (deny-and-record)
     #[serde(default)]
     pub learning_mode: OptionalField<bool>,
-    /// Optional AppContainer capability names.
+    /// Optional AppContainer capability names. Each entry must contain one
+    /// name; commas are rejected because BaseContainer uses them as its wire
+    /// delimiter. `learningModeLogging` and `permissiveLearningMode` are
+    /// reserved; use `learningMode`, `--audit`, or `captureDenials` instead.
     #[serde(default)]
-    pub capabilities: OptionalField<Vec<String>>,
+    pub capabilities: OptionalField<Vec<ProcessContainerCapability>>,
     /// Optional capture-denials policy.
     #[serde(default)]
     pub capture_denials: OptionalField<CaptureDenials>,
     /// Optional ProcessContainer-specific user-interface policy.
     #[serde(default)]
     pub ui: OptionalField<ProcessContainerUi>,
+    /// Optional ProcessContainer-specific network settings.
+    #[serde(default)]
+    pub network: OptionalField<ProcessContainerNetwork>,
+}
+
+/// ProcessContainer-specific network settings.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProcessContainerNetwork {
+    /// Optional loopback peer the contained process may reach in addition to
+    /// the configured runtime proxy. Requires `runtimeConfig.networkProxy`.
+    #[serde(default)]
+    pub allowed_proxy_peer: OptionalField<String>,
+}
+
+/// Runtime configuration supplied alongside the sandbox policy.
+#[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RuntimeConfig {
+    /// Optional loopback proxy the runtime configures for the sandbox. Must
+    /// address localhost, and requires an egress policy.
+    #[serde(default)]
+    pub network_proxy: OptionalField<String>,
 }
 
 /// Linux LXC distribution settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Lxc {
     /// The Linux distribution name.
@@ -191,6 +330,7 @@ string_enum! {
 
 /// macOS Seatbelt backend settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Seatbelt {
     /// Optional override of the generated sandbox profile.

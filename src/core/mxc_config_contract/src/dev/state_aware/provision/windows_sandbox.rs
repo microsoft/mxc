@@ -13,6 +13,7 @@ string_marker! {
 
 /// Experimental settings accepted by a Windows Sandbox provision request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WindowsSandboxExperimental {
     /// Optional telemetry override.
@@ -22,6 +23,7 @@ pub struct WindowsSandboxExperimental {
 
 /// A complete state-aware `provision` request for windows_sandbox
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WindowsSandboxProvisionRequest {
     /// Optional JSON Schema reference for editor validation.

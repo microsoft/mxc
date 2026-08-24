@@ -5,7 +5,7 @@
 //!
 //! Walks the generated JSON Schema as a `serde_json::Value` — built from the
 //! `MxcConfig` wire model, the same value that
-//! [`crate::wire::generate_config_schema_json`] renders to JSON text — and emits
+//! [`crate::render_root_ordered`] renders to JSON text — and emits
 //! the SDK's wire TypeScript types, with no third-party generator.
 //! The result is `sdk/node/src/generated/wire.ts`, a drift oracle that the SDK's
 //! hand-written public types are asserted to conform to (and that a CI gate
@@ -20,7 +20,7 @@
 
 use serde_json::Value;
 
-const BANNER: &str = "\
+const LEGACY_BANNER: &str = "\
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
@@ -29,14 +29,15 @@ const BANNER: &str = "\
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
+ * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
+ * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
+ * API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
  */
 ";
 
@@ -45,9 +46,35 @@ const BANNER: &str = "\
 const ROOT_NAME: &str = "MXCConfiguration";
 
 /// Emit the full `wire.ts` content for the given schema root value.
-pub fn emit_ts(schema: &Value) -> String {
+pub(crate) fn emit_ts(schema: &Value) -> String {
+    emit_ts_with_banner(schema, LEGACY_BANNER)
+}
+
+pub(crate) fn emit_contract_ts(schema: &Value, version: &str) -> String {
+    let banner = format!(
+        "\
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+/* eslint-disable */
+/**
+ * GENERATED FILE — DO NOT EDIT BY HAND.
+ *
+ * Emitted from the exact MXC {version} development contract by
+ * mxc_schema_gen. This is a drift oracle, not public API, and is not exported
+ * from the SDK.
+ *
+ * Regenerate with:
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version {version} --out sdk/node/src/generated/v0_8_0_alpha/wire.ts
+ */
+"
+    );
+    emit_ts_with_banner(schema, &banner)
+}
+
+fn emit_ts_with_banner(schema: &Value, banner: &str) -> String {
     let root = schema.as_object().expect("schema root is an object");
-    let mut out = String::from(BANNER);
+    let mut out = String::from(banner);
 
     if let Some(Value::Object(defs)) = root.get("definitions") {
         for (name, def) in defs {
@@ -55,10 +82,52 @@ pub fn emit_ts(schema: &Value) -> String {
         }
     }
 
-    // The root itself is an object schema; emit it as the top-level interface.
-    emit_object(&mut out, ROOT_NAME, root);
+    if root.contains_key("properties") {
+        emit_object(&mut out, ROOT_NAME, root);
+    } else {
+        emit_root_union(&mut out, root);
+    }
 
     out
+}
+
+fn emit_root_union(out: &mut String, root: &serde_json::Map<String, Value>) {
+    let mut references = Vec::new();
+    for (key, value) in root {
+        if key != "definitions" {
+            collect_references(value, &mut references);
+        }
+    }
+    references.dedup();
+
+    push_doc(out, root.get("description"));
+    let union = references
+        .iter()
+        .map(|reference| ref_name(reference))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    out.push_str(&format!("export type {ROOT_NAME} = {union};\n"));
+}
+
+fn collect_references(value: &Value, references: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+                if !references.iter().any(|existing| existing == reference) {
+                    references.push(reference.to_string());
+                }
+            }
+            for child in object.values() {
+                collect_references(child, references);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                collect_references(child, references);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Emit one named definition: an enum (string union) or an object interface.
@@ -76,33 +145,102 @@ fn emit_definition(out: &mut String, name: &str, def: &Value) {
         push_doc(out, obj.get("description"));
         let union = variants
             .iter()
-            .map(|v| format!("\"{v}\""))
+            .map(|value| serde_json::to_string(value).expect("enum value serializes"))
             .collect::<Vec<_>>()
             .join(" | ");
         out.push_str(&format!("export type {name} = {union};\n\n"));
         return;
     }
 
+    if let Some(variants) = object_union_variants(obj) {
+        push_doc(out, obj.get("description"));
+        out.push_str(&format!(
+            "export type {name} = {};\n\n",
+            variants.join(" | ")
+        ));
+        return;
+    }
+
+    if obj.get("type").and_then(Value::as_str) != Some("object") {
+        let (definition_type, nullable) = ts_type(def);
+        push_doc(out, obj.get("description"));
+        let nullable = if nullable { " | null" } else { "" };
+        out.push_str(&format!(
+            "export type {name} = {definition_type}{nullable};\n\n"
+        ));
+        return;
+    }
+
     emit_object(out, name, obj_as_map(def));
+}
+
+fn object_union_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
+    let one_of = obj.get("oneOf")?.as_array()?;
+    let all_properties = one_of
+        .iter()
+        .filter_map(|branch| branch.get("properties").and_then(Value::as_object))
+        .flat_map(|properties| properties.keys().cloned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut variants = Vec::with_capacity(one_of.len());
+
+    for branch in one_of {
+        let branch = branch.as_object()?;
+        if branch.get("type").and_then(Value::as_str) != Some("object") {
+            return None;
+        }
+        let properties = branch.get("properties")?.as_object()?;
+        let branch_properties = properties
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let required: Vec<&str> = branch
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|array| array.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        let mut fields = properties
+            .iter()
+            .map(|(name, schema)| {
+                let (field_type, nullable) = ts_type(schema);
+                let optional = if required.contains(&name.as_str()) {
+                    ""
+                } else {
+                    "?"
+                };
+                let nullable = if nullable { " | null" } else { "" };
+                format!("{}{}: {field_type}{nullable}", field_key(name), optional)
+            })
+            .collect::<Vec<_>>();
+        fields.extend(
+            all_properties
+                .difference(&branch_properties)
+                .map(|name| format!("{}?: never", field_key(name))),
+        );
+        variants.push(format!("{{ {} }}", fields.join("; ")));
+    }
+
+    Some(variants)
 }
 
 /// Collect a string-union's members from either a `oneOf` of single-value
 /// `enum`s or a direct `enum` array. Returns `None` if the definition is not an
 /// enum.
-fn enum_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<String>> {
+fn enum_variants(obj: &serde_json::Map<String, Value>) -> Option<Vec<Value>> {
     if let Some(Value::Array(one_of)) = obj.get("oneOf") {
         let mut variants = Vec::new();
         for branch in one_of {
             let e = branch.get("enum")?.as_array()?;
-            let s = e.first()?.as_str()?;
-            variants.push(s.to_string());
+            variants.push(e.first()?.clone());
         }
         return Some(variants);
     }
     if let Some(Value::Array(e)) = obj.get("enum") {
-        let variants: Vec<String> = e
+        let variants: Vec<Value> = e
             .iter()
-            .filter_map(|v| v.as_str().map(String::from))
+            .filter(|value| {
+                value.is_string() || value.is_boolean() || value.is_number() || value.is_null()
+            })
+            .cloned()
             .collect();
         if !variants.is_empty() {
             return Some(variants);
@@ -118,7 +256,13 @@ fn obj_as_map(def: &Value) -> &serde_json::Map<String, Value> {
 /// Emit an `export interface Name { ... }` from an object schema.
 fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value>) {
     push_doc(out, obj.get("description"));
-    out.push_str(&format!("export interface {name} {{\n"));
+    let exclusions = exclusive_property_pairs(obj);
+    let has_exclusions = !exclusions.is_empty();
+    if !has_exclusions {
+        out.push_str(&format!("export interface {name} {{\n"));
+    } else {
+        out.push_str(&format!("export type {name} = {{\n"));
+    }
 
     let required: Vec<&str> = obj
         .get("required")
@@ -144,7 +288,31 @@ fn emit_object(out: &mut String, name: &str, obj: &serde_json::Map<String, Value
         out.push_str("  [k: string]: unknown;\n");
     }
 
-    out.push_str("}\n\n");
+    out.push('}');
+    for (first, second) in &exclusions {
+        out.push_str(&format!(
+            " & ({{ {}?: never }} | {{ {}?: never }})",
+            field_key(first),
+            field_key(second)
+        ));
+    }
+    if has_exclusions {
+        out.push(';');
+    }
+    out.push_str("\n\n");
+}
+
+fn exclusive_property_pairs(obj: &serde_json::Map<String, Value>) -> Vec<(String, String)> {
+    obj.get("allOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|constraint| constraint.get("not")?.get("required")?.as_array())
+        .filter_map(|required| match required.as_slice() {
+            [first, second] => Some((first.as_str()?.to_string(), second.as_str()?.to_string())),
+            _ => None,
+        })
+        .collect()
 }
 
 /// An object is "open" unless it explicitly sets `additionalProperties: false`.
@@ -161,6 +329,15 @@ fn ts_type(prop: &Value) -> (String, bool) {
 
     if let Some(r) = obj.get("$ref").and_then(|v| v.as_str()) {
         return (ref_name(r), false);
+    }
+
+    if let Some(variants) = enum_variants(obj) {
+        let union = variants
+            .iter()
+            .map(|value| serde_json::to_string(value).expect("enum value serializes"))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        return (union, false);
     }
 
     if let Some(Value::Array(any_of)) = obj.get("anyOf") {
@@ -297,6 +474,134 @@ mod tests {
         let ts = emit_ts(&schema);
         assert!(
             ts.contains("export type Color = \"red\" | \"green\";"),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_literal_boolean_and_conditional_root_union() {
+        let schema = json!({
+            "description": "Root request.",
+            "allOf": [{
+                "if": { "required": ["phase"] },
+                "then": { "$ref": "#/definitions/ExecRequest" },
+                "else": { "$ref": "#/definitions/OneShotRequest" }
+            }],
+            "definitions": {
+                "ExecRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                },
+                "OneShotRequest": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {}
+                },
+                "True": {
+                    "type": "boolean",
+                    "enum": [true]
+                }
+            }
+        });
+
+        let ts = emit_contract_ts(&schema, "0.8.0-alpha");
+
+        assert!(ts.contains("export type True = true;"), "{ts}");
+        assert!(
+            ts.contains("export type MXCConfiguration = OneShotRequest | ExecRequest;"),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_object_union() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Proxy": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "url": { "type": "string" }
+                            },
+                            "required": ["url"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "builtin": { "enum": [true], "type": "boolean" }
+                            },
+                            "required": ["builtin"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(
+            ts.contains(
+                "export type Proxy = { url: string; builtin?: never } | { builtin: true; url?: never };"
+            ),
+            "{ts}"
+        );
+    }
+
+    #[test]
+    fn emits_named_scalar_definition() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "NonEmptyString": {
+                    "type": "string",
+                    "minLength": 1
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(ts.contains("export type NonEmptyString = string;"), "{ts}");
+    }
+
+    #[test]
+    fn emits_mutually_exclusive_aliases() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {},
+            "definitions": {
+                "Request": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": {
+                        "canonical": { "type": "string" },
+                        "alias": { "type": "string" }
+                    },
+                    "allOf": [{
+                        "not": {
+                            "required": ["canonical", "alias"]
+                        }
+                    }]
+                }
+            }
+        });
+
+        let ts = emit_ts(&schema);
+
+        assert!(
+            ts.contains(
+                "export type Request = {\n  alias?: string;\n  canonical?: string;\n} & ({ canonical?: never } | { alias?: never });"
+            ),
             "{ts}"
         );
     }

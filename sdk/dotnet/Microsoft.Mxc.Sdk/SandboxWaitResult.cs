@@ -4,8 +4,7 @@
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
-/// The outcome of waiting on an <see cref="MxcSandboxProcess"/> via
-/// <see cref="MxcSandboxProcess.Wait"/> / <see cref="MxcSandboxProcess.WaitAsync"/>.
+/// The outcome of waiting for a sandboxed process to finish.
 /// </summary>
 public readonly struct SandboxWaitResult
 {

@@ -412,7 +412,7 @@ try {
             $id = $envObj.result.sandboxId
             $decoded = Decode-SandboxId $id
             Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
-            Assert-True ($decoded.appId -eq 'Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
+            Assert-True ($decoded.appId -eq 'PFN:Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
             Assert-True ($decoded.agentUserName -eq $envObj.result.metadata.agentUserName) "payload agentUserName matches metadata"
             # appId is deliberately NOT echoed in metadata -- the caller already
             # supplied it, so echoing it would be redundant surface.

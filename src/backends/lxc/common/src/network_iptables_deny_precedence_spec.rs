@@ -154,7 +154,7 @@ fn a_destination_in_both_lists_is_dropped_because_deny_rules_are_emitted_first()
         ..Default::default()
     };
 
-    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy);
+    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
     // B1: both rules are present -- there is no de-duplication pass -- and
     // the DROP rule precedes the ACCEPT rule so first-match-wins denies.
@@ -194,7 +194,7 @@ fn an_ipv6_destination_in_both_lists_is_dropped_because_deny_rules_are_emitted_f
         ..Default::default()
     };
 
-    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy);
+    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
     assert_eq!(
         args.ipv6.len(),
@@ -240,7 +240,7 @@ fn deny_precedence_holds_across_both_families_with_several_entries_in_each_list(
         ..Default::default()
     };
 
-    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy);
+    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
     assert_eq!(
         args.ipv4.len(),
@@ -284,7 +284,8 @@ fn an_unresolvable_blocked_host_errors_under_an_allow_default_and_names_the_host
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
 
     let err = match result {
         Err(err) => err,
@@ -312,7 +313,8 @@ fn the_same_unresolvable_blocked_host_does_not_error_under_a_block_default() {
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
     let args = expect_ok(
         result,
         "a Block default already denies everything the allow list did not \
@@ -349,7 +351,8 @@ fn an_unresolvable_allowed_host_never_errors_under_an_allow_default() {
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
     let args = expect_ok(
         result,
         "B4 reserves Err for an unresolvable BLOCK entry under an Allow \
@@ -386,7 +389,8 @@ fn an_unresolvable_allowed_host_never_errors_under_a_block_default() {
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
     let args = expect_ok(
         result,
         "an unresolvable ALLOW entry must never error, regardless of the \
@@ -424,7 +428,8 @@ fn an_unresolvable_entry_does_not_suppress_a_sibling_entrys_rule_or_log_line() {
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
     let args = expect_ok(
         result,
         "an unresolvable block entry under a Block default must not error, \
@@ -478,7 +483,7 @@ fn emitted_rules_have_the_exact_iptables_shape_for_both_allow_and_block_actions(
         ..Default::default()
     };
 
-    let args = NetworkIptablesManager::build_policy_rule_args(chain, &policy);
+    let args = NetworkIptablesManager::build_policy_rule_args(chain, &policy, false);
 
     assert_eq!(
         args.ipv4.len(),
@@ -519,7 +524,7 @@ fn ipv4_and_ipv6_destinations_are_split_into_the_correct_bucket_and_never_cross_
         ..Default::default()
     };
 
-    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy);
+    let args = NetworkIptablesManager::build_policy_rule_args(CHAIN, &policy, false);
 
     // Property, not an enumerated example: every destination placed in the
     // v4 bucket must itself parse as IPv4, and likewise for v6. This is what
@@ -572,7 +577,8 @@ fn programmed_rules_are_logged_with_the_exact_iptables_and_ip6tables_prefixes() 
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(chain, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(chain, &policy, false, &mut logger);
     let args = expect_ok(result, "both entries resolve, so no error is expected here");
 
     assert_eq!(args.ipv4.len(), 1, "actual: {:?}", args.ipv4);
@@ -610,7 +616,8 @@ fn an_empty_policy_produces_an_empty_ok_result_with_no_log_output() {
     };
     let mut logger = Logger::new(Mode::Buffer);
 
-    let result = NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, &mut logger);
+    let result =
+        NetworkIptablesManager::build_policy_rules_logged(CHAIN, &policy, false, &mut logger);
     let args = expect_ok(result, "B6: empty host lists must still return Ok");
 
     assert!(

@@ -21,8 +21,8 @@ provides:
   rules over `subpath` literals, with deny rules layered on top so
   `deniedPaths` overrides any broader allow.
 - **Network isolation** via allow/block-all outbound rules. Seatbelt cannot
-  enforce DNS host lists: `allowedHosts` degrades to allow-all outbound and
-  `blockedHosts` is rejected.
+  enforce DNS host lists: both `allowedHosts` (under `defaultPolicy: "block"`)
+  and `blockedHosts` are rejected rather than silently degraded.
 - **Cooperative HTTP proxy** via `network.proxy`: `HTTP_PROXY` /
   `HTTPS_PROXY` / `ALL_PROXY` are injected into the sandbox so well-behaved
   clients route through the configured proxy (raw-socket clients can bypass it).
@@ -153,8 +153,7 @@ settings live under a top-level `seatbelt` key:
         "deniedPaths":    ["/Users/me/.ssh"]
     },
     "network": {
-        "defaultPolicy": "block",
-        "allowedHosts":  ["api.github.com"]
+        "defaultPolicy": "block"
     },
     "seatbelt": {
         "nestedPty": true
@@ -266,7 +265,7 @@ Two asymmetries are intentional:
 - `deniedPaths` denies `network-outbound`, overriding **both** kinds of allow
   that can reach it: a broader `readwritePaths` subtree containing the denied
   path, and the *unfiltered* `(allow network-outbound)` emitted by
-  `defaultPolicy: "allow"` and the remote-proxy fallback. Without the deny the
+  `defaultPolicy: "allow"`. Without the deny the
   sandbox could `connect()` to a pre-existing socket inside a denied subtree —
   a Docker, `ssh-agent` or `gpg-agent` socket is a control plane, so that would
   be an escape.
@@ -286,10 +285,10 @@ independently of the profile.
 | `defaultPolicy: "block"` | No `(allow network-outbound)` is emitted; the baseline `(deny default)` then blocks all IP sockets. |
 | `defaultPolicy: "allow"` (no host list) | `(allow network-outbound)` plus `(allow network-bind (local ip))` and `(allow system-socket)`. |
 | `allowLocalNetwork: true` | `(allow network-inbound (local ip))` — on its own this is what lets a process `listen()` on a local address; it covers the `bind()` too. (`network-bind (local ip)` alone is *not* enough: `bind()` succeeds and `listen()` is denied.) Independent of `defaultPolicy`, and unrelated to AF_UNIX sockets (see above). |
-| `allowedHosts` | Accepted for SDK compatibility, but Seatbelt cannot filter DNS names; the profile degrades to allow-all outbound as best-effort. |
+| `allowedHosts` | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot filter DNS names, so an allowlist could only be approximated as allow-all (the inverse of the request) or deny-all (silently dropping it). The exception is `network.proxy.builtinTestServer: true` (testing only), where MXC launches its own proxy and passes it the host list, so that proxy applies the list while the profile keeps its deny baseline plus port-scoped proxy reachability. Host lists are **not** forwarded to any other proxy. Under `defaultPolicy: "allow"` it is accepted as a no-op superset of the stated default. |
 | `blockedHosts` | Rejected during validation because Seatbelt cannot enforce hostname blocks. |
-| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, the existing allow-all covers it. |
-| `proxy` (remote `url`) | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot filter a remote proxy by DNS name, so reachability would degrade to allow-all and silently weaken the deny for raw-socket clients. Under `allow`, allows all outbound as best-effort (the proxy enforces host policy). Use a loopback proxy or `builtinTestServer` for MXC-scoped reachability under deny. |
+| `proxy` (loopback: `localhost` / `builtinTestServer`) | Under `defaultPolicy: "block"`, allows only the resolved `localhost:<proxy-port>`. Other loopback services and the wider network remain blocked. Under `allow`, **rejected during validation** — see below. |
+| `proxy` (remote `url`) | Under `defaultPolicy: "block"`, **rejected during validation** — Seatbelt cannot express reachability to a specific remote host, so the proxy would be unreachable and no outbound connection could succeed. (`allowedHosts` / `blockedHosts` are never forwarded to an external proxy, so it cannot enforce them on MXC's behalf either.) Under `allow`, **rejected during validation** — see below. Use a loopback proxy or `builtinTestServer` for MXC-scoped reachability under deny. |
 
 Proxy configuration (`network.proxy`) is supported via the **cooperative
 env-var model** (the same as the Bubblewrap backend): the runner launches or
@@ -301,6 +300,43 @@ the env vars bypass it. `builtinTestServer` launches a bundled, testing-only
 proxy (`unix-test-proxy`) and requires `--allow-testing-features`. macOS has no
 per-process WinHTTP-style OS proxy policy, so unlike Windows the proxy is
 cooperative rather than kernel-enforced.
+
+`network.proxy` (or `runtimeConfig.networkProxy`) combined with
+`defaultPolicy: "allow"` (or `egress.default: "allow"`) is **rejected during
+validation**. Seatbelt's only enforcement lever for a proxy is scoping the
+sandbox profile's *deny* rule to spare just the proxy's address+port
+(`write_proxy_reachability_rules`); under `allow` there is no deny rule left
+to scope, so the config would silently reduce to "proxy env vars injected,
+direct egress wide open" with no indication that any client ignoring
+`HTTP_PROXY`/`HTTPS_PROXY` bypasses the proxy entirely. Use `defaultPolicy:
+"block"` (or `egress.default: "deny"`) with a loopback proxy for enforced
+reachability.
+
+#### Schema 0.8 network shape (`egress` / `ingress` / `runtimeConfig.networkProxy`)
+
+Starting at config `"version": "0.8.0-alpha"` or newer, Seatbelt also accepts
+the schema-0.8 network shape described in
+[`docs/sandbox-policy/0.8.0/networking/`](../sandbox-policy/0.8.0/networking/networking.md).
+A config must use either this shape or the legacy fields above, never both —
+mixing the two is rejected during validation. This shape is **not**
+Seatbelt-specific: it's the official, cross-backend schema, and
+`network_parser.rs` parses it identically regardless of `containment`. What's
+backend-specific is *enforcement* — each backend declares which parts of the
+shape it actually supports via `SandboxBackend::network_policy_support()`
+(`wxc_common::validator::NetworkPolicySupport`), and a backend that hasn't
+declared a given feature rejects a config that sets it, before ever reaching
+backend-specific code. Seatbelt is currently the only backend that declares
+support (`EGRESS_DEFAULT | INGRESS_DEFAULT | HOST_LOOPBACK | RUNTIME_PROXY`,
+in `seatbelt_runner.rs`); other backends still declare `LEGACY` only, so the
+same config would be rejected under a different `containment` until each adds
+its own declaration as separate follow-up work.
+
+| Field | Behavior |
+|---|---|
+| `network.egress.default` | `"allow"` / absent-then-`"deny"` maps to the same profile generation as legacy `defaultPolicy: "allow"` / `"block"`. |
+| `network.egress.allow` / `network.egress.deny` | **Rejected** if non-empty — Seatbelt has no destination-filtering primitive (no CIDR/port/protocol allow-lists), so only the blanket `default` posture can be expressed. |
+| `network.ingress.default` / `network.ingress.hostLoopback` | Map together to the same `(allow network-inbound (local ip))` rule as legacy `allowLocalNetwork`. Seatbelt has no private loopback, so it cannot enforce a host-loopback posture independent of the general local-network posture: `hostLoopback` must equal `default`, or the config is **rejected**. |
+| `runtimeConfig.networkProxy` | Replaces `network.proxy.localhost` / loopback `network.proxy.url`. Must be an `http`/`https` URL with a `localhost` / `127.0.0.1` / `[::1]` host and an explicit port — a non-loopback host is **rejected** (the schema-0.8 GA design requires the runtime proxy endpoint to be loopback-only). Combined with `network.egress.default: "allow"`, also **rejected** — same unenforceable-proxy rule as the legacy shape above. |
 
 ### UI policy
 
@@ -406,10 +442,24 @@ environment.
   raw sockets and ignore them bypass it. The macOS sandbox cannot interpose at
   the TLS/socket layer per process, so this matches the Bubblewrap backend
   rather than Windows' kernel-enforced WinHTTP policy.
-- **Per-host network filtering (`blockedHosts`) is not supported.** Apple's
-  Seatbelt profile language has no mechanism for selectively blocking individual
-  hostnames while allowing all other traffic. The `blockedHosts` config field is
-  rejected at validation time rather than silently ignored.
+
+  Under a deny default the profile does add a real kernel-enforced guarantee,
+  but a narrow one: outbound is scoped to the proxy's exact `localhost:<port>`,
+  so a non-cooperating client cannot reach the wider network *or* other
+  host-local services. That constrains traffic to the proxy — it says nothing
+  about **where the proxy then connects**. MXC configures the destination
+  policy of exactly one proxy: the `builtinTestServer` it launches itself. An
+  externally supplied proxy is never told about `allowedHosts` / `blockedHosts`
+  and applies whatever policy it was independently configured with.
+- **Per-host network filtering (`allowedHosts` / `blockedHosts`) is not
+  supported.** Apple's Seatbelt profile language has no mechanism for
+  selectively allowing or blocking individual hostnames while treating all
+  other traffic differently — its `(remote ...)` filter accepts only `*` and
+  `localhost`. Both fields are rejected at validation time rather than
+  silently ignored: `blockedHosts` always, and `allowedHosts` when combined
+  with `defaultPolicy: "block"` (where the only expressible approximations are
+  allow-all, the inverse of the request, or deny-all, which silently drops the
+  allowlist).
 
   Alternative approaches considered:
 
@@ -419,7 +469,12 @@ environment.
   | **`/etc/hosts` manipulation** | Not viable | Requires root, affects all processes on the system, and is bypassable via direct IP connections or DNS-over-HTTPS. |
   | **Network Extension framework** | Potential future path | Apple's `NEFilterDataProvider` API can filter per-process at the hostname level. Requires a signed System Extension with the `com.apple.developer.networking.networkextension` entitlement and user approval via System Preferences. Would run as a separate daemon alongside MXC. |
 
-  To deny all network access, use `defaultPolicy: "block"` instead.
+  To deny all network access, use `defaultPolicy: "block"` on its own. For
+  egress constrained to a single endpoint, use a loopback proxy under
+  `defaultPolicy: "block"` (or the schema-0.8 `runtimeConfig.networkProxy`),
+  which the profile scopes to the proxy's exact port. For MXC-applied host
+  filtering in tests, `network.proxy.builtinTestServer: true` passes the host
+  lists to the proxy MXC launches.
 
 - **`sandbox_init` is technically deprecated** in headers since macOS 10.8
   but remains shipping and is used by Apple's own apps and Chromium.

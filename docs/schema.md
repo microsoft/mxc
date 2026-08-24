@@ -2,9 +2,9 @@
 ## Configuration Schema
 
 MXC uses a JSON configuration file. The current stable schema is at
-[`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](../schemas/stable/mxc-config.schema.0.7.0-alpha.json).
+[`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](../schemas/stable/mxc-config.schema.0.8.0-alpha.json).
 For development, the dev schema at
-[`schemas/dev/mxc-config.schema.0.8.0-dev.json`](../schemas/dev/mxc-config.schema.0.8.0-dev.json)
+[`schemas/dev/mxc-config.schema.0.9.0-dev.json`](../schemas/dev/mxc-config.schema.0.9.0-dev.json)
 includes experimental features and may change without notice.
 
 Editors that support JSON Schema will provide autocomplete and validation when
@@ -13,10 +13,10 @@ production configs and the dev schema when working on experimental features:
 
 ```json
 // Production
-"$schema": "./schemas/stable/mxc-config.schema.0.7.0-alpha.json"
+"$schema": "./schemas/stable/mxc-config.schema.0.8.0-alpha.json"
 
 // Development (experimental features)
-"$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json"
+"$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json"
 ```
 
 ### Schema 0.8 networking
@@ -47,7 +47,10 @@ Direct egress rules and `runtimeConfig.networkProxy` select different
 connectivity models and cannot be combined. A ProcessContainer proxy requires
 `ingress.default: "allow"`. Identity-scoped proxies set `allowedProxyPeer` and
 keep `hostLoopback: "deny"`; identity-less host proxies omit
-`allowedProxyPeer` and require `hostLoopback: "allow"`.
+`allowedProxyPeer` and require `hostLoopback: "allow"`. The identity-less route
+is a weaker development/testing compatibility deployment because it opens both
+host-loopback directions; it is not the strict proxy-endpoint exception
+defined by the shared model-2 policy.
 
 ```json
 {
@@ -81,7 +84,7 @@ cannot mix both formats in one request.
 
 ```json
 {
-    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.7.0-alpha".
+    "version": "0.6.0-alpha",              // Schema version (semver). Minimum supported: "0.6.0-alpha"; current stable: "0.8.0-alpha".
     "containerId": "my-container",         // Externally assigned container ID
     "containment": "processcontainer",     // Backend (see table below)
 
@@ -113,6 +116,13 @@ cannot mix both formats in one request.
     "network": {
         "defaultPolicy": "block",          // "allow" or "block"
         "enforcementMode": "firewall",     // "capabilities", "firewall", or "both"
+        "allowedHosts": ["203.0.113.0/24"],
+        "blockedHosts": ["203.0.113.7"],   // Denies outrank allows, including broader CIDRs
+                                           // Under bubblewrap at schema 0.8+ with
+                                           //  enforcementMode "firewall", entries must be IP
+                                           //  literals or CIDR blocks: DNS names are rejected at
+                                           //  validation time rather than resolved. Use proxy
+                                           //  mode for hostname-based control.
         "proxy": { "localhost": 8080 }     // Loopback proxy port (processcontainer; bubblewrap; seatbelt)
                                            // (use { "builtinTestServer": true } for the bundled
                                            //  testing-only proxy; requires --allow-testing-features)
@@ -126,6 +136,21 @@ cannot mix both formats in one request.
                                            //  The chain hooks FORWARD, so traffic addressed to the
                                            //  bridge gateway itself is delivered locally via INPUT
                                            //  and is outside what this chain governs.
+                                           // Under Bubblewrap on schema 0.8+ the proxy is likewise
+                                           //  enforced, in the sandbox's own network namespace:
+                                           //  egress is dropped except the proxy endpoint, and DNS
+                                           //  is not opened. A url-form hostname is resolved on the
+                                           //  host and pinned into the sandbox's /etc/hosts, since
+                                           //  the sandbox has no resolver of its own. `localhost`,
+                                           //  127.0.0.0/8 and the wildcards 0.0.0.0 / :: are
+                                           //  rewritten to the slirp gateway; `::1` is rejected,
+                                           //  because an IPv6-loopback listener cannot accept the
+                                           //  IPv4 connection that gateway produces. Because the
+                                           //  pin outranks every filesystem mount, a `deniedPaths`
+                                           //  entry covering /etc/hosts is rejected rather than
+                                           //  silently overridden. On schema
+                                           //  0.6/0.7 Bubblewrap keeps the cooperative-only
+                                           //  behavior (no egress rules).
     },
 
     "ui": {
@@ -338,13 +363,13 @@ state-aware lifecycle (`provision` / `start` / `exec` / `stop` /
 phase is being driven against an existing provisioned sandbox.
 
 The envelope follows the same supported version range as one-shot requests:
-`>=0.6, <=0.8`. The example uses `0.6.0-alpha`, which is accepted throughout
+`>=0.6, <=0.9`. The example uses `0.6.0-alpha`, which is accepted throughout
 that range. The state-aware field shape is documented by the current dev
 schema:
 
 ```json
 {
-    "$schema": "./schemas/dev/mxc-config.schema.0.8.0-dev.json",
+    "$schema": "./schemas/dev/mxc-config.schema.0.9.0-dev.json",
     "version": "0.6.0-alpha",
     "phase": "exec",                       // One of: provision | start | exec | stop | deprovision
     "sandboxId": "wsb:abcd1234",           // Required for non-provision phases.
@@ -357,7 +382,7 @@ schema:
     // level, exactly as in a one-shot request -- there is no wrapping `config`
     // object. Backend- and phase-specific config, when a phase has any, nests
     // under `experimental.<backendKey>.<phase>`, e.g.:
-    //   "experimental": { "isolation_session": { "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" } } }
+    //   "experimental": { "isolation_session": { "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" } } }
 }
 ```
 
@@ -394,13 +419,14 @@ The parser compares the config's major.minor against its supported version
 
 | Config `version` | Parser supports | Result |
 |---|---|---|
-| absent | >=0.6, <=0.8 | Accepted (assumed compatible) |
-| `"0.5.0-alpha"` | >=0.6, <=0.8 | **Rejected** — "older than supported" |
-| `"0.6.0-alpha"` | >=0.6, <=0.8 | Accepted (0.6 in range) |
-| `"0.7.0-alpha"` | >=0.6, <=0.8 | Accepted (0.7 in range) |
-| `"0.8.0-alpha"` | >=0.6, <=0.8 | Accepted (0.8 in range) |
-| `"0.9.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
-| `"1.0.0"` | >=0.6, <=0.8 | **Rejected** — "newer than supported" |
+| absent | >=0.6, <=0.9 | Accepted (assumed compatible) |
+| `"0.5.0-alpha"` | >=0.6, <=0.9 | **Rejected** — "older than supported" |
+| `"0.6.0-alpha"` | >=0.6, <=0.9 | Accepted (0.6 in range) |
+| `"0.7.0-alpha"` | >=0.6, <=0.9 | Accepted (0.7 in range) |
+| `"0.8.0-alpha"` | >=0.6, <=0.9 | Accepted (0.8 in range) |
+| `"0.9.0-alpha"` | >=0.6, <=0.9 | Accepted (0.9 in range) |
+| `"0.10.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
+| `"1.0.0"` | >=0.6, <=0.9 | **Rejected** — "newer than supported" |
 
 #### When to bump
 

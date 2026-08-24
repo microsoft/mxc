@@ -647,3 +647,64 @@ fn rejects_state_aware_fields() {
         assert_invalid(&json);
     }
 }
+
+// Runtime configuration and the ProcessContainer proxy-peer surface, added to
+// the 0.8 contract alongside directional networking.
+#[test]
+fn accepts_runtime_config_and_process_container_network() {
+    assert_valid(
+        r#"{
+            "version": "0.8.0-alpha",
+            "containment": "processcontainer",
+            "process": {"commandLine": "echo"},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
+            "processContainer": {"network": {"allowedProxyPeer": "127.0.0.1"}},
+            "network": {"egress": {"default": "deny"}}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_unknown_runtime_config_field() {
+    assert_invalid(
+        r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo"},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080", "nope": true}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_unknown_process_container_network_field() {
+    assert_invalid(
+        r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo"},
+            "processContainer": {"network": {"allowedProxyPeer": "127.0.0.1", "nope": true}}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_duplicate_runtime_config() {
+    assert_invalid(
+        r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo"},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:8080"},
+            "runtimeConfig": {"networkProxy": "http://127.0.0.1:9090"}
+        }"#,
+    );
+}
+
+#[test]
+fn rejects_non_string_runtime_config_network_proxy() {
+    assert_invalid(
+        r#"{
+            "version": "0.8.0-alpha",
+            "process": {"commandLine": "echo"},
+            "runtimeConfig": {"networkProxy": 8080}
+        }"#,
+    );
+}

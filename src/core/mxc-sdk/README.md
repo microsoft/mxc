@@ -1,13 +1,14 @@
 # `mxc-sdk`
 
 An importable Rust library for starting [MXC](../../../README.md) sandboxes
-**in-process**, without ever allocating a pty.
+**in-process**.
 
 Build a `SandboxRequest` from a [`SandboxPolicy`], then either **run it to
 completion** with [`run`] (capturing stdout/stderr in one call) or hand it to
 [`spawn_sandbox`] for a live handle you can stream, feed stdin, and kill.
 Either way it selects the right containment backend for the host and runs the
-sandboxed process — no pty is ever allocated.
+sandboxed process over ordinary pipes, with no pty. The state-aware
+[`exec_attached`] path is the one exception — see *Pty allocation*.
 
 ## Usage
 
@@ -21,7 +22,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: Some(10_000),
-    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("echo hello");
@@ -37,29 +37,64 @@ assert_eq!(String::from_utf8_lossy(&output.stdout), "hello\n");
 [`spawn_sandbox`] when you need to drive the process live (see
 [Live stdio + kill](#live-stdio--kill-streaming) below).
 
-[`build_request`] is the Rust port of the SDK's `createConfigFromPolicy`. It
-resolves the host's containment backend (Seatbelt on macOS, Bubblewrap on
-Linux, ProcessContainer on Windows) and mirrors the SDK's field mapping and
-network validation, building the same wire config internally and running it
-through the shared parser. The returned [`SandboxRequest`] has an empty
-command line — set the command with [`SandboxRequest::set_script`] (and any
-working directory / env) before spawning.
+[`build_request`] resolves the host's default containment backend (see
+[Supported backends](#supported-backends)), builds the wire config, and runs it
+through the shared parser. The returned [`SandboxRequest`] has an empty command
+line — set the command with [`SandboxRequest::set_script`] (and any working
+directory / env) before spawning.
 
 To target a specific backend instead of the host default, use
-[`build_request_with_containment`] with a [`Containment`] — the same choice the
-TypeScript SDK makes with `createConfigFromPolicy(policy, containment)`.
+[`build_request_with_containment`] with a [`Containment`].
 
-Filesystem-policy discovery helpers (ports of the SDK's `policy.ts`) are also
-available to feed a policy: [`available_tools_policy`] (PATH + tool/SDK env
-dirs), [`user_profile_policy`], and [`temporary_files_policy`].
+Configure a Windows ProcessContainer with
+`Containment::ProcessContainer(ProcessContainer::default())`.
+`ProcessContainer` controls learning mode, capabilities,
+BaseProcessContainer UI isolation, proxy peer identity, and denial capture.
+Schema 0.8 directional networking is available through
+`NetworkSection::{egress, ingress, runtime_config}`.
+
+The new ProcessContainer and directional-network configuration types are
+non-exhaustive so fields can be added compatibly. Construct types whose fields
+are all optional with `Default`, then assign the settings the request needs.
+Construct network peers with `NetworkPeerSection::new(cidr)`, since each peer
+requires a CIDR.
+
+```rust,no_run
+use mxc_sdk::{
+    build_request_with_containment,
+    configs::{CaptureDenials, ProcessContainer},
+    Containment, SandboxPolicy,
+};
+
+let policy = SandboxPolicy {
+    version: "0.8.0-alpha".to_string(),
+    filesystem: None,
+    network: None,
+    ui: None,
+    timeout_ms: None,
+};
+let mut process_container = ProcessContainer::default();
+process_container.capabilities = vec!["registryRead".to_string()];
+process_container.capture_denials = Some(CaptureDenials::default());
+let request = build_request_with_containment(
+    &policy,
+    &Containment::ProcessContainer(process_container),
+    None,
+)?;
+# Ok::<(), mxc_sdk::Error>(())
+```
+
+Filesystem-policy discovery helpers are also available to feed a policy:
+[`available_tools_policy`] (PATH + tool/SDK environment directories),
+[`user_profile_policy`], and [`temporary_files_policy`].
 
 ## Diagnosing a failure
 
 Every fallible **entry point** — [`build_request`],
 [`build_request_with_containment`], [`run`], [`spawn_sandbox`],
-[`exec_sandbox`], [`run_state_aware_json`] — returns an [`Error`] carrying a
-closed [`ErrorCode`] and a message, plus, when the failure came from an
-underlying platform API, the call that failed and its status.
+[`exec_sandbox`], [`exec_attached`], [`run_state_aware_json`] — returns an
+[`Error`] carrying a closed [`ErrorCode`] and a message, plus, when the failure
+came from an underlying platform API, the call that failed and its status.
 
 The live [`Sandbox`] handle is the deliberate exception: `wait`, `try_wait`,
 `wait_with_output` and `kill` return [`std::io::Result`], mirroring
@@ -108,11 +143,9 @@ questions:
   launch** (the subset in [Supported backends](#supported-backends)). Use it to
   decide whether `run` / `spawn_sandbox` will work before building a request.
 - [`available_backends`] — a broader **host-capability** probe. Reports every
-  containment backend the *host* can run, including ones only the executor
-  binaries (`wxc-exec` etc.) can currently drive — Windows Sandbox,
-  IsolationSession, LXC — each with its effective isolation **tier** (for the
-  Windows ProcessContainer ladder). Use it for capability discovery, not as a
-  launchability guarantee.
+  containment backend the *host* can run, including ones this SDK cannot drive
+  one-shot — LXC, Windows Sandbox, and IsolationSession — each with its
+  effective isolation **tier**.
 
 ```rust,no_run
 use mxc_sdk::{available_backends, platform_support, BackendCapability};
@@ -149,41 +182,31 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
-> **Before / after.** Host-and-backend discovery previously lived only in the
-> TypeScript SDK (`getPlatformSupport`), so Rust callers and the executor
-> binaries had no in-process way to ask "what backends does this host support?"
-> and could only learn a backend was unusable by trying to launch it. Now the
-> engine answers both in-process — [`platform_support`] for the SDK-launchable
-> subset and [`available_backends`] for the full host-capability set with tiers —
-> with no TypeScript dependency and no trial spawn.
-
 ## Denial capture (Windows)
 
-`SandboxPolicy::capture_denials` enables the Windows ProcessContainer's
-learning-mode capture: the runner records every access the policy does not
-grant and writes them to a JSON denials document.
+`ProcessContainer::capture_denials` enables learning-mode capture: the
+runner records every access the policy does not grant and writes them to a JSON
+denials document.
 
 ```rust
-use mxc_sdk::policy::{CaptureDenialsMode, CaptureDenialsSection};
-use mxc_sdk::SandboxPolicy;
-
-let policy = SandboxPolicy {
-    version: "0.8.0-alpha".to_string(),
-    filesystem: None,
-    network: None,
-    ui: None,
-    timeout_ms: None,
-    capture_denials: Some(CaptureDenialsSection {
-        // `Block` (the default) keeps deny-by-default and records the denial;
-        // `Allow` runs permissively and records what *would* have been denied.
-        mode: CaptureDenialsMode::Block,
-        // Absolute path; a per-run id is stamped into the stem
-        // (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
-        output_path: None,
-        // Preserve the sealed ETL and report its path in output metadata.
-        retain_etl: false,
-    }),
+use mxc_sdk::configs::{
+    CaptureDenials, CaptureDenialsMode, ProcessContainer,
 };
+use mxc_sdk::Containment;
+
+let mut capture = CaptureDenials::default();
+// `Block` (the default) keeps deny-by-default and records the denial;
+// `Allow` runs permissively and records what *would* have been denied.
+capture.mode = CaptureDenialsMode::Block;
+// Absolute path; a per-run id is stamped into the stem
+// (`denials.json` -> `denials.<run-id>.json`). `None` uses a managed temp.
+capture.output_path = None;
+// Preserve the sealed ETL and report its path in output metadata.
+capture.retain_etl = false;
+
+let mut process_container = ProcessContainer::default();
+process_container.capture_denials = Some(capture);
+let containment = Containment::ProcessContainer(process_container);
 ```
 
 `Allow` relaxes containment for the run — it is reported through `warnings()`.
@@ -193,8 +216,7 @@ the process terminates. When `retain_etl` is enabled, the capture output's
 `capture_denials_error` carries the failure and retained path. Dropping a
 sandbox without a terminal wait deletes the internal trace even when retention
 was requested. After deleting a retained ETL, callers should also remove its
-now-empty per-run parent directory. The section is ignored on Linux and macOS,
-whose backends have no learning-mode API.
+now-empty per-run parent directory.
 
 ## Live stdio + kill (streaming)
 
@@ -212,7 +234,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
-    capture_denials: None,
 };
 let mut request = build_request(&policy, None)?;
 request.set_script("cat"); // echoes stdin until EOF
@@ -288,20 +309,28 @@ state-aware sandbox lifecycle from a wire-format request JSON string:
 - `run_state_aware_json(request_json, dry_run, experimental)` drives the
   **envelope phases** — `provision`, `start`, `stop`, `deprovision` (and a dry
   run of any phase) — and returns the response-envelope JSON string.
-- `exec_sandbox(request_json, experimental)` runs the `exec` phase as a **live
-  streaming** `Sandbox` (the same handle `spawn_sandbox` returns).
+- `exec_attached(request_json, experimental)` runs the `exec` phase **attached
+  to this process's stdio**, blocking until the workload exits and returning a
+  `WaitOutcome`. See *Pty allocation* for the terminal requirement and what each
+  backend does with the streams.
+- `exec_sandbox(request_json, experimental)` runs the same `exec` phase as a
+  **live streaming** `Sandbox` (the same handle `spawn_sandbox` returns), for a
+  caller that drives the pipes itself. The child sees no TTY and this process's
+  console is left untouched.
+
+Both take the same request JSON and differ only in where the workload's stdio
+goes.
 
 Every state-aware backend is experimental, so `experimental` is the in-process
 equivalent of the executor's `--experimental` flag: without it the request is
 refused with `ErrorCode::BackendUnavailable` before any work happens. It is an
 API parameter, not a field in the request JSON.
 
-The example below is illustrative: it selects IsolationSession, which needs
-`mxc_engine/isolation_session`, and this crate does not forward that feature
-today — so it returns `ErrorCode::UnsupportedPhase` as written.
+The example needs this crate's `isolation_session` feature and a host running the
+OS-side service.
 
 ```rust,no_run
-use mxc_sdk::{run_state_aware_json, exec_sandbox};
+use mxc_sdk::{run_state_aware_json, exec_attached};
 
 // Provision. IsolationSession accepts only the canonical unrestricted-network
 // acknowledgment; an absent policy defaults to `block`, which it refuses.
@@ -311,37 +340,62 @@ let provisioned = run_state_aware_json(
     false, // dry_run
     true,  // experimental
 )?;
+// The returned `sandboxId` is opaque — carry it forward, never parse it.
 
-// Exec phase: a live streaming handle.
-let mut proc = exec_sandbox(
-    r#"{"phase":"exec","sandboxId":"iso:...","process":{"commandLine":"echo hi"}}"#,
+// Start. The exec phase runs against a started session.
+run_state_aware_json(
+    r#"{"phase":"start","sandboxId":"..."}"#,
+    false, // dry_run
+    true,  // experimental
+)?;
+
+// Exec phase, attached: an interactive shell on this console.
+let outcome = exec_attached(
+    r#"{"phase":"exec","sandboxId":"...","process":{"commandLine":"powershell.exe"}}"#,
     true, // experimental
 )?;
-let _ = proc.wait();
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 Three backends implement the state-aware lifecycle — IsolationSession, WSLc and
-Windows Sandbox — all Windows-only, and only IsolationSession serves a streaming
-`exec` in-process. Branch on the error code: a backend whose feature is not
-compiled in answers `ErrorCode::BackendUnavailable`, and one with no arm on the
-path you called answers `ErrorCode::UnsupportedPhase`.
+Windows Sandbox. Only IsolationSession serves `exec_sandbox`.
+
+`exec_attached` is verified against **IsolationSession** only.
+
+What an unavailable backend returns differs, so branch on the code rather than
+assuming one: a build without the `wslc` or `isolation_session` feature answers
+`ErrorCode::BackendUnavailable` for that backend, while a backend with no
+state-aware arm on the path you called answers `ErrorCode::UnsupportedPhase`.
+Windows Sandbox is compiled in unconditionally on Windows; IsolationSession and
+WSLc each need their engine feature, both of which this crate forwards.
+
+**IsolationSession is refused from a single-threaded apartment.** Call it from an
+MTA thread or one with no apartment of its own.
 
 ## Supported backends
 
 The backend is chosen by the `containment` field in the request (or the host
 default):
 
-| Host    | Backend(s)                                      | Selected by             |
-|---------|-------------------------------------------------|-------------------------|
-| Linux   | Bubblewrap                                      | `Containment::Process`  |
-| macOS   | Seatbelt                                        | `Containment::Process`  |
-| Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`  |
-| Windows | WSLC (WSL Container)                            | `Containment::Wslc`     |
+| Host    | Backend(s)                                      | Selected by                      |
+|---------|-------------------------------------------------|----------------------------------|
+| Linux   | Bubblewrap                                      | `Containment::Process`           |
+| macOS   | Seatbelt                                        | `Containment::Process`           |
+| Windows | ProcessContainer (AppContainer + BaseContainer) | `Containment::Process`           |
+| Windows | Explicit ProcessContainer configuration         | `Containment::ProcessContainer`  |
+| Windows | WSLC (WSL Container)                            | `Containment::Wslc`              |
 
-Any other backend (Windows Sandbox, IsolationSession, MicroVM, Hyperlight, LXC)
-returns an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive the
-standalone executor binaries for those.
+`Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
+Constructing the listed variants is unaffected.
+
+`Containment::IsolationSession` names that backend, but no entry point taking a
+`Containment` serves it: `run` and `spawn_sandbox` both return
+[`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware
+lifecycle — `run_state_aware_json` plus `exec_attached` or `exec_sandbox`.
+
+Backends with no variant at all — Windows Sandbox, MicroVM, Hyperlight, LXC —
+cannot be named from this crate; use the executor binaries. Windows Sandbox is
+still reachable here through the state-aware lifecycle.
 
 ### WSLC (experimental)
 
@@ -355,7 +409,9 @@ go through the same parser the executor uses — so a rejected value (e.g. a por
 mapping with a zero or duplicated host port) fails at build time, not at spawn.
 
 ```rust,no_run
-use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+use mxc_sdk::{
+    build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
+};
 
 # let policy = SandboxPolicy {
 #     version: "0.7.0-alpha".to_string(),
@@ -373,13 +429,18 @@ stdin (`Sandbox::take_stdin()` returns `None`), and its process has no host
 process id (`Sandbox::id()` is `0`) — `kill()` stops the whole container.
 [`platform_support`] reports `"wslc"` only on a host that can actually run it.
 
-## No pty
+## Pty allocation
 
-The child's stdio is always wired to ordinary pipes — the library never
-allocates a pty (the executor binaries, by contrast, stream live: LXC via a
-pty, Seatbelt/Bubblewrap/AppContainer by inheriting the executor's stdio
-directly — a TTY when the executor has one). Output the caller doesn't
-take is drained and discarded by `wait()`.
+Every entry point except `exec_attached` wires the child's stdio to ordinary
+pipes and allocates no pty; output the caller does not take is drained and
+discarded by `wait()`.
+
+Under `exec_attached`, IsolationSession allocates a pseudo-console and forwards
+stdin, so interactive shells render and resize. A pseudo-console has one output
+stream, so the sandbox's stderr arrives merged into stdout.
+
+`exec_attached` refuses with `MalformedRequest` unless this process's stdout and
+stdin are both terminals; use `exec_sandbox` for a workload with no terminal.
 
 ## Relationship to `mxc_engine` and the executor binaries
 

@@ -50,7 +50,7 @@ pub struct MxcConfig {
     #[serde(rename = "_comment")]
     pub comment: Option<serde_json::Value>,
 
-    /// MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+    /// MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
     pub version: Option<String>,
 
     /// State-aware lifecycle phase. When present, the request is a state-aware
@@ -726,10 +726,12 @@ pub struct IsolationSession {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct IsolationSessionProvisionPhase {
-    /// Optional application identifier for the calling application. For a
-    /// packaged application this is the Package Family Name; for an unpackaged
-    /// one it may be any string. Carried inside the `sandboxId` so later
-    /// lifecycle phases can recover it without the caller re-supplying it.
+    /// Optional identifier for the calling application.
+    ///
+    /// **A packaged application must supply its Package Family Name in the
+    /// form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`).
+    /// An unpackaged application may pass any string. Carried inside the `sandboxId`
+    /// so later lifecycle phases can recover it without the caller re-supplying it.
     pub app_id: Option<String>,
 }
 
@@ -743,7 +745,7 @@ mod schema_gen {
     /// Canonical `$id` for the generated dev schema. Bump alongside the dev schema
     /// version/filename (see `schemas/schema-version.json`).
     const SCHEMA_ID: &str =
-        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-dev.json";
+        "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json";
 
     /// Generate the JSON Schema for the MXC config from the dedicated `MxcConfig`
     /// model. The schema is post-processed to (a) inject the canonical `$id`,
@@ -757,7 +759,7 @@ mod schema_gen {
     pub fn generate_config_schema_json() -> String {
         let value = schema_value();
         if let serde_json::Value::Object(map) = &value {
-            return render_root_ordered(map);
+            return mxc_schema_support::render_root_ordered(map);
         }
         serde_json::to_string_pretty(&value).expect("schema serialises to JSON")
     }
@@ -769,13 +771,7 @@ mod schema_gen {
     fn schema_value() -> serde_json::Value {
         let schema = schemars::schema_for!(MxcConfig);
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
-        normalize_integer_formats(&mut value);
-        if let serde_json::Value::Object(map) = &mut value {
-            map.insert(
-                "$id".to_string(),
-                serde_json::Value::String(SCHEMA_ID.to_string()),
-            );
-        }
+        mxc_schema_support::prepare_schema(&mut value, SCHEMA_ID);
         value
     }
 
@@ -788,87 +784,7 @@ mod schema_gen {
     /// (alphabetical) order.
     pub fn generate_sdk_types_ts() -> String {
         let value = schema_value();
-        crate::ts_emit::emit_ts(&value)
-    }
-
-    /// Render the root object as pretty JSON with a fixed key order — the schema
-    /// metadata (`$schema`, `$id`, `title`, `description`) first, then the
-    /// structural keys — without disturbing nested key order.
-    ///
-    /// `serde_json`'s default `Map` is a `BTreeMap`, so it emits every object's keys
-    /// alphabetically and gives no control over root order. Rather than switch the
-    /// whole crate to `preserve_order` (which would reorder every nested object too),
-    /// only the root is rendered here: each value is pretty-printed with the standard
-    /// serializer (so nested objects stay alphabetical, byte-for-byte as before) and
-    /// re-indented one level. Any key not in `ORDER` keeps its alphabetical position
-    /// after the listed ones.
-    fn render_root_ordered(map: &serde_json::Map<String, serde_json::Value>) -> String {
-        // Only the metadata keys are floated to the front; every other key keeps its
-        // natural (alphabetical) position, so the rest of the file is unchanged.
-        const ORDER: &[&str] = &["$schema", "$id", "title", "description"];
-        let rank = |key: &str| ORDER.iter().position(|k| *k == key).unwrap_or(ORDER.len());
-
-        // `map` is a BTreeMap, so `keys()` is already alphabetical; a stable sort by
-        // rank floats the listed keys to the front and leaves the rest alphabetical.
-        let mut keys: Vec<&String> = map.keys().collect();
-        keys.sort_by_key(|k| rank(k));
-
-        let mut out = String::from("{\n");
-        for (i, key) in keys.iter().enumerate() {
-            let value_pretty =
-                serde_json::to_string_pretty(&map[*key]).expect("schema value serialises to JSON");
-            // The value sits one level deep: keep its first line in place after the
-            // key, and indent every following line by two spaces.
-            let mut lines = value_pretty.lines();
-            let mut indented = lines.next().unwrap_or("").to_string();
-            for line in lines {
-                indented.push_str("\n  ");
-                indented.push_str(line);
-            }
-            let key_json = serde_json::to_string(key).expect("object key serialises to JSON");
-            out.push_str("  ");
-            out.push_str(&key_json);
-            out.push_str(": ");
-            out.push_str(&indented);
-            if i + 1 < keys.len() {
-                out.push(',');
-            }
-            out.push('\n');
-        }
-        out.push('}');
-        out
-    }
-
-    /// Recursively rewrite non-standard schemars integer `format`s into draft-07
-    /// constructs: unsigned types (`uint*`) gain `minimum: 0` and drop `format`;
-    /// signed types (`int*`) just drop `format`. Standard string formats
-    /// (`date-time`, `uri`, …) are left untouched.
-    fn normalize_integer_formats(value: &mut serde_json::Value) {
-        use serde_json::Value;
-        match value {
-            Value::Object(map) => {
-                if let Some(Value::String(fmt)) = map.get("format") {
-                    let fmt = fmt.clone();
-                    let is_unsigned = fmt.starts_with("uint");
-                    let is_signed = fmt.starts_with("int");
-                    if is_unsigned || is_signed {
-                        map.remove("format");
-                        if is_unsigned {
-                            map.entry("minimum").or_insert(Value::Number(0.into()));
-                        }
-                    }
-                }
-                for v in map.values_mut() {
-                    normalize_integer_formats(v);
-                }
-            }
-            Value::Array(items) => {
-                for v in items {
-                    normalize_integer_formats(v);
-                }
-            }
-            _ => {}
-        }
+        mxc_schema_support::emit_ts(&value)
     }
 }
 

@@ -35,10 +35,17 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
         .is_some_and(|peer| !peer.trim().is_empty())
 }
 
-pub(crate) fn supports_directional_network(version: &str) -> bool {
+/// Returns directional-network support for a valid schema version.
+///
+/// `None` leaves malformed-version diagnostics to the schema parser.
+pub fn directional_network_support(version: &str) -> Option<bool> {
     semver::Version::parse(version)
+        .ok()
         .map(|version| version.major > 0 || version.minor >= 8)
-        .unwrap_or(false)
+}
+
+pub fn supports_directional_network(version: &str) -> bool {
+    directional_network_support(version).unwrap_or(false)
 }
 
 pub(crate) fn directional_network_version_error() -> WxcError {
@@ -67,7 +74,11 @@ enum NetworkFormat {
     Directional,
 }
 
-/// Returns whether a proxy host names a loopback address.
+/// Any address in `127.0.0.0/8`, plus `::1` and `localhost`.
+///
+/// Use this to *reject* a host (LXC treats all of `127/8` as the container's
+/// own namespace loopback). Breadth is fail-safe here: a wider match rejects
+/// more. To *admit* a host, use [`host_is_canonical_loopback`].
 pub(crate) fn host_is_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
@@ -76,6 +87,22 @@ pub(crate) fn host_is_loopback(host: &str) -> bool {
         .parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false)
+}
+
+/// Only `127.0.0.1` and `::1`, plus `localhost`; bracketed or not, any case.
+///
+/// Use this to *admit* a proxy host. The accept-set is exactly what Seatbelt's
+/// `(remote ip "localhost:<port>")` enforces — measured, not assumed: under
+/// that rule `127.0.0.1` and `::1` connect while `127.0.0.2` gets `EPERM`.
+/// Matching `127.0.0.0/8` here would admit a proxy the sandbox then blocks.
+pub fn host_is_canonical_loopback(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    matches!(
+        unbracket_host(host).parse::<IpAddr>(),
+        Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)) | Ok(IpAddr::V6(Ipv6Addr::LOCALHOST))
+    )
 }
 
 fn convert_wire_proxy_at(proxy: wire::Proxy, path: &str) -> Result<ProxyConfig, WxcError> {
@@ -335,7 +362,7 @@ fn apply_directional_network(
             .as_ref()
             .map(ProxyAddress::host)
             .unwrap_or_default();
-        if !runtime_proxy_host_is_supported(host) {
+        if !host_is_canonical_loopback(host) {
             return Err(WxcError::ConfigParse(
                 "runtimeConfig.networkProxy must use localhost, 127.0.0.1, or [::1]".to_string(),
             ));
@@ -365,16 +392,6 @@ fn validate_directional_proxy_policy(policy: &ContainerPolicy) -> Result<(), Wxc
         ));
     }
     Ok(())
-}
-
-fn runtime_proxy_host_is_supported(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    matches!(
-        unbracket_host(host).parse::<IpAddr>(),
-        Ok(IpAddr::V4(Ipv4Addr::LOCALHOST)) | Ok(IpAddr::V6(Ipv6Addr::LOCALHOST))
-    )
 }
 
 fn convert_action(action: wire::NetworkAction) -> NetworkAction {
@@ -545,6 +562,17 @@ fn validate_process_container_proxy_policy(
     policy: &ContainerPolicy,
     proxy_enabled: bool,
 ) -> Result<(), WxcError> {
+    if policy
+        .allowed_proxy_peer
+        .as_deref()
+        .is_some_and(|peer| peer.eq_ignore_ascii_case("MXC-Loopback"))
+    {
+        return Err(WxcError::ConfigParse(
+            "processContainer.network.allowedProxyPeer must not use the reserved \
+             'MXC-Loopback' identity"
+                .to_string(),
+        ));
+    }
     if policy.allowed_proxy_peer.is_some() && !proxy_enabled {
         return Err(WxcError::ConfigParse(
             "processContainer.network.allowedProxyPeer requires runtimeConfig.networkProxy"
@@ -580,6 +608,29 @@ fn validate_process_container_proxy_policy(
                 .to_string(),
         )),
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod proxy_policy_tests {
+    use super::*;
+
+    #[test]
+    fn reserved_loopback_peer_identity_is_rejected_case_insensitively() {
+        let policy = ContainerPolicy {
+            allowed_proxy_peer: Some("mxc-loopback".to_string()),
+            ..Default::default()
+        };
+
+        let error = validate_process_container_proxy_policy(&policy, true).unwrap_err();
+        match error {
+            WxcError::ConfigParse(message) => assert_eq!(
+                message,
+                "processContainer.network.allowedProxyPeer must not use the reserved \
+                 'MXC-Loopback' identity"
+            ),
+            other => panic!("expected config error, got {other:?}"),
+        }
     }
 }
 

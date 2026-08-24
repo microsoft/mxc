@@ -1,0 +1,6 @@
+{
+  "version": "0.8.0-alpha",
+  "phase": "deprovision",
+  "sandboxId": "example:12345678",
+  "containment": "windows_sandbox"
+}

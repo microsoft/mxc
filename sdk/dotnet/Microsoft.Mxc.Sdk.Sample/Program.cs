@@ -113,18 +113,44 @@ try
     Console.WriteLine("State-aware lifecycle:");
     try
     {
-        var provisioned = MxcLifecycle.ProvisionSandbox();
+        var provisioned = MxcLifecycle.ProvisionSandbox(
+            StateAwareContainment.IsolationSession,
+            new ProvisionSandboxOptions
+            {
+                // The isolation session runs on a network MXC can neither filter
+                // nor deny; provision accepts only this posture, stated
+                // explicitly, and refuses an absent policy.
+                Network = new StateAwareNetworkPolicy
+                {
+                    DefaultPolicy = StateAwareNetworkDefault.Allow,
+                    AllowLocalNetwork = true,
+                },
+            });
         Console.WriteLine($"  provisioned: {provisioned.SandboxId}");
         try
         {
             MxcLifecycle.StartSandbox(provisioned.SandboxId);
             var lifecycleRun = await MxcLifecycle.ExecInSandboxAsync(provisioned.SandboxId, command);
             Console.WriteLine($"  exec exit={lifecycleRun.ExitCode} stdout={lifecycleRun.Stdout.TrimEnd()}");
-            MxcLifecycle.StopSandbox(provisioned.SandboxId);
         }
         finally
         {
-            MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+            try
+            {
+                MxcLifecycle.StopSandbox(provisioned.SandboxId);
+            }
+            catch (MxcException)
+            {
+                // A failed stop must not prevent the deprovision that frees the account.
+            }
+            try
+            {
+                MxcLifecycle.DeprovisionSandbox(provisioned.SandboxId);
+            }
+            catch (MxcException ex)
+            {
+                Console.WriteLine($"  WARNING: deprovision failed, the account may leak: {ex.Message}");
+            }
         }
     }
     catch (MxcException ex)

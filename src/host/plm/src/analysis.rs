@@ -4,13 +4,13 @@
 //! Canonical Learning Mode analysis and compatibility views for `plm.exe`.
 
 use std::collections::{HashMap, HashSet};
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use learning_mode_core::{
-    write_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary, DenialsDocument,
-    DeniedResource, ResourceType,
+    verbose_logging_sibling_path, write_document, write_paired_output_files,
+    write_verbose_logging_document, AccessType, AnalysisResult, DenialAnalyzer, DenialSummary,
+    DenialsDocument, DeniedResource, ExistingOutputPolicy, ResourceType, VerboseLoggingDocument,
 };
 use learning_mode_windows::EtlDenialAnalyzer;
 
@@ -24,7 +24,8 @@ pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
         .with_context(|| format!("failed to analyze {}", trace_file.display()))
 }
 
-/// Write canonical denials JSON atomically and return the document that was written.
+/// Write canonical denials JSON and its verbose logging sibling, then return the
+/// canonical document.
 pub fn write_denials(
     output_path: &Path,
     analysis: &AnalysisResult,
@@ -40,16 +41,17 @@ pub fn write_denials(
         analysis.denied_resources_truncated,
     );
     let document = DenialsDocument::new(analysis.denials.clone(), summary);
-    let mut temp = tempfile::NamedTempFile::new_in(parent)
-        .with_context(|| format!("failed to create denials temp file in {}", parent.display()))?;
-    write_document(&mut temp, &document)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
-    temp.flush()
-        .and_then(|_| temp.as_file().sync_all())
-        .with_context(|| format!("failed to flush {}", output_path.display()))?;
-    temp.persist(output_path)
-        .map_err(|error| error.error)
-        .with_context(|| format!("failed to replace {}", output_path.display()))?;
+    let verbose_logging_document = VerboseLoggingDocument::new(&analysis.verbose_logging);
+    let verbose_logging_path = verbose_logging_sibling_path(output_path)
+        .with_context(|| format!("failed to derive sibling for {}", output_path.display()))?;
+    write_paired_output_files(
+        "plm stop",
+        output_path,
+        &verbose_logging_path,
+        ExistingOutputPolicy::Replace,
+        |writer| write_document(writer, &document),
+        |writer| write_verbose_logging_document(writer, &verbose_logging_document),
+    )?;
     Ok(document)
 }
 
@@ -292,13 +294,38 @@ mod tests {
         let analysis = AnalysisResult {
             denials: vec![denial(r"C:\read.txt", ResourceType::File, AccessType::Read)],
             denied_resources_truncated: true,
+            verbose_logging: Default::default(),
         };
 
         write_denials(&path, &analysis, 7).unwrap();
         let document: DenialsDocument =
-            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
+        let verbose_logging_document: learning_mode_core::VerboseLoggingDocument =
+            serde_json::from_slice(&std::fs::read(verbose_logging_path).unwrap()).unwrap();
         assert_eq!(document.denials, analysis.denials);
         assert_eq!(document.summary.exit_code, 7);
         assert!(document.summary.denied_resources_truncated);
+        assert_eq!(verbose_logging_document.summary.total_occurrences, 0);
+    }
+
+    #[test]
+    fn canonical_promotion_failure_removes_verbose_logging_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("denials.json");
+        std::fs::create_dir(&path).unwrap();
+        let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(&path).unwrap();
+        let analysis = AnalysisResult {
+            denials: Vec::new(),
+            denied_resources_truncated: false,
+            verbose_logging: Default::default(),
+        };
+
+        let error = write_denials(&path, &analysis, 0).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("cannot replace non-file canonical"));
+        assert!(!verbose_logging_path.exists());
     }
 }

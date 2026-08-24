@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Firewall",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "wget -qO- https://api.github.com/zen"
+    "commandLine": "bash -c 'set -u; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo LEGACY_FIREWALL_OK'"
   },
   "network": {
     "defaultPolicy": "block",
