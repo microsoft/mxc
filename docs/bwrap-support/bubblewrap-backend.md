@@ -29,7 +29,8 @@ requiring root privileges or a container runtime.
   below that floor.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
   plus `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
-  `ip6tables-restore` for the in-namespace egress and ingress rules, and the
+  `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
+  `sh` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
   match (unprivileged Bubblewrap cannot load it on demand).
 
@@ -570,7 +571,7 @@ request fails if its private namespace cannot be configured.
 
 0. Before anything is launched, `validate` probes the host tools this mode
    depends on — `slirp4netns`, `unshare` (checked for `--map-current-user` and
-   `--keep-caps`), `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
+   `--keep-caps`), `sh`, `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
    `ip6tables-restore` — so a host that is
    missing one fails immediately with a message naming it, rather than partway
    through supervisor startup. For the `iptables` family presence is not
@@ -697,6 +698,24 @@ run, the result is `unsupported`, never "unknown".
 This check is advisory, not a gate. The runner still probes the dependencies at
 launch: the probe runs in a different process and at an earlier time, so a
 package can be removed in between.
+
+The pre-flight walk is bounded to a few seconds in total, tighter than the
+per-tool timeout the launch path allows itself, so `getPlatformSupport()`
+answers promptly. A host slow enough to exhaust that budget is reported
+`unsupported` with a warning naming the timeout — the run itself is not
+subject to that budget, so such a host may still launch successfully.
+
+It is also not exhaustive. It confirms `slirp4netns`, the `iptables` tooling and
+a usable backend, and that the kernel actually grants the unprivileged user and
+network namespaces `bwrap` will ask for — but a missing `nf_conntrack` module is
+only detectable once the rules are installed, so that case still surfaces at
+launch with a targeted error message rather than here.
+
+Each call re-walks the dependencies, so removing a package is reflected by the
+next call and the pre-flight answer never stands in for the runner's own check
+at launch. This applies to direct Rust and CLI invocations; the TypeScript
+`getPlatformSupport()` memoizes its result for the lifetime of the SDK module,
+so a Node caller keeps the first answer it received.
 
 ### Caveats
 
@@ -825,7 +844,7 @@ resolution.
 | Rootfs | Downloads distro rootfs | Bind-mounts host filesystem |
 | Startup | Create → Start → Attach | Single `bwrap` exec; the 0.8 private-namespace modes (proxy and firewall enforcement) add a user/network-namespace supervisor, a `slirp4netns` instance and an egress rule set |
 | Network isolation | iptables + veth | `--unshare-net`, private netns + slirp4netns, or iptables |
-| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, plus `iptables`, `ip6tables` and their `-restore` counterparts on the `nf_tables` backend |
+| Dependencies | `lxc-*` tools, templates | `bwrap`; the 0.8 private-namespace modes also need `slirp4netns`, util-linux `unshare` and `nsenter`, a POSIX `sh`, plus `iptables`, `ip6tables` and their `-restore` counterparts on the `nf_tables` backend |
 | Lifecycle | Create/destroy containers | Process dies on exit; proxy mode's supervisor is reaped with it |
 
 **When to use Bubblewrap:**

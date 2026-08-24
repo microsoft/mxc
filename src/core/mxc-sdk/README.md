@@ -148,6 +148,25 @@ And a backend appearing in `available_backends()` is a host-capability signal,
 **not** a guarantee this SDK can launch it — cross-check [`platform_support`]
 for that.
 
+On Linux, [`platform_support`] additionally reports `bubblewrap_network`: whether
+this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode,
+which runs the sandbox in a private network namespace). That mode has no
+fallback, so check it before building a proxy request:
+
+```rust,no_run
+use mxc_sdk::{platform_support, ProxyEnforcement};
+
+if let Some(network) = platform_support().bubblewrap_network {
+    if network.proxy_enforcement != ProxyEnforcement::Supported {
+        println!("proxy mode unavailable: {:?}", network.warnings);
+    }
+}
+```
+
+Reported fail-closed: when the probe cannot run, the result is `Unsupported`
+with the reason in `warnings`. The field is absent only when Bubblewrap itself
+is unavailable, which [`PlatformSupport::reason`] explains.
+
 > **Before / after.** Host-and-backend discovery previously lived only in the
 > TypeScript SDK (`getPlatformSupport`), so Rust callers and the executor
 > binaries had no in-process way to ask "what backends does this host support?"

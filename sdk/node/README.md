@@ -151,9 +151,12 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 On Linux, when Bubblewrap is available, `getPlatformSupport()` also reports `bubblewrapNetwork`: whether this host can enforce **proxy-only egress** (schema `0.8.0-alpha`+ proxy mode, which runs the sandbox in a private network namespace and default-drops everything except the proxy). That mode has no fallback — a policy the host cannot satisfy fails rather than silently degrading — so check it before spawning:
 
 ```typescript
-const support = getPlatformSupport();
-if (support.bubblewrapNetwork?.proxyEnforcement !== 'supported') {
-  throw new Error(`proxy mode unavailable: ${support.bubblewrapNetwork?.warnings.join('; ')}`);
+const network = getPlatformSupport().bubblewrapNetwork;
+if (!network) {
+  throw new Error('Bubblewrap is not available on this host');
+}
+if (network.proxyEnforcement !== 'supported') {
+  throw new Error(`proxy mode unavailable: ${network.warnings.join('; ')}`);
 }
 ```
 

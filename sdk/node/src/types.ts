@@ -587,11 +587,13 @@ export interface UiCapabilitySupport {
  *
  * Schema `0.8.0-alpha`+ proxy policies run the sandbox in a private network
  * namespace and default-drop everything except the proxy endpoint. That
- * requires host tooling (`slirp4netns`, `unshare`, `nsenter`, `iptables`) and
- * there is deliberately no fallback to the weaker shared-host-network model,
- * so a request that cannot configure private networking fails rather than
- * silently degrading. This reports, before launching, whether the host can
- * satisfy such a policy.
+ * requires host tooling (slirp4netns, util-linux unshare, nsenter, the
+ * iptables family) plus unprivileged user and network namespaces the kernel
+ * will actually grant; see `docs/bwrap-support/bubblewrap-backend.md` for the
+ * full list. There is deliberately no fallback to the weaker shared-host-network
+ * model, so a request that cannot configure private networking fails rather
+ * than silently degrading. This reports, before launching, whether the host
+ * can satisfy such a policy.
  */
 export interface BubblewrapNetworkSupport {
   /** Whether proxy-only egress can be enforced on this host. */

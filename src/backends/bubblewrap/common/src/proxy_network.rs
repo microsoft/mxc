@@ -26,6 +26,7 @@ use crate::bwrap_command::COMMAND_TAIL;
 use crate::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
+use crate::probe_io::{capture_file, capture_target, read_capture};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -85,6 +86,13 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 /// Ceiling for a single dependency probe. Generous next to a `--version` call,
 /// which returns in milliseconds, so only a genuinely wedged binary trips it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Total budget for the advisory pre-flight probe surface.
+///
+/// The launch path can afford [`PROBE_TIMEOUT`] on each of eight dependencies
+/// in turn; [`probe_proxy_enforcement`] cannot, because it runs behind a
+/// caller-owned timeout and is fail-closed, so being killed from outside would
+/// report the host as *unsupported*.
+const PRE_FLIGHT_BUDGET: Duration = Duration::from_secs(3);
 const SLIRP_HOST_GATEWAY: &str = "10.0.2.2";
 /// The gateway as an address, for rules and pins. Kept in step with
 /// [`SLIRP_HOST_GATEWAY`] by [`tests::gateway_constants_agree`].
@@ -944,6 +952,47 @@ struct ProbeOutput {
     stdout: String,
 }
 
+/// Which bound produced a command's deadline, so a timeout names the right
+/// cause: a hung tool, or a budget earlier checks had spent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DeadlineSource {
+    Command,
+    Budget,
+}
+
+/// How long a dependency walk may take in total. `None` bounds the walk only
+/// by the sum of the per-command [`PROBE_TIMEOUT`]s.
+#[derive(Clone, Copy)]
+struct ProbeBudget {
+    deadline: Option<Instant>,
+}
+
+impl ProbeBudget {
+    fn unbounded() -> Self {
+        Self { deadline: None }
+    }
+
+    fn total(budget: Duration) -> Self {
+        Self {
+            deadline: Some(Instant::now() + budget),
+        }
+    }
+
+    /// The next command's own ceiling, clamped to what is left of the budget.
+    fn command_deadline(self) -> (Instant, DeadlineSource) {
+        let per_command = Instant::now() + PROBE_TIMEOUT;
+        match self.deadline {
+            Some(total) if total < per_command => (total, DeadlineSource::Budget),
+            _ => (per_command, DeadlineSource::Command),
+        }
+    }
+
+    fn is_exhausted(self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+}
+
 /// Run `command` to completion, killing it if it outlives [`PROBE_TIMEOUT`].
 ///
 /// `Command::output()` waits forever. These probes run inside `validate`, so a
@@ -951,19 +1000,30 @@ struct ProbeOutput {
 /// no diagnostic -- a hang is far harder to chase than a failure, so bound it
 /// and name the tool that stalled.
 ///
-/// stdout is collected only after the child exits. That is safe for probes that
-/// print a version banner or a help page (kilobytes, against a 64 KiB pipe
-/// buffer); a probe whose output could fill the pipe would deadlock against
-/// this wait and must drain the pipe concurrently instead.
-fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
+/// stdout is captured to an unlinked temp file, not a pipe: a pipe reports EOF
+/// only once every inherited write end closes, so a backgrounded descendant
+/// could hold the read past this deadline. Only a bounded prefix is read back.
+fn run_probe(
+    mut command: Command,
+    label: &str,
+    budget: ProbeBudget,
+) -> Result<ProbeOutput, String> {
+    if budget.is_exhausted() {
+        return Err(format!(
+            "Bubblewrap: ran out of time before checking '{label}' \
+             (the host took longer than {PRE_FLIGHT_BUDGET:?} to answer earlier checks)"
+        ));
+    }
+
+    let stdout_file = capture_file("stdout")?;
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
+        .stdout(capture_target(&stdout_file, "stdout")?)
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| format!("{error}"))?;
 
-    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let (deadline, deadline_source) = budget.command_deadline();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -974,10 +1034,19 @@ fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
                 // Leaving it running would keep the pipe open and strand the
                 // process for the lifetime of the host process.
                 terminate_child(&mut child);
-                return Err(format!(
-                    "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
-                     the host's {label} installation appears to be hung"
-                ));
+                return Err(match deadline_source {
+                    DeadlineSource::Command => format!(
+                        "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
+                         the host's {label} installation appears to be hung"
+                    ),
+                    // The budget is shorter than the per-command ceiling, so
+                    // this fires for a healthy-but-slow tool too; blaming it
+                    // for hanging would be wrong.
+                    DeadlineSource::Budget => format!(
+                        "Bubblewrap: gave up while checking '{label}' after the host took \
+                         longer than {PRE_FLIGHT_BUDGET:?} to answer the dependency checks"
+                    ),
+                });
             }
             Err(error) => {
                 terminate_child(&mut child);
@@ -986,11 +1055,43 @@ fn run_probe(mut command: Command, label: &str) -> Result<ProbeOutput, String> {
         }
     };
 
-    let mut stdout = String::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        let _ = pipe.read_to_string(&mut stdout);
-    }
+    let stdout = String::from_utf8_lossy(&read_capture(&stdout_file)).into_owned();
     Ok(ProbeOutput { status, stdout })
+}
+
+/// Whether an `unshare` exit code means the trailing command never started,
+/// rather than the namespaces being refused (which exits 1).
+fn shell_failed_to_start(code: i32) -> bool {
+    matches!(code, 126 | 127)
+}
+
+/// Turn a failed namespace probe into actionable guidance.
+///
+/// Split out so the diagnostics are testable: a host where the namespaces work
+/// cannot be made to produce these statuses.
+fn namespace_probe_error(status: ExitStatus, use_case: PrivateNetworkUse) -> String {
+    let requirement = use_case.requirement();
+    // 126/127 are the exec-failure codes `unshare` propagates (EACCES and
+    // ENOENT). A PATH lookup can produce either, and both mean the namespaces
+    // worked and `sh` is what could not start.
+    if status.code().is_some_and(shell_failed_to_start) {
+        return format!(
+            "Bubblewrap: {requirement} requires 'sh' on PATH inside the sandbox namespace \
+             (the proxy supervisor runs as 'sh -c'), which this host could not start. \
+             Install a POSIX shell or {}.",
+            use_case.remedy()
+        );
+    }
+    format!(
+        "Bubblewrap: {requirement} requires unprivileged user and network namespaces, \
+         which this host refused (unshare --user --net exited with {status}). On Ubuntu 24.04+ \
+         this is usually AppArmor's 'kernel.apparmor_restrict_unprivileged_userns=1': give \
+         the caller an AppArmor profile that permits userns, or clear that sysctl on an \
+         ephemeral host. Otherwise enable the namespaces (for example 'sysctl -w \
+         kernel.unprivileged_userns_clone=1', or raise 'user.max_user_namespaces' / \
+         'user.max_net_namespaces') or {}.",
+        use_case.remedy()
+    )
 }
 
 /// Write the sandbox's `/etc/hosts`: the pin, then the host's own entries with
@@ -1235,12 +1336,26 @@ impl PrivateNetworkUse {
 /// [`crate::bwrap_runner`]: schema 0.8 proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
 /// run fails. Advisory — the runner still probes before it launches.
+///
+/// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
+/// rules are installed, so it still surfaces at launch.
+///
+/// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
+/// caller answering "can this host do it?" before spawning cannot afford the
+/// sum of every per-command timeout.
+///
+/// Uncached in both directions. Sharing the launch cache would let one
+/// advisory call report support long after the tooling was removed, and would
+/// let it stand in for the fresh walk the runner promises to do at launch.
 pub fn probe_proxy_enforcement() -> Result<(), String> {
-    probe_dependencies(PrivateNetworkUse::ProxyOnlyEgress)
+    probe_dependencies_uncached(
+        PrivateNetworkUse::ProxyOnlyEgress,
+        ProbeBudget::total(PRE_FLIGHT_BUDGET),
+    )
 }
 
 pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), String> {
-    // Probing costs five subprocess spawns, and the host's tooling does not
+    // Probing costs eight subprocess spawns, and the host's tooling does not
     // change under a running process often enough to pay that on every
     // sandbox. Cache the *success* only: a failure is usually "the operator
     // has not installed slirp4netns yet", and caching that would keep failing
@@ -1253,16 +1368,19 @@ pub(crate) fn probe_dependencies(use_case: PrivateNetworkUse) -> Result<(), Stri
     if PROBED.get().is_some() {
         return Ok(());
     }
-    probe_dependencies_uncached(use_case)?;
+    probe_dependencies_uncached(use_case, ProbeBudget::unbounded())?;
     let _ = PROBED.set(());
     Ok(())
 }
 
-fn probe_dependencies_uncached(use_case: PrivateNetworkUse) -> Result<(), String> {
+fn probe_dependencies_uncached(
+    use_case: PrivateNetworkUse,
+    budget: ProbeBudget,
+) -> Result<(), String> {
     let requirement = use_case.requirement();
     let mut slirp_command = Command::new("slirp4netns");
     slirp_command.arg("--version");
-    let slirp = run_probe(slirp_command, "slirp4netns").map_err(|error| {
+    let slirp = run_probe(slirp_command, "slirp4netns", budget).map_err(|error| {
         format!(
             "Bubblewrap: {requirement} requires 'slirp4netns' on PATH: {error}. \
              Install slirp4netns or {}.",
@@ -1279,7 +1397,7 @@ fn probe_dependencies_uncached(use_case: PrivateNetworkUse) -> Result<(), String
 
     let mut unshare_command = Command::new("unshare");
     unshare_command.arg("--help");
-    let unshare = run_probe(unshare_command, "unshare").map_err(|error| {
+    let unshare = run_probe(unshare_command, "unshare", budget).map_err(|error| {
         format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
     })?;
     if !unshare.status.success()
@@ -1290,6 +1408,33 @@ fn probe_dependencies_uncached(use_case: PrivateNetworkUse) -> Result<(), String
             "Bubblewrap: {requirement} requires util-linux unshare with \
              --map-current-user and --keep-caps support"
         ));
+    }
+
+    // `--help` only proves the flags are compiled in. The kernel can still
+    // refuse the namespaces (unprivileged user namespaces disabled, or
+    // user.max_net_namespaces exhausted), which would otherwise surface deep
+    // inside supervisor startup. Both are requested together, mirroring the
+    // CLONE_NEWUSER|CLONE_NEWNET bwrap itself asks for.
+    //
+    // `sh -c :` rather than `true`: the supervisor runs as `sh -c
+    // "$SUPERVISOR_SCRIPT"`, so this covers a real dependency instead of a
+    // binary the launch path never runs.
+    let mut userns_command = Command::new("unshare");
+    userns_command.args([
+        "--user",
+        "--map-current-user",
+        "--keep-caps",
+        "--net",
+        "--",
+        "sh",
+        "-c",
+        ":",
+    ]);
+    let userns = run_probe(userns_command, "unshare", budget).map_err(|error| {
+        format!("Bubblewrap: {requirement} requires private user and network namespaces: {error}")
+    })?;
+    if !userns.status.success() {
+        return Err(namespace_probe_error(userns.status, use_case));
     }
 
     // The in-namespace rules are programmed with these, so a host missing them
@@ -1303,7 +1448,7 @@ fn probe_dependencies_uncached(use_case: PrivateNetworkUse) -> Result<(), String
     ] {
         let mut command = Command::new(binary);
         command.arg(probe);
-        let output = run_probe(command, binary).map_err(|error| {
+        let output = run_probe(command, binary, budget).map_err(|error| {
             format!(
                 "Bubblewrap: {requirement} requires '{binary}' on PATH to enforce {}: {error}",
                 use_case.mechanism()
@@ -2546,7 +2691,8 @@ mod tests {
         command.arg("120");
 
         let started = Instant::now();
-        let error = run_probe(command, "wedged-tool").expect_err("a hung probe must not succeed");
+        let error = run_probe(command, "wedged-tool", ProbeBudget::unbounded())
+            .expect_err("a hung probe must not succeed");
         let elapsed = started.elapsed();
 
         assert!(
@@ -2562,11 +2708,242 @@ mod tests {
     }
 
     #[test]
+    fn an_aggregate_budget_bounds_the_walk_tighter_than_one_command_timeout() {
+        let mut command = Command::new("sleep");
+        command.arg("120");
+
+        let started = Instant::now();
+        let error = run_probe(command, "wedged-tool", ProbeBudget::total(Duration::ZERO))
+            .expect_err("a hung probe must not succeed");
+        let elapsed = started.elapsed();
+
+        // The pre-flight surface is fail-closed and runs behind a caller-owned
+        // timeout, so it must give up well inside a single command's ceiling.
+        assert!(
+            elapsed < PROBE_TIMEOUT,
+            "an exhausted budget still waited {elapsed:?}, the per-command ceiling"
+        );
+        assert!(
+            error.contains("ran out of time"),
+            "an exhausted budget must blame the budget, not the tool, got: {error}"
+        );
+    }
+
+    /// `unshare` runs `sh` via a PATH lookup, so an exec failure surfaces as
+    /// either exec code; a refused namespace exits 1 and must stay distinct.
+    #[test]
+    fn an_exec_failure_is_told_apart_from_a_refused_namespace() {
+        assert!(shell_failed_to_start(126));
+        assert!(shell_failed_to_start(127));
+        assert!(!shell_failed_to_start(1));
+        assert!(!shell_failed_to_start(0));
+    }
+
+    fn exit_status(code: i32) -> ExitStatus {
+        Command::new("sh")
+            .args(["-c", &format!("exit {code}")])
+            .status()
+            .expect("sh must run")
+    }
+
+    /// The fail-closed boundary for hosts that disable or exhaust namespaces.
+    /// A host where they work cannot produce this status, so classify directly.
+    #[test]
+    fn a_refused_namespace_names_every_knob_that_could_be_responsible() {
+        let error = namespace_probe_error(exit_status(1), PrivateNetworkUse::ProxyOnlyEgress);
+
+        assert!(error.contains("refused"), "got: {error}");
+        for knob in [
+            "kernel.apparmor_restrict_unprivileged_userns",
+            "kernel.unprivileged_userns_clone",
+            "user.max_user_namespaces",
+            "user.max_net_namespaces",
+        ] {
+            assert!(error.contains(knob), "must mention {knob}, got: {error}");
+        }
+    }
+
+    /// An exec failure must not be reported as a namespace refusal: the
+    /// remedies are unrelated.
+    #[test]
+    fn a_shell_that_cannot_start_is_not_reported_as_a_refused_namespace() {
+        for code in [126, 127] {
+            let error =
+                namespace_probe_error(exit_status(code), PrivateNetworkUse::ProxyOnlyEgress);
+
+            assert!(error.contains("'sh'"), "must name the shell, got: {error}");
+            assert!(
+                !error.contains("apparmor"),
+                "must not offer namespace remedies, got: {error}"
+            );
+        }
+    }
+
+    fn on_path(tool: &str) -> bool {
+        Command::new("sh")
+            .args(["-c", &format!("command -v {tool} >/dev/null 2>&1")])
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn namespaces_are_available() -> bool {
+        Command::new("unshare")
+            .args([
+                "--user",
+                "--map-current-user",
+                "--keep-caps",
+                "--net",
+                "--",
+                "sh",
+                "-c",
+                ":",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn iptables_uses_nf_tables() -> bool {
+        Command::new("iptables")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains("nf_tables"))
+    }
+
+    /// The deadline tests cover the individual failure branches in isolation.
+    /// This drives the whole sequence, so a check added later cannot start
+    /// failing hosts that do meet every requirement.
+    #[test]
+    fn the_whole_dependency_walk_passes_on_a_host_that_meets_every_requirement() {
+        let missing: Vec<&str> = [
+            "slirp4netns",
+            "unshare",
+            "sh",
+            "nsenter",
+            "iptables",
+            "ip6tables",
+            "iptables-restore",
+            "ip6tables-restore",
+        ]
+        .into_iter()
+        .filter(|tool| !on_path(tool))
+        .collect();
+        let equipped =
+            missing.is_empty() && namespaces_are_available() && iptables_uses_nf_tables();
+
+        let started = Instant::now();
+        let result = probe_proxy_enforcement();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < PRE_FLIGHT_BUDGET * 2,
+            "the walk must stay near its budget, took {elapsed:?}"
+        );
+        // A less-equipped host still has something to prove: the refusal must
+        // say which dependency it was, never fail closed anonymously.
+        if let Err(error) = result {
+            assert!(
+                !equipped,
+                "a host with every dependency must pass the walk, got: {error}"
+            );
+            assert!(
+                missing.iter().any(|tool| error.contains(tool))
+                    || error.contains("namespaces")
+                    || error.contains("iptables")
+                    || error.contains("ip6tables"),
+                "a failure must name what is missing or unusable, got: {error}"
+            );
+        }
+    }
+
+    /// A descendant inheriting stdout keeps a pipe's write end open, so a
+    /// pipe-based probe would block here until that descendant exited.
+    #[test]
+    fn a_probe_returns_while_a_descendant_still_holds_its_output() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10 & echo banner"]);
+
+        let started = Instant::now();
+        let output = run_probe(command, "sh", ProbeBudget::unbounded())
+            .expect("the direct child exits immediately");
+
+        assert!(output.stdout.contains("banner"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "reading output must not wait for the descendant, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_clamped_command_blames_the_budget_rather_than_the_tool() {
+        let mut command = Command::new("sleep");
+        command.arg("120");
+
+        // A healthy-but-slow tool killed by the residual budget must not be
+        // reported as hung: this text is the caller-visible warning.
+        let error = run_probe(
+            command,
+            "innocent-tool",
+            ProbeBudget::total(Duration::from_millis(200)),
+        )
+        .expect_err("a hung probe must not succeed");
+
+        assert!(
+            !error.contains("hung"),
+            "a budget-clamped command must not be called hung, got: {error}"
+        );
+        assert!(
+            error.contains(&format!("{PRE_FLIGHT_BUDGET:?}")),
+            "the error must name the budget that ran out, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_command_that_outlives_its_own_ceiling_is_reported_as_hung() {
+        let budget = ProbeBudget::unbounded();
+        let (_, source) = budget.command_deadline();
+
+        assert_eq!(
+            source,
+            DeadlineSource::Command,
+            "an unbounded walk must attribute timeouts to the command itself"
+        );
+    }
+
+    #[test]
+    fn a_live_budget_clamps_a_hung_command_to_the_time_remaining() {
+        let mut command = Command::new("sleep");
+        command.arg("120");
+
+        let started = Instant::now();
+        let error = run_probe(
+            command,
+            "wedged-tool",
+            ProbeBudget::total(Duration::from_millis(200)),
+        )
+        .expect_err("a hung probe must not succeed");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < PROBE_TIMEOUT,
+            "the command ran {elapsed:?}, ignoring the {:?} budget it was given",
+            Duration::from_millis(200)
+        );
+        assert!(
+            error.contains("wedged-tool"),
+            "a command that hung inside its budget must still name the tool, got: {error}"
+        );
+    }
+
+    #[test]
     fn probe_returns_stdout_of_a_well_behaved_binary() {
         let mut command = Command::new("sh");
         command.args(["-c", "echo probe-stdout-marker"]);
 
-        let probe = run_probe(command, "echo").expect("a fast probe must succeed");
+        let probe = run_probe(command, "echo", ProbeBudget::unbounded())
+            .expect("a fast probe must succeed");
 
         assert!(
             probe.status.success(),
@@ -2585,7 +2962,8 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 3"]);
 
-        let probe = run_probe(command, "failing").expect("a clean non-zero exit is not an error");
+        let probe = run_probe(command, "failing", ProbeBudget::unbounded())
+            .expect("a clean non-zero exit is not an error");
 
         assert!(!probe.status.success(), "expected a non-zero exit status");
     }

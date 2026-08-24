@@ -87,7 +87,10 @@ pub fn available_backends() -> Vec<AvailableBackend> {
     }
 }
 
-/// Serialize [`available_backends`] for the `--probe` CLI surface.
+/// Serialize [`available_backends`] for the `--available-backends` CLI surface.
+///
+/// Distinct from `wxc-exec --probe`, which emits the AppContainer diagnostics
+/// object; this is the backend-availability array.
 pub fn to_json_pretty(backends: &[AvailableBackend]) -> Result<String, serde_json::Error> {
     serde_json::to_string_pretty(backends)
 }

@@ -13,7 +13,17 @@
 //! [`probe_bwrap`] shells out.
 
 use std::fmt;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use crate::probe_io::{capture_file, capture_target, read_capture};
+
+/// Ceiling on `bwrap --version`.
+///
+/// A banner returns in milliseconds. The bound matters because this probe sits
+/// under `getPlatformSupport()`: an unbounded wait hangs the caller rather
+/// than answering it.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The minimum `bwrap` version the Bubblewrap backend supports.
 ///
@@ -135,10 +145,20 @@ impl std::error::Error for BwrapUnavailable {}
 /// Runs `bwrap --version` and validates the reported version against
 /// [`MIN_BWRAP_VERSION`]. Returns the detected version on success.
 pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
-    let output = Command::new("bwrap")
+    let probe_failed = |detail: String| BwrapUnavailable::ProbeFailed {
+        status: None,
+        detail,
+    };
+
+    let stdout_file = capture_file("stdout").map_err(probe_failed)?;
+    let stderr_file = capture_file("stderr").map_err(probe_failed)?;
+
+    let child = Command::new("bwrap")
         .arg("--version")
         .stdin(Stdio::null())
-        .output()
+        .stdout(capture_target(&stdout_file, "stdout").map_err(probe_failed)?)
+        .stderr(capture_target(&stderr_file, "stderr").map_err(probe_failed)?)
+        .spawn()
         .map_err(|err| match err.kind() {
             // `ENOENT` covers both an absent binary and a present-but-unusable
             // one (missing ELF interpreter / shebang target), so confirm the
@@ -150,16 +170,49 @@ pub fn probe_bwrap() -> Result<BwrapVersion, BwrapUnavailable> {
             },
         })?;
 
-    if !output.status.success() {
+    let status = wait_bounded(child).map_err(probe_failed)?;
+
+    if !status.success() {
         return Err(BwrapUnavailable::ProbeFailed {
-            status: output.status.code(),
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            status: status.code(),
+            detail: String::from_utf8_lossy(&read_capture(&stderr_file))
+                .trim()
+                .to_string(),
         });
     }
 
     // The version banner goes to stdout; `parse_version` owns its format.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    check_version_output(&stdout)
+    let stdout = read_capture(&stdout_file);
+    check_version_output(&String::from_utf8_lossy(&stdout))
+}
+
+/// Wait for `child`, killing it if it outlives [`VERSION_PROBE_TIMEOUT`].
+///
+/// Output is captured to files rather than pipes, so the caller reads it
+/// without a descendant of `child` being able to hold the read open.
+fn wait_bounded(mut child: Child) -> Result<ExitStatus, String> {
+    let deadline = Instant::now() + VERSION_PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "'bwrap --version' did not respond within {VERSION_PROBE_TIMEOUT:?}; \
+                     the host's bubblewrap installation appears to be hung"
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("failed to inspect 'bwrap': {error}"));
+            }
+        }
+    };
+
+    Ok(status)
 }
 
 /// Validate a raw `bwrap --version` output string against

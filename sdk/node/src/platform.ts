@@ -182,6 +182,8 @@ type LinuxProbeRunner = () => string;
 
 let linuxProbeRunner: LinuxProbeRunner = defaultLinuxProbeRunner;
 
+const LINUX_PROBE_TIMEOUT_MS = 10_000;
+
 /** @internal Test-only: override the Linux probe runner. */
 export function _setLinuxProbeRunner(runner: LinuxProbeRunner | null): void {
   linuxProbeRunner = runner ?? defaultLinuxProbeRunner;
@@ -193,7 +195,10 @@ function defaultLinuxProbeRunner(): string {
     throw new Error('lxc-exec not found');
   }
   return execFileSync(lxcPath, ['--available-backends'], {
-    timeout: 5000,
+    // A backstop, not the real deadline: the native probe bounds its own
+    // dependency walk. Killing it here is indistinguishable from an
+    // unsupported host, so leave headroom rather than race it.
+    timeout: LINUX_PROBE_TIMEOUT_MS,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
