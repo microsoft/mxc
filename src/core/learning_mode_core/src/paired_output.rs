@@ -131,7 +131,7 @@ impl RelocationOutcome {
     }
 }
 
-/// Stages, flushes, and promotes a actionable output and its verbose logging sibling.
+/// Stages, flushes, and promotes an actionable output and its verbose logging sibling.
 ///
 /// Both documents are serialized before either final path is changed. Replace
 /// mode retains the previous files until both new files are promoted, allowing

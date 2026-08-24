@@ -282,7 +282,7 @@ pub fn write_stderr_line_best_effort(message: std::fmt::Arguments<'_>) {
 mod tests {
     use super::*;
     use learning_mode_core::{
-        AccessType, DeniedResource, ResourceType, VerboseLoggingExclusionReason,
+        AccessType, DeniedResource, ResourceType, VerboseLoggingOutcomeReason,
         VerboseLoggingProvider, VerboseLoggingSignature,
     };
     use std::io::Write;
@@ -339,7 +339,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: VerboseLoggingExclusionReason::Actionable,
+            reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 42,
             access_type: Some(learning_mode_core::AccessType::Read),
             resource_type: Some(learning_mode_core::ResourceType::File),

@@ -265,7 +265,7 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 ```
 
 Signatures are keyed by symbolic provider category, provider GUID,
-provider-scoped event ID, closed exclusion reason, PID, and sorted sanitized
+provider-scoped event ID, closed outcome reason, PID, and sorted sanitized
 properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
 non-file resource values are retained. Complete file paths are replaced with
 `<REDACTED>`; standalone user/account names remain replaced with

@@ -30,7 +30,7 @@ use std::path::Path;
 
 use learning_mode_core::{
     AnalysisResult, AnalyzeError, DenialAnalyzer, DeniedResource, ProcessLifetime,
-    VerboseLoggingExclusionReason, VerboseLoggingProvider, VerboseLoggingSignature,
+    VerboseLoggingOutcomeReason, VerboseLoggingProvider, VerboseLoggingSignature,
     VerboseLoggingSummary, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
 use windows::core::PWSTR;
@@ -234,7 +234,7 @@ impl<'visitor> Accumulator<'visitor> {
                     self.record_raw_denial_outcome(
                         &raw,
                         &candidate,
-                        VerboseLoggingExclusionReason::UnusableResourcePath,
+                        VerboseLoggingOutcomeReason::UnusableResourcePath,
                     );
                     return;
                 }
@@ -246,7 +246,7 @@ impl<'visitor> Accumulator<'visitor> {
                     self.record_raw_denial_outcome(
                         &raw,
                         &candidate,
-                        VerboseLoggingExclusionReason::UnusableResourcePath,
+                        VerboseLoggingOutcomeReason::UnusableResourcePath,
                     );
                     return;
                 }
@@ -254,7 +254,7 @@ impl<'visitor> Accumulator<'visitor> {
         } else {
             path_norm::to_user_visible(&raw.object_name).unwrap_or_else(|| raw.object_name.clone())
         };
-        self.record_raw_denial_outcome(&raw, &resource, VerboseLoggingExclusionReason::Actionable);
+        self.record_raw_denial_outcome(&raw, &resource, VerboseLoggingOutcomeReason::Actionable);
         let dedup_resource = match raw.resource_type {
             learning_mode_core::ResourceType::File | learning_mode_core::ResourceType::Other => {
                 resource.to_ascii_lowercase()
@@ -294,7 +294,7 @@ impl<'visitor> Accumulator<'visitor> {
         &mut self,
         raw: &RawDenial,
         resource: &str,
-        reason: VerboseLoggingExclusionReason,
+        reason: VerboseLoggingOutcomeReason,
     ) {
         let mut properties = raw
             .verbose_logging_properties
@@ -348,7 +348,7 @@ impl<'visitor> Accumulator<'visitor> {
         &mut self,
         provider: VerboseLoggingProvider,
         event_id: u16,
-        reason: VerboseLoggingExclusionReason,
+        reason: VerboseLoggingOutcomeReason,
         pid: u32,
         properties: Vec<(String, String)>,
     ) {
@@ -359,7 +359,7 @@ impl<'visitor> Accumulator<'visitor> {
         &mut self,
         provider: VerboseLoggingProvider,
         event_id: u16,
-        reason: VerboseLoggingExclusionReason,
+        reason: VerboseLoggingOutcomeReason,
         pid: u32,
         classification: (
             Option<learning_mode_core::AccessType>,
@@ -443,13 +443,13 @@ impl<'visitor> Accumulator<'visitor> {
         if let Some(category) = crate::extractors::verbose_logging_provider_for_guid(provider) {
             let reason = match error.event_kind() {
                 Some(tdh_decode::EventDecodeKind::PayloadMalformed) => {
-                    VerboseLoggingExclusionReason::EventPayloadMalformed
+                    VerboseLoggingOutcomeReason::EventPayloadMalformed
                 }
                 Some(tdh_decode::EventDecodeKind::DecoderLimitReached) => {
-                    VerboseLoggingExclusionReason::DecoderLimitReached
+                    VerboseLoggingOutcomeReason::DecoderLimitReached
                 }
                 Some(tdh_decode::EventDecodeKind::UnsupportedPropertyEncoding) => {
-                    VerboseLoggingExclusionReason::UnsupportedPropertyEncoding
+                    VerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
                 }
                 None => return,
             };
@@ -841,7 +841,7 @@ unsafe fn process_event_record(event_record: *mut EVENT_RECORD, acc: &mut Accumu
             acc.record_exclusion(
                 category,
                 event_id,
-                VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 header.ProcessId,
                 Vec::new(),
             );
@@ -978,7 +978,7 @@ fn select_event_for_relogging(
 }
 
 /// Extracts denials from one decoded, in-vocabulary event and feeds them
-/// (or their closed exclusion reason) into `acc`.
+/// (or their closed outcome reason) into `acc`.
 ///
 /// Re-checks the provider/event vocabulary so it stays a single source of
 /// truth for both the real ETW path (which gates before decoding, above)
@@ -998,7 +998,7 @@ fn handle_decoded_event(
             acc.record_exclusion(
                 category,
                 parts.event_id,
-                VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 header_pid,
                 crate::extractors::sanitize_properties(&parts.props),
             );
@@ -1010,7 +1010,7 @@ fn handle_decoded_event(
             acc.record_outcome(
                 category,
                 parts.event_id,
-                VerboseLoggingExclusionReason::EventPayloadMalformed,
+                VerboseLoggingOutcomeReason::EventPayloadMalformed,
                 header_pid,
                 crate::extractors::verbose_logging_classification(parts),
                 crate::extractors::sanitize_properties(&parts.props),
@@ -1036,7 +1036,7 @@ fn handle_decoded_event(
     match primary {
         Ok(raw) => acc.add_raw_denial(raw),
         Err(reason) => {
-            let recovered_by_dacl = reason == VerboseLoggingExclusionReason::UnresolvedCapability
+            let recovered_by_dacl = reason == VerboseLoggingOutcomeReason::UnresolvedCapability
                 && !capability_candidates.is_empty();
             if !recovered_by_dacl {
                 acc.record_outcome(
@@ -1209,7 +1209,7 @@ mod tests {
             )
             .signature
             .reason,
-            VerboseLoggingExclusionReason::EventPayloadMalformed
+            VerboseLoggingOutcomeReason::EventPayloadMalformed
         );
     }
 
@@ -1431,7 +1431,7 @@ mod tests {
             .signatures
             .iter()
             .filter(|group| {
-                group.signature.reason == VerboseLoggingExclusionReason::UnusableResourcePath
+                group.signature.reason == VerboseLoggingOutcomeReason::UnusableResourcePath
             })
             .collect::<Vec<_>>();
         assert_eq!(excluded.len(), 1);
@@ -1474,7 +1474,7 @@ mod tests {
             summary: &learning_mode_core::VerboseLoggingSummary,
             provider: learning_mode_core::VerboseLoggingProvider,
             event_id: u16,
-            reason: VerboseLoggingExclusionReason,
+            reason: VerboseLoggingOutcomeReason,
         ) -> u64 {
             summary
                 .signatures
@@ -1519,7 +1519,7 @@ mod tests {
                 &accumulator.verbose_logging,
                 learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                VerboseLoggingExclusionReason::Actionable
+                VerboseLoggingOutcomeReason::Actionable
             ),
             1
         );
@@ -1540,7 +1540,7 @@ mod tests {
                 &accumulator.verbose_logging,
                 learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
                 4907,
-                VerboseLoggingExclusionReason::Actionable
+                VerboseLoggingOutcomeReason::Actionable
             ),
             3
         );
@@ -1749,7 +1749,7 @@ mod tests {
             .expect("registry event should remain in verbose logging");
         assert_eq!(
             registry.signature.reason,
-            VerboseLoggingExclusionReason::NotActionable
+            VerboseLoggingOutcomeReason::NotActionable
         );
         assert_eq!(registry.signature.access_type, Some(AccessType::Write));
         assert_eq!(registry.signature.resource_type, Some(ResourceType::Other));
@@ -1839,7 +1839,7 @@ mod tests {
         );
         assert_eq!(
             event_14_group.signature.reason,
-            VerboseLoggingExclusionReason::UnresolvedCapability
+            VerboseLoggingOutcomeReason::UnresolvedCapability
         );
         assert_eq!(event_14_group.count, 1);
         let event_28_groups = groups
@@ -1849,7 +1849,7 @@ mod tests {
         assert_eq!(event_28_groups.len(), 2);
         assert!(event_28_groups.iter().all(|group| {
             group.signature.provider == VerboseLoggingProvider::KernelGeneral
-                && group.signature.reason == VerboseLoggingExclusionReason::UnresolvedCapability
+                && group.signature.reason == VerboseLoggingOutcomeReason::UnresolvedCapability
                 && group.count == 1
         }));
     }
@@ -1921,7 +1921,7 @@ mod tests {
             .signatures
             .iter()
             .find(|group| {
-                group.signature.reason == VerboseLoggingExclusionReason::UnsupportedEventSchema
+                group.signature.reason == VerboseLoggingOutcomeReason::UnsupportedEventSchema
             })
             .expect("owned unknown event retained");
         assert_eq!(property(&unsupported.signature, "Marker"), "owned");
@@ -1954,7 +1954,7 @@ mod tests {
             .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::Actionable)
+            .find(|group| group.signature.reason == VerboseLoggingOutcomeReason::Actionable)
             .expect("actionable capability event retained");
         assert_eq!(group.signature.pid, 42);
         assert_eq!(group.signature.access_type, Some(AccessType::Unknown));
@@ -2006,15 +2006,15 @@ mod tests {
         };
         assert_eq!(
             reason_for(14),
-            Some(VerboseLoggingExclusionReason::UnsupportedObjectType)
+            Some(VerboseLoggingOutcomeReason::UnsupportedObjectType)
         );
         assert_eq!(
             reason_for(28),
-            Some(VerboseLoggingExclusionReason::NotActionable)
+            Some(VerboseLoggingOutcomeReason::NotActionable)
         );
         assert_eq!(
             reason_for(9999),
-            Some(VerboseLoggingExclusionReason::UnsupportedEventSchema)
+            Some(VerboseLoggingOutcomeReason::UnsupportedEventSchema)
         );
     }
 
@@ -2049,7 +2049,7 @@ mod tests {
         assert_eq!(group.signature.event_id, 14);
         assert_eq!(
             group.signature.reason,
-            VerboseLoggingExclusionReason::UnusableResourcePath
+            VerboseLoggingOutcomeReason::UnusableResourcePath
         );
         assert_eq!(group.signature.pid, 1996);
         assert_eq!(group.signature.access_type, Some(AccessType::Read));
@@ -2099,7 +2099,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing verbose logging signature for {object_type}"));
             assert_eq!(
                 group.signature.reason,
-                VerboseLoggingExclusionReason::UnsupportedObjectType
+                VerboseLoggingOutcomeReason::UnsupportedObjectType
             );
             assert_eq!(property(&group.signature, "ObjectName"), object_name);
             assert_eq!(group.count, 1);
@@ -2140,7 +2140,7 @@ mod tests {
         assert!(out.denials.is_empty());
         assert_eq!(out.verbose_logging.signatures.len(), names.len());
         assert!(out.verbose_logging.signatures.iter().all(|group| {
-            group.signature.reason == VerboseLoggingExclusionReason::NotActionable
+            group.signature.reason == VerboseLoggingOutcomeReason::NotActionable
                 && group.signature.resource_type == Some(ResourceType::Other)
                 && group.signature.access_type == Some(AccessType::Write)
                 && group.count == 1
@@ -2197,7 +2197,7 @@ mod tests {
             .expect("timer should remain in verbose logging");
         assert_eq!(
             timer.signature.reason,
-            VerboseLoggingExclusionReason::NotActionable
+            VerboseLoggingOutcomeReason::NotActionable
         );
         assert_eq!(timer.signature.resource_type, Some(ResourceType::Other));
         assert_eq!(timer.signature.access_type, Some(AccessType::Read));
@@ -2208,10 +2208,7 @@ mod tests {
             .iter()
             .find(|group| group.signature.resource_type == Some(ResourceType::Ui))
             .expect("UI denial should remain actionable");
-        assert_eq!(
-            ui.signature.reason,
-            VerboseLoggingExclusionReason::Actionable
-        );
+        assert_eq!(ui.signature.reason, VerboseLoggingOutcomeReason::Actionable);
     }
 
     #[test]
@@ -2247,7 +2244,7 @@ mod tests {
             .signatures
             .iter()
             .all(|group| group.signature.reason
-                == VerboseLoggingExclusionReason::UnsupportedEventSchema));
+                == VerboseLoggingOutcomeReason::UnsupportedEventSchema));
         assert!(out
             .verbose_logging
             .signatures
@@ -2318,7 +2315,7 @@ mod tests {
             .verbose_logging
             .signatures
             .iter()
-            .find(|group| group.signature.reason == VerboseLoggingExclusionReason::Actionable)
+            .find(|group| group.signature.reason == VerboseLoggingOutcomeReason::Actionable)
             .expect("actionable outcome recorded");
         assert_eq!(
             actionable_group.signature.provider,
@@ -2406,7 +2403,7 @@ mod tests {
         assert_eq!(out.denials[0].resource, "internetClient");
         assert_eq!(out.verbose_logging.signatures.len(), 1);
         let signature = &out.verbose_logging.signatures[0].signature;
-        assert_eq!(signature.reason, VerboseLoggingExclusionReason::Actionable);
+        assert_eq!(signature.reason, VerboseLoggingOutcomeReason::Actionable);
         assert_eq!(signature.access_type, Some(AccessType::Unknown));
         assert_eq!(signature.resource_type, Some(ResourceType::Capability));
     }
@@ -2450,7 +2447,7 @@ mod tests {
             accumulator.record_exclusion(
                 VerboseLoggingProvider::KernelGeneral,
                 14,
-                VerboseLoggingExclusionReason::Actionable,
+                VerboseLoggingOutcomeReason::Actionable,
                 pid,
                 properties.clone(),
             );
@@ -2475,7 +2472,7 @@ mod tests {
         let group = find_signature(&out.verbose_logging, 9999);
         assert_eq!(
             group.signature.reason,
-            VerboseLoggingExclusionReason::UnsupportedEventSchema
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema
         );
         assert_eq!(
             property(&group.signature, "ObjectName"),
@@ -2502,7 +2499,7 @@ mod tests {
         let group = find_signature(&out.verbose_logging, 28);
         assert_eq!(
             group.signature.reason,
-            VerboseLoggingExclusionReason::UnresolvedCapability
+            VerboseLoggingOutcomeReason::UnresolvedCapability
         );
         assert_eq!(
             group.signature.provider,
@@ -2606,17 +2603,17 @@ mod tests {
         let malformed = find_signature(&out.verbose_logging, 14);
         assert_eq!(
             malformed.signature.reason,
-            VerboseLoggingExclusionReason::EventPayloadMalformed
+            VerboseLoggingOutcomeReason::EventPayloadMalformed
         );
         assert_eq!(malformed.signature.pid, 9);
         assert_eq!(property(&malformed.signature, "EventName"), "AccessCheck");
         assert_eq!(
             find_signature(&out.verbose_logging, 27).signature.reason,
-            VerboseLoggingExclusionReason::DecoderLimitReached
+            VerboseLoggingOutcomeReason::DecoderLimitReached
         );
         assert_eq!(
             find_signature(&out.verbose_logging, 28).signature.reason,
-            VerboseLoggingExclusionReason::UnsupportedPropertyEncoding
+            VerboseLoggingOutcomeReason::UnsupportedPropertyEncoding
         );
         assert_eq!(
             find_signature(&out.verbose_logging, 28)

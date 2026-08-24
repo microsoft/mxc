@@ -30,7 +30,7 @@ pub enum VerboseLoggingProvider {
 /// Closed reason describing how a decoder outcome was handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum VerboseLoggingExclusionReason {
+pub enum VerboseLoggingOutcomeReason {
     /// The event produced a valid actionable denial.
     Actionable,
     /// The provider is known, but the event ID is not a supported denial schema.
@@ -55,7 +55,7 @@ pub enum VerboseLoggingExclusionReason {
     NotActionable,
 }
 
-impl VerboseLoggingExclusionReason {
+impl VerboseLoggingOutcomeReason {
     /// Returns whether this outcome represents a valid denial candidate.
     #[must_use]
     pub fn is_actionable(self) -> bool {
@@ -74,7 +74,7 @@ pub struct VerboseLoggingSignature {
     /// Provider-scoped ETW schema identifier.
     pub event_id: u16,
     /// Closed exclusion category.
-    pub reason: VerboseLoggingExclusionReason,
+    pub reason: VerboseLoggingOutcomeReason,
     /// Process identifier from the event header.
     pub pid: u32,
     /// Classified access type when the event produced a denial candidate.
@@ -374,7 +374,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: VerboseLoggingExclusionReason::MissingObjectName,
+            reason: VerboseLoggingOutcomeReason::MissingObjectName,
             pid: 42,
             access_type: None,
             resource_type: None,
@@ -409,7 +409,7 @@ mod tests {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
@@ -420,7 +420,7 @@ mod tests {
             provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
             provider_guid: "privacy".to_string(),
             event_id: u16::MAX,
-            reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+            reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
             pid: 1,
             access_type: None,
             resource_type: None,
@@ -440,7 +440,7 @@ mod tests {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
@@ -451,7 +451,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "kernel".to_string(),
             event_id: u16::MAX,
-            reason: VerboseLoggingExclusionReason::Actionable,
+            reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 1,
             access_type: Some(crate::AccessType::Read),
             resource_type: Some(crate::ResourceType::File),
@@ -461,7 +461,7 @@ mod tests {
         assert!(summary
             .signatures
             .iter()
-            .any(|group| group.signature.reason == VerboseLoggingExclusionReason::Actionable));
+            .any(|group| group.signature.reason == VerboseLoggingOutcomeReason::Actionable));
         assert_eq!(summary.overflow_occurrences, 1);
         assert_eq!(summary.actionable_overflow_occurrences, 0);
     }
@@ -479,7 +479,7 @@ mod tests {
                     provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
                     event_id: 14,
-                    reason: VerboseLoggingExclusionReason::Actionable,
+                    reason: VerboseLoggingOutcomeReason::Actionable,
                     pid,
                     access_type: Some(crate::AccessType::Read),
                     resource_type: Some(crate::ResourceType::File),
@@ -521,7 +521,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "kernel".to_string(),
             event_id: 14,
-            reason: VerboseLoggingExclusionReason::Actionable,
+            reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 1,
             access_type: Some(crate::AccessType::Read),
             resource_type: Some(crate::ResourceType::File),

@@ -54,7 +54,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_job_ui_limit_has_a_actionable_resource_name() {
+    fn every_job_ui_limit_has_an_actionable_resource_name() {
         let expected = [
             (0x0001, "Handles"),
             (0x0002, "ReadClipboard"),

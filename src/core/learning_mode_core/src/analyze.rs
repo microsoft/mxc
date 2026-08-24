@@ -237,7 +237,7 @@ mod tests {
     use super::*;
     use crate::model::{AccessType, ResourceType};
     use crate::verbose_logging::{
-        VerboseLoggingAggregate, VerboseLoggingExclusionReason, VerboseLoggingProvider,
+        VerboseLoggingAggregate, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
         VerboseLoggingSignature,
     };
 
@@ -308,7 +308,7 @@ mod tests {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "provider".to_string(),
                 event_id: 14,
-                reason: VerboseLoggingExclusionReason::Actionable,
+                reason: VerboseLoggingOutcomeReason::Actionable,
                 pid,
                 access_type: Some(AccessType::Read),
                 resource_type: Some(ResourceType::File),
@@ -353,7 +353,7 @@ mod tests {
                         provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
-                        reason: VerboseLoggingExclusionReason::Actionable,
+                        reason: VerboseLoggingOutcomeReason::Actionable,
                         pid: 1,
                         access_type: Some(AccessType::Read),
                         resource_type: Some(ResourceType::File),
@@ -396,7 +396,7 @@ mod tests {
                         provider: VerboseLoggingProvider::KernelGeneral,
                         provider_guid: "provider".to_string(),
                         event_id: 14,
-                        reason: VerboseLoggingExclusionReason::Actionable,
+                        reason: VerboseLoggingOutcomeReason::Actionable,
                         pid: 1,
                         access_type: Some(AccessType::Read),
                         resource_type: Some(ResourceType::File),
@@ -430,7 +430,7 @@ mod tests {
                     provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "provider".to_string(),
                     event_id: 14,
-                    reason: VerboseLoggingExclusionReason::MissingObjectName,
+                    reason: VerboseLoggingOutcomeReason::MissingObjectName,
                     pid: u32::try_from(pid).unwrap(),
                     access_type: Some(AccessType::Read),
                     resource_type: Some(ResourceType::File),

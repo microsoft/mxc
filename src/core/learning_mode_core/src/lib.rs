@@ -49,7 +49,7 @@ pub use paired_output::{
 pub use summary::DenialSummary;
 pub use verbose_logging::{
     verbose_logging_sibling_path, write_verbose_logging_document, VerboseLoggingAggregate,
-    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingExclusionReason,
+    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingOutcomeReason,
     VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
     MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };
