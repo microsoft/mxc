@@ -32,9 +32,11 @@ if (-not (Test-Path $wxc) -or -not (Test-Path $proxy)) {
 $principal = [Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )
-if (-not $PackagedOnly -and
-    -not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Proxy identity E2E tests require an elevated PowerShell session.'
+$isElevated = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$runUnpackaged = -not $PackagedOnly -and $isElevated
+if (-not $PackagedOnly -and -not $isElevated) {
+    Write-Host 'SKIPPED: unpackaged proxy cases require administrator firewall rules.' `
+        -ForegroundColor Yellow
 }
 
 function Invoke-ProxyLauncher {
@@ -211,7 +213,7 @@ try {
     Invoke-Client -Name 'packaged-fulltrust' -AllowedPeer $peer
     Stop-Proxy $processes[-1]
 
-    if (-not $PackagedOnly) {
+    if ($runUnpackaged) {
         $proxyPid = Invoke-ProxyLauncherPid @(
             'launch-appcontainer',
             '--profile', $appContainerProfile,

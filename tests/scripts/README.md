@@ -41,7 +41,7 @@ Linux / macOS (`.sh`):
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
-| `run_processcontainer_proxy_identity_tests.ps1` | Process container proxy peer-identity E2E tests (`-PackagedOnly` runs unelevated) | Elevated shell for unpackaged cases |
+| `run_processcontainer_proxy_identity_tests.ps1` | Process container external-proxy authorization E2E tests (unpackaged cases skip when unelevated) | Elevated shell for unpackaged cases |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
 ### Linux suites

@@ -34,22 +34,27 @@ The packaged negative case starts only the AppContainer proxy. It authorizes
 the registered full-trust package family instead, proving that a valid but
 different package identity cannot use the proxy endpoint.
 
-Run only the packaged cases without elevation:
-
-```powershell
-tests\scripts\run_processcontainer_proxy_identity_tests.ps1 -PackagedOnly
-```
-
-Run all cases from an elevated PowerShell session:
+Run the suite from an ordinary PowerShell session. It runs the packaged cases
+and reports the unpackaged cases as skipped:
 
 ```powershell
 tests\scripts\run_processcontainer_proxy_identity_tests.ps1
 ```
 
-The unpackaged cases require elevation because the harness creates machine
-firewall rules. The packaged cases use loose development registration and
-manifest-owned firewall rules, so they need neither elevation nor a trusted
-test certificate.
+Use `-PackagedOnly` to select packaged coverage explicitly, including from an
+elevated shell:
+
+```powershell
+tests\scripts\run_processcontainer_proxy_identity_tests.ps1 -PackagedOnly
+```
+
+Run the same command without `-PackagedOnly` from an elevated PowerShell
+session to execute all cases. The unpackaged cases require elevation because
+the harness creates machine firewall rules. The unpackaged AppContainer rule
+is scoped to its profile SID and proxy executable; the unpackaged full-trust
+rule is scoped to the proxy executable. The packaged cases use loose
+development registration and manifest-owned firewall rules, so they need
+neither elevation nor a trusted test certificate.
 
 ## Windows launcher commands
 
