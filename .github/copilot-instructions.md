@@ -11,7 +11,7 @@ rustup component add rust-analyzer
 npm install -g typescript-language-server typescript
 ```
 
-Building or testing the C# SDK (`sdk/dotnet/`) additionally requires the .NET SDK (net8.0 or newer; a net8.0 target is used).
+Building the C# SDK (`sdk/dotnet/`) additionally requires the .NET SDK; the projects target `net8.0`. Running the tests with `dotnet test` requires .NET SDK 10 or newer.
 
 ## Build Commands
 
@@ -138,7 +138,7 @@ npm test
 npm run test:integration
 
 # C# SDK (from sdk/dotnet/)
-dotnet test Microsoft.Mxc.Sdk.slnx           # builds mxc_ffi via cargo (Rust toolchain required)
+dotnet test --solution Microsoft.Mxc.Sdk.slnx   # builds mxc_ffi via cargo (Rust toolchain required)
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver

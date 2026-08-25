@@ -64,12 +64,10 @@ public class MxcLifecycleTests
         // cannot: it is a separate entry point. That gate short-circuits ahead of
         // backend dispatch, which is also why this test cannot pin the
         // experimental opt-in.
-        if (!Console.IsOutputRedirected || !Console.IsInputRedirected)
-        {
-            // A console host satisfies the terminal gate, so the call would
-            // dispatch a real attached exec rather than be refused by it.
-            return;
-        }
+        Assert.SkipUnless(
+            Console.IsOutputRedirected && Console.IsInputRedirected,
+            "a console host satisfies the terminal gate, so the call would "
+                + "dispatch a real attached exec rather than be refused by it");
 
         var ex = Assert.Throws<MxcException>(
             () => MxcLifecycle.ExecInSandboxAttached(
