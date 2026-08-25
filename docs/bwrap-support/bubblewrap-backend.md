@@ -425,6 +425,26 @@ remaining covering blocks, so `allow 0.0.0.0/0 except 1.1.1.0/24` becomes a set
 of accepts that provably omit the carve-out rather than an accept followed by a
 hoped-for later deny.
 
+**Protocol support.** `ports[].protocol` accepts `tcp`, `udp`, `icmp`, and
+`any`. What Bubblewrap actually enforces is bounded by its *transport*, not by
+its rule engine: every mode that installs egress rules puts the sandbox behind
+`slirp4netns`, a userspace network stack that carries **TCP, UDP, and ICMP echo
+only**. No other IP protocol — SCTP, DCCP, GRE — has a path out of the
+namespace, whether or not a rule names it.
+
+| Selector | Rules emitted | Notes |
+|---|---|---|
+| `tcp` | `-p tcp` | |
+| `udp` | `-p udp` | |
+| `icmp` | `-p icmp` (IPv4) / `-p icmpv6` (IPv6) | Expands by destination address family, per the 0.8 contract. |
+| `any`, no `port` | no `-p` match at all | Matches every protocol, ICMP included. |
+| `any` with a `port` | `-p tcp` and `-p udp` | ICMP is omitted: it carries no port numbers for a port-scoped rule to name. |
+
+This meets the 0.8 floor — `any` covers at minimum TCP, UDP, and ICMPv4/6.
+ICMPv6 is satisfied vacuously: `slirp4netns` is launched without
+`--enable-ipv6`, so the namespace has no IPv6 route. The `ip6tables` rules
+render correctly, but nothing traverses them.
+
 **Mode selection.** Directional never resolves to the shared host namespace:
 
 | Directional policy | Resolved mode |
