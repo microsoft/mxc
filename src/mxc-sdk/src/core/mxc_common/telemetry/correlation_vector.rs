@@ -79,10 +79,10 @@ pub fn seed() -> String {
 /// Source `N` bytes of OS randomness, or `None` if the RNG is unavailable. This
 /// is the single seam every operator's randomness flows through, so a test can
 /// force the (otherwise unreachable) RNG-failure branch — see
-/// [`test_rng::ForceRngFailure`] — that selects the clock+nonce fallback in
+/// `test_rng::ForceRngFailure` — that selects the clock+nonce fallback in
 /// [`seed`] and [`spin`].
 ///
-/// Design note: the `#[cfg(test)]` hook here (and the [`test_rng`] module) is a
+/// Design note: the `#[cfg(test)]` hook here (and the `test_rng` module) is a
 /// deliberate seam, not incidental test-in-prod entanglement. The pure cores
 /// [`seed_with`]/[`spin_with`] can already be driven with `None` entropy, but
 /// they do NOT cover the *wrapper-level selection* logic — [`seed`]'s
@@ -340,7 +340,7 @@ fn is_valid_frozen(cv: &str) -> bool {
 /// valid mutable vector (which [`spin`] advances) or a valid frozen vector
 /// (which [`spin`] passes through). Anything else is reseeded. Used by the
 /// state-aware planner to decide `Spin` vs `Reseed` without executing the RNG —
-/// it runs the same pure [`classify`] the operators do, so planner and operator
+/// it runs the same pure `classify` the operators do, so planner and operator
 /// can never disagree on what "relayable" means.
 pub fn is_relayable(cv: &str) -> bool {
     matches!(classify(cv), Class::Frozen | Class::Mutable(_))

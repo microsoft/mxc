@@ -8,7 +8,7 @@
 //! guards the rest of the crate uses.
 //!
 //! On top of those sit the two execution models, both implemented by
-//! [`WSLContainerRunner`](wsl_container_runner::WSLContainerRunner) over one
+//! [`WSLContainerRunner`] over one
 //! shared container lifecycle: run-to-completion (`ScriptRunner`, used by
 //! `wxc-exec`) and streaming (`SandboxBackend`, in [`sandbox`], used by the
 //! Rust SDK).

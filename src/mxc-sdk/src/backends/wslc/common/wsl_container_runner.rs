@@ -9,12 +9,12 @@
 //!
 //! RAII guards ensure cleanup even on error paths.
 //!
-//! [`start_container`](WSLContainerRunner::start_container) owns everything up
+//! `start_container` owns everything up
 //! to and including "container started, init process in hand" and is shared by
 //! both execution models: the run-to-completion [`ScriptRunner`] here, and the
 //! streaming [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) in
-//! [`crate::sandbox`]. They differ only in where the SDK's I/O callbacks send
-//! their bytes — see [`IoSink`].
+//! [`crate::wslc_common::sandbox`]. They differ only in where the SDK's I/O callbacks send
+//! their bytes — see `IoSink`.
 
 use std::ffi::c_void;
 use std::fmt::Write;
@@ -839,7 +839,7 @@ impl WSLContainerRunner {
     /// and the init-process handle. The caller decides what happens next — wait
     /// to completion ([`Self::run_internal`]) or stream
     /// (the [`SandboxBackend`](crate::mxc_common::sandbox_process::SandboxBackend) impl
-    /// in [`crate::sandbox`]).
+    /// in [`crate::wslc_common::sandbox`]).
     ///
     /// `output` selects where the SDK's output callbacks send their bytes; the
     /// caller-side read ends (if any) come back on [`StartedContainer::pipes`],

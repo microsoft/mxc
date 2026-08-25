@@ -7,7 +7,7 @@
 //! `deprovision`) runs as a separate short-lived `wxc-exec` process. Because the
 //! WSLc SDK has no cross-process re-attach, this backend does **not** touch the
 //! SDK directly: it translates runtime-owned phase configuration plus
-//! the cross-cutting `policy` section into [`daemon_protocol`] frames and drives
+//! the cross-cutting `policy` section into [`crate::wslc_common::daemon_protocol`] frames and drives
 //! the long-lived `wxc-wslc-daemon` (which owns the live session/container
 //! handles) over an owner-only named pipe via [`DaemonClient`].
 //!

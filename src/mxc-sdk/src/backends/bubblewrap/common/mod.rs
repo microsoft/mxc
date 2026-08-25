@@ -13,7 +13,7 @@
 //! - `network_rules` validates rule addresses and builds the egress plan the
 //!   sandbox's own network namespace is programmed with. Platform-agnostic for
 //!   the same reason as [`bwrap_command`].
-//! - [`bwrap_runner`] is gated to `target_os = "linux"` since it actually
+//! - `bwrap_runner` is gated to `target_os = "linux"` since it actually
 //!   spawns the `bwrap` binary.
 
 pub mod bwrap_command;

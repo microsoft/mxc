@@ -1120,7 +1120,7 @@ pub enum FailurePhase {
     /// The process was created and ran, but exited with a non-zero code.
     ProcessExited,
     /// The process was force-terminated because it exceeded `scriptTimeout`.
-    /// Distinct from [`ProcessExited`] (it did not exit on its own) so callers
+    /// Distinct from [`FailurePhase::ProcessExited`] (it did not exit on its own) so callers
     /// can detect a timeout uniformly across backends rather than inferring it
     /// from `exit_code == -1` (which collides with other failures).
     Timeout,
@@ -1128,7 +1128,7 @@ pub enum FailurePhase {
     /// is missing, the runtime is not installed, or an OS feature it depends on
     /// is disabled. No change to the request can satisfy it — the host has to
     /// be provisioned, or a different backend selected. Distinct from
-    /// [`LaunchFailed`], which is a backend that is present and failed.
+    /// [`FailurePhase::LaunchFailed`], which is a backend that is present and failed.
     BackendUnavailable,
 }
 

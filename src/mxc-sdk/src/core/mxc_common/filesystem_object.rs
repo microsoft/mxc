@@ -4,7 +4,7 @@
 //! Object-based filesystem-policy normalization (roadmap item D6 —
 //! "object-based policy validation").
 //!
-//! The string-level [`crate::mxc_common::config_parser::normalize_filesystem_paths`] already
+//! The string-level `crate::mxc_common::config_parser::normalize_filesystem_paths` already
 //! resolves *same path string* appearing in multiple lists via
 //! most-restrictive-wins (`deny` > `readonly` > `readwrite`). This module
 //! handles the harder case: two **different** path strings that resolve to the

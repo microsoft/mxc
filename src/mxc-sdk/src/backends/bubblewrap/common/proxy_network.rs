@@ -1848,14 +1848,14 @@ impl PrivateNetworkUse {
 /// Whether this host can enforce proxy-only egress, and why not when it cannot.
 ///
 /// Pre-flight counterpart to the launch-path check in
-/// [`crate::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
+/// [`crate::bwrap_common::bwrap_runner`]: supported runtime proxy policy has no fallback, so a
 /// caller that cannot ask this ahead of time only learns the answer when the
 /// run fails. Advisory — the runner still probes before it launches.
 ///
 /// Not exhaustive: a missing `nf_conntrack` module is only detectable when the
 /// rules are installed, so it still surfaces at launch.
 ///
-/// Bounded by [`PRE_FLIGHT_BUDGET`] in total, unlike the launch-path walk: a
+/// Bounded by `PRE_FLIGHT_BUDGET` in total, unlike the launch-path walk: a
 /// caller answering "can this host do it?" before spawning cannot afford the
 /// sum of every per-command timeout. The walk runs in a deadline-watched
 /// worker, so the ceiling holds even when a spawn itself blocks (a PATH lookup
