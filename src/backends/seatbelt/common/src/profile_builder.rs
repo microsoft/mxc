@@ -356,8 +356,14 @@ fn write_host_loopback_rules(out: &mut String, policy: &ContainerPolicy, allow_o
             out.push_str("(deny network-outbound (remote ip \"localhost:*\"))\n");
         }
         (true, false) => {
+            // Same breadth in reverse: this opens every address bound to this
+            // host, not just 127.0.0.1. Other machines stay blocked —
+            // `localhost` means "this machine", not "this network" — and there
+            // is no narrower primitive, since a literal `127.0.0.1` is a
+            // profile syntax error ("host must be * or localhost").
             out.push_str(";; --- network: ingress.hostLoopback=allow — open host loopback\n");
-            out.push_str(";;     under an otherwise-deny egress default ---\n");
+            out.push_str(";;     under an otherwise-deny egress default. Covers every\n");
+            out.push_str(";;     address bound to this host; other machines stay denied ---\n");
             out.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
         }
         _ => {}
@@ -377,12 +383,14 @@ fn write_outbound_allow_rules(out: &mut String) {
 /// everything here sits under a `(deny default)` baseline.
 ///
 /// A loopback proxy is scoped to its exact `localhost:<port>`, so clients that
-/// ignore `HTTP_PROXY` can't reach anything else. A non-loopback proxy can't be
-/// expressed at all — Seatbelt's `(remote ip ...)` matches neither DNS names nor
-/// specific addresses — so it fails closed. Both upstream layers already reject
-/// that combination, so this arm is unreachable in practice; failing closed
-/// keeps any future disagreement about what counts as loopback from silently
-/// opening up egress.
+/// ignore `HTTP_PROXY` can't reach any other port or machine. Note the scoping
+/// is by port, not by address: `localhost` means "this machine", so the rule
+/// also covers the host's non-loopback addresses on that same port. A
+/// non-loopback proxy can't be expressed at all — Seatbelt's `(remote ip ...)`
+/// matches neither DNS names nor specific addresses — so it fails closed. Both
+/// upstream layers already reject that combination, so this arm is unreachable
+/// in practice; failing closed keeps any future disagreement about what counts
+/// as loopback from silently opening up egress.
 fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
     if host_is_canonical_loopback(proxy_address.host()) {
         let _ = writeln!(
