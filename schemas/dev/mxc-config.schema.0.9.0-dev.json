@@ -201,6 +201,17 @@
           ],
           "description": "IsolationSession backend config (Windows)."
         },
+        "lxc": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LxcExperimental"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "LXC backend config (Linux)."
+        },
         "seatbelt": {
           "anyOf": [
             {
@@ -383,6 +394,43 @@
     "Lxc": {
       "additionalProperties": false,
       "description": "LXC container settings.",
+      "properties": {
+        "distribution": {
+          "description": "Distribution image (e.g. `alpine`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "Distribution release (e.g. `3.23`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LxcExperimental": {
+      "description": "LXC backend config under the experimental surface. Carries only the per-phase state-aware nesting for the phases that take config (`provision`); the one-shot LXC surface is the stable top-level `lxc` section, so this type is named apart from it rather than shared with it. `start`, `exec`, `stop`, and `deprovision` take no per-phase config payload.",
+      "properties": {
+        "provision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LxcProvisionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "State-aware provision-phase configuration."
+        }
+      },
+      "type": "object"
+    },
+    "LxcProvisionPhase": {
+      "description": "Provision-phase LXC configuration (state-aware lifecycle), nested under `experimental.lxc.provision`. Names the container image to create.\n\nFilesystem mounts and network policy derive from the top-level `filesystem` and `network` sections, not from here. It is its own type rather than a shared one because a shared type would advertise its fields on every phase in the generated schema.",
       "properties": {
         "distribution": {
           "description": "Distribution image (e.g. `alpine`).",

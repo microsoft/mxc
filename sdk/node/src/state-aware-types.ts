@@ -19,7 +19,7 @@ export type Phase = 'provision' | 'start' | 'exec' | 'stop' | 'deprovision';
  */
 export type StateAwareContainmentBackend = Extract<
   ContainmentBackend,
-  'isolation_session' | 'windows_sandbox' | 'wslc'
+  'isolation_session' | 'lxc' | 'windows_sandbox' | 'wslc'
 >;
 
 /**
@@ -94,6 +94,70 @@ export interface IsolationSessionDeprovisionConfig {
   version?: string;
 }
 
+export interface LxcProvisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Optional externally assigned LXC container name. */
+  containerId?: string;
+  /** Linux distribution for the container rootfs, e.g. "alpine" or "ubuntu". */
+  distribution: string;
+  /** Distribution release version, e.g. "3.20" or "24.04". */
+  release: string;
+}
+
+/**
+ * Network policy accepted by LXC state-aware `start`.
+ *
+ * Narrowed to the fields an LXC caller can usefully set, rather than derived
+ * from `NetworkConfig`:
+ *
+ * - `proxy` is rejected at start (`apply_network_policy` returns a
+ *   policy-validation error).
+ * - `removeRulesOnExit` is an SDK-only field emitted inside the top-level
+ *   `network` object. Rust's `wire::Network` is `deny_unknown_fields`, so
+ *   sending it fails the whole request.
+ * - `allowLocalNetwork` deserializes, but start rejects
+ *   `allowLocalNetwork: true` with a policy-validation error
+ *   (`reject_unenforceable_network_policy`). The container's inbound chain can
+ *   only open a source range, and opening every source is broader than the
+ *   local-network access requested.
+ * - `enforcementMode` is not offered.  LXC enforces from `defaultPolicy`,
+ *   `allowedHosts`, and `blockedHosts` alone (`apply_firewall_rules` never
+ *   consults the mode), so exposing it would advertise a setting with no
+ *   effect.  The wire still accepts the field, so a `network` object shared
+ *   with another backend keeps parsing.
+ */
+export interface LxcNetworkConfig {
+  defaultPolicy?: NetworkConfig['defaultPolicy'];
+  allowedHosts?: NetworkConfig['allowedHosts'];
+  blockedHosts?: NetworkConfig['blockedHosts'];
+}
+
+export interface LxcStartConfig {
+  /** Schema version (semver). */
+  version?: string;
+  /** Filesystem mounts to apply before starting the container. */
+  filesystem?: FilesystemConfig;
+  /** iptables policy to install before the container starts. `proxy` is not supported by this backend. */
+  network?: LxcNetworkConfig;
+}
+
+export interface LxcExecConfig {
+  /** Schema version (semver). */
+  version?: string;
+  process: ProcessConfig;
+}
+
+export interface LxcStopConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
+export interface LxcDeprovisionConfig {
+  /** Schema version (semver). */
+  version?: string;
+}
+
 /**
  * IsolationSession's provision-phase metadata surfaced to the caller: the
  * per-instance agent user account name minted for this sandbox, the agent
@@ -105,6 +169,11 @@ export interface IsolationSessionProvisionMetadata {
   agentUserName: string;
   agentUserSid: string;
   ephemeralWorkspacePath: string;
+}
+
+export interface LxcProvisionMetadata {
+  containerName: string;
+  created: boolean;
 }
 
 // WindowsSandbox per-(backend, phase) Configs. WindowsSandbox holds a single
@@ -251,6 +320,13 @@ type StateAwareConfigRegistry = DefineStateAwareConfigRegistry<{
     stop: IsolationSessionStopConfig;
     deprovision: IsolationSessionDeprovisionConfig;
   };
+  lxc: {
+    provision: LxcProvisionConfig;
+    start: LxcStartConfig;
+    exec: LxcExecConfig;
+    stop: LxcStopConfig;
+    deprovision: LxcDeprovisionConfig;
+  };
   windows_sandbox: {
     provision: WindowsSandboxProvisionConfig;
     start: WindowsSandboxStartConfig;
@@ -349,6 +425,10 @@ export type StateAwareMetadata = DefineStateAwareMetadataRegistry<{
   isolation_session: {
     provision?: IsolationSessionProvisionMetadata;
     // IsolationSession returns no metadata for start, stop, or deprovision.
+  };
+  lxc: {
+    provision?: LxcProvisionMetadata;
+    // LXC returns no metadata for start, stop, or deprovision.
   };
   // WindowsSandbox returns no metadata for any phase (provision yields only the
   // sandbox id). The key still participates so `StateAwareMetadata[C]` type-

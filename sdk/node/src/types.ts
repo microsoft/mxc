@@ -210,9 +210,9 @@ export interface NetworkConfig {
    * TCP/UDP). Independent of `defaultPolicy`. (default: false)
    */
   allowLocalNetwork?: boolean;
-  /** Hostnames or IP addresses/CIDR blocks to allow (firewall mode only) */
+  /** Hostnames or IP addresses/CIDR blocks to allow (Windows and Bubblewrap require firewall mode) */
   allowedHosts?: string[];
-  /** Hostnames or IP addresses to block (firewall mode only) */
+  /** Hostnames or IP addresses to block (Windows and Bubblewrap require firewall mode) */
   blockedHosts?: string[];
   /** Proxy configuration (supported on Windows ProcessContainer, Linux Bubblewrap,
    *  macOS Seatbelt, and WSLC). On Bubblewrap/Seatbelt/WSLC it is a cooperative

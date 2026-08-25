@@ -80,6 +80,10 @@ export interface Experimental {
    */
   isolation_session?: IsolationSession | null;
   /**
+   * LXC backend config (Linux).
+   */
+  lxc?: LxcExperimental | null;
+  /**
    * Seatbelt backend config (pre-promotion alias).
    */
   seatbelt?: Seatbelt | null;
@@ -187,6 +191,34 @@ export interface Lxc {
    * Distribution release (e.g. `3.23`).
    */
   release?: string | null;
+}
+
+/**
+ * LXC backend config under the experimental surface. Carries only the per-phase state-aware nesting for the phases that take config (`provision`); the one-shot LXC surface is the stable top-level `lxc` section, so this type is named apart from it rather than shared with it. `start`, `exec`, `stop`, and `deprovision` take no per-phase config payload.
+ */
+export interface LxcExperimental {
+  /**
+   * State-aware provision-phase configuration.
+   */
+  provision?: LxcProvisionPhase | null;
+  [k: string]: unknown;
+}
+
+/**
+ * Provision-phase LXC configuration (state-aware lifecycle), nested under `experimental.lxc.provision`. Names the container image to create.
+ * 
+ * Filesystem mounts and network policy derive from the top-level `filesystem` and `network` sections, not from here. It is its own type rather than a shared one because a shared type would advertise its fields on every phase in the generated schema.
+ */
+export interface LxcProvisionPhase {
+  /**
+   * Distribution image (e.g. `alpine`).
+   */
+  distribution?: string | null;
+  /**
+   * Distribution release (e.g. `3.23`).
+   */
+  release?: string | null;
+  [k: string]: unknown;
 }
 
 /**
