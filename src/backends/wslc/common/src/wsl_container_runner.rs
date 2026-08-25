@@ -1278,6 +1278,26 @@ impl WSLContainerRunner {
     /// `WslcCreateContainer` returns here. RAII guards (`WslcSessionGuard`,
     /// `WslcContainerGuard`, `WslcProcessGuard`, `IoCtxRawGuard`) ensure handles
     /// and reference counts are released on every exit path.
+    /// The in-container directory for `working_directory`, or `None` when the
+    /// caller asked for the container default.
+    ///
+    /// A caller who names a directory and silently gets a different one has no
+    /// way to notice, so a value WSLc cannot map is refused here.
+    fn container_working_directory(working_directory: &str) -> Result<Option<String>, String> {
+        if working_directory.is_empty() {
+            return Ok(None);
+        }
+
+        match policy_mapping::windows_path_to_container_path(working_directory) {
+            Some(container_path) => Ok(Some(container_path)),
+            None => Err(format!(
+                "process.cwd {working_directory:?} cannot be mapped into the container. \
+                 WSLc accepts a drive-qualified Windows path such as C:\\work; refusing \
+                 rather than starting the script in a different directory."
+            )),
+        }
+    }
+
     pub(crate) unsafe fn start_container(
         &self,
         request: &ExecutionRequest,
@@ -1428,22 +1448,20 @@ impl WSLContainerRunner {
         }
 
         let _cwd_cstr;
-        if !request.working_directory.is_empty() {
-            if let Some(container_cwd) =
-                policy_mapping::windows_path_to_container_path(&request.working_directory)
-            {
-                _cwd_cstr = format!("{}\0", container_cwd);
-                let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
-                    &mut process_settings,
-                    _cwd_cstr.as_bytes().as_ptr() as PCSTR,
-                );
-                if hr != S_OK {
-                    return Err(sdk_error(
-                        "WslcSetProcessSettingsWorkingDirectory failed",
-                        hr,
-                        "",
-                    ));
-                }
+        if let Some(container_cwd) = Self::container_working_directory(&request.working_directory)
+            .map_err(|message| ScriptResponse::error(&message))?
+        {
+            _cwd_cstr = format!("{}\0", container_cwd);
+            let hr = sdk.WslcSetProcessSettingsWorkingDirectory(
+                &mut process_settings,
+                _cwd_cstr.as_bytes().as_ptr() as PCSTR,
+            );
+            if hr != S_OK {
+                return Err(sdk_error(
+                    "WslcSetProcessSettingsWorkingDirectory failed",
+                    hr,
+                    "",
+                ));
             }
         }
 
@@ -2112,6 +2130,31 @@ mod tests {
         }
         ar.into_inner().unwrap().flush().unwrap();
         file
+    }
+
+    #[test]
+    fn an_unmappable_working_directory_is_refused_rather_than_dropped() {
+        for value in ["/workspace", "relative/path", r"\\server\share", "C:folder"] {
+            let result = WSLContainerRunner::container_working_directory(value);
+            assert!(
+                result.is_err(),
+                "input=process.cwd={value:?}; WSLc cannot map this into the container, so the launch must fail rather than run somewhere else; output={result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mappable_working_directory_still_reaches_the_container() {
+        assert_eq!(
+            WSLContainerRunner::container_working_directory(r"C:\work"),
+            Ok(Some("/mnt/c/work".to_string())),
+            "input=process.cwd=C:\\work; a drive-qualified path still maps"
+        );
+        assert_eq!(
+            WSLContainerRunner::container_working_directory(""),
+            Ok(None),
+            "input=process.cwd omitted; the container default is still selected"
+        );
     }
 
     #[test]
