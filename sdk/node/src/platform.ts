@@ -325,6 +325,55 @@ const BWRAP_HELPER_RESULT_BYTES = 1024 * 1024;
 const BWRAP_PROBE_SUPERVISION_MARGIN_MS = 1500;
 
 /**
+ * Inline bootstrap for the packaged probe worker.
+ *
+ * The caller blocks in `Atomics.wait`, so an `error` event on the main-thread
+ * Worker object cannot report a missing, corrupt, or throwing worker module in
+ * time. This trusted bootstrap runs without a packaged asset, imports the real
+ * worker, and publishes import/startup failures through the same shared result
+ * buffer the worker uses for normal outcomes.
+ */
+const BWRAP_PROBE_WORKER_BOOTSTRAP = String.raw`
+const { pathToFileURL } = require('node:url');
+const { workerData } = require('node:worker_threads');
+
+function publishStartupError(error) {
+  const header = new Int32Array(workerData.shared, 0, 3);
+  if (Atomics.load(header, 0) !== 0) return;
+  const payload = new Uint8Array(workerData.shared, 12);
+  const detail = error instanceof Error ? error.message : String(error);
+  let encoded = Buffer.from(JSON.stringify({
+    kind: 'spawnError',
+    detail: 'probe worker failed to start: ' + detail,
+  }));
+  if (encoded.length > payload.length) {
+    encoded = Buffer.from(JSON.stringify({
+      kind: 'spawnError',
+      detail: 'probe worker startup error exceeded its bound',
+    }));
+  }
+  payload.set(encoded);
+  Atomics.store(header, 1, encoded.length);
+  if (Atomics.compareExchange(header, 0, 0, 1) === 0) {
+    Atomics.notify(header, 0);
+  }
+}
+
+function publishFatalStartupError(error) {
+  publishStartupError(error);
+}
+
+process.once('uncaughtException', publishFatalStartupError);
+process.once('unhandledRejection', publishFatalStartupError);
+import(pathToFileURL(workerData.workerPath).href)
+  .then(() => {
+    process.removeListener('uncaughtException', publishFatalStartupError);
+    process.removeListener('unhandledRejection', publishFatalStartupError);
+  })
+  .catch(publishStartupError);
+`;
+
+/**
  * Split the caller's budget into the probe deadline (how long `bwrap` itself
  * may run) and the worker's publish deadline, so the caller-visible wait never
  * exceeds `timeoutMs`. Budgets smaller than twice the margin split in half
@@ -434,9 +483,11 @@ export function _runBwrapVersionCommand(
   const { probeTimeoutMs, publishTimeoutMs } = _bwrapProbeDeadlines(setupRemainingMs);
   let worker: Worker;
   try {
-    worker = bwrapProbeWorkerFactory(resolveBwrapProbeScript('bwrap-probe-worker.js'), {
+    worker = bwrapProbeWorkerFactory(BWRAP_PROBE_WORKER_BOOTSTRAP, {
+      eval: true,
       workerData: {
         shared,
+        workerPath: resolveBwrapProbeScript('bwrap-probe-worker.js'),
         anchorPath: resolveBwrapProbeScript('bwrap-probe-anchor.js'),
         helperPath: resolveBwrapProbeScript('bwrap-probe-helper.js'),
         probeTimeoutMs,
@@ -454,7 +505,12 @@ export function _runBwrapVersionCommand(
       detail: err instanceof Error ? err.message : String(err),
     };
   }
-  worker.on('error', () => {});
+  worker.on('error', (error) => {
+    // The inline bootstrap and the worker's own protocol report recoverable
+    // startup/runtime failures synchronously. This catches only catastrophic
+    // worker failures that escaped both and avoids an unhandled event.
+    platformDiagnosticLogger(`Bubblewrap probe worker failed: ${error.message}`);
+  });
   const waitRemainingMs = Math.max(0, deadline - performance.now());
   const waitResult = Atomics.wait(header, 0, 0, waitRemainingMs);
   if (waitResult === 'timed-out') {

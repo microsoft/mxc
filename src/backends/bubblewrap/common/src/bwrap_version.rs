@@ -362,6 +362,10 @@ fn run_version_command_until(
     deadline: Instant,
     timeout: Duration,
 ) -> Result<ProbeOutput, BwrapUnavailable> {
+    if Instant::now() >= deadline {
+        return Err(probe_timeout(timeout));
+    }
+
     // The public probe runs this entire operation in a deadline-watched worker,
     // so PATH lookup and spawn are bounded without assuming a fixed `env` path.
     // A dedicated process group handles wrappers and inherited probe pipes. On
@@ -1139,6 +1143,36 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, BwrapUnavailable::NotFound);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_deadline_does_not_launch_the_probe_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("bwrap");
+        let marker = dir.path().join("launched");
+        std::fs::write(&script, "#!/bin/sh\nprintf launched > \"$1\"\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let marker_arg = marker.to_string_lossy();
+        let timeout = Duration::from_millis(50);
+        let error = run_version_command_until(
+            &script,
+            &[marker_arg.as_ref()],
+            Instant::now() - Duration::from_millis(1),
+            timeout,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, probe_timeout(timeout));
+        assert!(
+            !marker.exists(),
+            "an expired worker launched the probe command after the caller returned"
+        );
     }
 
     #[cfg(unix)]

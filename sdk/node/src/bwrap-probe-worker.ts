@@ -64,8 +64,19 @@ function completeAfterCleanup(result: unknown, stop = false): void {
   completionRequested = true;
   pendingResult = result;
   if (stop) stopAnchor();
-  if (anchorClosed) publish(pendingResult);
+  if (!anchor || anchorClosed) publish(pendingResult);
 }
+
+function handleFatalWorkerError(error: unknown): void {
+  const detail = error instanceof Error ? error.message : String(error);
+  completeAfterCleanup(
+    { kind: 'spawnError', detail: `probe worker failed: ${detail}` },
+    true,
+  );
+}
+
+process.once('uncaughtException', handleFatalWorkerError);
+process.once('unhandledRejection', handleFatalWorkerError);
 
 if (Atomics.load(header, 0) === 0) {
   try {

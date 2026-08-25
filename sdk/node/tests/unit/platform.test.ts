@@ -889,6 +889,48 @@ describe('bwrap subprocess helpers', () => {
     }
   });
 
+  it('reports missing or corrupt worker modules without waiting for the probe timeout', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mxc-bwrap-worker-startup-'));
+    const corruptWorker = path.join(dir, 'corrupt-worker.mjs');
+    fs.writeFileSync(corruptWorker, 'export const = ;\n');
+    const cases = [
+      path.join(dir, 'missing-worker.mjs'),
+      corruptWorker,
+    ];
+    const workers: Worker[] = [];
+
+    try {
+      for (const workerPath of cases) {
+        _setBwrapProbeWorkerFactory((bootstrap, options) => {
+          const worker = new Worker(bootstrap, {
+            ...options,
+            workerData: {
+              ...(options.workerData as Record<string, unknown>),
+              workerPath,
+            },
+          });
+          workers.push(worker);
+          return worker;
+        });
+
+        const started = Date.now();
+        const result = _runBwrapVersionCommand(3000);
+        const elapsed = Date.now() - started;
+
+        assert.strictEqual(result.kind, 'failed');
+        if (result.kind === 'failed') {
+          assert.match(result.detail, /^probe worker failed to start:/);
+          assert.doesNotMatch(result.detail, /timed out/i);
+        }
+        assert.ok(elapsed < 1500, `worker startup failure took ${elapsed}ms`);
+      }
+    } finally {
+      _setBwrapProbeWorkerFactory(null);
+      await Promise.all(workers.map((worker) => worker.terminate()));
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it(
     'returns within the caller-visible timeout when the probe hangs',
     { skip: os.platform() !== 'linux' },
