@@ -101,7 +101,7 @@ pub fn finalize(
         })?)
         .map_err(|error| {
             format!(
-                "captureDenials output {} is not valid canonical denials JSON: {error}",
+                "captureDenials output {} is not valid actionable denials JSON: {error}",
                 source_denials.display()
             )
         })?;
@@ -166,7 +166,7 @@ fn validate_metadata(
         || capture.denied_resources_truncated != document.summary.denied_resources_truncated
     {
         return Err(
-            "captureDenials metadata does not match the canonical denials document".to_string(),
+            "captureDenials metadata does not match the actionable denials document".to_string(),
         );
     }
     Ok(())
@@ -176,7 +176,7 @@ fn validate_metadata(
 /// on-disk state and the metadata paths mutually truthful even on partial
 /// failure.
 ///
-/// The JSON pair is relocated transactionally and its final canonical path is
+/// The JSON pair is relocated transactionally and its final actionable path is
 /// published only after both siblings commit. The retained ETL moves last and
 /// its final path is published immediately on success. A later move failure
 /// therefore leaves every metadata path truthful.
@@ -448,7 +448,7 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("canonical denials JSON"));
+        assert!(error.contains("actionable denials JSON"));
         assert!(source_denials.exists());
         assert!(
             learning_mode_core::verbose_logging_sibling_path(&source_denials)
@@ -508,7 +508,7 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("canonical output file already exists"));
+        assert!(error.contains("actionable output file already exists"));
         assert!(source_denials.exists());
         assert!(
             learning_mode_core::verbose_logging_sibling_path(&source_denials)
@@ -660,7 +660,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.contains("failed to promote canonical"));
+        assert!(error.contains("failed to promote actionable"));
         assert_eq!(Path::new(&capture.output_path), source_denials);
         assert!(source_denials.is_file());
         assert!(source_verbose_logging.is_file());

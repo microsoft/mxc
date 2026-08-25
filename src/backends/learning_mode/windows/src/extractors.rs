@@ -29,8 +29,11 @@
 //!   (`ObjectType` / `ObjectName` / `AccessMask`). `ObjectType` selects the
 //!   resource type: `File` → [`ResourceType::File`], `Key` →
 //!   [`ResourceType::Other`] (registry), and an **empty** `ObjectType` is a
-//!   brokered-capability check → [`ResourceType::Capability`]. Named Section,
-//!   SymbolicLink, and Timer objects also map to [`ResourceType::Other`].
+//!   brokered-capability check → [`ResourceType::Capability`]. Only positively
+//!   classified registry reads are actionable; writes and unknown registry
+//!   access are retained only as verbose diagnostics. Named Section,
+//!   SymbolicLink, and Timer objects are likewise verbose-only because MXC has
+//!   no corresponding policy grants.
 //!   Other object types are dropped until their access-mask vocabulary is
 //!   understood. The [`AccessType`] is derived from the
 //!   `AccessMask` field (see [`access_type_from_mask`]). Emitted under both
@@ -48,7 +51,7 @@
 //!   name; custom hashed capabilities fall back to the SID string).
 
 use learning_mode_core::{
-    AccessType, ResourceType, VerboseLoggingExclusionReason, VerboseLoggingProvider,
+    AccessType, ResourceType, VerboseLoggingOutcomeReason, VerboseLoggingProvider,
 };
 use sha2::{Digest, Sha256};
 use windows::core::GUID;
@@ -118,7 +121,7 @@ pub struct RawDenial {
 
 /// Routes a decoded event to the matching extractor by its event ID.
 ///
-/// Returns `Err` with a closed [`VerboseLoggingExclusionReason`] for events that
+/// Returns `Err` with a closed [`VerboseLoggingOutcomeReason`] for events that
 /// are not learning-mode denials, that carry an object type we don't
 /// surface, or that otherwise fail extraction. Callers aggregate the
 /// returned reason into [`learning_mode_core::VerboseLoggingSummary`] rather than
@@ -129,14 +132,14 @@ pub fn extract_denial(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
     // Callers on the real trace path gate on `is_learning_mode_event` before
     // decoding via TDH at all, so this branch only matters for direct/test
     // callers that skip that gate.
     let provider = verbose_logging_provider_for_guid(parts.provider)
-        .ok_or(VerboseLoggingExclusionReason::UnsupportedEventSchema)?;
+        .ok_or(VerboseLoggingOutcomeReason::UnsupportedEventSchema)?;
     if !is_learning_mode_event(parts.provider, parts.event_id) {
-        return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
+        return Err(VerboseLoggingOutcomeReason::UnsupportedEventSchema);
     }
 
     match parts.event_id {
@@ -150,12 +153,12 @@ pub fn extract_denial(
             build_denial_from_learning_mode(parts, pid, filetime, provider)
         }
         CAPABILITY_DENIAL_EVENT_ID => build_denial_from_capability(parts, pid, filetime, provider),
-        _ => Err(VerboseLoggingExclusionReason::UnsupportedEventSchema),
+        _ => Err(VerboseLoggingOutcomeReason::UnsupportedEventSchema),
     }
 }
 
 /// Returns typed denial classifications that can be determined independently
-/// of whether the event contains every property required for canonical output.
+/// of whether the event contains every property required for actionable output.
 pub(crate) fn verbose_logging_classification(
     parts: &DecodedEventParts,
 ) -> (Option<AccessType>, Option<ResourceType>) {
@@ -607,9 +610,11 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 /// The `ObjectType` field selects the resource type: `File` and `Key`
 /// (registry) map to concrete resources, an **empty** `ObjectType` is a
 /// brokered-capability check, and the observed named-object types `Section`,
-/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Other object
-/// types are dropped until their access-mask vocabulary is understood. An
-/// absent `ObjectType` field drops the event.
+/// `SymbolicLink`, and `Timer` map to [`ResourceType::Other`]. Only registry
+/// reads are actionable; other registry access and those named-object types are
+/// excluded because MXC has no corresponding policy grants. Other object types
+/// are dropped until their access-mask vocabulary is understood. An absent
+/// `ObjectType` field drops the event.
 ///
 /// For file/registry resources the [`AccessType`] is derived from the
 /// event's `AccessMask` field (the desired access the caller was denied;
@@ -620,24 +625,25 @@ pub(crate) fn sanitize_properties(props: &[(String, String)]) -> Vec<(String, St
 ///
 /// # Errors
 ///
-/// Returns the closed [`VerboseLoggingExclusionReason`] describing why no denial
-/// could be built: a missing `ObjectType` ([`VerboseLoggingExclusionReason::MissingObjectType`]),
+/// Returns the closed [`VerboseLoggingOutcomeReason`] describing why no denial
+/// could be built: a missing `ObjectType` ([`VerboseLoggingOutcomeReason::MissingObjectType`]),
 /// an object type this model can't represent
-/// ([`VerboseLoggingExclusionReason::UnsupportedObjectType`]), a missing/empty
+/// ([`VerboseLoggingOutcomeReason::UnsupportedObjectType`]), a missing/empty
 /// object name (registry/file:
-/// [`VerboseLoggingExclusionReason::MissingObjectName`]; capability: an
+/// [`VerboseLoggingOutcomeReason::MissingObjectName`]; capability: an
 /// unidentified brokered check,
-/// [`VerboseLoggingExclusionReason::UnresolvedCapability`] — [`crate::capability_dacl`]
-/// may still recover it from the event's DACL payload), or a self-access
-/// check that isn't actionable ([`VerboseLoggingExclusionReason::NotActionable`]).
+/// [`VerboseLoggingOutcomeReason::UnresolvedCapability`] — [`crate::capability_dacl`]
+/// may still recover it from the event's DACL payload), or a self-access,
+/// non-read registry, or recognized named-object check that isn't actionable
+/// ([`VerboseLoggingOutcomeReason::NotActionable`]).
 pub fn build_denial_from_access_check(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
     provider: VerboseLoggingProvider,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
     let object_type = find_prop(&parts.props, "ObjectType")
-        .ok_or(VerboseLoggingExclusionReason::MissingObjectType)?;
+        .ok_or(VerboseLoggingOutcomeReason::MissingObjectType)?;
     let object_type_str = object_type.trim_matches('"');
 
     let resource_type = match object_type_str {
@@ -646,7 +652,7 @@ pub fn build_denial_from_access_check(
         "Section" | "SymbolicLink" | "Timer" => ResourceType::Other,
         // A present-but-empty object type is a brokered-capability check.
         "" => ResourceType::Capability,
-        _ => return Err(VerboseLoggingExclusionReason::UnsupportedObjectType),
+        _ => return Err(VerboseLoggingOutcomeReason::UnsupportedObjectType),
     };
 
     let object_name = find_prop(&parts.props, "ObjectName")
@@ -656,9 +662,9 @@ pub fn build_denial_from_access_check(
         // An unidentified brokered-capability check: the identifier may
         // still be recoverable from the event's DACL payload.
         (ResourceType::Capability, None) => {
-            return Err(VerboseLoggingExclusionReason::UnresolvedCapability)
+            return Err(VerboseLoggingOutcomeReason::UnresolvedCapability)
         }
-        (_, None) => return Err(VerboseLoggingExclusionReason::MissingObjectName),
+        (_, None) => return Err(VerboseLoggingOutcomeReason::MissingObjectName),
         (_, Some(name)) => name,
     };
 
@@ -667,7 +673,7 @@ pub fn build_denial_from_access_check(
             .or_else(|| find_prop(&parts.props, "ApplicationPath"))
             .map(|value| value.trim_matches('"'));
         if app_path.is_some_and(|app_path| is_self_access(&object_name, app_path)) {
-            return Err(VerboseLoggingExclusionReason::NotActionable);
+            return Err(VerboseLoggingOutcomeReason::NotActionable);
         }
     }
 
@@ -686,6 +692,12 @@ pub fn build_denial_from_access_check(
             })
             .unwrap_or(AccessType::Unknown)
     };
+
+    if (object_type_str == "Key" && access_type != AccessType::Read)
+        || matches!(object_type_str, "Section" | "SymbolicLink" | "Timer")
+    {
+        return Err(VerboseLoggingOutcomeReason::NotActionable);
+    }
 
     Ok(RawDenial {
         pid,
@@ -755,27 +767,27 @@ fn strip_dos_namespace_prefix(path: &str) -> &str {
 ///
 /// # Errors
 ///
-/// Returns [`VerboseLoggingExclusionReason::MissingObjectType`] when `Category` is
-/// absent or unparseable, [`VerboseLoggingExclusionReason::MissingObjectName`]
+/// Returns [`VerboseLoggingOutcomeReason::MissingObjectType`] when `Category` is
+/// absent or unparseable, [`VerboseLoggingOutcomeReason::MissingObjectName`]
 /// when the required `Detail` is absent or unparseable, and
-/// [`VerboseLoggingExclusionReason::NotActionable`] when the category/detail pair
+/// [`VerboseLoggingOutcomeReason::NotActionable`] when the category/detail pair
 /// describes no violation (`Category == 0`).
 pub fn build_denial_from_learning_mode(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
     provider: VerboseLoggingProvider,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
     let category = find_prop(&parts.props, "Category")
         .and_then(|value| parse_u32(value))
-        .ok_or(VerboseLoggingExclusionReason::MissingObjectType)?;
+        .ok_or(VerboseLoggingOutcomeReason::MissingObjectType)?;
     let detail = match find_prop(&parts.props, "Detail") {
-        Some(value) => parse_u32(value).ok_or(VerboseLoggingExclusionReason::MissingObjectName)?,
+        Some(value) => parse_u32(value).ok_or(VerboseLoggingOutcomeReason::MissingObjectName)?,
         None if category == crate::ui::CONVERT_TO_GUI => 0,
-        None => return Err(VerboseLoggingExclusionReason::MissingObjectName),
+        None => return Err(VerboseLoggingOutcomeReason::MissingObjectName),
     };
     let object_name = crate::ui::resource_name(category, detail)
-        .ok_or(VerboseLoggingExclusionReason::NotActionable)?;
+        .ok_or(VerboseLoggingOutcomeReason::NotActionable)?;
 
     Ok(RawDenial {
         pid,
@@ -801,20 +813,20 @@ pub fn build_denial_from_learning_mode(
 ///
 /// # Errors
 ///
-/// Returns [`VerboseLoggingExclusionReason::NotActionable`] when `Denied` is
-/// absent or not `true`, and [`VerboseLoggingExclusionReason::UnresolvedCapability`]
+/// Returns [`VerboseLoggingOutcomeReason::NotActionable`] when `Denied` is
+/// absent or not `true`, and [`VerboseLoggingOutcomeReason::UnresolvedCapability`]
 /// when no usable capability identifier could be decoded.
 pub fn build_denial_from_capability(
     parts: &DecodedEventParts,
     pid: u32,
     filetime: u64,
     provider: VerboseLoggingProvider,
-) -> Result<RawDenial, VerboseLoggingExclusionReason> {
+) -> Result<RawDenial, VerboseLoggingOutcomeReason> {
     // A partially decoded event must not become a policy recommendation.
     let denied = find_prop(&parts.props, "Denied")
         .is_some_and(|value| value.trim_matches('"').eq_ignore_ascii_case("true"));
     if !denied {
-        return Err(VerboseLoggingExclusionReason::NotActionable);
+        return Err(VerboseLoggingOutcomeReason::NotActionable);
     }
 
     let pid = find_prop(&parts.props, "ProcessId")
@@ -840,7 +852,7 @@ pub fn build_denial_from_capability(
                 && name != "<invalid SID>"
                 && name != "<malformed-sid>"
         })
-        .ok_or(VerboseLoggingExclusionReason::UnresolvedCapability)?;
+        .ok_or(VerboseLoggingOutcomeReason::UnresolvedCapability)?;
 
     Ok(RawDenial {
         pid,
@@ -1098,7 +1110,7 @@ mod tests {
             );
             assert_eq!(
                 extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-                VerboseLoggingExclusionReason::NotActionable
+                VerboseLoggingOutcomeReason::NotActionable
             );
         }
     }
@@ -1213,6 +1225,49 @@ mod tests {
     }
 
     #[test]
+    fn access_check_key_write_is_not_actionable() {
+        let p = parts(
+            14,
+            &[
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+                // KEY_SET_VALUE.
+                ("AccessMask", "0x2"),
+            ],
+        );
+        assert_eq!(
+            extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+            VerboseLoggingOutcomeReason::NotActionable
+        );
+        assert_eq!(
+            verbose_logging_classification(&p),
+            (Some(AccessType::Write), Some(ResourceType::Other))
+        );
+    }
+
+    #[test]
+    fn access_check_key_unknown_access_is_not_actionable() {
+        for access_mask in [None, Some("not-a-mask"), Some("0x0")] {
+            let mut properties = vec![
+                ("ObjectType", "\"Key\""),
+                ("ObjectName", "\"\\REGISTRY\\USER\\.DEFAULT\\Console\""),
+            ];
+            if let Some(access_mask) = access_mask {
+                properties.push(("AccessMask", access_mask));
+            }
+            let p = parts(14, &properties);
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(AccessType::Unknown), Some(ResourceType::Other))
+            );
+        }
+    }
+
+    #[test]
     fn access_check_empty_capability_identifier_is_dropped() {
         // Permissive-mode capability check: present-but-empty ObjectType,
         // empty ObjectName, mask 0x1 (not a file read verb here).
@@ -1227,7 +1282,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::UnresolvedCapability
+            VerboseLoggingOutcomeReason::UnresolvedCapability
         );
     }
 
@@ -1244,7 +1299,7 @@ mod tests {
             );
             assert_eq!(
                 extract_denial(&p, 5900, FIXED_FILETIME).unwrap_err(),
-                VerboseLoggingExclusionReason::MissingObjectName
+                VerboseLoggingOutcomeReason::MissingObjectName
             );
         }
     }
@@ -1260,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn access_check_observed_named_object_types_are_retained() {
+    fn access_check_observed_named_object_types_are_not_actionable() {
         for (object_type, object_name, mask, expected_access) in [
             (
                 "Section",
@@ -1284,10 +1339,14 @@ mod tests {
                     ("AccessMask", mask),
                 ],
             );
-            let denial = extract_denial(&p, 1, FIXED_FILETIME).unwrap();
-            assert_eq!(denial.resource_type, ResourceType::Other);
-            assert_eq!(denial.object_name, object_name);
-            assert_eq!(denial.access_type, expected_access);
+            assert_eq!(
+                extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
+                VerboseLoggingOutcomeReason::NotActionable
+            );
+            assert_eq!(
+                verbose_logging_classification(&p),
+                (Some(expected_access), Some(ResourceType::Other))
+            );
         }
     }
 
@@ -1299,7 +1358,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::UnsupportedObjectType
+            VerboseLoggingOutcomeReason::UnsupportedObjectType
         );
     }
 
@@ -1308,7 +1367,7 @@ mod tests {
         let p = parts(14, &[("ObjectName", "\"x\"")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::MissingObjectType
+            VerboseLoggingOutcomeReason::MissingObjectType
         );
     }
 
@@ -1391,13 +1450,13 @@ mod tests {
         let invalid_category = parts(27, &[("Category", "not-a-number"), ("Detail", "4")]);
         assert_eq!(
             extract_denial(&invalid_category, 9999, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::MissingObjectType
+            VerboseLoggingOutcomeReason::MissingObjectType
         );
 
         let invalid_detail = parts(27, &[("Category", "2"), ("Detail", "not-a-number")]);
         assert_eq!(
             extract_denial(&invalid_detail, 9999, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::MissingObjectName
+            VerboseLoggingOutcomeReason::MissingObjectName
         );
     }
 
@@ -1406,7 +1465,7 @@ mod tests {
         let p = parts(27, &[("Category", "0"), ("Detail", "0")]);
         assert_eq!(
             extract_denial(&p, 9999, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::NotActionable
+            VerboseLoggingOutcomeReason::NotActionable
         );
     }
 
@@ -1500,7 +1559,7 @@ mod tests {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "false")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::NotActionable
+            VerboseLoggingOutcomeReason::NotActionable
         );
     }
 
@@ -1509,7 +1568,7 @@ mod tests {
         let p = parts(28, &[("PackageSid", "S-1-15-3-1")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::NotActionable
+            VerboseLoggingOutcomeReason::NotActionable
         );
     }
 
@@ -1518,7 +1577,7 @@ mod tests {
         let p = parts(28, &[("ProcessId", "0x10"), ("Denied", "true")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::UnresolvedCapability
+            VerboseLoggingOutcomeReason::UnresolvedCapability
         );
     }
 
@@ -1531,7 +1590,7 @@ mod tests {
         );
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::UnsupportedEventSchema
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema
         );
         assert!(verbose_logging_provider_for_guid(GUID::from_u128(
             0x12345678_1234_1234_1234_1234567890ab
@@ -1562,7 +1621,7 @@ mod tests {
         let p = parts(9999, &[("Foo", "\"bar\"")]);
         assert_eq!(
             extract_denial(&p, 1, FIXED_FILETIME).unwrap_err(),
-            VerboseLoggingExclusionReason::UnsupportedEventSchema
+            VerboseLoggingOutcomeReason::UnsupportedEventSchema
         );
     }
 
