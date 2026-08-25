@@ -34,12 +34,14 @@
 //! cannot run, the inbound deny is unenforceable for that family, so the run
 //! fails closed rather than silently leaving IPv6 open.
 //!
-//! **Permissive path is not yet implemented.** `allowLocalNetwork: true`, and its
-//! 0.8 successors `network.ingress.default: "allow"` and
-//! `network.ingress.hostLoopback: "allow"`, each ask for the sandboxed process to
-//! bind, listen, and accept incoming connections. LXC has a single inbound chain
-//! and the policy carries no way to narrow an accept to particular ports, sources,
-//! or interfaces, so the only rule available today is an unscoped
+//! **Permissive path is not yet implemented.** Three settings ask for the
+//! sandboxed process to bind, listen, and accept incoming connections:
+//! `allowLocalNetwork: true`, its 0.8 successor
+//! `network.ingress.default: "allow"`, and
+//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8 and has no 0.7
+//! equivalent. LXC has a single inbound chain and the policy carries no way to
+//! narrow an accept to particular ports, sources, or interfaces, so the only
+//! rule available today is an unscoped
 //! `--state NEW -j ACCEPT` accepting inbound from every interface and source, LAN
 //! and WAN included. Rather than install that silently,
 //! [`IngressManager::apply_firewall_rules`] returns a not-yet-implemented error
