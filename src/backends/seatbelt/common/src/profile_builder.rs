@@ -318,8 +318,9 @@ fn write_network_rules(
     write_host_loopback_rules(out, policy, allow_outbound);
 
     // Emitted last on purpose: among rules whose filters both match, Seatbelt
-    // takes the *last* one, so the proxy's port-scoped allow has to follow the
-    // host-loopback deny to survive it.
+    // takes the *last* one. Nothing here denies `localhost` today — the deny
+    // arm needs an open egress default, which skips the proxy entirely — so
+    // going last keeps the port-scoped allow safe if that ever changes.
     if !allow_outbound {
         if let Some(address) = proxy_address {
             write_proxy_reachability_rules(out, address);
@@ -1164,24 +1165,46 @@ mod tests {
     }
 
     #[test]
-    fn proxy_allow_is_emitted_after_the_host_loopback_deny() {
-        // `validate` rejects proxy + egress allow today, so this pairing is
-        // unreachable in practice. The ordering still has to hold: a later deny
-        // would silently swallow the proxy exception and fail closed.
+    fn no_host_loopback_deny_can_swallow_the_proxy_allow() {
+        // A proxy is only reachable under a deny egress default, and that arm
+        // emits no `localhost:*` deny. Pin it: a deny reaching the profile
+        // alongside the proxy allow would silently fail closed.
+        for loopback in [NetworkAction::Allow, NetworkAction::Deny] {
+            let mut r = req();
+            r.policy.network_egress = Some(egress(NetworkAction::Deny));
+            r.policy.network_ingress = Some(ingress(loopback));
+            let addr = ProxyAddress::new("127.0.0.1".into(), 44444);
+            let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
+
+            assert!(
+                p.contains("(allow network-outbound (remote ip \"localhost:44444\"))"),
+                "hostLoopback={loopback:?}: the proxy allow must be emitted"
+            );
+            assert!(
+                !p.contains("(deny network-outbound (remote ip \"localhost:*\"))"),
+                "hostLoopback={loopback:?}: a loopback deny would swallow the proxy allow"
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_allow_is_emitted_after_the_host_loopback_allow() {
+        // The only case where two `localhost` rules coexist. Both permit, so
+        // order is harmless today — assert it anyway to keep the proxy
+        // exception last if either rule ever becomes a deny.
         let mut r = req();
-        r.policy.network_egress = Some(egress(NetworkAction::Allow));
-        r.policy.network_ingress = Some(ingress(NetworkAction::Deny));
+        r.policy.network_egress = Some(egress(NetworkAction::Deny));
+        r.policy.network_ingress = Some(ingress(NetworkAction::Allow));
         let addr = ProxyAddress::new("127.0.0.1".into(), 44444);
         let p = build_profile_with_proxy(&r, Some(&addr)).unwrap();
 
-        let deny = p.find("(deny network-outbound (remote ip \"localhost:*\"))");
-        let proxy = p.find("(allow network-outbound (remote ip \"localhost:44444\"))");
-        if let (Some(deny), Some(proxy)) = (deny, proxy) {
-            assert!(
-                proxy > deny,
-                "the proxy allow must survive the loopback deny"
-            );
-        }
+        let loopback = p
+            .find("(allow network-outbound (remote ip \"localhost:*\"))")
+            .expect("hostLoopback=allow must emit the loopback allow");
+        let proxy = p
+            .find("(allow network-outbound (remote ip \"localhost:44444\"))")
+            .expect("a loopback proxy must emit the port-scoped allow");
+        assert!(proxy > loopback, "the proxy allow must be emitted last");
     }
 
     #[test]
