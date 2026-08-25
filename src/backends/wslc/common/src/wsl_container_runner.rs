@@ -605,11 +605,14 @@ enum TarFormat {
 /// Builds a user-facing prerequisite error for the components `WslcGetMissingComponents`
 /// reports as missing. `missing` may combine multiple bits, and the guidance is branched
 /// per-component so a user missing only `VirtualMachinePlatform` isn't told to update WSL
-/// (which doesn't enable that Windows optional feature), and vice versa.
+/// (which doesn't enable that Windows optional feature), and vice versa. `SdkNeedsUpdate`
+/// points at MXC rather than WSL, since it means MXC's SDK is the stale side.
 pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     let needs_vmp =
         missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM.0 != 0;
     let needs_wsl_package = missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_WSL_PACKAGE.0 != 0;
+    let needs_sdk_update =
+        missing.0 & WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE.0 != 0;
 
     let mut guidance = Vec::new();
     if needs_vmp {
@@ -623,6 +626,14 @@ pub(crate) fn wslc_prerequisite_error(missing: WslcComponentFlags) -> String {
     if needs_wsl_package {
         guidance
             .push("install WSL 2.9.3 or newer and run `wsl --update --pre-release`".to_string());
+    }
+    if needs_sdk_update {
+        // MXC's vendored SDK is behind the installed WSL, so the fix is on MXC's
+        // side — telling the user to install WSL would send them the wrong way.
+        guidance.push(
+            "update MXC — the WSLc SDK it ships is too old for your installed version of WSL"
+                .to_string(),
+        );
     }
     if guidance.is_empty() {
         guidance.push("ensure WSL2 and the WSLC SDK are installed".to_string());
@@ -2590,7 +2601,36 @@ mod tests {
         let message =
             wslc_prerequisite_error(WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE);
 
+        assert_eq!(
+            message,
+            "WSLC runtime unavailable. Missing components: SdkNeedsUpdate (0x4). \
+             Please update MXC — the WSLc SDK it ships is too old for your installed \
+             version of WSL."
+        );
         assert!(message.contains("SdkNeedsUpdate"));
+        assert!(message.contains("update MXC"));
+        // The user's WSL is fine (and newer) — no install/update advice for it.
+        assert!(!message.contains("ensure WSL2 and the WSLC SDK are installed"));
+        assert!(!message.contains("wsl --update"));
+        assert!(!message.contains("Virtual Machine Platform"));
+    }
+
+    #[test]
+    fn prerequisite_error_for_sdk_update_combined_with_another_component() {
+        let combined = WslcComponentFlags::WSLC_COMPONENT_FLAG_SDK_NEEDS_UPDATE
+            | WslcComponentFlags::WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM;
+        let message = wslc_prerequisite_error(combined);
+
+        assert!(message.contains("update MXC"));
+        assert!(message.contains("Virtual Machine Platform"));
+        assert!(!message.contains("ensure WSL2 and the WSLC SDK are installed"));
+    }
+
+    #[test]
+    fn prerequisite_error_falls_back_for_unrecognized_components() {
+        // An unknown future bit still has to produce actionable text.
+        let message = wslc_prerequisite_error(WslcComponentFlags(0x8000));
+
         assert!(message.contains("ensure WSL2 and the WSLC SDK are installed"));
     }
 }
