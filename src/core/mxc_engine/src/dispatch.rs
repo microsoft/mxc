@@ -266,7 +266,7 @@ fn spawn_wslc(
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_host_supported, spawn_runner};
+    use super::{ensure_host_supported, map_spawn_error, spawn_runner};
     use crate::policy::{build_request, SandboxPolicy};
     use wxc_common::logger::{Logger, Mode};
     use wxc_common::models::ContainmentBackend;
@@ -280,6 +280,45 @@ mod tests {
             ui: None,
             timeout_ms: None,
         }
+    }
+
+    fn spawn_failure(
+        phase: wxc_common::models::FailurePhase,
+    ) -> wxc_common::models::ScriptResponse {
+        wxc_common::models::ScriptResponse {
+            error_message: "wslc rejected the request".to_string(),
+            failure_phase: phase,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rejected_phase_maps_to_policy_validation() {
+        use wxc_common::models::FailurePhase;
+
+        let err = map_spawn_error(spawn_failure(FailurePhase::Rejected));
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+        assert_eq!(err.message, "wslc rejected the request");
+    }
+
+    #[test]
+    fn unavailable_and_unset_phases_keep_their_codes() {
+        use wxc_common::models::FailurePhase;
+
+        // `None` is the default, so an unclassified failure must stay a generic
+        // backend error rather than being mistaken for a rejection.
+        assert_eq!(
+            map_spawn_error(spawn_failure(FailurePhase::BackendUnavailable)).code,
+            MxcErrorCode::BackendUnavailable
+        );
+        assert_eq!(
+            map_spawn_error(spawn_failure(FailurePhase::None)).code,
+            MxcErrorCode::BackendError
+        );
+        assert_eq!(
+            map_spawn_error(spawn_failure(FailurePhase::LaunchFailed)).code,
+            MxcErrorCode::BackendError
+        );
     }
 
     #[test]

@@ -665,7 +665,10 @@ impl ScriptRunner for WSLContainerRunner {
             )
             .into_response());
         }
-        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        // The shared validator returns an untagged response; retag it so its
+        // rejections reach SDK callers as `policy_validation` like the checks above.
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
+            .map_err(|resp| WslcError::Rejected(resp.error_message).into_response())?;
         Ok(())
     }
 
@@ -2377,6 +2380,27 @@ mod tests {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
         let err = runner.validate_runner(&request).unwrap_err();
         assert!(err.error_message.contains("allowLocalNetwork"));
+    }
+
+    #[test]
+    fn validate_runner_tags_shared_validator_rejections() {
+        // The shared network validator builds untagged responses; WSLc retags them
+        // so callers get `policy_validation` rather than an opaque backend error.
+        let mut request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(err.error_message.contains("network.egress.default"));
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
     }
 
     #[test]
