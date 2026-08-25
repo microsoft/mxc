@@ -6,12 +6,10 @@ and merged: Phase 5A in PR #909, Phase 5B in PR #910, Phase 5C in PR #929,
 Phase 5D in PR #941, the Phase 5A review follow-up in PR #949, and the
 capabilities parity remediation in PR #966. Phase 6 merged in PR #968. The
 legacy rolling-model v0.8 release shipped from tag `v0.8.0`; Phase 6.5
-reconstructs its exact Rust contract, advances exact development to
-`0.9.0-alpha`, and is complete on
-`user/gudge/version_specific_config_parsers_phase6.5`, awaiting a pull request
-and merge. Phase 7.1 is renamed Phase 7a and is open as PR #969. Phases 7.2-7.5
-and Phases 8-11 remain; the planned end state publishes `0.9.0-alpha` and opens
-`0.10.0-alpha` development.
+reconstructed its exact Rust contract and advanced exact development to
+`0.9.0-alpha`, merged in PR #1027. Phase 7.1 is renamed Phase 7a and is open as
+PR #969. Phases 7.2-7.5 and Phases 8-11 remain; the planned end state publishes
+`0.9.0-alpha` and opens `0.10.0-alpha` development.
 
 Original planning base: `origin/main` at
 `692275b84eaa3f83cd8582dc774bc5f354f46ccf` (2026-08-14).
@@ -53,7 +51,7 @@ Original planning base: `origin/main` at
 ### Contract lifecycle and target state
 
 The legacy rolling stack shipped config schema `0.8.0-alpha` under product tag
-`v0.8.0`. Phase 6.5 reconstructs that immutable published contract and advances
+`v0.8.0`. Phase 6.5 reconstructed that immutable published contract and advanced
 the exact development contract to `0.9.0-alpha`.
 
 | Point in the work | Published exact contracts | Mutable exact development contract |
@@ -721,9 +719,7 @@ in the Phase 6 detailed design section below. Phase 6 merged in PR #968.
 
 ### Phase 6.5: Reconstruct published v0.8 and advance exact development to v0.9
 
-Status: implementation complete on
-`user/gudge/version_specific_config_parsers_phase6.5`; awaiting pull request,
-review, CI, and merge.
+Merged in PR #1027.
 
 The legacy rolling stack shipped v0.8 before exact dispatch was authoritative.
 This phase bridges that release into the exact-contract model without changing
@@ -1440,9 +1436,8 @@ one-shot-scoped corpus problem recorded in Phase 6.7 impossible to reintroduce.
 
 #### Phase 6 step breakdown
 
-Steps 6.0 through 6.10 are all implemented on the branch. The text below is
-retained as the design record and as the review checklist for the pull request
-that has yet to be opened.
+Steps 6.0 through 6.10 are all implemented. The text below is retained as the
+design record and as the review checklist that PR #968 was reviewed against.
 
 ##### Phase 6.0: Prepare the implementation branch
 
@@ -2747,9 +2742,9 @@ The order is:
    Phase 6.5 reconstructs the exact Rust contract but does not regenerate or
    rewrite that artifact.
 5. Move remaining rolling and exact development work to `0.9.0-alpha`.
-   **Rolling development moved in PR #996; exact development moves in Phase
-   6.5.** The contract artifact suffix is `-alpha`; `-dev` remains reserved for
-   the rolling family being retired.
+   **Rolling development moved in PR #996; exact development moved in Phase
+   6.5, PR #1027.** The contract artifact suffix is `-alpha`; `-dev` remains
+   reserved for the rolling family being retired.
 
 #### Published `0.8.0-alpha` scope: stable candidate only
 
@@ -2917,8 +2912,7 @@ accepted JSON shape cannot change underneath its users.
 
 #### Phase 6.5 final implementation
 
-Phase 6.5 is complete on
-`user/gudge/version_specific_config_parsers_phase6.5`. It:
+Phase 6.5 merged in PR #1027. It:
 
 - reconstructs `published/v0_8_0_alpha` from the tagged stable schema using the
   same policy as v0.6/v0.7: exact required version, closed objects, explicit
@@ -2949,7 +2943,7 @@ version string moving with it.
 
 #### Phase 6.5 completion status
 
-Implementation and local validation are complete as of 2026-08-24.
+Merged in PR #1027 as commit `bae778e1`.
 
 | Area | Final state |
 | --- | --- |
@@ -2962,9 +2956,8 @@ Implementation and local validation are complete as of 2026-08-24.
 | Published contract coverage | All v0.8 fixtures are discovered automatically; version, null, command, LXC, proxy, capability, alias, enum, experimental, and state-aware boundaries are covered |
 | Review remediation | Stable-schema rewrite, obsolete v0.8 TypeScript generation, validation-claim drift, documentation errors, fixture omissions, and the v0.8 capability boundary assertion are resolved |
 
-The only remaining Phase 6.5 work is to open its pull request, complete normal
-review and CI, and merge it. General published-contract digest/freeze automation
-remains part of Phase 11 rather than a Phase 6.5 merge blocker.
+General published-contract digest/freeze automation remains part of Phase 11
+rather than Phase 6.5 work.
 
 #### The adapter's no-wildcard rule is enforced by the compiler
 
