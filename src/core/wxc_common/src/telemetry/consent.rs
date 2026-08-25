@@ -98,13 +98,6 @@ pub struct ConsentStatus {
     pub reason: Option<ConsentStatusReason>,
 }
 
-impl ConsentStatus {
-    /// Whether an explicit consent request may offer the canonical prompt.
-    pub fn needs_prompt(&self) -> bool {
-        matches!(self.effective_state, ConsentState::Undetermined)
-    }
-}
-
 /// Explicit result returned by a consent presenter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsentDecision {
@@ -171,13 +164,12 @@ impl ConsentState {
         matches!(self, ConsentState::Granted)
     }
 
-    /// Whether a hosting application should offer its own first-run consent
-    /// prompt for this state.
+    /// Whether this consent state represents an absent user decision.
     ///
-    /// This shared predicate keeps all consumer surfaces consistent. It is
-    /// false for [`NotApplicable`](ConsentState::NotApplicable), because MXC
-    /// collects no telemetry off Windows.
-    pub fn needs_prompt(&self) -> bool {
+    /// This is deliberately private and policy-blind. Host applications must
+    /// use [`needs_consent_prompt`], which also suppresses the prompt under an
+    /// administrative block.
+    fn needs_prompt(&self) -> bool {
         matches!(self, ConsentState::Undetermined)
     }
 }
@@ -228,10 +220,11 @@ struct ConsentRecord {
 
 /// Returns the current, persisted telemetry consent state.
 ///
-/// Fail-closed: a missing file, an unreadable file, unparseable JSON, or an
-/// unrecognized `schemaVersion` all resolve to [`ConsentState::Undetermined`]
-/// — never to `Granted`. Always [`ConsentState::NotApplicable`] on
-/// non-Windows platforms, without any filesystem access.
+/// Fail-closed: a missing file, an unreadable file, or unparseable JSON resolves
+/// to [`ConsentState::Undetermined`]. An unrecognized `schemaVersion`
+/// invalidates a stored grant to `Undetermined`, while a stored denial remains
+/// denied. Always [`ConsentState::NotApplicable`] on non-Windows platforms,
+/// without any filesystem access.
 pub fn get_consent() -> ConsentState {
     get_status().effective_state
 }
@@ -2014,7 +2007,7 @@ mod tests {
         }
 
         #[test]
-        fn unknown_schema_version_is_undetermined() {
+        fn unsupported_schema_grant_is_undetermined() {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
             let dir = tmp.path().join("mxc");
@@ -2025,6 +2018,25 @@ mod tests {
             )
             .unwrap();
             assert_eq!(get_consent(), ConsentState::Undetermined);
+        }
+
+        #[test]
+        fn unsupported_schema_denial_remains_denied() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let dir = tmp.path().join("mxc");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("telemetry-consent.json"),
+                r#"{"schemaVersion":999,"consent":"denied"}"#,
+            )
+            .unwrap();
+
+            let status = get_status();
+
+            assert_eq!(status.stored_state, ConsentState::Denied);
+            assert_eq!(status.effective_state, ConsentState::Denied);
+            assert_eq!(status.reason, None);
         }
 
         #[test]

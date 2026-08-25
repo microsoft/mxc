@@ -103,7 +103,9 @@ const POLICY_KEY_OVERRIDE_OWNER_ENV: &str = "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_
 /// Fail-closed: a value that is present but not understood resolves to
 /// [`PolicyState::Blocked`]. An *absent* policy resolves to
 /// [`PolicyState::Unrestricted`] — the unmanaged default, where the user's own
-/// consent decision governs.
+/// consent decision governs. Registry failures are reported to stderr once per
+/// distinct failure so the fail-closed result does not hide a broken policy
+/// deployment from operators.
 pub fn get_policy() -> PolicyState {
     platform::read()
 }
@@ -123,6 +125,9 @@ pub fn is_blocked_by_policy() -> bool {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{PolicyState, POLICY_VALUE_OPTIONAL};
+    use std::collections::HashSet;
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
 
@@ -163,6 +168,45 @@ mod platform {
         Unreadable,
     }
 
+    #[derive(Default)]
+    struct FailureReporter {
+        reported: Mutex<HashSet<String>>,
+    }
+
+    impl FailureReporter {
+        fn report(&self, signature: String, emit: impl FnOnce(&str)) {
+            let is_new = self
+                .reported
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(signature.clone());
+            if is_new {
+                emit(&signature);
+            }
+        }
+    }
+
+    fn report_policy_read_failure(operation: &str, error: &std::io::Error) {
+        static FAILURES: OnceLock<FailureReporter> = OnceLock::new();
+        let signature = format!(
+            "{operation}: kind={:?}, os_error={:?}, error={error}",
+            error.kind(),
+            error.raw_os_error()
+        );
+        FAILURES
+            .get_or_init(FailureReporter::default)
+            .report(signature, |detail| {
+                let stderr = std::io::stderr();
+                let mut handle = stderr.lock();
+                let _ = writeln!(
+                    handle,
+                    "mxc: failed to read telemetry administrative policy ({detail}); \
+                     treating policy as blocked"
+                );
+                let _ = handle.flush();
+            });
+    }
+
     pub(super) fn read() -> PolicyState {
         policy_state_from_value(read_policy_value())
     }
@@ -201,12 +245,18 @@ mod platform {
         let key = match RegKey::predef(hive).open_subkey(subkey) {
             Ok(key) => key,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PolicyValue::Absent,
-            Err(_) => return PolicyValue::Unreadable,
+            Err(error) => {
+                report_policy_read_failure("open policy key", &error);
+                return PolicyValue::Unreadable;
+            }
         };
         match key.get_value::<u32, _>(POLICY_VALUE_NAME) {
             Ok(value) => PolicyValue::Value(value),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => PolicyValue::Absent,
-            Err(_) => PolicyValue::Unreadable,
+            Err(error) => {
+                report_policy_read_failure("read AllowTelemetry value", &error);
+                PolicyValue::Unreadable
+            }
         }
     }
 
@@ -318,6 +368,36 @@ mod platform {
             assert_eq!(
                 same_process_policy_key_override(Some("Software\\MxcTest".into()), None, 42),
                 None
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod failure_reporter {
+        use super::FailureReporter;
+        use std::sync::Mutex;
+
+        #[test]
+        fn reports_each_distinct_failure_once() {
+            let reporter = FailureReporter::default();
+            let emitted = Mutex::new(Vec::new());
+
+            for signature in [
+                "open: access denied",
+                "open: access denied",
+                "read: wrong type",
+            ] {
+                reporter.report(signature.to_string(), |message| {
+                    emitted
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(message.to_string());
+                });
+            }
+
+            assert_eq!(
+                *emitted.lock().unwrap_or_else(|error| error.into_inner()),
+                ["open: access denied", "read: wrong type"]
             );
         }
     }
