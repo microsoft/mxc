@@ -1078,7 +1078,7 @@ mod tests {
         assert!(!p.contains("network-inbound"));
     }
 
-    // --- network.ingress.hostLoopback (issue #1021) -------------------------
+    // --- network.ingress.hostLoopback -------------------------
     //
     // The posture only changes the profile in the two cells where it disagrees
     // with the egress default; the other two are already covered by the

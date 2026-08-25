@@ -139,16 +139,7 @@ for the full design and per-backend enforcement matrix), not a
 backend-specific format: it's parsed the same way regardless of
 `containment`. Each backend independently declares which parts of it — if
 any — it actually enforces; a backend that hasn't declared support for a
-given field rejects a config that sets it:
-
-| Backend | Declared schema-0.8 network support |
-|---|---|
-| ProcessContainer / BaseContainer (Windows) | all directional fields |
-| ProcessContainer / AppContainer (Windows) | `EGRESS_DEFAULT`, `INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` (rejects `hostLoopback: "allow"`) |
-| Bubblewrap (Linux) | `EGRESS_DEFAULT`, `EGRESS_RULES`, `INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` |
-| LXC (Linux) | `EGRESS_DEFAULT`, `EGRESS_RULES`, `INGRESS_DEFAULT`, `HOST_LOOPBACK` |
-| Seatbelt (macOS) | `EGRESS_DEFAULT`, `INGRESS_DEFAULT`, `HOST_LOOPBACK`, `RUNTIME_PROXY` (see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md#schema-08-network-shape-egress--ingress--runtimeconfignetworkproxy)) |
-| WSLc, Windows Sandbox, IsolationSession, MicroVM, Hyperlight | legacy fields only — a directional config is rejected |
+given field rejects a config that sets it.
 
 Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
 without it accepts only `egress.default`. On Seatbelt,
