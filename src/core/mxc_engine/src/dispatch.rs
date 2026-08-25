@@ -78,9 +78,10 @@ pub fn spawn_runner(
 }
 
 /// Map a backend's `spawn` failure `ScriptResponse` to an
-/// [`MxcError`], preserving the `BackendUnavailable` phase (so callers can fall
-/// back to a lower tier) and folding any `extended_error` detail into the
-/// message — rather than flattening everything to a generic `BackendError`.
+/// [`MxcError`], preserving the failure phase (so callers can fall back to a
+/// lower tier, or tell a rejected request from a broken one) and folding any
+/// `extended_error` detail into the message — rather than flattening
+/// everything to a generic `BackendError`.
 fn map_spawn_error(resp: ScriptResponse) -> MxcError {
     use wxc_common::models::FailurePhase;
 
@@ -94,6 +95,8 @@ fn map_spawn_error(resp: ScriptResponse) -> MxcError {
     }
     match resp.failure_phase {
         FailurePhase::BackendUnavailable => MxcError::backend_unavailable(message),
+        // The request itself cannot be honored, so a blind retry will not help.
+        FailurePhase::Rejected => MxcError::policy_validation(message),
         _ => MxcError::backend_error(message),
     }
 }
