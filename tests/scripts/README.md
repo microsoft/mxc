@@ -69,8 +69,8 @@ these dispatchers, which map a matrix backend id to the suites above:
 
 | Dispatcher | Platforms | Backend ids |
 |------------|-----------|-------------|
-| `run_ci_backend_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
-| `run_ci_backend_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows | `process-t1`, `process-t3`, `isolation-session`, `windows-sandbox`, `wslc`, `microvm`, `hyperlight` |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux, macOS | `bubblewrap`, `lxc`, `seatbelt`, `microvm`, `hyperlight` |
 
 Pass the backend id exactly as it appears in the catalog — there is no separate
 handler name. Ids that share a suite have their own case in the dispatcher:
@@ -78,12 +78,12 @@ handler name. Ids that share a suite have their own case in the dispatcher:
 determines the tier it expects from the host's own `wxc-exec --probe`.
 
 ```powershell
-tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 `
+scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `
     -BinaryDirectory <dir> -Architecture x64
 ```
 
 ```bash
-tests/scripts/run_ci_backend_tests.sh bubblewrap <binary-directory>
+scripts/ci/run_backend_validation_tests.sh bubblewrap <binary-directory>
 ```
 
 A backend with no wired suite exits non-zero on purpose, so accidentally

@@ -31,6 +31,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = Split-Path -Parent (Split-Path -Parent $scriptRoot)
+$testScriptRoot = Join-Path $repoRoot 'tests\scripts'
 $binaryDirectoryPath = (Resolve-Path -LiteralPath $BinaryDirectory).Path
 $wxc = Join-Path $binaryDirectoryPath 'wxc-exec.exe'
 
@@ -97,7 +99,7 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $debugDirectory 'wxc-ui-probe.exe') -Force
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
-    $script = Join-Path $scriptRoot 'WinProcessContainer-Tests.ps1'
+    $script = Join-Path $testScriptRoot 'WinProcessContainer-Tests.ps1'
     # -KeepArtifacts stops the harness deleting its scratch tree on a clean
     # run, so a passing job still uploads its per-test logs and configs.
     # Skip build and Cargo phases because this job consumes a previously
@@ -136,12 +138,12 @@ switch ($Backend) {
         Invoke-ProcessContainerTests
     }
     'isolation-session' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_isolation_session_tests.ps1') -Arguments @{
             WxcExePath = $wxc
         }
     }
     'windows-sandbox' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_windows_sandbox_one_shot_tests.ps1') -Arguments @{
             BinDir = $binaryDirectoryPath
         }
     }
@@ -150,12 +152,12 @@ switch ($Backend) {
         if ($Architecture -ne 'x64') {
             throw 'The existing WSLC test harness is not architecture-portable yet.'
         }
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_wslc_all_tests.ps1') -Arguments @{
             WxcExecPath = $wxc
         }
     }
     'microvm' {
-        Invoke-TestScript -Path (Join-Path $scriptRoot 'run_microvm_tests.ps1') -Arguments @{
+        Invoke-TestScript -Path (Join-Path $testScriptRoot 'run_microvm_tests.ps1') -Arguments @{
             BinDir = $binaryDirectoryPath
         }
     }

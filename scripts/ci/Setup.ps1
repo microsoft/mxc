@@ -2,25 +2,30 @@
 
 <#
 .SYNOPSIS
-    TEMP scratch script: runs only the WSLC host initialization steps.
+    Installs or updates the WSL runtime, optionally from the pre-release ring, and checks for required Windows optional features.
 
 .DESCRIPTION
-    A trimmed copy of scripts/ci/prepare-windows-host.ps1 that keeps just the
-    WSLC path. Unlike the CI script this one is diagnostic-only: every failure
-    is reported and execution always ends with exit code 0.
+    Prepares and reports on a host's WSL2 installation: it verifies that the
+    Windows optional features WSL2 depends on are enabled, then inspects the
+    installed runtime, updating an inbox build to the modern runtime and
+    updating from the pre-release ring when -InstallPreRelease is set. It is
+    diagnostic-only in the sense that nothing aborts it: every problem is
+    reported as a FAILED line and the script always exits with code 0.
 
-.PARAMETER BinaryDirectory
-    Optional directory holding a built/downloaded artifact. When supplied, the
-    WSLC binaries are checked for presence; otherwise that check is skipped.
+.PARAMETER InstallPreRelease
+    Update WSL from the pre-release ring. Off by default, which leaves the host
+    on the stable ring.
 
 .EXAMPLE
     ./scripts/ci/Setup.ps1
-    ./scripts/ci/Setup.ps1 -BinaryDirectory src/target/x86_64-pc-windows-msvc/release
+
+.EXAMPLE
+    ./scripts/ci/Setup.ps1 -InstallPreRelease $true
 #>
 
 [CmdletBinding()]
 param(
-    [string]$BinaryDirectory
+    [bool]$InstallPreRelease = $false
 )
 
 Set-StrictMode -Off
@@ -38,25 +43,6 @@ function Write-Failure {
     param([Parameter(Mandatory)][string]$Message)
     $script:Failed = $true
     Write-Host "FAILED: $Message"
-}
-
-function Test-RequiredFile {
-    param([Parameter(Mandatory)][string[]]$RelativePath)
-
-    if (-not $BinaryDirectory) {
-        Write-Host 'No -BinaryDirectory supplied; skipping artifact presence check.'
-        return
-    }
-
-    foreach ($relative in $RelativePath) {
-        $full = Join-Path $BinaryDirectory $relative
-        if (Test-Path $full) {
-            $item = Get-Item $full
-            Write-Host "  found $($item.FullName) ($($item.Length) bytes)"
-        } else {
-            Write-Failure "missing binary: $full"
-        }
-    }
 }
 
 # Read a Windows optional feature's state without throwing. A host that cannot
@@ -124,23 +110,6 @@ function Invoke-Wsl {
     return $result.ExitCode
 }
 
-# Minimum WSL runtime for WSLC, read from the pinned SDK version so the two
-# cannot drift. The SDK's own runtime error names this same version.
-function Get-RequiredWslVersion {
-    $buildScript = Join-Path $PSScriptRoot '..\..\src\backends\wslc\common\build.rs'
-    if (-not (Test-Path $buildScript)) {
-        Write-Host "WARNING: $buildScript not found; skipping the WSL version gate."
-        return $null
-    }
-
-    $match = [regex]::Match((Get-Content $buildScript -Raw), 'WSLC_SDK_VERSION:\s*&str\s*=\s*"([0-9]+(?:\.[0-9]+)+)"')
-    if (-not $match.Success) {
-        Write-Host 'WARNING: could not parse WSLC_SDK_VERSION; skipping the WSL version gate.'
-        return $null
-    }
-    return [version]$match.Groups[1].Value
-}
-
 # Installed modern-runtime version, or $null when wsl.exe is the legacy inbox
 # build (no --version) or otherwise unusable.
 function Get-InstalledWslVersion {
@@ -158,8 +127,6 @@ function Get-InstalledWslVersion {
 
 function Initialize-WslcHost {
     Write-Step 'WSLC artifact binaries'
-    # wslcsdk.dll ships beside wxc-exec.exe only in a --features wslc build.
-    Test-RequiredFile @('wxc-exec.exe', 'wslcsdk.dll')
 
     Write-Step 'Required Windows optional features'
     Test-RequiredFeature -Name 'Microsoft-Windows-Subsystem-Linux', 'VirtualMachinePlatform'
@@ -200,20 +167,16 @@ function Initialize-WslcHost {
         Write-Host 'WSL2 is installed and updated (not prerelease, yet).'
     }
 
-    # WSLC needs a runtime at least as new as the pinned WSLC SDK, and those
-    # builds ship only on the pre-release ring - the stable ring lands well
-    # behind it. Without this the SDK fails at run time with
-    # "WSLC runtime unavailable. Missing components: WslPackage".
-    $required = Get-RequiredWslVersion
+    # The pre-release ring carries builds the stable ring lands well behind, so
+    # it is opt-in rather than a version the script decides on its own.
     $installed = Get-InstalledWslVersion
-    Write-Host "Required WSL version: $(if ($null -eq $required) { '<unknown>' } else { $required })"
     Write-Host "Installed WSL version: $(if ($null -eq $installed) { '<none>' } else { $installed })"
 
-    if ($null -ne $required -and ($null -eq $installed -or $installed -lt $required)) {
-        Write-Host "WSL $installed is older than the $required WSLC requires; updating to pre-release..."
+    if ($InstallPreRelease) {
+        Write-Host 'Updating WSL to the latest pre-release build...'
         if ((Invoke-Wsl @('--update', '--pre-release', '--web-download') -Quiet) -ne 0 -and
             (Invoke-Wsl @('--update', '--pre-release')) -ne 0) {
-            Write-Failure "wsl --update --pre-release failed; WSLC requires WSL $required or newer."
+            Write-Failure 'wsl --update --pre-release failed; the pre-release WSL2 runtime could not be installed on this host.'
             return
         }
         $installed = Get-InstalledWslVersion
@@ -221,28 +184,14 @@ function Initialize-WslcHost {
     }
 
     if ($null -eq $installed) {
-        Write-Failure 'wsl --version failed after updating; the WSL2 runtime is not usable on this host.'
-        return
-    }
-    if ($null -ne $required -and $installed -lt $required) {
-        Write-Failure "WSL $installed is installed, but WSLC requires $required or newer."
+        Write-Failure 'wsl --version failed; the WSL2 runtime is not usable on this host.'
         return
     }
 
-    Write-Host "WSL runtime $installed is ready (WSLC requires $required or newer)."
+    Write-Host "WSL runtime $installed is ready."
 }
 
 Write-Host "WSLC host setup starting on $([System.Environment]::OSVersion)"
-
-if ($BinaryDirectory) {
-    if (Test-Path $BinaryDirectory) {
-        $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
-        Write-Host "Binary directory: $BinaryDirectory"
-    } else {
-        Write-Failure "Binary directory not found: $BinaryDirectory"
-        $BinaryDirectory = $null
-    }
-}
 
 try {
     Initialize-WslcHost

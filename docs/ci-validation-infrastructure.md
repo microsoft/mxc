@@ -31,8 +31,8 @@ the individual local test scripts are documented in
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
-| `tests/scripts/run_ci_backend_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
-| `tests/scripts/run_ci_backend_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
+| `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
+| `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
 ### Flow
 
@@ -42,9 +42,9 @@ Validation.Tests.Scheduled.yml
       ├─ windows / linux / macos    →  Build.*.Job.yml  (upload artifacts)
       └─ test-nightly / test-weekly →  Validation.Tests.Matrix.Job.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
-                 ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_ci_backend_tests.ps1
-                 ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_ci_backend_tests.sh
-                 └─ macos   job (matrix) → download artifact →                            run_ci_backend_tests.sh
+                 ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
+                 ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
+                 └─ macos   job (matrix) → download artifact →                            run_backend_validation_tests.sh
 ```
 
 An entry point **must** build the artifacts before calling the matrix job — the
@@ -70,9 +70,9 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | Job | Runner | What it does |
 |-----|--------|--------------|
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
-| `windows` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_ci_backend_tests.ps1 -Backend <backend id>`. |
-| `linux` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_ci_backend_tests.sh <backend id>` (under `sudo` for LXC). |
-| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_ci_backend_tests.sh <backend id>`. No host-prep step. |
+| `windows` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
+| `linux` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
+| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. No host-prep step. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
@@ -201,8 +201,8 @@ get fixed or wired.
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
-| IsolationSession | ⚠️ Blocked | `Feature_AgentSessionsBaseSupport` is not enabled on the pool image yet. |
-| Windows Sandbox | ⛔ Not scheduled | Dispatcher case is wired; no trigger entry yet. |
+| IsolationSession | ✅ Good | |
+| Windows Sandbox | ⛔ Blocked | Images don't support `Containers-DisposableClientVM` opt. feature |
 | MicroVM | ⛔ Not working | Windows cold and warm starts hang; no Linux suite. The artifact payload is currently commented out in the build jobs. |
 | Hyperlight | ⛔ Not implemented | No suite on any platform. |
 | Seatbelt | ⛔ Not implemented | The backend itself is healthy; there is no official E2E suite to dispatch to. |
@@ -256,7 +256,7 @@ scratch trees, transcripts, and results files under the user's temp directory
 `${{ runner.temp }}` (`C:\a\_work\_temp`). Anything left in the former is simply
 never collected, which is why the artifact used to arrive nearly empty.
 
-So `run_ci_backend_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
+So `run_backend_validation_tests.ps1` points `TEMP` and `TMP` at `$RUNNER_TEMP` before
 it dispatches. Parameter defaults, `[System.IO.Path]::GetTempPath()`, and child
 processes all read those variables, so everything temp-rooted lands in the
 upload directory without CI having to know a single filename.
@@ -300,8 +300,8 @@ test runner is allocated.
 1. **Catalog:** add the id to the `backends` list of every platform/arch that
    can run it. There is no separate registration step — the id *is* the
    dispatcher argument.
-2. **Dispatcher:** add a case to `run_ci_backend_tests.ps1` (`ValidateSet` +
-   `switch`) or `run_ci_backend_tests.sh` (`usage` + `case`), pointing at the
+2. **Dispatcher:** add a case to `run_backend_validation_tests.ps1` (`ValidateSet` +
+   `switch`) or `run_backend_validation_tests.sh` (`usage` + `case`), pointing at the
    suite. Until a suite exists, leave the explicit throw / `exit 2` so
    accidental activation fails loudly.
 3. **Host prep:** add a branch to `prepare-windows-host.ps1` (`ValidateSet` +

@@ -18,6 +18,7 @@ backend="$1"
 binary_directory="$(cd "$2" && pwd)"
 script_root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_root/../.." && pwd)"
+test_script_root="$repo_root/tests/scripts"
 release_directory="$repo_root/src/target/release"
 
 case "$backend" in
@@ -40,7 +41,7 @@ case "$backend" in
         mkdir -p "$release_directory"
         cp -a "$binary_directory/." "$release_directory/"
         chmod +x "$release_directory/lxc-exec" "$release_directory/unix-test-proxy"
-        bash "$script_root/run_bwrap_all_tests.sh"
+        bash "$test_script_root/run_bwrap_all_tests.sh"
         ;;
     lxc)
         test -x "$binary_directory/lxc-exec"
@@ -51,7 +52,7 @@ case "$backend" in
         # A skip here means a prerequisite disappeared on a runner provisioned
         # to execute this suite, so turn it into a failure rather than a
         # vacuously green gate.
-        MXC_LXC_TESTS_REQUIRE_EXECUTION=1 bash "$script_root/run_lxc_all_tests.sh"
+        MXC_LXC_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_lxc_all_tests.sh"
         ;;
     seatbelt)
         test -x "$binary_directory/mxc-exec-mac"

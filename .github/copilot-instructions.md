@@ -90,8 +90,8 @@ matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
 `scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
 explicit no-op, so the step runs unconditionally for every entry.
 
-**Test dispatch** goes through `tests/scripts/run_ci_backend_tests.ps1`
-(Windows) and `tests/scripts/run_ci_backend_tests.sh` (Linux/macOS), which map
+**Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
+(Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map
 the matrix `backend` id to the repository's existing backend suite. Ids that
 share a suite get their own case (`process-t1` and `process-t3` both run
 `WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
@@ -157,13 +157,13 @@ cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
 
 # WSLC has no cargo E2E suite — it is covered by tests\scripts\run_wslc_all_tests.ps1,
-# which the validation matrix runs via tests\scripts\run_ci_backend_tests.ps1.
+# which the validation matrix runs via scripts\ci\run_backend_validation_tests.ps1.
 
 # CI validation entry points — run a backend suite against a downloaded artifact
 # the way the validation matrix does. Take the matrix backend id exactly as it
 # appears in scripts/ci/validation-test-matrix.json.
-tests\scripts\run_ci_backend_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
-tests\scripts\run_ci_backend_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
+scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 -BinaryDirectory <dir> -Architecture x64
+scripts\ci\run_backend_validation_tests.sh <bubblewrap|lxc|seatbelt> <binary-directory>
 
 # Resolve a plan locally to see exactly what CI would schedule
 node scripts/ci/resolve-validation-test-matrix.mjs --plan nightly
