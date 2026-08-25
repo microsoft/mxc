@@ -187,11 +187,11 @@ collection.
   interactive terminal inside an isolation session. Terminal behaviour has no
   automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
   judged by whoever runs them; each states what to look for.
-- **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`). The lifecycle and
-  streaming end-to-end tests need a capable host and run only when
+- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The lifecycle and streaming
+  end-to-end tests need a capable host and skip, with a reason, unless
   `MXC_E2E_HOST_PREPPED=1`.
 
-Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
+Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
 Run native telemetry-consent integration tests in the **Debug** configuration.
 

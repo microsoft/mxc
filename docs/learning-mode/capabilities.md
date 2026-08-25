@@ -210,10 +210,11 @@ sandbox policy:
 - `resource` is the user-visible identifier for the denied resource,
   interpreted by `resourceType`: an absolute `C:\…` path for `file`, the
   AppContainer **capability name** (e.g. `internetClient`) for `capability`,
-  and the raw resource identifier otherwise. Named Section, SymbolicLink, and
-  Timer access checks are emitted as `other`. Well-known capability SIDs are
+  and the raw resource identifier otherwise. Well-known capability SIDs are
   resolved to their policy name; custom (hashed) capability SIDs that can't be
-  reversed fall back to the `S-1-15-3-…` SID string. Event 28 is
+  reversed fall back to the `S-1-15-3-…` SID string. Named Section,
+  SymbolicLink, and Timer checks are verbose-only because the config has no
+  corresponding policy grants. Event 28 is
   schema-discriminated: UI-shaped `Category`/`Detail` payloads emit `ui`
   resources instead of treating the package SID as a capability.
 - `resourceType` is one of `file`, `ui`, `network`, `capability`, `other`;
@@ -233,14 +234,14 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "signatures": [
     {
       "signature": {
         "provider": "kernelGeneral",
         "providerGuid": "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}",
         "eventId": 14,
-        "reason": "canonicalDenial",
+        "reason": "actionable",
         "pid": 4321,
         "accessType": "read",
         "resourceType": "file",
@@ -255,16 +256,16 @@ policy denial occurrences plus diagnostic outcomes omitted from the policy file:
   "summary": {
     "totalOccurrences": 37,
     "overflowOccurrences": 0,
-    "canonicalOverflowOccurrences": 0,
+    "actionableOverflowOccurrences": 0,
     "aggregateGroupsTruncated": false,
     "processedEventsTruncated": false,
-    "canonicalDenialLimitReached": false
+    "actionableLimitReached": false
   }
 }
 ```
 
 Signatures are keyed by symbolic provider category, provider GUID,
-provider-scoped event ID, closed exclusion reason, PID, and sorted sanitized
+provider-scoped event ID, closed outcome reason, PID, and sorted sanitized
 properties. SIDs, capability names, GUIDs, PIDs/process identifiers, and
 non-file resource values are retained. Complete file paths are replaced with
 `<REDACTED>`; standalone user/account names remain replaced with
@@ -272,24 +273,29 @@ non-file resource values are retained. Complete file paths are replaced with
 Exact header timestamps and timestamp-like properties are omitted so otherwise
 identical events deduplicate, and free-form decoder errors are never serialized.
 
-Every valid denial candidate is classified as `canonicalDenial` in the verbose
+Every valid actionable denial is classified as `actionable` in the verbose
 file, including its first occurrence, later duplicates, and candidates observed
-after the policy file's unique-denial bound. Those occurrences deduplicate under the
-same signature and increment its count. `accessType` and `resourceType` are
-included when denial extraction determined them; diagnostic outcomes without
-those classifications omit the fields.
+after the actionable file's unique-denial bound. Those occurrences deduplicate
+under the same signature and increment its count. `accessType` and
+`resourceType` are included when denial extraction determined them; diagnostic
+outcomes without those classifications omit the fields.
 
-Candidates excluded from the policy output retain a closed diagnostic
+Candidates excluded from the actionable output retain a closed diagnostic
 reason and their sanitized event properties:
 
+- `notActionable` includes registry writes, registry checks whose access mask
+  cannot be classified as a read, and recognized Section, SymbolicLink, and
+  Timer checks. MXC has no corresponding policy grants, so reporting them in
+  the actionable `captureDenials` file would not give the caller an action it
+  could take. They remain available in verbose logging with their classified
+  access type and sanitized resource.
 - `unusableResourcePath` means a File access-check resource could not be
   converted to a safe absolute DOS or UNC path. For example,
   `\Device\MountPointManager` is useful Devices-namespace evidence, but it is
   not a directly authorable filesystem grant.
 - `unsupportedObjectType` means the event names a resource outside the
-  supported policy model. Observed Section, SymbolicLink, and Timer checks are
-  retained as `other` resources; remaining examples include
-  `\BaseNamedObjects` as a Directory, ALPC Ports such as
+  supported diagnostic model. Examples include `\BaseNamedObjects` as a
+  Directory, ALPC Ports such as
   `ubpmtaskhostchannel`, and RPC Interface GUIDs.
 
 Property values longer than 256 characters retain bounded prefix and suffix
@@ -314,15 +320,15 @@ error rather than being represented as a verbose logging signature.
 To keep diagnostics bounded, verbose logging retains at most 4,096 distinct
 signatures, 24 sorted properties per signature, and 256 characters per property
 value. `overflowOccurrences` and `aggregateGroupsTruncated` indicate that
-additional diagnostic groups were omitted. `canonicalOverflowOccurrences`
-counts omitted policy-denial occurrences, while `processedEventsTruncated`
+additional diagnostic groups were omitted. `actionableOverflowOccurrences`
+counts omitted actionable-denial occurrences, while `processedEventsTruncated`
 indicates that the 1,000,000-event limit prevented complete accounting. The
-policy file itself is never reduced to make room for verbose logging.
+actionable file itself is never reduced to make room for verbose logging.
 
-The policy and verbose logging files fail together: MXC stages both and reports
+The actionable and verbose logging files fail together: MXC stages both and reports
 capture failure unless both final artifacts are committed. The verbose logging path
 is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
-metadata; callers derive it from the policy output path using the naming rule
+metadata; callers derive it from the actionable output path using the naming rule
 above.
 
 **Locating the file.** Set `captureDenials.outputPath` to name the file

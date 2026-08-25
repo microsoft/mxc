@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Proxy-Namespace",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "set -e; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo SANDBOX_CAPBND=$(grep ^CapBnd: /proc/self/status | cut -f2); echo SANDBOX_CAPEFF=$(grep ^CapEff: /proc/self/status | cut -f2); echo SANDBOX_CAPPRM=$(grep ^CapPrm: /proc/self/status | cut -f2); curl -fsSL https://api.github.com/zen > /dev/null; echo PROXY_NAMESPACE_OK"
+    "commandLine": "set -e; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo SANDBOX_CAPBND=$(grep ^CapBnd: /proc/self/status | cut -f2); echo SANDBOX_CAPEFF=$(grep ^CapEff: /proc/self/status | cut -f2); echo SANDBOX_CAPPRM=$(grep ^CapPrm: /proc/self/status | cut -f2); curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK; echo PROXY_NAMESPACE_OK"
   },
   "network": {
     "defaultPolicy": "allow",

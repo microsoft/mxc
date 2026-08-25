@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Canonical Learning Mode analysis and compatibility views for `plm.exe`.
+//! Actionable Learning Mode analysis and compatibility views for `plm.exe`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -24,8 +24,8 @@ pub fn analyze_trace(trace_file: &Path) -> Result<AnalysisResult> {
         .with_context(|| format!("failed to analyze {}", trace_file.display()))
 }
 
-/// Write canonical denials JSON and its verbose logging sibling, then return the
-/// canonical document.
+/// Write actionable denials JSON and its verbose logging sibling, then return the
+/// actionable document.
 pub fn write_denials(
     output_path: &Path,
     analysis: &AnalysisResult,
@@ -55,7 +55,7 @@ pub fn write_denials(
     Ok(document)
 }
 
-/// Build the temporary legacy config-generator inputs from canonical denials.
+/// Build the temporary legacy config-generator inputs from actionable denials.
 ///
 /// The adjusted-config generator is removed in the regeneration work item.
 /// Until then, this adapter preserves its existing file/capability behavior
@@ -160,7 +160,7 @@ fn is_local_drive_path(path: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
-/// Print a concise human-readable view of canonical denials.
+/// Print a concise human-readable view of actionable denials.
 pub fn write_detection_summary(analysis: &AnalysisResult) {
     println!();
     println!("Detected denials ({}):", analysis.denials.len());
@@ -198,7 +198,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_inputs_are_derived_only_from_canonical_file_and_capability_denials() {
+    fn legacy_inputs_are_derived_only_from_actionable_file_and_capability_denials() {
         let denials = [
             denial(r"C:\read.txt", ResourceType::File, AccessType::Read),
             denial(r"C:\write.txt", ResourceType::File, AccessType::Write),
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_document_preserves_analysis_results() {
+    fn actionable_document_preserves_analysis_results() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("denials.json");
         let analysis = AnalysisResult {
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_promotion_failure_removes_verbose_logging_sibling() {
+    fn actionable_promotion_failure_removes_verbose_logging_sibling() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("denials.json");
         std::fs::create_dir(&path).unwrap();
@@ -325,7 +325,7 @@ mod tests {
 
         assert!(error
             .to_string()
-            .contains("cannot replace non-file canonical"));
+            .contains("cannot replace non-file actionable"));
         assert!(!verbose_logging_path.exists());
     }
 }

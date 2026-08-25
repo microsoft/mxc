@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Wire types for the mutable `0.8.0-alpha` state-aware configuration
+//! Wire types for the mutable `0.9.0-alpha` state-aware configuration
 //! contract.
 
 macro_rules! string_marker {

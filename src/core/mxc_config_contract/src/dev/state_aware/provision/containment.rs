@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn probe_rejects_missing_containment() {
-        let json = r#"{"version": "0.8.0-alpha"}"#;
+        let json = r#"{"version": "0.9.0-alpha"}"#;
         assert!(matches!(
             probe_containment(json),
             Err(ContainmentProbeError::InvalidDeclaration(_))

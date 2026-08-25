@@ -12,7 +12,7 @@
 //!    [`DeniedResource`] records. The per-OS decoder implements
 //!    [`DenialAnalyzer`]; this crate owns the trait and the model.
 //! 3. **Emit** — the records plus a terminating [`DenialSummary`] are
-//!    written to the canonical JSON output that host applications read to
+//!    written to the actionable JSON output that host applications read to
 //!    regenerate policy. A deterministic verbose logging sibling contains bounded,
 //!    sensitive-value-redacted signatures for excluded decoder outcomes.
 //!
@@ -49,7 +49,7 @@ pub use paired_output::{
 pub use summary::DenialSummary;
 pub use verbose_logging::{
     verbose_logging_sibling_path, write_verbose_logging_document, VerboseLoggingAggregate,
-    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingExclusionReason,
+    VerboseLoggingDocument, VerboseLoggingDocumentSummary, VerboseLoggingOutcomeReason,
     VerboseLoggingProvider, VerboseLoggingSignature, VerboseLoggingSummary,
     MAX_VERBOSE_LOGGING_GROUPS, MAX_VERBOSE_LOGGING_SIGNATURE_BYTES,
 };

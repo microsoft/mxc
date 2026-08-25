@@ -29,7 +29,7 @@ string_enum! {
     }
 }
 
-/// One of the proxy configurations accepted by the `0.8.0-alpha` contract.
+/// One of the proxy configurations accepted by the `0.9.0-alpha` contract.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 pub enum NetworkProxy {

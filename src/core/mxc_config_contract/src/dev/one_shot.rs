@@ -10,7 +10,7 @@ use super::stable::{
 use crate::dev::Version;
 
 string_enum! {
-    /// Containment selections available in `0.8.0-alpha`.
+    /// Containment selections available in `0.9.0-alpha`.
     #[derive(Debug)]
     pub enum Containment, schema_name = "OneShotContainment" {
         // Stable-candidate values.
@@ -41,7 +41,7 @@ string_enum! {
     }
 }
 
-/// A complete one-shot `0.8.0-alpha` configuration request.
+/// A complete one-shot `0.9.0-alpha` configuration request.
 #[derive(Debug, serde::Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema-gen", schemars(rename = "OneShotRequest"))]

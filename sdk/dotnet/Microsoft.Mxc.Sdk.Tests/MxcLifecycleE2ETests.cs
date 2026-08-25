@@ -20,7 +20,7 @@ namespace Microsoft.Mxc.Sdk.Tests;
 public class MxcLifecycleE2ETests
 {
     // Opt-in gate shared with the streaming E2E tests: a host that can really run
-    // a sandbox sets MXC_E2E_HOST_PREPPED=1. Elsewhere these return early.
+    // a sandbox sets MXC_E2E_HOST_PREPPED=1. Elsewhere these skip.
     private static bool HostRunsIsolationSession =>
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1"
         && OperatingSystem.IsWindows();
@@ -138,15 +138,15 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Exec_RunsAsTheAgentUserFromTheProvisionMetadata()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
         {
-            var run = await MxcLifecycle.ExecInSandboxAsync(started.Id, $"{Cmd} /c whoami");
+            var run = await MxcLifecycle.ExecInSandboxAsync(
+            started.Id,
+            $"{Cmd} /c whoami",
+            TestContext.Current.CancellationToken);
 
             Assert.Equal(0, run.ExitCode);
             Assert.Equal(started.AgentUserName.ToLowerInvariant(), AccountOf(run.Stdout));
@@ -158,10 +158,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Exec_PropagatesANonZeroExitCode()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -181,10 +178,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Deprovision_RetiresTheSandboxId()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -203,10 +197,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Lifecycle_RunsEndToEnd()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -223,10 +214,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Workspace_IsSharedWithTheAgent_AndRemovedOnDeprovision()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)

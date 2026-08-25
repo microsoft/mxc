@@ -357,9 +357,16 @@ fn rejects_null_in_directional_objects() {
         r#"{"ingress": null}"#,
         r#"{"egress": {"default": null}}"#,
         r#"{"egress": {"allow": null}}"#,
+        r#"{"egress": {"deny": null}}"#,
+        r#"{"ingress": {"default": null}}"#,
         r#"{"ingress": {"hostLoopback": null}}"#,
         r#"{"egress": {"allow": [{"to": null}]}}"#,
+        r#"{"egress": {"allow": [{"ports": null}]}}"#,
         r#"{"egress": {"allow": [{"to": [{"cidr": null}]}]}}"#,
+        r#"{"egress": {"allow": [{"to": [{"cidr": "10.0.0.0/8", "except": null}]}]}}"#,
+        r#"{"egress": {"allow": [{"ports": [{"protocol": null}]}]}}"#,
+        r#"{"egress": {"allow": [{"ports": [{"port": null}]}]}}"#,
+        r#"{"egress": {"allow": [{"ports": [{"endPort": null}]}]}}"#,
     ] {
         assert_invalid(&with_network(network));
     }

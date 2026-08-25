@@ -8,7 +8,7 @@ use std::num::NonZeroU16;
 
 pub(super) fn convert_version(value: contract::Version) -> &'static str {
     match value {
-        contract::Version::V0_8_0Alpha => ContractVersion::V0_8_0Alpha.as_str(),
+        contract::Version::V0_9_0Alpha => ContractVersion::V0_9_0Alpha.as_str(),
     }
 }
 
