@@ -4,6 +4,10 @@
 # Asserts reachability rather than a log line: a chain can install cleanly,
 # name the right chain, and still filter nothing.
 #
+# The tcp/443 cases probe a CI-controlled peer this script stands up in its own
+# routed namespace rather than a public host, so remote-service health can never
+# turn the positive path red.
+#
 # A directional posture carries no port 53 exemption, unlike the legacy chain,
 # which is what the two DNS cases pin.
 set -euo pipefail
@@ -27,6 +31,8 @@ skip() {
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the egress peer needs it to host a listener."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 DENY_CONFIG="$REPO_DIR/tests/configs/lxc_network_ga_egress_deny.json"
@@ -119,6 +125,102 @@ assert_allowed() {
         fail "the case produced no verdict at all; the container command did not run."
     fi
 }
+
+# ---------------------------------------------------------------------------
+# A CI-controlled peer for the positive path.
+#
+# The allow case has to prove the chain admits an allowed destination, which
+# only means something if the destination is one the chain actually governs.
+# The chain hooks FORWARD (-i <veth> / --physdev-in <veth>), so it sees only
+# traffic the host routes for the container.  A listener on the host or on the
+# bridge gateway is delivered locally through INPUT, never reaches the chain,
+# and would answer even with no firewall installed, so it cannot stand in for
+# an allowed destination.  The peer therefore lives in its own network
+# namespace, routed to over a dedicated veth, reachable only through the
+# container's forwarded path.  This is the same routed-namespace peer that
+# run_lxc_network_proxy_hostname_test.sh already stands up for exactly this
+# reason; the mechanism is reused here rather than invented.
+#
+# This replaces api.github.com, whose rate-limited 403 was indistinguishable
+# from over-blocking and turned a healthy firewall red when the remote service,
+# not the repository, was at fault.
+PEER_NETNS="mxc-ga-egress-peer"
+PEER_HOST_VETH="mxcgah0"
+PEER_VETH="mxcgap0"
+# A different RFC 5737 range from the proxy-hostname peer's 192.0.2.0/24.  The
+# host routes by longest matching prefix, so two peers sharing a range let
+# whichever suite ran last capture the other's traffic.
+PEER_HOST_IP="203.0.113.1"
+PEER_IP="203.0.113.2"
+PEER_CIDR="203.0.113.0/24"
+PEER_PORT="443"
+
+PEER_LISTENER_PID=""
+teardown_peer() {
+    if [ -n "$PEER_LISTENER_PID" ]; then
+        kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
+    fi
+    ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
+    ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
+}
+trap teardown_peer EXIT
+
+# Clear anything an aborted earlier run left behind, then build the peer.
+teardown_peer
+ip netns add "$PEER_NETNS" || fail "could not create the egress peer namespace."
+ip link add "$PEER_HOST_VETH" type veth peer name "$PEER_VETH" \
+    || fail "could not create the egress peer veth pair."
+ip link set "$PEER_VETH" netns "$PEER_NETNS" \
+    || fail "could not move the egress peer interface into its namespace."
+ip addr add "$PEER_HOST_IP/24" dev "$PEER_HOST_VETH" \
+    || fail "could not address the host side of the egress peer veth."
+ip link set "$PEER_HOST_VETH" up || fail "could not bring up the egress peer veth."
+ip netns exec "$PEER_NETNS" ip addr add "$PEER_IP/24" dev "$PEER_VETH" \
+    || fail "could not address the egress peer."
+ip netns exec "$PEER_NETNS" ip link set "$PEER_VETH" up \
+    || fail "could not bring up the egress peer interface."
+ip netns exec "$PEER_NETNS" ip link set lo up \
+    || fail "could not bring up the egress peer loopback."
+ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
+    || fail "could not route the egress peer back to the container."
+
+# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
+# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
+# only an ACCEPT in the container's FORWARD chain permits.
+ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
+    >/dev/null 2>&1 &
+PEER_LISTENER_PID=$!
+sleep 1
+kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
+    || fail "the egress peer listener did not start on $PEER_IP:$PEER_PORT."
+
+# Alive is not the same as reachable: confirm the listener answers across the
+# veth, so a peer that never bound is reported as harness breakage rather than
+# mistaken for the firewall blocking the allow case.  Mirrors the reachability
+# gate in run_lxc_network_proxy_hostname_test.sh.
+python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the egress peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except OSError as exc:
+    print(exc)
+    sys.exit(1)
+finally:
+    s.close()
+PY
+
+# Drift guard: the tcp/443 fixtures must target this peer, or the run would
+# probe a stale address and prove nothing.  Fail loudly if the two disagree.
+for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+    grep -Fq "$PEER_IP" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
+done
+for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
+    grep -Fq "$PEER_CIDR" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
+done
 
 echo "Running LXC schema 0.8 egress enforcement test..."
 
