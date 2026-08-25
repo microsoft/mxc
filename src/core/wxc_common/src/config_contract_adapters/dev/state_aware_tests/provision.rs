@@ -198,6 +198,33 @@ fn wslc_configuration_matches_explicit_values_without_wire_conversion() {
 }
 
 #[test]
+fn wslc_provision_port_mappings_map_without_wire_conversion() {
+    let fields = r#","experimental":{"wslc":{"provision":{"portMappings":[{"windowsPort":8080,"containerPort":80},{"windowsPort":8443,"containerPort":443,"protocol":"tcp"}]}}}"#;
+    let json = source("wslc", fields);
+    let (_, operation) = adapt(&json);
+    let StateAwareOperation::Provision(StateAwareProvision::Wslc(config)) = operation else {
+        panic!("wrong operation");
+    };
+    let ports = config
+        .expect("provision config should be populated")
+        .port_mappings
+        .expect("portMappings should be populated");
+    assert_eq!(ports.len(), 2);
+    assert_eq!(ports[0].windows_port, 8080);
+    assert_eq!(ports[0].container_port, 80);
+
+    // An omitted `protocol` stays absent rather than defaulting here; both arms
+    // of the contract's optional protocol are covered.
+    assert!(ports[0].protocol.is_none());
+    assert_eq!(ports[1].windows_port, 8443);
+    assert_eq!(ports[1].container_port, 443);
+    assert!(matches!(
+        ports[1].protocol,
+        Some(wire::TransportProtocol::Tcp)
+    ));
+}
+
+#[test]
 fn rolling_wslc_conversion_has_independent_expected_fields() {
     for (image, image_tar_path) in [
         (None, None),

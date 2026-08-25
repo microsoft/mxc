@@ -43,7 +43,7 @@ pub const PROTOCOL_VERSION: u32 = 3;
 // Per-phase config structs (daemon-internal; NOT the public wire schema)
 // ---------------------------------------------------------------------------
 
-/// One host→container directory mount, mirroring the one-shot runner's volume
+/// One host -> container directory mount, mirroring the one-shot runner's volume
 /// handling. Paths are host-absolute; `container` is the in-container mount
 /// point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,9 +53,9 @@ pub struct VolumeMount {
     pub read_only: bool,
 }
 
-/// One host→container port forward, mirroring the one-shot runner's port
-/// handling. Only TCP is supported today (the wire model rejects `udp`), so no
-/// protocol field is carried — the daemon programs every entry as TCP.
+/// One host -> container port forward, mirroring the one-shot runner's port
+/// handling. Only TCP is supported (the wire model rejects `udp`), so no
+/// protocol field is carried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortMapping {
     pub windows_port: u16,
@@ -93,7 +93,7 @@ pub struct ProvisionConfig {
     /// Container network mode.
     #[serde(default)]
     pub network: NetworkMode,
-    /// Host↔container port forwards (TCP). Empty = no forwarding.
+    /// Host↔container port forwards (TCP).
     #[serde(default)]
     pub port_mappings: Vec<PortMapping>,
 }

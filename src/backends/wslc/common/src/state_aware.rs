@@ -18,7 +18,9 @@ use std::io::Write;
 use wxc_common::logger::{Logger, Mode};
 #[cfg(test)]
 use wxc_common::models::NetworkPolicy;
-use wxc_common::models::{ContainerPolicy, ExecutionRequest, WslcProvisionConfig};
+use wxc_common::models::{
+    validate_wslc_port_mappings, ContainerPolicy, ExecutionRequest, WslcProvisionConfig,
+};
 use wxc_common::mxc_error::MxcError;
 use wxc_common::state_aware_backend::{
     null_pipe_handle, DeprovisionResult, ExecHandle, ExecOutcome, ExecStdio, ProvisionResult,
@@ -392,41 +394,23 @@ fn build_provision_config(
     })
 }
 
-/// Map + validate the provision phase's port mappings (wire → daemon). Mirrors
-/// the one-shot parser: `windowsPort` / `containerPort` must be > 0, and a
-/// duplicate `windowsPort` is rejected. Only TCP is representable — the wire
-/// model rejects `udp` at deserialize — so no protocol is carried through.
+/// Map and validate the provision phase's port mappings (wire → daemon).
 fn map_provision_port_mappings(
     config: Option<&WslcProvisionConfig>,
 ) -> Result<Vec<PortMapping>, MxcError> {
     let Some(mappings) = config.and_then(|c| c.port_mappings.as_ref()) else {
         return Ok(Vec::new());
     };
-    let mut converted = Vec::with_capacity(mappings.len());
-    let mut seen = std::collections::HashSet::new();
-    for (idx, m) in mappings.iter().enumerate() {
-        if m.windows_port == 0 {
-            return Err(MxcError::policy_validation(format!(
-                "experimental.wslc.provision.portMappings[{idx}]: 'windowsPort' must be > 0"
-            )));
-        }
-        if m.container_port == 0 {
-            return Err(MxcError::policy_validation(format!(
-                "experimental.wslc.provision.portMappings[{idx}]: 'containerPort' must be > 0"
-            )));
-        }
-        if !seen.insert(m.windows_port) {
-            return Err(MxcError::policy_validation(format!(
-                "experimental.wslc.provision.portMappings: duplicate windowsPort {}",
-                m.windows_port
-            )));
-        }
-        converted.push(PortMapping {
-            windows_port: m.windows_port,
-            container_port: m.container_port,
-        });
-    }
-    Ok(converted)
+    let validated =
+        validate_wslc_port_mappings(mappings, "experimental.wslc.provision.portMappings")
+            .map_err(MxcError::policy_validation)?;
+    Ok(validated
+        .into_iter()
+        .map(|pm| PortMapping {
+            windows_port: pm.windows_port,
+            container_port: pm.container_port,
+        })
+        .collect())
 }
 
 /// State-aware adapter over the shared WSLc provision policy gate
@@ -867,7 +851,7 @@ mod tests {
     /// fire there too — not only inside `provision`.
     #[test]
     fn validate_provision_rejects_duplicate_windows_port() {
-        let phase = WslcProvisionPhase {
+        let phase = WslcProvisionConfig {
             image: None,
             image_tar_path: None,
             port_mappings: Some(vec![
@@ -899,7 +883,7 @@ mod tests {
 
     #[test]
     fn validate_provision_rejects_zero_port() {
-        let phase = WslcProvisionPhase {
+        let phase = WslcProvisionConfig {
             image: None,
             image_tar_path: None,
             port_mappings: Some(vec![WirePortMapping {
@@ -920,7 +904,7 @@ mod tests {
 
     #[test]
     fn validate_provision_accepts_valid_port_mappings() {
-        let phase = WslcProvisionPhase {
+        let phase = WslcProvisionConfig {
             image: None,
             image_tar_path: None,
             port_mappings: Some(vec![WirePortMapping {

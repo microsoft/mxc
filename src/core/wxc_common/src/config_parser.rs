@@ -9,7 +9,7 @@ use crate::logger::Logger;
 use crate::models::{
     CaptureDenialsConfig, CaptureDenialsMode, ContainerPolicy, ContainmentBackend,
     ExecutionRequest, ExperimentalConfig, LifecycleConfig, LxcConfig, NetworkEnforcementMode,
-    NetworkPolicy, PortMapping, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
+    NetworkPolicy, SeatbeltConfig, TelemetryConfig, TestFeatureConfig, UiPolicy,
     WindowsSandboxConfig, WslcConfig,
 };
 use crate::mxc_error::MxcError;
@@ -1648,7 +1648,12 @@ fn convert_wire_config(
             // MXC-run host-loopback proxy is unreachable. Accept only the
             // caller-supplied `url` form (which carries `original_url`); reject
             // the `localhost` / `builtinTestServer` forms.
-            if containment == ContainmentBackend::Wslc && proxy_config.is_enabled() {
+            //
+            // One-shot only: the state-aware path reaches the same rejection
+            // through the backend exec gate (`validate_exec_policy`), which
+            // reports it as `policy_validation` rather than a parse error.
+            if !state_aware && containment == ContainmentBackend::Wslc && proxy_config.is_enabled()
+            {
                 let is_url_form = proxy_config
                     .address
                     .as_ref()
@@ -1703,7 +1708,6 @@ fn convert_wire_config(
         if !state_aware
             && containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
-            && !state_aware
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1719,17 +1723,16 @@ fn convert_wire_config(
         // WSLc cannot enforce per-host egress filtering: containers lack
         // CAP_NET_ADMIN (so in-container iptables aborts at exec), and WSLc
         // cannot expose VM-level enforcement without breaking other security
-        // guarantees (e.g. MDE). Reject any non-empty host list up front —
-        // including one redundant with the default (`block` + blockedHosts,
-        // `allow` + allowedHosts), which would otherwise be silently ignored
-        // (a fail-open footgun). The backend's validate_runner enforces the
-        // same for requests that bypass this parser. Bare defaults with no host
-        // lists (full cutoff / full NAT) are enforceable, left as-is.
+        // guarantees (e.g. MDE). Reject any non-empty host list up front,
+        // including one redundant with the default — an accepted-then-ignored
+        // list misstates what is enforced. The backend's validate_runner
+        // enforces the same for requests that bypass this parser. Bare defaults
+        // with no host lists (full cutoff / full NAT) are enforceable, left
+        // as-is.
         //
         // One-shot only: the state-aware path reaches the same rejection through
         // the backend policy gate (`reject_host_filtering`), which reports it as
-        // `policy_validation` rather than a parse error, so firing here would
-        // mislabel a well-formed but unsupported policy as `malformed_request`.
+        // `policy_validation` rather than a parse error.
         if containment == ContainmentBackend::Wslc {
             if !state_aware && policy.has_host_lists() {
                 let msg = "WSLc: per-host egress filtering (allowedHosts/blockedHosts) is not \
@@ -1917,49 +1920,11 @@ fn convert_wire_config(
             }
             config.storage_path = cc.storage_path;
             if let Some(mappings) = cc.port_mappings {
-                let mut converted = Vec::with_capacity(mappings.len());
-                for (idx, m) in mappings.into_iter().enumerate() {
-                    if m.windows_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'windowsPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    if m.container_port == 0 {
-                        let msg = format!(
-                            "experimental.wslc.portMappings[{idx}]: 'containerPort' must be > 0"
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                    // Only TCP is representable in the wire model
-                    // (TransportProtocol is tcp-only); a `udp` value is rejected
-                    // at deserialize. The WSLC SDK runtime returns E_NOTIMPL for
-                    // UDP, so only TCP is currently supported.
-                    let protocol = "tcp".to_string();
-                    converted.push(PortMapping {
-                        windows_port: m.windows_port,
-                        container_port: m.container_port,
-                        protocol,
-                    });
-                }
-                // Reject duplicate (windowsPort, protocol) entries. Same host
-                // port on TCP+UDP would in principle be legal, but UDP is
-                // rejected at deserialize (the wire model is tcp-only); the
-                // second protocol dimension is retained in the dedupe key in
-                // case UDP support is enabled later.
-                let mut seen: std::collections::HashSet<(u16, &str)> =
-                    std::collections::HashSet::new();
-                for pm in &converted {
-                    if !seen.insert((pm.windows_port, pm.protocol.as_str())) {
-                        let msg = format!(
-                            "experimental.wslc.portMappings: duplicate windowsPort {} \
-                             for protocol '{}'",
-                            pm.windows_port, pm.protocol
-                        );
-                        return Err(WxcError::ConfigParse(msg));
-                    }
-                }
-                config.port_mappings = converted;
+                config.port_mappings = crate::models::validate_wslc_port_mappings(
+                    &mappings,
+                    "experimental.wslc.portMappings",
+                )
+                .map_err(WxcError::ConfigParse)?;
             }
             Some(config)
         } else {
@@ -4723,7 +4688,7 @@ mod tests {
             observed_counts, expected_counts,
             "explicit divergence inventory and observed category totals differ"
         );
-        let expected_inventory = (353, 329, 14);
+        let expected_inventory = (354, 330, 14);
         assert_eq!(
             (files.len(), equivalent_accepts, shared_rejections),
             expected_inventory,
@@ -9482,9 +9447,8 @@ mod tests {
 
     #[test]
     fn wslc_rejects_redundant_block_with_blocked_hosts() {
-        // 'block' default + a blocklist is redundant (block already denies), but
-        // must still be rejected rather than silently ignored — a fail-open
-        // footgun otherwise (#824 Gap 1).
+        // A blocklist under a `block` default changes nothing, but accepting it
+        // would report per-host filtering the container never gets (#824).
         let json = r#"{
             "version": "0.6.0-alpha",
             "containment": "wslc",
@@ -9506,9 +9470,8 @@ mod tests {
 
     #[test]
     fn wslc_rejects_redundant_allow_with_allowed_hosts() {
-        // 'allow' default + an allowlist is the classic "I meant an allowlist"
-        // typo: it would previously permit ALL egress (the list ignored). Reject
-        // it instead of failing open (#824 Gap 1).
+        // An allowlist under an `allow` default reads as a restriction but
+        // enforces none: accepting it leaves all egress open (#824).
         let json = r#"{
             "version": "0.6.0-alpha",
             "containment": "wslc",

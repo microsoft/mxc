@@ -818,7 +818,7 @@ pub unsafe fn create_daemon_container(
     logger: &mut Logger,
 ) -> Result<WslcContainerGuard, ScriptResponse> {
     // Daemon containers set no container flags (auto-remove / gpu / privileged
-    // are one-shot-only); port forwards come from the provision phase config.
+    // are one-shot-only).
     let mut container_settings = ContainerSettings::build(
         sdk,
         image,
