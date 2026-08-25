@@ -863,6 +863,77 @@ mod tests {
         assert!(err.message.contains("windowsPort"), "got: {}", err.message);
     }
 
+    /// `--dry-run` stops after `validate_provision`, so the port checks must
+    /// fire there too — not only inside `provision`.
+    #[test]
+    fn validate_provision_rejects_duplicate_windows_port() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 80,
+                    protocol: None,
+                },
+                WirePortMapping {
+                    windows_port: 8080,
+                    container_port: 8080,
+                    protocol: None,
+                },
+            ]),
+        };
+        let err = WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            err.message.contains("duplicate windowsPort"),
+            "got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn validate_provision_rejects_zero_port() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 0,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        let err = WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap_err();
+        assert_eq!(
+            err.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(err.message.contains("windowsPort"), "got: {}", err.message);
+    }
+
+    #[test]
+    fn validate_provision_accepts_valid_port_mappings() {
+        let phase = WslcProvisionPhase {
+            image: None,
+            image_tar_path: None,
+            port_mappings: Some(vec![WirePortMapping {
+                windows_port: 8080,
+                container_port: 80,
+                protocol: None,
+            }]),
+        };
+        WslcStateAwareRunner
+            .validate_provision(&ExecutionRequest::default(), Some(&phase))
+            .unwrap();
+    }
+
     #[test]
     fn build_provision_config_defaults_image_and_omits_tar_when_absent() {
         for phase in [None, Some(WslcProvisionConfig::default())] {
