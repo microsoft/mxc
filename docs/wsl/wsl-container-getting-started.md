@@ -353,13 +353,15 @@ that combine the proxy with a `block` default or host lists are **rejected**.
 
 ### Per-host filtering is not supported
 
-WSLC **cannot** enforce per-host egress filtering. Any allowlist
-(`allowedHosts` with `defaultPolicy: "block"`) or blocklist (`blockedHosts`
-with `defaultPolicy: "allow"`) would require in-container `iptables` rules, but
-a WSLC container runs **without** `CAP_NET_ADMIN` (the SDK's `Privileged` flag
-does not grant it), so those rules cannot be applied — and MXC has no VM-level
-enforcement hook either (WSLC cannot expose one without breaking other security
-promises such as MDE). Because the lists cannot be honoured, **any** non-empty
+WSLC has no way to enforce per-host egress filtering, so **MXC refuses any
+config that asks for it** — the request is never accepted and then quietly
+ignored. Any allowlist (`allowedHosts` with `defaultPolicy: "block"`) or
+blocklist (`blockedHosts` with `defaultPolicy: "allow"`) would require
+in-container `iptables` rules, but a WSLC container runs **without**
+`CAP_NET_ADMIN` (the SDK's `Privileged` flag does not grant it), so those rules
+cannot be applied — and MXC has no VM-level enforcement hook either (WSLC
+cannot expose one without breaking other security promises such as MDE).
+Because the lists cannot be honoured, **any** non-empty
 `allowedHosts` or `blockedHosts` is rejected — including a list that is
 redundant with the default (`blockedHosts` under `block`, `allowedHosts` under
 `allow`), which would otherwise be silently ignored. Rather than fail the run at

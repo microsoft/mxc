@@ -688,6 +688,14 @@ try {
 
 # ---------------- Lifecycle C2: port mappings at provision ----------------
 
+# Reserve a free ephemeral host port. A fixed port would fail this test whenever
+# an unrelated process or a stale sandbox already owns it.
+function Get-FreeTcpPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try { return [int]$listener.LocalEndpoint.Port } finally { $listener.Stop() }
+}
+
 # Connect to a TCP port on the Windows host and return the bytes the peer sends
 # on connect (ASCII), or $null if no listener answers within the retry budget.
 # Used to prove a provision-time portMapping actually wires host->container NAT.
@@ -724,15 +732,34 @@ function Get-TcpResponse {
 # Provisions with experimental.wslc.provision.portMappings and drives a real
 # functional port round-trip: a detached listener in the container answers on
 # containerPort 80, and the harness connects through the mapped Windows host
-# port 18080 and asserts the payload. This regresses #824 — an implementation
-# that silently drops portMappings leaves nothing listening on 18080, so the
-# host connect fails. The listener script is base64-piped to `sh` to keep the
-# argv-split commandLine free of nested quotes.
+# port and asserts the payload. This regresses #824 — an implementation that
+# silently drops portMappings leaves nothing listening, so the host connect
+# fails. The request is built inline rather than from the fixture so the host
+# port can be chosen at runtime; the fixture still covers schema validation.
+# The listener script is base64-piped to `sh` to keep the argv-split
+# commandLine free of nested quotes.
 $script:portSandboxId = $null
+$script:portHostPort = Get-FreeTcpPort
 $portDeprovisionedOk = $false
 try {
     $portProvisionedOk = Run-StateAwareTest "C2: provision (port mappings)" {
-        $r = Invoke-StateAware -ConfigFile 'wslc_state_aware_provision_ports.json'
+        $req = @{
+            version      = '0.8.0-alpha'
+            phase        = 'provision'
+            containment  = 'wslc'
+            network      = @{ defaultPolicy = 'allow' }
+            experimental = @{
+                wslc = @{
+                    provision = @{
+                        image        = 'alpine:latest'
+                        portMappings = @(
+                            @{ windowsPort = $script:portHostPort; containerPort = 80; protocol = 'tcp' }
+                        )
+                    }
+                }
+            }
+        }
+        $r = Invoke-StateAware -Request $req
         $envObj = Assert-ResultEnvelope $r "port-mapped provision"
         if ($envObj) { $script:portSandboxId = [string]$envObj.result.sandboxId }
     }
@@ -763,10 +790,10 @@ echo LISTENER_UP
     }
 
     if ($portListenerOk) {
-        Run-StateAwareTest "C2: port forward round-trip (windows 18080 -> container 80)" {
-            $payload = Get-TcpResponse -HostName '127.0.0.1' -Port 18080
+        Run-StateAwareTest "C2: port forward round-trip (windows $script:portHostPort -> container 80)" {
+            $payload = Get-TcpResponse -HostName '127.0.0.1' -Port $script:portHostPort
             Assert-True ($payload -eq 'MXC_PORTMAP_OK') `
-                "host port 18080 forwards to the container listener (got '$payload')"
+                "host port $script:portHostPort forwards to the container listener (got '$payload')"
         } | Out-Null
     }
 

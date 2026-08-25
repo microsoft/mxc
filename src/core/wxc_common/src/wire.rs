@@ -644,7 +644,7 @@ pub struct Wslc {
     pub gpu: Option<bool>,
     /// Storage path override.
     pub storage_path: Option<String>,
-    /// Host → container port forwards. Only TCP is currently supported; the
+    /// Host -> container port forwards. Only TCP is currently supported; the
     /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
     /// for UDP port mappings.
     pub port_mappings: Option<Vec<PortMapping>>,
@@ -658,7 +658,7 @@ pub struct Wslc {
 /// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested
 /// under `experimental.wslc.provision`. Carries what the amortized daemon
 /// session honors: the container image (or a local tarball to import) and the
-/// host↔container port forwards.
+/// host -> container port forwards.
 ///
 /// Filesystem mounts and network mode derive from the top-level `policy`
 /// section (readwrite / readonly paths, network), not from here. The
@@ -678,13 +678,13 @@ pub struct WslcProvisionPhase {
     pub image: Option<String>,
     /// Path to a local image tarball to import instead of pulling.
     pub image_tar_path: Option<String>,
-    /// Host → container port forwards. Only TCP is currently supported; the
+    /// Host -> container port forwards. Only TCP is currently supported; the
     /// parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL`
     /// for UDP port mappings. Mirrors the one-shot `Wslc::port_mappings`.
     pub port_mappings: Option<Vec<PortMapping>>,
 }
 
-/// A single host → container port forward. Reachable only under the permissive
+/// A single host -> container port forward. Reachable only under the permissive
 /// `experimental` surface, so unknown fields are tolerated (forward-compat).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]

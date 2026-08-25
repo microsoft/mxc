@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use crate::dev::state_aware::provision::ProvisionPhase;
-use crate::dev::{Filesystem, Network, Telemetry};
+use crate::dev::{Filesystem, Network, PortMapping, Telemetry};
 use crate::dev::{OptionalField, Version};
 use serde::Deserialize;
 
@@ -22,6 +22,10 @@ pub struct WslcProvision {
     /// Optional path to a local container image archive.
     #[serde(default)]
     pub image_tar_path: OptionalField<String>,
+    /// Optional host-to-container TCP port mappings. Per-container, so unlike
+    /// the one-shot sizing knobs it is honored on the shared daemon session.
+    #[serde(default)]
+    pub port_mappings: OptionalField<Vec<PortMapping>>,
 }
 
 /// State-aware WSLC experimental settings.

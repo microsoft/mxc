@@ -1046,7 +1046,11 @@ fn convert_wire_config(
         // host lists to it, and a 'block' default (the WSLc default) yields no
         // outbound networking / a drop-floor that can't even reach the proxy.
         // Require an 'allow' default with no host lists so the proxy is reachable.
-        if containment == ContainmentBackend::Wslc
+        //
+        // One-shot only: state-aware binds the network mode at provision, so a
+        // later phase omits `defaultPolicy`; its own per-phase gates cover proxy.
+        if !state_aware
+            && containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
             && !state_aware
             && (policy.default_network_policy == NetworkPolicy::Block
