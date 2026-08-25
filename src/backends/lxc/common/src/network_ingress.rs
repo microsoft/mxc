@@ -1348,6 +1348,12 @@ mod tests {
                 ..Default::default()
             };
             if directional {
+                // A policy admitting no peer at all is given no interface to
+                // hook.
+                policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+                    default: NetworkAction::Allow,
+                    ..Default::default()
+                });
                 policy.network_ingress = Some(NetworkIngressPolicy::default());
             }
 
@@ -2981,10 +2987,18 @@ mod tests {
     // chain has to follow from the schema itself.
     #[test]
     fn a_stated_directional_posture_installs_the_inbound_chain() {
-        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        let mut policy = directional_ingress(NetworkAction::Allow, NetworkAction::Deny);
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
 
         assert!(installs_firewall(&policy, true));
+    }
+
+    #[test]
+    fn a_posture_admitting_no_peer_installs_no_inbound_chain() {
+        let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
+        policy.network_egress = Some(Default::default());
+
+        assert!(!installs_firewall(&policy, true));
     }
 }

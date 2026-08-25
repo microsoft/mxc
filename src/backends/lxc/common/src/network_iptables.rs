@@ -19,11 +19,41 @@ use wxc_common::models::{
     ProxyHostPin,
 };
 
+/// True when the policy grants the container no reachable peer in either
+/// direction.
+///
+/// Only a directional schema states such a posture; legacy schemas answer
+/// false.
+pub(crate) fn permits_no_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    if !uses_directional_schema || policy.network_proxy.is_enabled() {
+        return false;
+    }
+
+    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+        return false;
+    }
+
+    let egress_permits_nothing = policy
+        .network_egress
+        .as_ref()
+        .is_none_or(|egress| egress.default == NetworkAction::Deny && egress.allow.is_empty());
+
+    let ingress_permits_nothing = policy.network_ingress.as_ref().is_none_or(|ingress| {
+        ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
+    });
+
+    egress_permits_nothing && ingress_permits_nothing
+}
+
 /// True when this run installs firewall chains.
 ///
 /// A run carries one schema. 0.8 states a posture with no mode to opt out of,
 /// so it always enforces; 0.7 enforces only where the config asked for it.
 pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
+    if permits_no_network(policy, uses_directional_schema) {
+        return false;
+    }
+
     if uses_directional_schema {
         true
     } else {
@@ -4604,7 +4634,10 @@ mod tests {
             network_enforcement_mode: NetworkEnforcementMode::Capabilities,
             network_mode_specified: true,
             default_network_policy: NetworkPolicy::Allow,
-            network_egress: Some(NetworkEgressPolicy::default()),
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Allow,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -4613,6 +4646,42 @@ mod tests {
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
+    }
+
+    #[test]
+    fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
+        let policy = ContainerPolicy::default();
+
+        assert!(permits_no_network(&policy, true));
+        assert!(!installs_firewall(&policy, true));
+    }
+
+    #[test]
+    fn a_stated_allow_entry_keeps_the_interface() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy {
+                default: NetworkAction::Deny,
+                allow: vec![NetworkRule::default()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!permits_no_network(&policy, true));
+    }
+
+    #[test]
+    fn an_admitted_inbound_peer_keeps_the_interface() {
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(wxc_common::models::NetworkIngressPolicy {
+                host_loopback: NetworkAction::Allow,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!permits_no_network(&policy, true));
     }
 
     // Resolving a host name and reaching a proxy both need the interface up,

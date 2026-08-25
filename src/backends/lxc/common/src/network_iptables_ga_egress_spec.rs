@@ -689,7 +689,11 @@ fn policy_from_json(json: &str) -> ContainerPolicy {
 // the container cannot reach.
 #[test]
 fn a_directional_deny_default_chain_does_not_open_dns() {
-    let policy = directional_policy(NetworkAction::Deny, vec![], vec![]);
+    let policy = directional_policy(
+        NetworkAction::Deny,
+        vec![rule(vec![peer("192.0.2.0/24", &[])], Vec::new())],
+        vec![],
+    );
     let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy, true);
 
     assert!(
@@ -803,7 +807,8 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
     let policy = policy_from_json(
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"},
-            "network": {"egress": {"default": "deny"}}}"#,
+            "network": {"egress": {"default": "deny",
+                                   "allow": [{"to": [{"cidr": "192.0.2.0/24"}]}]}}}"#,
     );
     let rules = appended_ipv4_chain_rules("parsed-directional", &policy, true);
 
@@ -821,10 +826,9 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
         r#"{"version": "0.8.0-alpha",
             "process": {"commandLine": "echo hi"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-v08-no-network", &policy, true);
 
     assert!(
-        !opens_dns_unconditionally(&rules),
-        "input=0.8 with no network section; expected no port 53 accept; output={rules:?}"
+        !installs_firewall(&policy, true),
+        "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }

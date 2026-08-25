@@ -17,7 +17,9 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{installs_firewall, needs_network, NetworkIptablesManager};
+use crate::network_iptables::{
+    installs_firewall, needs_network, permits_no_network, NetworkIptablesManager,
+};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -248,6 +250,30 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+
+        // LXC reads the network section only as the container starts; the
+        // firewall decision below is too late.
+        if permits_no_network(&request.policy, uses_directional_schema) {
+            // `up` keeps 127.0.0.1 available to a workload that binds it.
+            for (key, value) in [("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")] {
+                if let Err(e) = container.set_config_item(key, value) {
+                    if self.destroy_on_exit || container_created {
+                        let _ = container.destroy();
+                    }
+                    return ScriptResponse::error(&format!(
+                        "Failed to remove the container network interface: {}",
+                        e
+                    ));
+                }
+            }
+            let _ = writeln!(
+                logger,
+                "Policy permits no network; starting the container with no interface."
+            );
+        }
+
         // Ensure the container is running so that the veth interface exists
         if !container.is_running() {
             let _ = writeln!(logger, "Starting LXC container...");
@@ -261,9 +287,6 @@ impl LxcScriptRunner {
         } else {
             let _ = writeln!(logger, "Container already running.");
         }
-
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
 
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 
