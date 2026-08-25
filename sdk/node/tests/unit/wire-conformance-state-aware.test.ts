@@ -157,12 +157,11 @@ type _WslcProvisionFieldValueTypes = AssertTrue<
   >
 >;
 
-// `portMappings` is a reused public one-shot leaf (`PortMapping[]`); its shape is
-// pinned by the one-shot oracle (public `PortMapping` ↔ wire `PortMapping`, incl.
-// the nullable `protocol`). It is excluded from the structural value comparison
-// above (the generated wire element carries a `[k: string]: unknown` index
-// signature and a nullable `protocol` that strict `Equivalent` would trip on) and
-// instead asserted to REUSE the public leaf, mirroring the `process` delegation.
+// `portMappings` is excluded from the structural value comparison above: the
+// generated wire element carries a `[k: string]: unknown` index signature and a
+// nullable `protocol` that strict `Equivalent` trips on. It is instead asserted
+// to REUSE the public one-shot leaf, whose shape the one-shot oracle already
+// pins, mirroring the `process` delegation.
 type WslcProvisionValueKeys = Exclude<BackendKeys<WslcProvisionConfig>, 'portMappings'>;
 type _WslcProvisionPortMappingsReuse = AssertTrue<
   Equivalent<NonNullable<WslcProvisionConfig['portMappings']>, PublicPortMapping[]>

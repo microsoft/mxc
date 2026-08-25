@@ -688,8 +688,8 @@ try {
 
 # ---------------- Lifecycle C2: port mappings at provision ----------------
 
-# Reserve a free ephemeral host port. A fixed port would fail this test whenever
-# an unrelated process or a stale sandbox already owns it.
+# Ask the OS for a free ephemeral port, then release it: a fixed port would fail
+# this test whenever an unrelated process or a stale sandbox already owns one.
 function Get-FreeTcpPort {
     $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
     $listener.Start()
@@ -698,7 +698,6 @@ function Get-FreeTcpPort {
 
 # Connect to a TCP port on the Windows host and return the bytes the peer sends
 # on connect (ASCII), or $null if no listener answers within the retry budget.
-# Used to prove a provision-time portMapping actually wires host->container NAT.
 function Get-TcpResponse {
     param(
         [string]$HostName,
@@ -715,10 +714,15 @@ function Get-TcpResponse {
             $client.EndConnect($iar)
             $stream = $client.GetStream()
             $stream.ReadTimeout = 3000
+            # Read until the peer closes; a single Read may return only part of
+            # the payload even when forwarding works.
+            $ms = New-Object System.IO.MemoryStream
             $buf = New-Object byte[] 256
-            $n = $stream.Read($buf, 0, $buf.Length)
-            if ($n -gt 0) {
-                return [System.Text.Encoding]::ASCII.GetString($buf, 0, $n)
+            while (($n = $stream.Read($buf, 0, $buf.Length)) -gt 0) {
+                $ms.Write($buf, 0, $n)
+            }
+            if ($ms.Length -gt 0) {
+                return [System.Text.Encoding]::ASCII.GetString($ms.ToArray())
             }
         } catch {
             Start-Sleep -Milliseconds $DelayMs
@@ -729,15 +733,12 @@ function Get-TcpResponse {
     return $null
 }
 
-# Provisions with experimental.wslc.provision.portMappings and drives a real
-# functional port round-trip: a detached listener in the container answers on
-# containerPort 80, and the harness connects through the mapped Windows host
-# port and asserts the payload. This regresses #824 — an implementation that
-# silently drops portMappings leaves nothing listening, so the host connect
-# fails. The request is built inline rather than from the fixture so the host
-# port can be chosen at runtime; the fixture still covers schema validation.
-# The listener script is base64-piped to `sh` to keep the argv-split
-# commandLine free of nested quotes.
+# Drives a real host->container round-trip rather than only checking that the
+# config parses: an implementation that silently drops portMappings leaves
+# nothing listening, so the host connect fails (#824). The request is built
+# inline so the host port can be chosen at runtime; the fixture still covers
+# schema validation. The listener script is base64-piped to `sh` to keep the
+# argv-split commandLine free of nested quotes.
 $script:portSandboxId = $null
 $script:portHostPort = Get-FreeTcpPort
 $portDeprovisionedOk = $false

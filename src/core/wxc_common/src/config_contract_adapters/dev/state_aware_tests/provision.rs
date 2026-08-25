@@ -90,7 +90,11 @@ const WSLC_ALL_FIELDS_REQUEST_JSON: &str = r#"{
         "wslc": {
             "provision": {
                 "image": "someImage",
-                "imageTarPath": "someImageTarPath"
+                "imageTarPath": "someImageTarPath",
+                "portMappings": [
+                    { "windowsPort": 8080, "containerPort": 80 },
+                    { "windowsPort": 8443, "containerPort": 443, "protocol": "tcp" }
+                ]
             }
         },
         "telemetry": {
@@ -431,6 +435,20 @@ fn wslc_request_maps_expected_wire_fields() {
     assert!(wslc.gpu.is_none());
     assert!(wslc.storage_path.is_none());
     assert!(wslc.port_mappings.is_none());
+    let ports = provision
+        .port_mappings
+        .as_deref()
+        .expect("provision portMappings should be populated");
+    assert_eq!(ports.len(), 2);
+    assert_eq!(ports[0].windows_port, 8080);
+    assert_eq!(ports[0].container_port, 80);
+    assert!(ports[0].protocol.is_none());
+    assert_eq!(ports[1].windows_port, 8443);
+    assert_eq!(ports[1].container_port, 443);
+    assert!(matches!(
+        ports[1].protocol,
+        Some(wire::TransportProtocol::Tcp)
+    ));
 
     let telemetry = experimental
         .telemetry

@@ -202,8 +202,6 @@ fn convert_protocol(value: contract::TransportProtocol) -> wire::TransportProtoc
     }
 }
 
-/// Shared by the one-shot `wslc.portMappings` and the state-aware
-/// `wslc.provision.portMappings`, which carry the same shape.
 pub(super) fn convert_wslc_port_mapping(value: contract::PortMapping) -> wire::PortMapping {
     let contract::PortMapping {
         windows_port,

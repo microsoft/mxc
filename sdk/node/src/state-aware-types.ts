@@ -188,12 +188,10 @@ export interface WslcProvisionConfig {
    */
   imageTarPath?: string;
   /**
-   * Host -> container port mappings applied at provision and frozen for the
-   * life of the sandbox. Per-container (not per-session), so — unlike the
-   * one-shot sizing knobs — they are honored here, matching the one-shot
-   * surface. Only TCP is supported (`protocol` defaults to `"tcp"`); `"udp"`
-   * is rejected. Nested under `experimental.wslc.provision.portMappings` on
-   * the wire.
+   * Host -> container port mappings, applied at provision and fixed for the
+   * life of the sandbox. Only TCP is supported: `protocol` defaults to `"tcp"`
+   * and `"udp"` is rejected. Nested under
+   * `experimental.wslc.provision.portMappings` on the wire.
    */
   portMappings?: PortMapping[];
 }

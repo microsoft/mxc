@@ -2379,8 +2379,6 @@ mod tests {
 
     #[test]
     fn validate_runner_rejects_redundant_block_with_blocked_hosts() {
-        // block default + blocklist is redundant but must fail closed (#824 Gap 1),
-        // matching the parser and the state-aware reject_host_filtering.
         let request = ExecutionRequest {
             containment: wxc_common::models::ContainmentBackend::Wslc,
             policy: wxc_common::models::ContainerPolicy {
@@ -2397,8 +2395,8 @@ mod tests {
 
     #[test]
     fn validate_runner_rejects_redundant_allow_with_allowed_hosts() {
-        // allow default + allowlist is the fail-open typo: previously accepted and
-        // ignored, now rejected (#824 Gap 1).
+        // An allowlist under an `allow` default reads as a restriction but
+        // enforces none: accepting it leaves all egress open (#824).
         let request = ExecutionRequest {
             containment: wxc_common::models::ContainmentBackend::Wslc,
             policy: wxc_common::models::ContainerPolicy {
