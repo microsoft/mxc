@@ -92,14 +92,79 @@ function namedBody(source, kind, name) {
 const snakeToCamel = (value) =>
   value.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
 
+function skipWhitespace(source, cursor) {
+  while (cursor < source.length && /\s/.test(source[cursor])) cursor++;
+  return cursor;
+}
+
+function attributeEnd(source, start, marker) {
+  let depth = 1;
+  let quote = null;
+  let escaped = false;
+  for (let cursor = start + marker.length; cursor < source.length; cursor++) {
+    const character = source[cursor];
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === "[") {
+      depth++;
+    } else if (character === "]" && --depth === 0) {
+      return cursor + 1;
+    }
+  }
+  return -1;
+}
+
+function attributedDeclarations(body, marker, declarationPattern) {
+  const declarations = [];
+  let cursor = 0;
+  while (cursor < body.length) {
+    cursor = skipWhitespace(body, cursor);
+    const attributesStart = cursor;
+    let hasAttributes = false;
+    while (body.startsWith(marker, cursor)) {
+      const end = attributeEnd(body, cursor, marker);
+      if (end === -1) {
+        cursor = body.length;
+        break;
+      }
+      hasAttributes = true;
+      cursor = skipWhitespace(body, end);
+    }
+    if (cursor >= body.length) break;
+
+    declarationPattern.lastIndex = cursor;
+    const match = declarationPattern.exec(body);
+    if (match) {
+      declarations.push({
+        attributes: body.slice(attributesStart, cursor),
+        name: match[1],
+      });
+      cursor = declarationPattern.lastIndex;
+    } else if (!hasAttributes) {
+      cursor++;
+    }
+  }
+  return declarations;
+}
+
 function rustFieldsFromBody(body) {
-  return [
-    ...body.matchAll(
-      /((?:\s*#\[[^\]]+\]\s*)*)(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:/g
-    ),
-  ].map((match) => {
-    const renamed = /\brename\s*=\s*"([^"]+)"/.exec(match[1]);
-    return renamed?.[1] ?? snakeToCamel(match[2]);
+  return attributedDeclarations(
+    body,
+    "#[",
+    /(?:pub(?:\([^)]*\))?\s+)?(\w+)\s*:/y
+  ).map(({ attributes, name }) => {
+    const renamed = /\brename\s*=\s*"([^"]+)"/.exec(attributes);
+    return renamed?.[1] ?? snakeToCamel(name);
   });
 }
 
@@ -125,15 +190,18 @@ function rustVariantFields(source, enumName, variantName) {
 
 function managedJsonFields(source, className) {
   const body = namedBody(source, "class", className);
-  return [
-    ...body.matchAll(
-      /((?:\s*\[[^\]]+\]\s*)*)public\s+(?:required\s+)?[\w<>,?.\[\]\s]+\s+(\w+)\s*\{/g
-    ),
-  ]
-    .filter((match) => !/\[\s*JsonIgnore(?:Attribute)?(?:\s*\]|\s*\()/.test(match[1]))
-    .map((match) => {
-      const renamed = /JsonPropertyName\("([^"]+)"\)/.exec(match[1]);
-      return renamed?.[1] ?? camelCase(match[2]);
+  return attributedDeclarations(
+    body,
+    "[",
+    /public\s+(?:required\s+)?[\w<>,?.\[\]\s]+\s+(\w+)\s*\{/y
+  )
+    .filter(
+      ({ attributes }) =>
+        !/\[\s*JsonIgnore(?:Attribute)?(?:\s*\]|\s*\()/.test(attributes)
+    )
+    .map(({ attributes, name }) => {
+      const renamed = /JsonPropertyName\("([^"]+)"\)/.exec(attributes);
+      return renamed?.[1] ?? camelCase(name);
     });
 }
 
