@@ -665,7 +665,10 @@ pub struct Wslc {
 #[serde(rename_all = "camelCase")]
 pub struct AppleContainer {
     /// OCI image reference. The image must provide `/bin/sh`.
-    #[cfg_attr(feature = "schema-gen", schemars(length(min = 1)))]
+    #[cfg_attr(
+        feature = "schema-gen",
+        schemars(schema_with = "non_blank_string_schema")
+    )]
     pub image: String,
     /// Requested virtual CPU count.
     #[cfg_attr(feature = "schema-gen", schemars(range(min = 1)))]
@@ -673,6 +676,22 @@ pub struct AppleContainer {
     /// Requested memory limit in megabytes.
     #[cfg_attr(feature = "schema-gen", schemars(range(min = 1)))]
     pub memory_mb: Option<u64>,
+}
+
+#[cfg(feature = "schema-gen")]
+fn non_blank_string_schema(
+    _generator: &mut schemars::gen::SchemaGenerator,
+) -> schemars::schema::Schema {
+    use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec, StringValidation};
+
+    Schema::Object(SchemaObject {
+        instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+        string: Some(Box::new(StringValidation {
+            pattern: Some(r"\S".to_string()),
+            ..Default::default()
+        })),
+        ..Default::default()
+    })
 }
 
 /// Per-phase WSLc **provision** configuration (state-aware lifecycle), nested
@@ -792,7 +811,44 @@ mod schema_gen {
         let schema = schemars::schema_for!(MxcConfig);
         let mut value = serde_json::to_value(&schema).expect("schema serialises to JSON value");
         mxc_schema_support::prepare_schema(&mut value, SCHEMA_ID);
+        require_apple_container_settings(&mut value);
         value
+    }
+
+    fn require_apple_container_settings(schema: &mut serde_json::Value) {
+        let root = schema
+            .as_object_mut()
+            .expect("generated schema root is an object");
+        let constraints = root
+            .entry("allOf")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("root allOf constraints");
+        constraints.push(serde_json::json!({
+            "if": {
+                "properties": {
+                    "containment": {
+                        "const": "apple_container"
+                    }
+                },
+                "required": ["containment"]
+            },
+            "then": {
+                "properties": {
+                    "experimental": {
+                        "allOf": [
+                            {
+                                "$ref": "#/definitions/Experimental"
+                            },
+                            {
+                                "required": ["apple_container"]
+                            }
+                        ]
+                    }
+                },
+                "required": ["experimental"]
+            }
+        }));
     }
 
     /// Emit the SDK's wire TypeScript types directly from the same generated schema
@@ -805,6 +861,37 @@ mod schema_gen {
     pub fn generate_sdk_types_ts() -> String {
         let value = schema_value();
         mxc_schema_support::emit_ts(&value)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn apple_container_schema_matches_runtime_requirements() {
+            let schema = schema_value();
+
+            assert_eq!(
+                schema["definitions"]["AppleContainer"]["properties"]["image"]["pattern"],
+                r"\S"
+            );
+
+            let constraints = schema["allOf"].as_array().expect("root allOf constraints");
+            let apple_container = constraints
+                .iter()
+                .find(|constraint| {
+                    constraint["if"]["properties"]["containment"]["const"] == "apple_container"
+                })
+                .expect("Apple Container constraint");
+            assert_eq!(
+                apple_container["then"]["required"],
+                serde_json::json!(["experimental"])
+            );
+            assert_eq!(
+                apple_container["then"]["properties"]["experimental"]["allOf"][1]["required"],
+                serde_json::json!(["apple_container"])
+            );
+        }
     }
 }
 

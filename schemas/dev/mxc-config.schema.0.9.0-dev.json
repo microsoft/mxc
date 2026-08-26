@@ -4,6 +4,39 @@
   "title": "MXC Configuration",
   "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
   "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "containment": {
+            "const": "apple_container"
+          }
+        },
+        "required": [
+          "containment"
+        ]
+      },
+      "then": {
+        "properties": {
+          "experimental": {
+            "allOf": [
+              {
+                "$ref": "#/definitions/Experimental"
+              },
+              {
+                "required": [
+                  "apple_container"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "experimental"
+        ]
+      }
+    }
+  ],
   "definitions": {
     "AppleContainer": {
       "description": "Apple Container backend config.",
@@ -19,7 +52,7 @@
         },
         "image": {
           "description": "OCI image reference. The image must provide `/bin/sh`.",
-          "minLength": 1,
+          "pattern": "\\S",
           "type": "string"
         },
         "memoryMb": {
