@@ -632,8 +632,11 @@ fn lower_ports(ports: &[NetworkPort]) -> Result<Vec<PortSpec>, String> {
                     range: None,
                 });
             }
-            // Ports exist only for TCP and UDP, so `any` with a port narrows to
-            // those two rather than widening to every protocol on that number.
+            // `--dport` comes from a protocol match extension, so iptables
+            // cannot express a port without naming a protocol; `any` therefore
+            // narrows to TCP and UDP. Safe only because every mode installing
+            // these rules runs behind slirp4netns, which carries nothing else
+            // (#980).
             NetworkProtocol::Any => match range {
                 None => specs.push(PortSpec::ALL),
                 Some(range) => {
@@ -1824,8 +1827,8 @@ mod tests {
         );
     }
 
-    /// Ports exist only for TCP and UDP, so `any` carrying one narrows to those
-    /// two. Emitting no `-p` would open every protocol on that number.
+    /// `any` with a port narrows to TCP and UDP — `--dport` needs a protocol
+    /// match. See the #980 note in `lower_ports`.
     #[test]
     fn an_any_protocol_port_narrows_to_tcp_and_udp() {
         let req = directional_rules_request(
