@@ -92,6 +92,87 @@ impl SandboxBackend for BubblewrapScriptRunner {
     }
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        self.validate_prepared(request).map(|_| ())
+    }
+
+    fn spawn(
+        &mut self,
+        request: &ExecutionRequest,
+        logger: &mut Logger,
+        stdio: StdioMode,
+    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
+        validate_common(request)?;
+        // Keep the plan validation derived so the firewall path installs
+        // exactly what was accepted instead of deriving it again.
+        let egress_plan = self.validate_prepared(request)?;
+        // Object-based FS-policy normalization (D6): tighten aliases of the same
+        // host object to the strictest intent (deny > ro > rw). Done here, close
+        // to mount — config_parser stays string-only and the TOCTOU window
+        // between check and mount is minimized. Only clone the request when an
+        // aliasing conflict actually needs tightening (the common case is none);
+        // an unresolvable path with deniedPaths present fails closed.
+        let normalized;
+        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
+            &request.policy,
+            logger,
+        ) {
+            Ok(Some(policy)) => {
+                normalized = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &normalized
+            }
+            Ok(None) => request,
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
+        };
+        // Delegation check (D3): reject any policy path the invoking user cannot
+        // access, so the sandbox never gains access the caller lacks. Runs AFTER
+        // object normalization so it is evaluated against the already-tightened
+        // intents (a path moved rw -> denied must not then require write access).
+        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
+            return Err(ScriptResponse::error(&msg));
+        }
+        // Resolve denied paths that traverse a symlink to their real host path
+        // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
+        // Only clones the request when a path needs rewriting (common case:
+        // none). See docs/bwrap-support/bubblewrap-backend.md.
+        let plan = match resolve_denied_paths(&request.policy, logger) {
+            Ok(plan) => plan,
+            Err(msg) => return Err(ScriptResponse::error(&msg)),
+        };
+        let resolved;
+        let request = match plan.paths {
+            Some(denied_paths) => {
+                let mut policy = request.policy.clone();
+                policy.denied_paths = denied_paths;
+                resolved = ExecutionRequest {
+                    policy,
+                    ..request.clone()
+                };
+                &resolved
+            }
+            None => request,
+        };
+        // The masks are built from the list above, not from the one the caller
+        // wrote, so the pin conflict has to be judged against it too.
+        if let Err(msg) = check_pin_against_denied_hosts(request) {
+            return Err(ScriptResponse::error(&msg));
+        }
+        let child = self.spawn_bwrap(request, &plan.files, egress_plan, logger, stdio)?;
+        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+    }
+}
+
+impl BubblewrapScriptRunner {
+    /// `validate`, plus the egress plan it derived.
+    ///
+    /// Returning the plan lets `spawn` install exactly what validation
+    /// accepted instead of deriving it a second time on every spawn.
+    fn validate_prepared(
+        &self,
+        request: &ExecutionRequest,
+    ) -> Result<Option<network_rules::EgressPlan>, ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
         // User-input validation runs before the environmental `bwrap`
         // probe so config errors are reported deterministically even on
@@ -209,11 +290,14 @@ impl SandboxBackend for BubblewrapScriptRunner {
         let firewall_enforced =
             ResolvedNetworkMode::from_request(request, request.policy.network_proxy.is_enabled())
                 == ResolvedNetworkMode::FirewallEnforced;
-        if firewall_enforced {
-            if let Err(error) = network_rules::EgressPlan::for_request(request) {
-                return Err(ScriptResponse::error(&error));
+        let egress_plan = if firewall_enforced {
+            match network_rules::EgressPlan::for_request(request) {
+                Ok(plan) => Some(plan),
+                Err(error) => return Err(ScriptResponse::error(&error)),
             }
-        }
+        } else {
+            None
+        };
 
         // `bwrap` must be present *and* new enough for every flag the argument
         // builder emits — an old binary would otherwise fail at spawn time with
@@ -235,73 +319,7 @@ impl SandboxBackend for BubblewrapScriptRunner {
             }
         }
 
-        Ok(())
-    }
-
-    fn spawn(
-        &mut self,
-        request: &ExecutionRequest,
-        logger: &mut Logger,
-        stdio: StdioMode,
-    ) -> Result<Box<dyn SandboxProcess>, ScriptResponse> {
-        validate_common(request)?;
-        self.validate(request)?;
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw). Done here, close
-        // to mount — config_parser stays string-only and the TOCTOU window
-        // between check and mount is minimized. Only clone the request when an
-        // aliasing conflict actually needs tightening (the common case is none);
-        // an unresolvable path with deniedPaths present fails closed.
-        let normalized;
-        let request = match wxc_common::filesystem_object::normalize_object_conflicts(
-            &request.policy,
-            logger,
-        ) {
-            Ok(Some(policy)) => {
-                normalized = ExecutionRequest {
-                    policy,
-                    ..request.clone()
-                };
-                &normalized
-            }
-            Ok(None) => request,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
-        };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents (a path moved rw -> denied must not then require write access).
-        if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
-            return Err(ScriptResponse::error(&msg));
-        }
-        // Resolve denied paths that traverse a symlink to their real host path
-        // and classify each as a file/dir mask (see [`resolve_denied_paths`]).
-        // Only clones the request when a path needs rewriting (common case:
-        // none). See docs/bwrap-support/bubblewrap-backend.md.
-        let plan = match resolve_denied_paths(&request.policy, logger) {
-            Ok(plan) => plan,
-            Err(msg) => return Err(ScriptResponse::error(&msg)),
-        };
-        let resolved;
-        let request = match plan.paths {
-            Some(denied_paths) => {
-                let mut policy = request.policy.clone();
-                policy.denied_paths = denied_paths;
-                resolved = ExecutionRequest {
-                    policy,
-                    ..request.clone()
-                };
-                &resolved
-            }
-            None => request,
-        };
-        // The masks are built from the list above, not from the one the caller
-        // wrote, so the pin conflict has to be judged against it too.
-        if let Err(msg) = check_pin_against_denied_hosts(request) {
-            return Err(ScriptResponse::error(&msg));
-        }
-        let child = self.spawn_bwrap(request, &plan.files, logger, stdio)?;
-        Ok(Box::new(BubblewrapSandboxProcess::new(child)))
+        Ok(egress_plan)
     }
 }
 
@@ -337,6 +355,7 @@ impl BubblewrapScriptRunner {
         &self,
         request: &ExecutionRequest,
         denied_files: &HashSet<String>,
+        egress_plan: Option<network_rules::EgressPlan>,
         logger: &mut Logger,
         stdio: StdioMode,
     ) -> Result<BwrapChild, ScriptResponse> {
@@ -409,12 +428,19 @@ impl BubblewrapScriptRunner {
             // endpoint. There is no hostname to pin because rule addresses are
             // literals and CIDRs only.
             None if network_mode == ResolvedNetworkMode::FirewallEnforced => {
-                let plan = match network_rules::EgressPlan::for_request(request) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        proxy.stop(logger);
-                        return Err(ScriptResponse::error(&error));
-                    }
+                // Reuse the validated plan. It is derived from network policy
+                // only, which the filesystem normalization between the two
+                // points cannot touch. Recompute only if the resolved mode
+                // disagrees with validation's pre-spawn proxy reading.
+                let plan = match egress_plan {
+                    Some(plan) => plan,
+                    None => match network_rules::EgressPlan::for_request(request) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            proxy.stop(logger);
+                            return Err(ScriptResponse::error(&error));
+                        }
+                    },
                 };
                 match proxy_network::ProxyNetworkNamespace::start(
                     &plan,

@@ -310,6 +310,14 @@ run_enforced "directional except carve-out" "bubblewrap_network_directional_exce
 run_enforced "directional ruleless deny" "bubblewrap_network_directional_block.json" \
     EGRESS_BLOCKED_OK
 
+# No other directional config carries an IPv6 peer or an ICMP rule, so the real
+# ip6tables-restore never sees a v6 address or the icmp -> icmpv6 token the v6
+# table requires. Connectivity is not the point: a token or transaction the tool
+# rejects fails namespace setup, so lxc-exec exits before the workload runs.
+run_enforced "directional ipv6 and icmp rendering" \
+    "bubblewrap_network_directional_ipv6_icmp.json" \
+    V6_ICMP_RULES_INSTALLED_OK CAP_NET_ADMIN_DROPPED_OK
+
 # Port narrowing: one address, two ports, only one allowed. Both ports are
 # probed reachable above, so the denied one being closed is the rule working.
 PORT_CONFIG="$WORK_DIR/directional_ports.json"
