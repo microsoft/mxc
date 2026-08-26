@@ -44,6 +44,10 @@ Any value MXC cannot read or cannot parse — a wrong type, a corrupt value, a
 registry error — is treated as `Blocked`. Telemetry collection is never the
 outcome of a failure.
 
+MXC reports each distinct unreadable or unrecognized policy failure once per
+process so operators can distinguish a broken deployment from an intentional
+block without weakening the fail-closed result.
+
 ## Deploying it
 
 ### Registry deployment
