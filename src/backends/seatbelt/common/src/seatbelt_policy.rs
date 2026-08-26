@@ -118,6 +118,41 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
             .to_string());
     }
 
+    // Seatbelt cannot filter network by hostname -- reject blockedHosts rather
+    // than silently allowing traffic the user expects to be denied.
+    if !policy.blocked_hosts.is_empty() {
+        return Err(
+            "macOS Seatbelt does not support per-host network filtering. \
+                    'blockedHosts' cannot be enforced; remove it or use \
+                    defaultPolicy: \"block\" to deny all network."
+                .to_string(),
+        );
+    }
+
+    // `hostLoopback` is bidirectional, but Seatbelt can only enforce its
+    // outbound half (see `write_host_loopback_rules`): an inbound filter scoped
+    // to loopback is either a no-op or breaks `bind()` outright. Requiring it to
+    // match `ingress.default` -- which drives the one `network-inbound` rule --
+    // keeps the inbound half consistent instead of enforcing one direction and
+    // silently ignoring the other.
+    if let Some(ingress) = policy.network_ingress.as_ref() {
+        if ingress.host_loopback != ingress.default {
+            let name = |action: NetworkAction| match action {
+                NetworkAction::Allow => "allow",
+                NetworkAction::Deny => "deny",
+            };
+            return Err(format!(
+                "macOS Seatbelt cannot enforce a network.ingress.hostLoopback \
+                 posture ('{}') that differs from network.ingress.default \
+                 ('{}'): the inbound half is not expressible in a Seatbelt \
+                 profile. Set both to the same value. Note that an omitted \
+                 'hostLoopback' is 'deny', not an inherit of 'default'.",
+                name(ingress.host_loopback),
+                name(ingress.default),
+            ));
+        }
+    }
+
     Ok(())
 }
 
