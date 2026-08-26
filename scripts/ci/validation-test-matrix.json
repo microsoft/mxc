@@ -321,12 +321,7 @@
       }
     }
   ],
-  "backendDelayedStart": [
-    {
-      "backend": "wslc",
-      "seconds": 45
-    }
-  ],
+  "backendDelayedStart": [],
   "triggers": {
     "pr": [],
     "nightly": [
@@ -398,18 +393,21 @@
       {
         "os": "windows-25h2",
         "backends": [
+          "process-t3",
           "wslc"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
+          "process-t3",
           "wslc"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
+          "process-t3",
           "wslc"
         ]
       }

@@ -128,10 +128,14 @@ A backend id is passed straight through: the matrix job hands it to the host-pre
 script and then to the dispatcher, which has one `switch`/`case` per id. Ids that
 share a suite each keep their own case so they can diverge later without a
 mapping table — `process-t1` and `process-t3` both run
-`WinProcessContainer-Tests.ps1` today. Teaching the Process Container test suite to 
+`WinProcessContainer-Tests.ps1`, and `process-t3` additionally runs
+`T3-Workloads.ps1`. Teaching the Process Container test suite to
 accept an explicit tier (so a T1 host can also be exercised
-at the T3 fallback) is a worthwhile future improvement; see
-[Possible future improvements](#possible-future-improvements).
+at the T3 fallback) is a worthwhile future improvement.
+
+`process-t3` runs its two suites back to back and reports them together: a
+failure in the primitives suite does not skip the workloads suite, so one job
+run shows both results instead of costing a second run to triage.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -158,8 +162,9 @@ because Seatbelt has no wired suite.
 
 ### `backendDelayedStart`
 
-Optional. Staggers the start of jobs for a named backend instead of letting
-them all begin at once:
+Optional, and **currently empty** — no backend is staggered today, so every job
+starts as soon as its runner is ready. The section staggers the start of jobs
+for a named backend instead of letting them all begin at once:
 
 ```json
 "backendDelayedStart": [
@@ -173,13 +178,22 @@ traffic into a burst the moment its jobs start together. Public registries
 answer with rate limiting and stalled downloads.
 
 `seconds` is the gap between consecutive jobs of that backend, counted per
-backend and following the resolved job order. With the entry above, four WSLC
-jobs start at 0, 300, 600, and 900 seconds.
+backend and following the resolved job order. With the example entry above,
+four WSLC jobs would start at 0, 300, 600, and 900 seconds.
 
 The resolver puts the offset on every matrix entry as
-`startup_delay_seconds` — `0` where no stagger applies — and the job sleeps
-that long before its first network step. Job timeout is a flat 180 minutes,
-with plenty of room for any wait you'd reasonably configure.
+`startup_delay_seconds` — `0` where no stagger applies, which is every entry
+while the section is empty — and the job sleeps that long before its first
+network step. Job timeout is a flat 180 minutes, with plenty of room for any
+wait you'd reasonably configure.
+
+Leave the section out (or empty) and every job starts as soon as its runner is
+ready. A backend id that no plan schedules is accepted; it just never applies.
+
+Do keep in mind that the runner is held while it sleeps — Actions can't defer
+allocating a matrix job, so the wait has to happen inside it. Use no more than
+the contention calls for. This spreads simultaneous load and nothing else; a
+single download that stalls on its own is unaffected.
 
 Leave the section out (or empty) and every job starts as soon as its runner is
 ready. A backend id that no plan schedules is accepted; it just never applies.
@@ -196,8 +210,8 @@ get fixed or wired.
 
 | Backend | Status | Notes |
 |---------|--------|-------|
-| Process T1 | ✅ Good | Prerelease Windows only. Remaining failures are genuine MXC bugs or harness limitations. |
-| Process T3 | ✅ Good | Non-prerelease Windows builds only, until the testing suite is updated. |
+| Process T1 | ✅ Good | Prerelease Windows only. Runs the primitives suite. Remaining failures are genuine MXC bugs or harness limitations. |
+| Process T3 | ✅ Good | Non-prerelease Windows builds only. Runs the primitives suite plus `T3-Workloads.ps1` (real programs — pwsh, git, node, python, cmd — on top of the T3 primitives). |
 | Bubblewrap | ✅ Good | |
 | LXC | ✅ Good | Some networking tests fail on distros other than Ubuntu 24.04; seems to be an issue with MXC. |
 | WSLC | ✅ Good | Might have to retry hung jobs - this is an issue with overzealous agent reclaiming. |
@@ -216,7 +230,11 @@ every entry.
 `prepare-windows-host.ps1`:
 
 - `process-t3` — runs `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`.
+  `prepare-null-device --no-sacl`, then verifies the workload interpreters:
+  `pwsh` and `git` are required (they gate 10 of the 19 `T3-Workloads.ps1`
+  cases, so their absence means a mis-imaged pool and fails the job), while
+  `node` and `python` only emit a warning because the suite reports their
+  cases as skipped.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.

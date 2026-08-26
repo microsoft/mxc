@@ -145,6 +145,51 @@ function Initialize-ProcessContainerHost {
     if ($LASTEXITCODE -ne 0) {
         Exit-WithError "wxc-host-prep prepare-null-device failed with exit code $LASTEXITCODE"
     }
+
+    Assert-WorkloadInterpreters
+}
+
+# Checks for programs useful to the workload test suite. Missing optional interpreters are reported as warnings.
+function Assert-WorkloadInterpreters {
+    $required = @(
+        @{ Name = 'pwsh'; Remedy = 'install PowerShell 7 in the image' },
+        @{ Name = 'git'; Remedy = 'install Git for Windows in the image' }
+    )
+    $missing = @()
+    foreach ($tool in $required) {
+        $found = Get-Command $tool.Name -ErrorAction SilentlyContinue
+        if ($found) {
+            Write-Host "Workload interpreter '$($tool.Name)' found at $($found.Source)"
+        } else {
+            $missing += "$($tool.Name) ($($tool.Remedy))"
+        }
+    }
+    if ($missing) {
+        Exit-WithError "Workload interpreters missing from this image: $($missing -join '; ')"
+    }
+
+    # The suite tries `python` then `python3`, so mirror that candidate order.
+    $optional = @(
+        @{ Name = 'node'; Candidates = @('node') },
+        @{ Name = 'python'; Candidates = @('python', 'python3') }
+    )
+    foreach ($tool in $optional) {
+        $resolved = $null
+        foreach ($candidate in $tool.Candidates) {
+            $found = Get-Command $candidate -ErrorAction SilentlyContinue
+            # A `python` resolving into WindowsApps is the Microsoft Store
+            # AppExecutionAlias stub, which the suite deliberately ignores.
+            if ($found -and $found.Source -notlike '*\WindowsApps\*') {
+                $resolved = $found.Source
+                break
+            }
+        }
+        if ($resolved) {
+            Write-Host "Workload interpreter '$($tool.Name)' found at $resolved"
+        } else {
+            Write-Host "::warning::Workload interpreter '$($tool.Name)' is absent."
+        }
+    }
 }
 
 function Initialize-MicroVmHost {

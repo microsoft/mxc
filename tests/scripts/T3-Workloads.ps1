@@ -21,6 +21,9 @@ param(
     # -Wxc explicitly if the layout differs.
     [string]$Wxc          = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'src\target\debug\wxc-exec.exe'),
     [string]$ScratchRoot  = (Join-Path $env:TEMP 'mxc-t3-workloads'),
+    # Structured results. Lives in $env:TEMP but OUTSIDE $ScratchRoot so
+    # `Initialize-Scratch`'s recursive nuke can never take it with it.
+    [string]$ResultsJson  = (Join-Path $env:TEMP 'T3-Workloads.results.json'),
     # Subset of workloads to run. Default: all nineteen.
     [int[]] $Run          = @(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19),
     # Add a few extra "kitchen sink" RO grants (TEMP, LOCALAPPDATA, ...)
@@ -43,25 +46,40 @@ function Record-Workload {
     param(
         [Parameter(Mandatory)] [string]$Id,
         [Parameter(Mandatory)] [string]$Name,
-        [Parameter(Mandatory)] [bool]$Pass,
+        [bool]$Pass = $true,
+        # Visual/semantic status. When omitted, derived from -Pass for back-
+        # compat (pass/fail). 'skip' = the workload's interpreter isn't on this
+        # host, so nothing was proven either way. A skip does not fail the run,
+        # but it renders distinctly so absent coverage is never a green PASS.
+        [ValidateSet('pass', 'fail', 'skip')] [string]$Status,
         [int]$ExitCode = 0,
         [string]$Detail = '',
         [string]$Stderr = ''
     )
+    if (-not $PSBoundParameters.ContainsKey('Status')) {
+        $Status = if ($Pass) { 'pass' } else { 'fail' }
+    } else {
+        # Keep the boolean consistent for downstream logic: only 'fail' fails.
+        $Pass = ($Status -ne 'fail')
+    }
     $entry = [pscustomobject]@{
         Id        = $Id
         Name      = $Name
         Pass      = $Pass
+        Status    = $Status
         ExitCode  = $ExitCode
         Detail    = $Detail
         StderrTop = ($Stderr -split "`r?`n" | Select-Object -First 3) -join ' / '
     }
     $Script:Results.Add($entry) | Out-Null
-    $tag = if ($Pass) { '[PASS]' } else { '[FAIL]' }
-    $color = if ($Pass) { 'Green' } else { 'Red' }
+    $tag, $color = switch ($Status) {
+        'pass' { '[PASS]', 'Green' }
+        'fail' { '[FAIL]', 'Red' }
+        'skip' { '[SKIP]', 'Yellow' }
+    }
     Write-Host ("  {0} {1} :: {2} (exit={3})" -f $tag, $Id, $Name, $ExitCode) -ForegroundColor $color
     if ($Detail) { Write-Host ("        detail: {0}" -f $Detail) }
-    if (-not $Pass -and $entry.StderrTop) {
+    if ($Status -eq 'fail' -and $entry.StderrTop) {
         Write-Host ("        stderr: {0}" -f $entry.StderrTop) -ForegroundColor DarkRed
     }
 }
@@ -291,7 +309,7 @@ function W1-CmdTypeMarker {
 function W2-PwshReadFile {
     Section 'W2: pwsh -NoProfile -c "Get-Content marker.txt"'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W2' -Name 'pwsh Get-Content' -Pass $false -Detail 'pwsh not found on PATH'
+        Record-Workload -Id 'W2' -Name 'pwsh Get-Content' -Status 'skip' -Detail 'pwsh not found on PATH'
         return
     }
     # PowerShell's install dir already grants ReadAndExecute to
@@ -312,11 +330,11 @@ function W2-PwshReadFile {
 function W3-PwshGitVersion {
     Section 'W3: pwsh -NoProfile -c "git --version"'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     if (-not $script:GitDir)  {
-        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Pass $false -Detail 'git not found'
+        Record-Workload -Id 'W3' -Name 'pwsh git --version' -Status 'skip' -Detail 'git not found'
         return
     }
     # Git install dir also grants ReadAndExecute to ALL APPLICATION
@@ -358,7 +376,7 @@ function Initialize-Repo {
 function W4-PwshGitStatus {
     Section 'W4: pwsh -NoProfile -c "cd <repo>; git status"'
     if (-not $script:PwshDir -or -not $script:GitDir) {
-        Record-Workload -Id 'W4' -Name 'pwsh git status' -Pass $false -Detail 'pwsh or git not found'
+        Record-Workload -Id 'W4' -Name 'pwsh git status' -Status 'skip' -Detail 'pwsh or git not found'
         return
     }
     $repo = "$ScratchRoot\rw\repo"
@@ -385,7 +403,7 @@ function W4-PwshGitStatus {
 function W5-PwshGitLog {
     Section 'W5: pwsh -NoProfile -c "cd <repo>; git log --oneline -n 10"'
     if (-not $script:PwshDir -or -not $script:GitDir) {
-        Record-Workload -Id 'W5' -Name 'pwsh git log' -Pass $false -Detail 'pwsh or git not found'
+        Record-Workload -Id 'W5' -Name 'pwsh git log' -Status 'skip' -Detail 'pwsh or git not found'
         return
     }
     $repo = "$ScratchRoot\rw\repo"
@@ -412,7 +430,7 @@ function W5-PwshGitLog {
 function W6-PwshListDir {
     Section 'W6: pwsh Get-ChildItem on rw directory'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W6' -Name 'pwsh Get-ChildItem' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W6' -Name 'pwsh Get-ChildItem' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"Get-ChildItem -LiteralPath '$ScratchRoot\rw' | Select-Object -ExpandProperty Name; exit 0`""
@@ -428,7 +446,7 @@ function W6-PwshListDir {
 function W7-PwshInProcEval {
     Section 'W7: pwsh in-process script eval (math, env, pipeline)'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W7' -Name 'pwsh in-proc eval' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W7' -Name 'pwsh in-proc eval' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $script = '$x = 6 * 7; Write-Output "answer=$x"; 1..3 | ForEach-Object { Write-Output "iter=$_" }; exit 0'
@@ -445,7 +463,7 @@ function W7-PwshInProcEval {
 function W8-PwshSpawnCmd {
     Section 'W8: pwsh spawning cmd /c (no NUL)'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W8' -Name 'pwsh spawn cmd' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W8' -Name 'pwsh spawn cmd' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     # No NUL redirects in the child — just a one-line echo.
@@ -462,7 +480,7 @@ function W8-PwshSpawnCmd {
 function W9-PwshWriteReadRoundTrip {
     Section 'W9: pwsh Set-Content + Get-Content round-trip'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W9' -Name 'pwsh write+read' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W9' -Name 'pwsh write+read' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $target = "$ScratchRoot\rw\w9-out.txt"
@@ -480,7 +498,7 @@ function W9-PwshWriteReadRoundTrip {
 function W10-PwshDotNetIo {
     Section 'W10: pwsh .NET [System.IO.File]::ReadAllText'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W10' -Name 'pwsh .NET IO' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W10' -Name 'pwsh .NET IO' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $script = "Write-Output ([System.IO.File]::ReadAllText('$ScratchRoot\rw\marker.txt')); exit 0"
@@ -504,7 +522,7 @@ function W10-PwshDotNetIo {
 function W11-NodeReadFile {
     Section 'W11: node -e fs.readFileSync(marker)'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W11' -Name 'node read file' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W11' -Name 'node read file' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $markerFwd = ("$ScratchRoot\rw\marker.txt") -replace '\\','/'
@@ -524,7 +542,7 @@ function W11-NodeReadFile {
 function W12-NodeEval {
     Section 'W12: node in-proc eval (math, loop)'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W12' -Name 'node eval' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W12' -Name 'node eval' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $js  = "let x=6*7;console.log('answer='+x);for(let i=1;i<=3;i++)console.log('iter='+i);"
@@ -543,7 +561,7 @@ function W12-NodeEval {
 function W13-NodeRoundTrip {
     Section 'W13: node fs.writeFileSync + readFileSync round-trip'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W13' -Name 'node write+read' -Pass $false -Detail 'node not found on PATH'
+        Record-Workload -Id 'W13' -Name 'node write+read' -Status 'skip' -Detail 'node not found on PATH'
         return
     }
     $targetFwd = ("$ScratchRoot\rw\w13-out.txt") -replace '\\','/'
@@ -570,7 +588,7 @@ function W13-NodeRoundTrip {
 function W14-PyReadFile {
     Section 'W14: python -c open(marker).read()'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W14' -Name 'python read file' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W14' -Name 'python read file' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     $py  = "import sys; sys.stdout.write(open(r'$ScratchRoot\rw\marker.txt').read())"
@@ -589,7 +607,7 @@ function W14-PyReadFile {
 function W15-PyEval {
     Section 'W15: python in-proc eval (math, loop)'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W15' -Name 'python eval' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W15' -Name 'python eval' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     # `python -c` accepts ';' between simple statements but requires
@@ -628,7 +646,7 @@ function Initialize-ChdirTarget {
 function W16-PyRoundTrip {
     Section 'W16: python open(w,write) + open(r,read) round-trip'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W16' -Name 'python write+read' -Pass $false -Detail 'python not found on PATH'
+        Record-Workload -Id 'W16' -Name 'python write+read' -Status 'skip' -Detail 'python not found on PATH'
         return
     }
     $target = "$ScratchRoot\rw\w16-out.txt"
@@ -662,7 +680,7 @@ function W16-PyRoundTrip {
 function W17-PwshSetLocation {
     Section 'W17: pwsh Set-Location into rw subdir'
     if (-not $script:PwshDir) {
-        Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Pass $false -Detail 'pwsh not found'
+        Record-Workload -Id 'W17' -Name 'pwsh Set-Location' -Status 'skip' -Detail 'pwsh not found'
         return
     }
     $target = Initialize-ChdirTarget
@@ -679,7 +697,7 @@ function W17-PwshSetLocation {
 function W18-NodeChdir {
     Section 'W18: node process.chdir into rw subdir'
     if (-not $script:NodeDir) {
-        Record-Workload -Id 'W18' -Name 'node chdir' -Pass $false -Detail 'node not found'
+        Record-Workload -Id 'W18' -Name 'node chdir' -Status 'skip' -Detail 'node not found'
         return
     }
     $target = Initialize-ChdirTarget
@@ -700,7 +718,7 @@ function W18-NodeChdir {
 function W19-PyChdir {
     Section 'W19: python os.chdir into rw subdir'
     if (-not $script:PythonExe) {
-        Record-Workload -Id 'W19' -Name 'python chdir' -Pass $false -Detail 'python not found'
+        Record-Workload -Id 'W19' -Name 'python chdir' -Status 'skip' -Detail 'python not found'
         return
     }
     $target = Initialize-ChdirTarget
@@ -753,9 +771,18 @@ catch {
 }
 finally {
     Section 'Summary'
-    $passed = @($Script:Results | Where-Object { $_.Pass })
-    $failed = @($Script:Results | Where-Object { -not $_.Pass })
-    Write-Host ("Total: {0}    Passed: {1}    Failed: {2}" -f $Script:Results.Count, $passed.Count, $failed.Count)
+    $passed  = @($Script:Results | Where-Object { $_.Status -eq 'pass' })
+    $failed  = @($Script:Results | Where-Object { $_.Status -eq 'fail' })
+    $skipped = @($Script:Results | Where-Object { $_.Status -eq 'skip' })
+    Write-Host ("Total: {0}    Passed: {1}    Failed: {2}    Skipped: {3}" -f `
+        $Script:Results.Count, $passed.Count, $failed.Count, $skipped.Count)
+    if ($skipped.Count -gt 0) {
+        Write-Host ''
+        Write-Host 'Skipped (interpreter not available on this host):' -ForegroundColor Yellow
+        foreach ($r in $skipped) {
+            Write-Host ("  [{0}] {1} :: {2}" -f $r.Id, $r.Name, $r.Detail) -ForegroundColor Yellow
+        }
+    }
     if ($failed.Count -gt 0) {
         Write-Host ''
         Write-Host 'Failures:' -ForegroundColor Red
@@ -765,8 +792,40 @@ finally {
             if ($r.StderrTop) { Write-Host ("        stderr: {0}" -f $r.StderrTop) -ForegroundColor DarkRed }
         }
     }
+
+    # Structured results for programmatic consumption, mirroring the shape
+    # WinProcessContainer-Tests.ps1 writes. Every step here is guarded: this
+    # runs in `finally`, so an unhandled throw would skip the exit-code line
+    # below and report a bogus result. CIM in particular is unavailable on
+    # locked-down hosts.
+    try {
+        $osInfo = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+        $osCaption = [string]$osInfo.Caption
+        $osBuild = [string]$osInfo.BuildNumber
+    } catch {
+        $osCaption = 'unknown'
+        $osBuild = 'unknown'
+    }
+    try {
+        $summary = [pscustomobject]@{
+            timestamp = (Get-Date).ToString('o')
+            host      = $env:COMPUTERNAME
+            os        = $osCaption
+            osBuild   = $osBuild
+            total     = $Script:Results.Count
+            passed    = $passed.Count
+            failed    = $failed.Count
+            skipped   = $skipped.Count
+            results   = $Script:Results
+        }
+        ($summary | ConvertTo-Json -Depth 6) | Out-File -LiteralPath $ResultsJson -Encoding utf8 -Force
+    } catch {
+        Write-Host "warning: could not write JSON results: $_" -ForegroundColor Yellow
+    }
+
     Write-Host ''
     Write-Host ("Scratch / logs: {0}" -f $ScratchRoot)
+    Write-Host ("JSON summary:   {0}" -f $ResultsJson)
     if (-not $KeepArtifacts -and $failed.Count -eq 0 -and $passed.Count -gt 0 -and (Test-Path $ScratchRoot)) {
         # Re-validate before deletion — `Assert-SafeScratchRoot` ran
         # at the start of the suite, but the variable could in
@@ -775,4 +834,7 @@ finally {
         Assert-SafeScratchRoot
         Remove-Item -Recurse -Force -LiteralPath $ScratchRoot -ErrorAction SilentlyContinue
     }
+    # A run that recorded nothing but skips proved nothing, so it is not a
+    # pass — otherwise a host missing every interpreter reports green.
+    if ($failed.Count -gt 0 -or $passed.Count -eq 0) { exit 1 } else { exit 0 }
 }

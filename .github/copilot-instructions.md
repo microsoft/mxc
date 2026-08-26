@@ -73,7 +73,8 @@ workflows) before calling the matrix job.
 - `scripts/ci/validation-test-matrix.json` is the catalog: `platforms` (each
   with per-architecture target/artifact/1ES pool and the backends that platform
   supports), `triggers` (which OS/backend pairs each plan runs), and the
-  optional `backendDelayedStart` (per-backend job-start stagger, in seconds).
+  optional `backendDelayedStart` (per-backend job-start stagger, in seconds;
+  currently empty — nothing is staggered).
   The `triggers` keys *are* the plan list — the resolver reads them at run time,
   so adding a plan needs no script change.
 - `scripts/ci/resolve-validation-test-matrix.mjs` validates that catalog and
@@ -95,7 +96,9 @@ explicit no-op, so the step runs unconditionally for every entry.
 the matrix `backend` id to the repository's existing backend suite. Ids that
 share a suite get their own case (`process-t1` and `process-t3` both run
 `WinProcessContainer-Tests.ps1`, which derives the tier it expects from the
-host's own `--probe`). A backend with no wired suite fails loudly rather than
+host's own `--probe`; `process-t3` additionally runs `T3-Workloads.ps1` and
+reports both suites' exit codes together, so one failing suite never hides the
+other). A backend with no wired suite fails loudly rather than
 reporting a false success. The Windows dispatcher points `TEMP` at
 `$RUNNER_TEMP` before running a suite, so anything a test writes to the temp
 directory is picked up by the job's log upload without per-file CI wiring.

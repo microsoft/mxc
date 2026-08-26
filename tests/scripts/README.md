@@ -41,6 +41,8 @@ Linux / macOS (`.sh`):
 | `run_windows_sandbox_one_shot_tests.ps1` | Windows Sandbox one-shot E2E suite (fresh disposable VM per test) | Windows Sandbox enabled |
 | `run_windows_sandbox_state_aware_tests.ps1` | Windows Sandbox state-aware lifecycle E2E (single VM held across provision/start/exec*/stop/deprovision) | Windows Sandbox enabled |
 | `run_processcontainer_proxy_tests.ps1` | Process container proxy tests | `wxc-exec.exe` |
+| `WinProcessContainer-Tests.ps1` | Process container (AppContainer / BaseContainer) primitives suite — tier probes, rw/ro/denied matrix, UI mitigations, DACL restore, crash recovery | `wxc-exec.exe`, `wxc-ui-probe.exe` |
+| `T3-Workloads.ps1` | Real workloads (pwsh, git, node, python, cmd) on top of the T3 primitives. A missing interpreter is reported as a skip, not a failure | `wxc-exec.exe`; `pwsh` and `git` for full coverage, `node` / `python` optional |
 | `run_on_repeat.ps1` | Stress test (loops core tests) | `wxc-exec.exe` |
 
 ### Linux suites
@@ -76,6 +78,8 @@ Pass the backend id exactly as it appears in the catalog — there is no separat
 handler name. Ids that share a suite have their own case in the dispatcher:
 `process-t1` and `process-t3` both run `WinProcessContainer-Tests.ps1`, which
 determines the tier it expects from the host's own `wxc-exec --probe`.
+`process-t3` additionally runs `T3-Workloads.ps1`; both suites run even if the
+first one fails, and the job reports their exit codes together.
 
 ```powershell
 scripts\ci\run_backend_validation_tests.ps1 -Backend process-t1 `
