@@ -42,10 +42,6 @@ command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the peer n
 # through INPUT instead, answers with no firewall installed at all, and so
 # cannot stand in for an allowed destination.  The peer lives in its own
 # network namespace behind a veth, reachable only through the forwarded path.
-#
-# This replaces api.github.com, whose rate-limited 403 was indistinguishable
-# from over-blocking and turned a healthy firewall red when the remote service,
-# not this repository, was at fault.
 PEER_NETNS="mxc-nettest-peer"
 PEER_HOST_VETH="mxcnth0"
 PEER_VETH="mxcntp0"

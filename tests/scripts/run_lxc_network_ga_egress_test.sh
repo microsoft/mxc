@@ -137,13 +137,7 @@ assert_allowed() {
 # and would answer even with no firewall installed, so it cannot stand in for
 # an allowed destination.  The peer therefore lives in its own network
 # namespace, routed to over a dedicated veth, reachable only through the
-# container's forwarded path.  This is the same routed-namespace peer that
-# run_lxc_network_proxy_hostname_test.sh already stands up for exactly this
-# reason; the mechanism is reused here rather than invented.
-#
-# This replaces api.github.com, whose rate-limited 403 was indistinguishable
-# from over-blocking and turned a healthy firewall red when the remote service,
-# not the repository, was at fault.
+# container's forwarded path.
 PEER_NETNS="mxc-ga-egress-peer"
 PEER_HOST_VETH="mxcgah0"
 PEER_VETH="mxcgap0"

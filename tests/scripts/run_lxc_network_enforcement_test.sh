@@ -107,10 +107,6 @@ assert_no_forward_reference() {
 # Both cases aim at this one address, which is what makes the pair meaningful:
 # the deny case now shows a destination that is demonstrably reachable becoming
 # unreachable under policy, rather than merely failing to reach something.
-#
-# This replaces api.github.com, whose rate-limited 403 was indistinguishable
-# from over-blocking and turned a healthy firewall red when the remote service,
-# not this repository, was at fault.
 PEER_NETNS="mxc-enforce-peer"
 PEER_HOST_VETH="mxcenh0"
 PEER_VETH="mxcenp0"

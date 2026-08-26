@@ -107,12 +107,6 @@ assert_no_forward_reference() {
 # Both runs aim here, which is what lets the control run do its job: it shows
 # this exact address is reachable when only the allow list names it, so the
 # overlap run's blocked verdict can only be the deny entry winning.
-#
-# This replaces api.github.com, whose rate-limited 403 was indistinguishable
-# from a working deny rule and turned a healthy firewall red when the remote
-# service, not this repository, was at fault.  Both fixtures still name
-# 0.0.0.0/0 and ::/0, so the deliberate choice of literal CIDRs over a hostname
-# described above is unaffected.
 PEER_NETNS="mxc-denyprec-peer"
 PEER_HOST_VETH="mxcdph0"
 PEER_VETH="mxcdpp0"
