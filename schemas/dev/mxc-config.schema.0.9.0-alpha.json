@@ -950,6 +950,31 @@
               "macos_sandbox"
             ]
           }
+        },
+        {
+          "else": true,
+          "if": {
+            "properties": {
+              "containment": {
+                "const": "apple_container"
+              }
+            },
+            "required": [
+              "containment"
+            ]
+          },
+          "then": {
+            "properties": {
+              "experimental": {
+                "required": [
+                  "apple_container"
+                ]
+              }
+            },
+            "required": [
+              "experimental"
+            ]
+          }
         }
       ],
       "description": "A complete one-shot `0.9.0-alpha` configuration request.",

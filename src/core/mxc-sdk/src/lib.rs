@@ -49,6 +49,7 @@
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
+//! | Apple Container (config only) | macOS | [`Containment::AppleContainer`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
 //! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
@@ -58,7 +59,10 @@
 //! Backends with no [`Containment`] variant return an [`Error`] with
 //! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
 //! binaries for those. IsolationSession refuses the one-shot surface the same
-//! way, and is reached through the state-aware lifecycle below.
+//! way, and is reached through the state-aware lifecycle below. Apple
+//! Container currently exposes configuration only: [`run`] and
+//! [`spawn_sandbox`] return [`ErrorCode::UnsupportedContainment`] before
+//! creating resources.
 //!
 //! # Diagnosing a failure
 //!

@@ -416,7 +416,6 @@ let policy = SandboxPolicy {
     network: None,
     ui: None,
     timeout_ms: None,
-    capture_denials: None,
 };
 let apple = AppleContainerSection {
     image: "docker.io/library/alpine:3.23".to_string(),

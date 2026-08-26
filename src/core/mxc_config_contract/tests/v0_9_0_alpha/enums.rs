@@ -5,7 +5,7 @@ use crate::common::{assert_invalid, assert_valid};
 
 // Enum value tests
 #[test]
-fn accepts_every_containment_value() {
+fn accepts_every_unconditional_containment_value() {
     for containment in [
         "process",
         "processcontainer",
@@ -18,7 +18,6 @@ fn accepts_every_containment_value() {
         "hyperlight",
         "isolation_session",
         "wslc",
-        "apple_container",
     ] {
         let json = format!(
             r#"{{
@@ -30,6 +29,25 @@ fn accepts_every_containment_value() {
 
         assert_valid(&json);
     }
+}
+
+#[test]
+fn rejects_apple_container_without_experimental_settings() {
+    assert_invalid(
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "apple_container",
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
+    assert_invalid(
+        r#"{
+            "version": "0.9.0-alpha",
+            "containment": "apple_container",
+            "experimental": {},
+            "process": {"commandLine": "echo"}
+        }"#,
+    );
 }
 
 #[test]

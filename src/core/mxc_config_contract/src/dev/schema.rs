@@ -113,6 +113,29 @@ fn exclude_duplicate_alias(
     }));
 }
 
+fn require_apple_container_settings(definitions: &mut Value) {
+    let one_shot = definitions["OneShotRequest"]
+        .as_object_mut()
+        .expect("one-shot request definition");
+    let constraints = one_shot
+        .entry("allOf")
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .expect("allOf constraints");
+    constraints.push(branch(
+        discriminator("containment", "apple_container"),
+        json!({
+            "properties": {
+                "experimental": {
+                    "required": ["apple_container"]
+                }
+            },
+            "required": ["experimental"]
+        }),
+        Value::Bool(true),
+    ));
+}
+
 /// Generates the unrendered JSON Schema for the mutable `0.9.0-alpha`
 /// development contract.
 ///
@@ -160,6 +183,7 @@ pub fn development_schema() -> Value {
         "seatbelt",
         "macos_sandbox",
     );
+    require_apple_container_settings(&mut definitions);
 
     json!({
         "$schema": "http://json-schema.org/draft-07/schema#",
@@ -268,7 +292,27 @@ mod tests {
                 .as_array()
                 .expect("alias constraints")
                 .len(),
-            2
+            3
+        );
+    }
+
+    #[test]
+    fn one_shot_schema_requires_apple_container_settings() {
+        let schema = development_schema();
+        let constraints = schema["definitions"]["OneShotRequest"]["allOf"]
+            .as_array()
+            .expect("one-shot constraints");
+        let apple_container = constraints
+            .iter()
+            .find(|constraint| {
+                constraint["if"]["properties"]["containment"]["const"] == json!("apple_container")
+            })
+            .expect("Apple Container constraint");
+
+        assert_eq!(apple_container["then"]["required"], json!(["experimental"]));
+        assert_eq!(
+            apple_container["then"]["properties"]["experimental"]["required"],
+            json!(["apple_container"])
         );
     }
 
