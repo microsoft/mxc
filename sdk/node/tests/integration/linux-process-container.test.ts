@@ -46,6 +46,12 @@ async function runLxc(
   return spawnFromConfigAsync(config, debugSpawnOptions);
 }
 
+function outboundNetwork(version: (typeof supportedVersions)[number]) {
+  return version.compare('0.8.0-alpha') >= 0
+    ? { egress: { default: 'allow' as const } }
+    : { allowOutbound: true };
+}
+
 for (const schemaVersion of supportedVersions) {
 describe(`Linux LXC Container (schema ${schemaVersion})`, {
   skip: lxcSkipReason,
@@ -109,10 +115,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should allow outbound network access', { skip: lxcNetworkSkipReason }, async () => {
-    const network = schemaVersion.compare('0.8.0-alpha') >= 0
-      ? { egress: { default: 'allow' as const } }
-      : { allowOutbound: true };
-    const policy = { version: schemaVersion.raw, network };
+    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'Network accessible'`,
       policy,
@@ -150,7 +153,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
     const policy = {
       version: schemaVersion.raw,
       filesystem: { readwritePaths: [tempDir] },
-      network: { allowOutbound: true },
+      network: outboundNetwork(schemaVersion),
     };
     const script =
       `wget -q -T 10 -O ${tempDir}/download.json '${NETWORK_TEST_URL}'` +
@@ -161,7 +164,7 @@ describe(`Linux LXC Container (schema ${schemaVersion})`, {
   });
 
   it('should access HTTPS endpoint', { skip: lxcNetworkSkipReason }, async () => {
-    const policy = { version: schemaVersion.raw, network: { allowOutbound: true } };
+    const policy = { version: schemaVersion.raw, network: outboundNetwork(schemaVersion) };
     const result = await runLxc(
       `wget -q -T 10 -O /dev/null '${NETWORK_TEST_URL}' && echo 'HTTPS endpoint accessible'`,
       policy,
