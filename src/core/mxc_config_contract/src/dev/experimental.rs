@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::primitives::NonEmptyString;
+use super::primitives::NonBlankString;
 use super::primitives::OptionalField;
 use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
@@ -102,7 +102,7 @@ pub struct OneShotWslc {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OneShotAppleContainer {
     /// OCI image reference. The image must provide `/bin/sh`.
-    pub image: NonEmptyString,
+    pub image: NonBlankString,
     /// Requested virtual CPU count.
     #[serde(default)]
     pub cpu_count: OptionalField<NonZeroU32>,

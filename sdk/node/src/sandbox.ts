@@ -473,6 +473,7 @@ export function createAppleContainerConfig(
 
     const config = createConfigFromPolicy(policy, 'process', containerName);
     delete config.seatbelt;
+    delete config.processContainer;
     config.containment = 'apple_container';
     config.experimental = {
         ...config.experimental,

@@ -992,7 +992,14 @@ describe('createConfigFromPolicy', () => {
       mockDarwin();
       try {
         const config = createAppleContainerConfig(
-          { version: '0.9.0-alpha' },
+          {
+            version: '0.9.0-alpha',
+            processContainer: {
+              network: {
+                allowedProxyPeer: 'Contoso.Proxy_1234567890abc',
+              },
+            },
+          },
           {
             image: 'docker.io/library/alpine:3.23',
             cpuCount: 2,
@@ -1004,6 +1011,7 @@ describe('createConfigFromPolicy', () => {
         assert.strictEqual(config.containment, 'apple_container');
         assert.strictEqual(config.containerId, 'apple-test');
         assert.strictEqual(config.seatbelt, undefined);
+        assert.strictEqual(config.processContainer, undefined);
         assert.deepStrictEqual(config.experimental?.apple_container, {
           image: 'docker.io/library/alpine:3.23',
           cpuCount: 2,

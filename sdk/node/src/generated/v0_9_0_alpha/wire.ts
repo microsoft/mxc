@@ -23,7 +23,7 @@ export interface AppleContainer {
   /**
    * OCI image reference. The image must provide `/bin/sh`.
    */
-  image: NonEmptyString;
+  image: NonBlankString;
   /**
    * Requested memory limit in megabytes.
    */
@@ -412,6 +412,8 @@ export interface NetworkRule {
    */
   to?: NetworkPeer[];
 }
+
+export type NonBlankString = string;
 
 export type NonEmptyString = string;
 

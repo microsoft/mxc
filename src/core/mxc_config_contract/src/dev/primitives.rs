@@ -150,6 +150,62 @@ impl<'de> Deserialize<'de> for NonEmptyString {
     }
 }
 
+/// A string containing at least one non-whitespace character.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NonBlankString(String);
+
+#[cfg(feature = "schema-gen")]
+impl schemars::JsonSchema for NonBlankString {
+    fn schema_name() -> String {
+        "NonBlankString".to_string()
+    }
+
+    fn json_schema(_generator: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{InstanceType, Schema, SchemaObject, SingleOrVec, StringValidation};
+
+        Schema::Object(SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            string: Some(Box::new(StringValidation {
+                pattern: Some(r"\S".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+impl NonBlankString {
+    /// Creates a validated string.
+    ///
+    /// Returns an error when `value` contains only whitespace.
+    pub fn new(value: String) -> Result<Self, String> {
+        if value.trim().is_empty() {
+            Err("string must contain a non-whitespace character".to_string())
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the validated string as a borrowed string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Consumes the wrapper and returns the validated string.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for NonBlankString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
 /// A JSON array that must contain at least one element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonEmptyVec<T>(Vec<T>);
@@ -236,6 +292,18 @@ mod tests {
         assert_eq!(error, "string must not be empty");
     }
 
+    #[test]
+    fn non_blank_string_accepts_surrounding_whitespace() {
+        let value = NonBlankString::new(" alpine ".to_string()).unwrap();
+        assert_eq!(value.as_str(), " alpine ");
+    }
+
+    #[test]
+    fn non_blank_string_rejects_whitespace_only() {
+        let error = NonBlankString::new(" \t\n".to_string()).unwrap_err();
+        assert_eq!(error, "string must contain a non-whitespace character");
+    }
+
     #[cfg(feature = "schema-gen")]
     #[test]
     fn constrained_primitive_schemas_match_deserialization() {
@@ -249,6 +317,10 @@ mod tests {
         let non_empty = serde_json::to_value(NonEmptyString::json_schema(&mut generator)).unwrap();
         assert_eq!(non_empty["type"], "string");
         assert_eq!(non_empty["minLength"], 1);
+
+        let non_blank = serde_json::to_value(NonBlankString::json_schema(&mut generator)).unwrap();
+        assert_eq!(non_blank["type"], "string");
+        assert_eq!(non_blank["pattern"], r"\S");
     }
 
     #[cfg(feature = "schema-gen")]

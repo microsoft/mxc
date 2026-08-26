@@ -147,7 +147,7 @@
           "type": "integer"
         },
         "image": {
-          "$ref": "#/definitions/NonEmptyString",
+          "$ref": "#/definitions/NonBlankString",
           "description": "OCI image reference. The image must provide `/bin/sh`."
         },
         "memoryMb": {
@@ -798,6 +798,10 @@
         }
       },
       "type": "object"
+    },
+    "NonBlankString": {
+      "pattern": "\\S",
+      "type": "string"
     },
     "NonEmptyString": {
       "minLength": 1,

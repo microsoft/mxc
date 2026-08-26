@@ -285,6 +285,8 @@ Apple Container has a dedicated builder because it requires an OCI image and
 schema version `0.9.0-alpha`:
 
 ```typescript
+import { createAppleContainerConfig } from '@microsoft/mxc-sdk';
+
 const config = createAppleContainerConfig(
   { version: '0.9.0-alpha' },
   { image: 'docker.io/library/alpine:3.23', cpuCount: 2, memoryMb: 1024 },

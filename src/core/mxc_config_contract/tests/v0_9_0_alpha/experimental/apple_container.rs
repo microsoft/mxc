@@ -34,6 +34,8 @@ fn rejects_missing_empty_or_non_string_image() {
     for fields in [
         "",
         r#""image": """#,
+        r#""image": " ""#,
+        r#""image": "\t\n""#,
         r#""image": null"#,
         r#""image": 123"#,
         r#""image": true"#,
