@@ -416,7 +416,8 @@ public sealed class MxcSandboxProcess : ISandboxProcess
     /// </summary>
     /// <param name="exitCode">
     /// Receives the child's exit code when this method returns
-    /// <see langword="true"/>; otherwise receives zero.
+    /// <see langword="true"/>, or <c>-1</c> when a native state-aware waiter
+    /// completed because its deadline elapsed; otherwise receives zero.
     /// </param>
     /// <returns>
     /// <see langword="true"/> when the child has exited; otherwise
@@ -431,18 +432,25 @@ public sealed class MxcSandboxProcess : ISandboxProcess
     /// <exception cref="MxcException">The process status could not be queried.</exception>
     public bool TryGetExitCode(out int exitCode)
     {
+        return TryGetTerminalStatus(out exitCode, out _);
+    }
+
+    private bool TryGetTerminalStatus(out int exitCode, out bool timedOut)
+    {
         lock (_controlLock)
         {
             ThrowIfDisposed();
             var running = 1;
             var nativeExitCode = 0;
+            var nativeTimedOut = 0;
             int status;
             unsafe
             {
                 status = NativeMethods.mxc_sandbox_try_wait(
                     _handle.Ptr,
                     &nativeExitCode,
-                    &running);
+                    &running,
+                    &nativeTimedOut);
             }
             if (status != (int)ErrorCode.Success)
             {
@@ -451,6 +459,7 @@ public sealed class MxcSandboxProcess : ISandboxProcess
                     "querying the sandbox process status failed");
             }
             exitCode = nativeExitCode;
+            timedOut = nativeTimedOut != 0;
             return running == 0;
         }
     }
@@ -464,11 +473,11 @@ public sealed class MxcSandboxProcess : ISandboxProcess
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            if (TryGetExitCode(out _))
+            if (TryGetTerminalStatus(out _, out _))
             {
                 // try_wait is intentionally a non-blocking root-process poll.
-                // Complete the native wait so descendant termination and any
-                // backend finalization (including captureDenials) finish before
+                // Complete the native wait so a cached timeout is translated
+                // into TimedOut and all backend finalization finishes before
                 // the managed Wait/WaitAsync contract returns.
                 return WaitBlocking();
             }

@@ -662,46 +662,54 @@ pub unsafe extern "C" fn mxc_sandbox_warnings_json(
     .unwrap_or(MXC_STATUS_PANIC)
 }
 
-/// Non-blocking exit check. On return, `*out_running` is `1` if the child is
-/// still running (and `*out_exit` is untouched) or `0` if it has exited (and
-/// `*out_exit` holds its exit code).
+/// Non-blocking completion check. On return, `*out_running` is `1` if the child
+/// is still running. For a normal exit it is `0`, `*out_exit` holds the exit
+/// code, and `*out_timed_out` is `0`. For a finalized timeout it is `0`,
+/// `*out_exit` is `-1`, and `*out_timed_out` is `1`.
 ///
 /// Returns [`MXC_STATUS_SUCCESS`], [`MXC_STATUS_NULL_ARGUMENT`] if any pointer
 /// is null, or [`MXC_STATUS_BACKEND_ERROR`] on a wait error.
 ///
 /// # Safety
 /// - `handle` must be null or a live handle from [`mxc_spawn`].
-/// - `out_exit` / `out_running` must be null or point to writable `i32` storage.
+/// - `out_exit` / `out_running` / `out_timed_out` must be null or point to
+///   writable `i32` storage.
 #[no_mangle]
 pub unsafe extern "C" fn mxc_sandbox_try_wait(
     handle: *mut MxcSandbox,
     out_exit: *mut i32,
     out_running: *mut i32,
+    out_timed_out: *mut i32,
 ) -> i32 {
-    if handle.is_null() || out_exit.is_null() || out_running.is_null() {
+    if handle.is_null() || out_exit.is_null() || out_running.is_null() || out_timed_out.is_null() {
         return MXC_STATUS_NULL_ARGUMENT;
     }
     let status = catch_unwind(AssertUnwindSafe(|| {
         // SAFETY: non-null live handle per the caller contract.
         let sandbox = unsafe { &mut *handle };
-        match sandbox.inner.try_wait() {
-            Ok(Some(code)) => {
+        match try_wait_result_to_abi(sandbox.inner.try_wait()) {
+            Ok((exit, running, timed_out)) => {
                 // SAFETY: out-params non-null writable per the caller contract.
                 unsafe {
-                    *out_exit = code;
-                    *out_running = 0;
+                    *out_exit = exit;
+                    *out_running = running;
+                    *out_timed_out = timed_out;
                 }
                 MXC_STATUS_SUCCESS
             }
-            Ok(None) => {
-                // SAFETY: out-params non-null writable per the caller contract.
-                unsafe { *out_running = 1 };
-                MXC_STATUS_SUCCESS
-            }
-            Err(_) => MXC_STATUS_BACKEND_ERROR,
+            Err(status) => status,
         }
     }));
     status.unwrap_or(MXC_STATUS_PANIC)
+}
+
+fn try_wait_result_to_abi(result: std::io::Result<Option<i32>>) -> Result<(i32, i32, i32), i32> {
+    match result {
+        Ok(Some(code)) => Ok((code, 0, 0)),
+        Ok(None) => Ok((0, 1, 0)),
+        Err(error) if error.kind() == std::io::ErrorKind::TimedOut => Ok((-1, 0, 1)),
+        Err(_) => Err(MXC_STATUS_BACKEND_ERROR),
+    }
 }
 
 /// Block until the child exits (honouring the request's `scriptTimeout`),
@@ -847,6 +855,23 @@ pub unsafe extern "C" fn mxc_stream_closer_free(closer: *mut MxcStreamCloser) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_wait_preserves_timeout_as_a_terminal_outcome() {
+        assert_eq!(try_wait_result_to_abi(Ok(Some(42))), Ok((42, 0, 0)));
+        assert_eq!(try_wait_result_to_abi(Ok(None)), Ok((0, 1, 0)));
+        assert_eq!(
+            try_wait_result_to_abi(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "deadline elapsed"
+            ))),
+            Ok((-1, 0, 1))
+        );
+        assert_eq!(
+            try_wait_result_to_abi(Err(std::io::Error::other("wait failed"))),
+            Err(MXC_STATUS_BACKEND_ERROR)
+        );
+    }
     use std::ffi::CString;
 
     #[test]
@@ -947,7 +972,7 @@ mod tests {
                 MXC_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
-                mxc_sandbox_try_wait(ptr::null_mut(), &mut i, &mut j),
+                mxc_sandbox_try_wait(ptr::null_mut(), &mut i, &mut j, &mut j),
                 MXC_STATUS_NULL_ARGUMENT
             );
             assert_eq!(
@@ -1122,9 +1147,11 @@ mod tests {
         let mut exit = 0;
         let mut running = 0;
         // SAFETY: live handle + out pointers.
-        let rc = unsafe { mxc_sandbox_try_wait(handle, &mut exit, &mut running) };
+        let mut timed_out = -1;
+        let rc = unsafe { mxc_sandbox_try_wait(handle, &mut exit, &mut running, &mut timed_out) };
         assert_eq!(rc, MXC_STATUS_SUCCESS);
         assert_eq!(running, 1, "blocked child should still be running");
+        assert_eq!(timed_out, 0);
 
         // SAFETY: live handle.
         let rc = unsafe { mxc_sandbox_kill(handle) };
