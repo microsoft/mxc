@@ -37,7 +37,9 @@ use wxc_common::sandbox_process::{
     WaitError,
 };
 use wxc_common::unix_proxy_coordinator::UnixProxyCoordinator;
-use wxc_common::validator::validate_common;
+use wxc_common::validator::{
+    validate_common, validate_network_policy_support, NetworkPolicySupport,
+};
 
 use crate::profile_builder::build_profile_with_proxy;
 
@@ -105,7 +107,26 @@ impl SeatbeltScriptRunner {
 }
 
 impl SandboxBackend for SeatbeltScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        // Seatbelt enforces a single outbound default (no CIDR/port/protocol
+        // rules — `EGRESS_RULES` is intentionally omitted), a single inbound
+        // default mapped to the existing `allowLocalNetwork` behavior, and the
+        // loopback-scoped runtime proxy. It has no per-peer proxy identity
+        // concept (`PROXY_PEER_IDENTITY` is a ProcessContainer-only feature).
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, self.network_policy_support())?;
+
+        // Shared with the config parser so a caller that builds an
+        // ExecutionRequest directly gets the same rules.
+        wxc_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
+            .map_err(error_response)?;
+
         // Seatbelt cannot filter network by hostname — reject blockedHosts
         // rather than silently allowing traffic the user expects to be denied.
         if !request.policy.blocked_hosts.is_empty() {
@@ -115,6 +136,23 @@ impl SandboxBackend for SeatbeltScriptRunner {
                  defaultPolicy: \"block\" to deny all network."
                     .to_string(),
             ));
+        }
+
+        // Seatbelt has no private loopback, so it cannot enforce an
+        // independent `hostLoopback` posture: `ingress.default` alone drives
+        // the `(allow network-inbound (local ip))` rule. Reject configs where
+        // `hostLoopback` diverges from `default` instead of silently applying
+        // one and ignoring the other.
+        if let Some(ingress) = request.policy.network_ingress.as_ref() {
+            if ingress.host_loopback != ingress.default {
+                return Err(error_response(
+                    "macOS Seatbelt has no private loopback and cannot enforce an \
+                     independent network.ingress.hostLoopback posture. Set \
+                     'hostLoopback' equal to 'default', or omit 'hostLoopback' to \
+                     inherit 'default'."
+                        .to_string(),
+                ));
+            }
         }
 
         Ok(())
@@ -821,7 +859,10 @@ fn cleanup_files(paths: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ExecutionRequest, SeatbeltConfig};
+    use wxc_common::models::{
+        ExecutionRequest, NetworkAction, NetworkEgressPolicy, NetworkPolicy, ProxyAddress,
+        SeatbeltConfig,
+    };
 
     #[allow(clippy::field_reassign_with_default)]
     fn base_request() -> ExecutionRequest {
@@ -840,6 +881,135 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    /// The parser is not the only door: `mxc_engine::run` takes an
+    /// `ExecutionRequest` built by hand. These assert `validate` rejects the
+    /// same policies the parser does, in both the legacy and directional shape.
+    #[test]
+    fn rejects_proxy_with_egress_allow_bypassing_the_parser() {
+        let runner = SeatbeltScriptRunner::new();
+
+        let mut legacy = base_request();
+        legacy.policy.default_network_policy = NetworkPolicy::Allow;
+        legacy.policy.network_proxy.address = Some(ProxyAddress::from_url(
+            "http://127.0.0.1:8080",
+            "127.0.0.1".into(),
+            8080,
+        ));
+        let err = runner.validate(&legacy).unwrap_err();
+        assert!(
+            err.error_message.contains("no enforcement effect"),
+            "{err:?}"
+        );
+
+        let mut directional = base_request();
+        directional.policy.network_egress = Some(NetworkEgressPolicy {
+            default: NetworkAction::Allow,
+            ..Default::default()
+        });
+        directional.policy.network_proxy.address = Some(ProxyAddress::from_url(
+            "http://127.0.0.1:8080",
+            "127.0.0.1".into(),
+            8080,
+        ));
+        let err = runner.validate(&directional).unwrap_err();
+        assert!(
+            err.error_message.contains("no enforcement effect"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_allowed_hosts_under_deny_bypassing_the_parser() {
+        let mut request = base_request();
+        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.allowed_hosts = vec!["example.com".into()];
+        let runner = SeatbeltScriptRunner::new();
+        let err = runner.validate(&request).unwrap_err();
+        assert!(err.error_message.contains("allowedHosts"), "{err:?}");
+    }
+
+    #[test]
+    fn accepts_allowed_hosts_under_deny_with_builtin_test_server() {
+        let mut request = base_request();
+        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.allowed_hosts = vec!["example.com".into()];
+        request.policy.network_proxy.builtin_test_server = true;
+        let runner = SeatbeltScriptRunner::new();
+        assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn rejects_remote_proxy_under_deny_bypassing_the_parser() {
+        let mut request = base_request();
+        request.policy.default_network_policy = NetworkPolicy::Block;
+        request.policy.network_proxy.address = Some(ProxyAddress::from_url(
+            "http://proxy.corp:3128",
+            "proxy.corp".into(),
+            3128,
+        ));
+        let runner = SeatbeltScriptRunner::new();
+        let err = runner.validate(&request).unwrap_err();
+        assert!(
+            err.error_message.contains("remote network.proxy"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_loopback_proxy_under_deny_in_every_spelling() {
+        let runner = SeatbeltScriptRunner::new();
+        for host in ["127.0.0.1", "localhost", "[::1]", "::1"] {
+            let mut request = base_request();
+            request.policy.default_network_policy = NetworkPolicy::Block;
+            request.policy.network_proxy.address = Some(ProxyAddress::from_url(
+                "http://proxy:8080",
+                host.into(),
+                8080,
+            ));
+            assert!(runner.validate(&request).is_ok(), "rejected {host}");
+        }
+    }
+
+    #[test]
+    fn declares_directional_network_policy_support() {
+        let runner = SeatbeltScriptRunner::new();
+        let support = runner.network_policy_support();
+        assert!(support.contains(NetworkPolicySupport::EGRESS_DEFAULT));
+        assert!(support.contains(NetworkPolicySupport::INGRESS_DEFAULT));
+        assert!(support.contains(NetworkPolicySupport::HOST_LOOPBACK));
+        assert!(support.contains(NetworkPolicySupport::RUNTIME_PROXY));
+        // No CIDR/port/protocol rule engine and no ProcessContainer-only
+        // per-peer proxy identity concept.
+        assert!(!support.contains(NetworkPolicySupport::EGRESS_RULES));
+        assert!(!support.contains(NetworkPolicySupport::PROXY_PEER_IDENTITY));
+    }
+
+    #[test]
+    fn rejects_mismatched_ingress_default_and_host_loopback() {
+        let mut request = base_request();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let runner = SeatbeltScriptRunner::new();
+        let response = runner.validate(&request).unwrap_err();
+        assert!(response.error_message.contains("hostLoopback"));
+        assert!(response.error_message.contains("independent"));
+    }
+
+    #[test]
+    fn accepts_matching_ingress_default_and_host_loopback() {
+        let mut request = base_request();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+        let runner = SeatbeltScriptRunner::new();
+        assert!(runner.validate(&request).is_ok());
     }
 
     /// Look up the last value set for `key` in a resolved env list.

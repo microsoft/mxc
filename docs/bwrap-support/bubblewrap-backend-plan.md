@@ -80,7 +80,8 @@ A backend-specific config can be added later under `ExperimentalConfig` if neede
 - Add a `Bubblewrap` variant to the wire `Containment` enum (or rely on the
   abstract `process` intent resolving to `Bubblewrap` on Linux)
 - Add any backend-specific fields to the wire model (under `experimental` while
-  experimental), then regenerate the schema with `mxc_schema_gen`
+  experimental), then regenerate the applicable rolling and exact schemas with
+  `mxc_schema_gen schema`
 - Map the new `containment` value in `map_wire_containment`
 - Optionally: make `"process"` resolve to `Bubblewrap` on Linux when LXC is unavailable
   (or add a `"process"` → bwrap fallback chain)

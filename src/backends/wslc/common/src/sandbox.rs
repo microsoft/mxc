@@ -31,6 +31,7 @@ use wxc_common::sandbox_process::{
     boxed_closer, cancel_and_join_discard, spawn_discard, take_boxed_read, SandboxBackend,
     SandboxProcess, StdioMode, StreamCloser,
 };
+use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::validate_common;
 
 use crate::stream_buffer::{StreamCanceller, StreamReader};
@@ -38,6 +39,10 @@ use crate::wsl_container_runner::{OutputMode, StartedContainer, WSLContainerRunn
 use crate::wslc_bindings::WslcSignal;
 
 impl SandboxBackend for WSLContainerRunner {
+    fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        ScriptRunner::validate_runner(self, request)
+    }
+
     fn spawn(
         &mut self,
         request: &ExecutionRequest,

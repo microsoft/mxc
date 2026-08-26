@@ -21,9 +21,7 @@
     PowerShell on that host.
 
     Prerequisite probe (skip if unavailable -- not a failure):
-      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`. This
-        single signal covers an OS that cannot activate the isolation session
-        API as well as a binary built without `--features isolation_session`.
+      - `wxc-exec --probe` reports `probes.isolationSessionAvailable`.
 
 .PARAMETER WxcExePath
     Path to wxc-exec.exe. Default probes the host-arch target dir, then
@@ -148,7 +146,7 @@ function Get-IsolationSessionProbe {
 
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
-    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
     exit 0
 }
 if ($probeResult.Status -ne 'available') {
@@ -414,7 +412,7 @@ try {
             $id = $envObj.result.sandboxId
             $decoded = Decode-SandboxId $id
             Assert-True ($null -ne $decoded) "sandbox_id payload decodes ($id)"
-            Assert-True ($decoded.appId -eq 'Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
+            Assert-True ($decoded.appId -eq 'PFN:Contoso.App_8wekyb3d8bbwe') "payload carries the supplied appId (got '$($decoded.appId)')"
             Assert-True ($decoded.agentUserName -eq $envObj.result.metadata.agentUserName) "payload agentUserName matches metadata"
             # appId is deliberately NOT echoed in metadata -- the caller already
             # supplied it, so echoing it would be redundant surface.

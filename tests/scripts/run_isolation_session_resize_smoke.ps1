@@ -148,7 +148,7 @@ function Get-IsolationSessionProbe {
 
 $probeResult = Get-IsolationSessionProbe -Exe $WxcExec
 if ($probeResult.Status -eq 'unavailable') {
-    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false (host cannot activate the isolation session API, or this binary was built without --features isolation_session)" -ForegroundColor Yellow
+    Write-Host "SKIPPED: wxc-exec --probe reports isolationSessionAvailable=false" -ForegroundColor Yellow
     exit 0
 }
 if ($probeResult.Status -ne 'available') {

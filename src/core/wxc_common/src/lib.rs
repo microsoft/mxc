@@ -20,12 +20,20 @@ pub mod logger;
 pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
+mod network_parser;
+pub use network_parser::directional_network_support;
+pub use network_parser::host_is_canonical_loopback;
+pub use network_parser::supports_directional_network;
 pub mod proxy_env;
 pub mod sandbox_process;
 pub mod script_runner;
+pub mod seatbelt_policy;
 pub mod state_aware_backend;
 pub mod state_aware_dispatch;
 pub mod state_aware_request;
+// Not yet reachable from production dispatch; see Gudge.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod state_aware_wire;
 pub mod telemetry;
 pub mod ui_policy;
 pub mod validator;
@@ -36,12 +44,6 @@ pub mod wire;
 
 // Adapters that map between specific JSON contracts and the 'wire' model.
 pub(crate) mod config_contract_adapters;
-
-// TypeScript emitter for the SDK wire types (drift oracle). Walks the generated
-// schema value and emits `sdk/node/src/generated/wire.ts`. Compiled with the wire
-// model under the `schema-gen` feature.
-#[cfg(feature = "schema-gen")]
-pub mod ts_emit;
 
 // Thin Windows-only helpers that are not backend-specific. Backend
 // runners live in dedicated crates under `backends/`; only utilities

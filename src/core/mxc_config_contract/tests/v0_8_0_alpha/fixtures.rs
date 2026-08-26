@@ -1,90 +1,72 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::OneShotRequest;
+use mxc_config_contract::published::v0_8_0_alpha::Request;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-const VALID_FIXTURES: &[(&str, &str)] = &[
-    ("minimal", include_str!("fixtures/valid/minimal.json")),
-    ("complete", include_str!("fixtures/valid/complete.json")),
-    (
-        "experimental field",
-        include_str!("fixtures/valid/experimental.json"),
-    ),
-    (
-        "empty optional objects",
-        include_str!("fixtures/valid/empty_optional_objects.json"),
-    ),
-    (
-        "appContainer alias",
-        include_str!("fixtures/valid/app_container_alias.json"),
-    ),
-    (
-        "localhost proxy",
-        include_str!("fixtures/valid/proxy_localhost.json"),
-    ),
-    (
-        "built-in proxy",
-        include_str!("fixtures/valid/proxy_builtin.json"),
-    ),
-    ("URL proxy", include_str!("fixtures/valid/proxy_url.json")),
-    (
-        "schema and comments",
-        include_str!("fixtures/valid/annotations.json"),
-    ),
-    (
-        "macos_sandbox alias",
-        include_str!("fixtures/valid/macos_sandbox_alias.json"),
-    ),
-    (
-        "seatbelt minimal",
-        include_str!("fixtures/valid/seatbelt_minimal.json"),
-    ),
-    (
-        "seatbelt complete",
-        include_str!("fixtures/valid/seatbelt_complete.json"),
-    ),
-];
+fn fixture_directory(kind: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("v0_8_0_alpha")
+        .join("fixtures")
+        .join(kind)
+}
 
-const INVALID_FIXTURES: &[(&str, &str)] = &[
-    (
-        "state-aware request",
-        include_str!("fixtures/invalid/state_aware.json"),
-    ),
-    (
-        "unknown root field",
-        include_str!("fixtures/invalid/unknown_root_field.json"),
-    ),
-    (
-        "unknown nested field",
-        include_str!("fixtures/invalid/unknown_nested_field.json"),
-    ),
-    (
-        "incomplete LXC section",
-        include_str!("fixtures/invalid/incomplete_lxc.json"),
-    ),
-    (
-        "seatbelt invalid launch method",
-        include_str!("fixtures/invalid/seatbelt_invalid_launch_method.json"),
-    ),
-    (
-        "seatbelt unknown field",
-        include_str!("fixtures/invalid/seatbelt_unknown_field.json"),
-    ),
-];
+fn read_fixtures(kind: &str) -> Vec<(String, String)> {
+    let directory = fixture_directory(kind);
+    let mut paths = fs::read_dir(&directory)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", directory.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "failed to read an entry in {}: {error}",
+                        directory.display()
+                    )
+                })
+                .path()
+        })
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    assert!(
+        !paths.is_empty(),
+        "fixture directory {} is empty",
+        directory.display()
+    );
+
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .expect("fixture path should have a file name")
+                .to_string_lossy()
+                .into_owned();
+            let json = fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            (name, json)
+        })
+        .collect()
+}
 
 #[test]
-fn accepts_valid_fixtures() {
-    for (name, json) in VALID_FIXTURES {
-        serde_json::from_str::<OneShotRequest>(json)
+fn accepts_every_discovered_valid_fixture() {
+    for (name, json) in read_fixtures("valid") {
+        serde_json::from_str::<Request>(&json)
             .unwrap_or_else(|error| panic!("valid fixture '{name}' was rejected: {error}"));
     }
 }
 
 #[test]
-fn rejects_invalid_fixtures() {
-    for (name, json) in INVALID_FIXTURES {
+fn rejects_every_discovered_invalid_fixture() {
+    for (name, json) in read_fixtures("invalid") {
         assert!(
-            serde_json::from_str::<OneShotRequest>(json).is_err(),
+            serde_json::from_str::<Request>(&json).is_err(),
             "invalid fixture '{name}' was accepted"
         );
     }

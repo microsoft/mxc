@@ -16,13 +16,13 @@ namespace Microsoft.Mxc.Sdk;
 /// (<see cref="ProvisionSandbox"/> / <see cref="StartSandbox"/> /
 /// <see cref="StopSandbox"/> / <see cref="DeprovisionSandbox"/>) are
 /// request/response; <see cref="ExecInSandbox"/> runs a command as a live
-/// streaming <see cref="MxcSandboxProcess"/>.
+/// streaming <see cref="MxcSandboxProcess"/>, and <see cref="ExecInSandboxAttached"/>
+/// runs one on this process's own console.
 /// </summary>
 /// <remarks>
-/// The only in-tree state-aware backend is IsolationSession (Windows-only,
-/// experimental), which requires its OS-side service. On a host or build without
-/// it, these calls surface an <see cref="MxcException"/> with
-/// <see cref="ErrorCode.UnsupportedPhase"/> / <see cref="ErrorCode.BackendUnavailable"/>.
+/// On a host or build that does not support the selected backend, these calls
+/// surface an <see cref="MxcException"/> with
+/// <see cref="ErrorCode.BackendUnavailable"/>.
 /// </remarks>
 public static class MxcLifecycle
 {
@@ -37,6 +37,10 @@ public static class MxcLifecycle
     /// <summary>The IsolationSession containment key (the only state-aware backend today).</summary>
     public const string IsolationSessionContainment = "isolation_session";
 
+    // The experimental opt-in every native entry point takes. Shared so the call
+    // sites cannot drift — the attached one is not reachable by a test.
+    private const int ExperimentalOptIn = 1;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -45,12 +49,15 @@ public static class MxcLifecycle
     };
 
     /// <summary>
-    /// Provision a new IsolationSession sandbox, returning its <see cref="SandboxId"/>.
+    /// Provision a new sandbox under <paramref name="containment"/>, returning its
+    /// <see cref="SandboxId"/>.
     /// </summary>
     /// <exception cref="MxcException">Provisioning failed.</exception>
-    public static ProvisionResult ProvisionSandbox(ProvisionSandboxOptions? options = null)
+    public static ProvisionResult ProvisionSandbox(
+        StateAwareContainment containment,
+        ProvisionSandboxOptions? options = null)
     {
-        var result = RunEnvelopePhase(BuildProvisionEnvelope(options))
+        var result = RunEnvelopePhase(BuildProvisionEnvelope(containment, options))
             ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no result object");
         var sandboxId = result["sandboxId"]?.GetValue<string>()
             ?? throw new MxcException(ErrorCode.BackendError, "provision response carried no sandboxId");
@@ -62,48 +69,44 @@ public static class MxcLifecycle
         };
     }
 
-    // Build the provision request envelope: containment + cross-cutting
-    // filesystem lifted to the top level, user nested under
-    // experimental.isolation_session.provision.
-    internal static JsonObject BuildProvisionEnvelope(ProvisionSandboxOptions? options)
+    // Build the provision request envelope. Cross-cutting policy (network,
+    // filesystem) sits at the envelope top level; backend-specific config nests
+    // under experimental.<containment>.provision.
+    internal static JsonObject BuildProvisionEnvelope(
+        StateAwareContainment containment,
+        ProvisionSandboxOptions? options)
     {
+        var backend = ContainmentKey(containment);
         var envelope = NewEnvelope("provision");
-        envelope["containment"] = IsolationSessionContainment;
+        envelope["containment"] = backend;
+        if (options?.Network is { } network)
+        {
+            envelope["network"] = SerializeToNode(network);
+        }
         if (options?.Filesystem is { } fs)
         {
             envelope["filesystem"] = SerializeToNode(fs);
         }
-        if (options?.User is { } user)
+        if (options?.AppId is { } appId)
         {
-            SetBackendConfig(envelope, "provision", "user", SerializeToNode(user));
+            SetBackendConfig(envelope, backend, "provision", "appId", appId);
         }
         return envelope;
     }
 
     /// <summary>Start a provisioned sandbox.</summary>
     /// <exception cref="MxcException">Starting failed.</exception>
-    public static void StartSandbox(SandboxId id, StartSandboxOptions? options = null)
+    public static void StartSandbox(SandboxId id)
     {
-        RunEnvelopePhase(BuildStartEnvelope(id, options));
+        RunEnvelopePhase(BuildStartEnvelope(id));
     }
 
-    // Build the start request envelope: sandboxId + optional sizing profile /
-    // user nested under experimental.isolation_session.start.
-    internal static JsonObject BuildStartEnvelope(SandboxId id, StartSandboxOptions? options)
+    // Build the start request envelope. The backend's start config is empty, so
+    // nothing nests under experimental.
+    internal static JsonObject BuildStartEnvelope(SandboxId id)
     {
         var envelope = NewEnvelope("start");
         envelope["sandboxId"] = id.Value;
-        if (options?.Size is { } size)
-        {
-            // The wire model reads the sizing profile from `configurationId`
-            // (a typed small/medium/large/composable enum). Emitting any other
-            // key would be silently dropped by the permissive experimental block.
-            SetBackendConfig(envelope, "start", "configurationId", size);
-        }
-        if (options?.User is { } user)
-        {
-            SetBackendConfig(envelope, "start", "user", SerializeToNode(user));
-        }
         return envelope;
     }
 
@@ -126,16 +129,8 @@ public static class MxcLifecycle
             {
                 NativeSandbox* handle = null;
                 MxcErrorDetail error = default;
-                // `experimental` is 0 deliberately. Two things are missing: the engine's
-                // `isolation_session` feature is not enabled in the library this project
-                // builds, so that backend has no dispatch arm and the request ends at
-                // `unsupported_phase`; and the request shape emitted here predates that
-                // backend's Preview migration. Passing 1 without fixing both trades
-                // `backend_unavailable` for `unsupported_phase`, which
-                // `AssertNoUsableBackend` already tolerates — the tests would stay green
-                // while nothing worked. Change it together with the feature and the shape.
                 var status = NativeMethods.mxc_state_aware_exec(
-                    requestPtr, /*experimental*/ 0, &handle, &error);
+                    requestPtr, ExperimentalOptIn, &handle, &error);
                 if (status != (int)ErrorCode.Success)
                 {
                     // See MxcSandbox.Spawn: the release belongs in `finally` so a throw
@@ -155,8 +150,71 @@ public static class MxcLifecycle
         }
     }
 
+    /// <summary>
+    /// Run <paramref name="command"/> in a started sandbox with its stdio
+    /// attached to this process's console, and wait for it to finish. Use this
+    /// for an interactive session: the sandboxed process gets a real terminal,
+    /// so a shell inside it renders and resizes normally.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="ExecInSandbox"/> this returns no handle and no captured
+    /// output — the stdio is the caller's own. The call blocks until the
+    /// sandboxed process exits, and always reports
+    /// <see cref="SandboxWaitResult.TimedOut"/> as false.
+    /// <para>
+    /// It throws <see cref="ErrorCode.MalformedRequest"/> when this process's
+    /// stdout and stdin are not both terminals, or when another attached exec is
+    /// already running — one runs at a time per process. Use
+    /// <see cref="ExecInSandbox"/> for a workload with no terminal. A
+    /// pseudo-console carries one output stream, so the sandbox's stderr arrives
+    /// merged into stdout.
+    /// </para>
+    /// <para>
+    /// For its duration the workload owns this process's console: raw VT, so no
+    /// echo and no line input, and keystrokes — <c>Ctrl-C</c> included — reach
+    /// the workload rather than this process. The console is restored on return.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="MxcException">The exec could not be started.</exception>
+    public static SandboxWaitResult ExecInSandboxAttached(SandboxId id, string command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        var requestJson = BuildExecEnvelope(id, command).ToJsonString();
+        var requestBuf = ToNullTerminatedUtf8(requestJson);
+
+        unsafe
+        {
+            fixed (byte* requestPtr = requestBuf)
+            {
+                MxcExecOutcome outcome = default;
+                MxcErrorDetail error = default;
+                var status = NativeMethods.mxc_state_aware_exec_attached(
+                    requestPtr, ExperimentalOptIn, &outcome, &error);
+                if (status != (int)ErrorCode.Success)
+                {
+                    // As in ExecInSandbox: the release belongs in `finally` so a throw
+                    // during exception construction cannot strand the detail's strings.
+                    try
+                    {
+                        throw NativeError.ToException(status, error, "unknown error");
+                    }
+                    finally
+                    {
+                        NativeMethods.mxc_error_detail_free(&error);
+                    }
+                }
+                return new SandboxWaitResult
+                {
+                    ExitCode = outcome.exit_code,
+                    TimedOut = outcome.timed_out != 0,
+                };
+            }
+        }
+    }
+
     // Build the exec request envelope: sandboxId + the command as the
-    // cross-cutting process.commandLine.
+    // cross-cutting `process` section.
     internal static JsonObject BuildExecEnvelope(SandboxId id, string command)
     {
         var envelope = NewEnvelope("exec");
@@ -226,23 +284,33 @@ public static class MxcLifecycle
         ["phase"] = phase,
     };
 
-    // Nest a backend-specific config value under experimental.isolation_session.<phase>.
-    private static void SetBackendConfig(JsonObject envelope, string phase, string key, JsonNode? value)
+    // Map the public containment selector to its wire key.
+    private static string ContainmentKey(StateAwareContainment containment) => containment switch
+    {
+        StateAwareContainment.IsolationSession => IsolationSessionContainment,
+        _ => throw new MxcException(
+            ErrorCode.UnsupportedContainment,
+            $"unknown state-aware containment '{containment}'"),
+    };
+
+    // Nest a backend-specific config value under experimental.<backend>.<phase>.
+    private static void SetBackendConfig(
+        JsonObject envelope, string backend, string phase, string key, JsonNode? value)
     {
         if (envelope["experimental"] is not JsonObject experimental)
         {
             experimental = new JsonObject();
             envelope["experimental"] = experimental;
         }
-        if (experimental[IsolationSessionContainment] is not JsonObject backend)
+        if (experimental[backend] is not JsonObject backendConfig)
         {
-            backend = new JsonObject();
-            experimental[IsolationSessionContainment] = backend;
+            backendConfig = new JsonObject();
+            experimental[backend] = backendConfig;
         }
-        if (backend[phase] is not JsonObject phaseConfig)
+        if (backendConfig[phase] is not JsonObject phaseConfig)
         {
             phaseConfig = new JsonObject();
-            backend[phase] = phaseConfig;
+            backendConfig[phase] = phaseConfig;
         }
         phaseConfig[key] = value;
     }
@@ -259,11 +327,8 @@ public static class MxcLifecycle
             fixed (byte* requestPtr = requestBuf)
             {
                 MxcStateAwareResult result = default;
-                // `experimental` is 0 for the reason given in ExecInSandbox: the backend
-                // is not compiled into this build and the request shape is stale, so
-                // opting in would only change which error surfaces.
                 var status = NativeMethods.mxc_state_aware(
-                    requestPtr, /*dry_run*/ 0, /*experimental*/ 0, &result);
+                    requestPtr, /*dry_run*/ 0, ExperimentalOptIn, &result);
                 try
                 {
                     if (status != (int)ErrorCode.Success)

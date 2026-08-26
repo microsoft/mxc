@@ -46,9 +46,9 @@
   },
   "processContainer": {
     "leastPrivilege": true,
-    "learningMode": false,
     "capabilities": [
-      "internetClient"
+      "internetClient",
+      "privateNetworkClientServer"
     ],
     "ui": {
       "isolation": "container",

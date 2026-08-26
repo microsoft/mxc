@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::common::assert_v08_introduces;
+use crate::common::assert_v09_introduces;
 
 #[test]
-fn development_containment_values_are_introduced_in_v08() {
+fn development_containment_values_are_introduced_in_v09() {
     for containment in [
         "vm",
         "windows_sandbox",
@@ -13,6 +13,6 @@ fn development_containment_values_are_introduced_in_v08() {
         "isolation_session",
         "wslc",
     ] {
-        assert_v08_introduces(&format!(r#""containment": "{containment}""#));
+        assert_v09_introduces(&format!(r#""containment": "{containment}""#));
     }
 }

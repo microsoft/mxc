@@ -31,12 +31,12 @@ pub struct StopOptions {
     /// captured trace. Useful for re-processing a previously captured
     /// trace without an active WPR session.
     pub trace_file: Option<PathBuf>,
-    /// Exit code recorded in the canonical denials document.
+    /// Exit code recorded in the actionable denials document.
     pub exit_code: i32,
     pub verbose: bool,
 }
 
-/// Inputs for generating compatibility artifacts from canonical denials.
+/// Inputs for generating compatibility artifacts from actionable denials.
 #[derive(Debug, Clone)]
 pub struct PostProcessOptions {
     pub log_dir: PathBuf,
@@ -89,9 +89,13 @@ fn prepare_config_output_paths(
     trace_path: &Path,
     denials_path: &Path,
 ) -> Result<Option<ConfigOutputPaths>> {
-    if same_config_target(trace_path, denials_path) {
+    let verbose_logging_path = learning_mode_core::verbose_logging_sibling_path(denials_path)
+        .context("failed to derive verbose logging output path")?;
+    if same_config_target(trace_path, denials_path)
+        || same_config_target(trace_path, &verbose_logging_path)
+    {
         anyhow::bail!(
-            "trace output {} would be overwritten by denials output {}",
+            "trace output {} would be overwritten by a denials output derived from {}",
             trace_path.display(),
             denials_path.display()
         );
@@ -112,7 +116,10 @@ fn prepare_config_output_paths(
         ("config snapshot", snapshot.as_path()),
         ("adjusted config", adjusted.as_path()),
     ] {
-        if same_config_target(path, trace_path) || same_config_target(path, denials_path) {
+        if same_config_target(path, trace_path)
+            || same_config_target(path, denials_path)
+            || same_config_target(path, &verbose_logging_path)
+        {
             anyhow::bail!(
                 "{label} path {} collides with a capture output",
                 path.display()
@@ -255,7 +262,7 @@ pub fn run(opts: StopOptions, exe_dir: &Path) -> Result<StopResult> {
     })
 }
 
-/// Generates the source-config snapshot and adjusted config from canonical denials.
+/// Generates the source-config snapshot and adjusted config from actionable denials.
 pub fn postprocess_denials(
     document: &DenialsDocument,
     opts: &PostProcessOptions,
@@ -288,7 +295,7 @@ fn postprocess_denials_with_paths(
     }
 
     // Load the source config before copying or mutating it. The trace and
-    // canonical denials remain useful even if this compatibility-only
+    // actionable denials remain useful even if this compatibility-only
     // adjusted-config phase fails.
     let base_config = load_config(&config_outputs.source)?;
 
@@ -494,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn canonical_denials_generate_snapshot_and_adjusted_config() {
+    fn actionable_denials_generate_snapshot_and_adjusted_config() {
         let document = DenialsDocument::new(
             vec![DeniedResource {
                 resource: "internetClient".to_string(),
@@ -519,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn truncated_canonical_denials_snapshot_but_skip_adjusted_config() {
+    fn truncated_actionable_denials_snapshot_but_skip_adjusted_config() {
         let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, true));
 
         let (_directory, log_dir, adjusted) = postprocess_fixture(&document);
@@ -657,6 +664,35 @@ mod tests {
         let error =
             prepare_config_output_paths(None, Path::new(r"C:\captures"), path, path).unwrap_err();
         assert!(error.to_string().contains("would be overwritten"));
+    }
+
+    #[test]
+    fn rejects_user_selected_trace_path_that_matches_derived_verbose_output() {
+        // `--trace-file` is caller-controlled, while this sibling path is
+        // derived from denials.json. Without this check, publishing the verbose
+        // output would overwrite the retained ETL before post-processing ends.
+        let trace = Path::new(r"C:\captures\denials.verbose.json");
+        let error = prepare_config_output_paths(
+            None,
+            Path::new(r"C:\captures"),
+            trace,
+            Path::new(r"C:\captures\denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("would be overwritten"));
+    }
+
+    #[test]
+    fn config_snapshot_cannot_collide_with_verbose_logging_output() {
+        let source = Path::new(r"C:\source\denials.verbose.json");
+        let error = prepare_config_output_paths(
+            Some(source),
+            Path::new(r"C:\captures"),
+            Path::new(r"C:\captures\trace.etl"),
+            Path::new(r"C:\captures\denials.json"),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("config snapshot"));
     }
 
     #[test]

@@ -170,6 +170,11 @@ export interface ProcessContainerConfig {
   capabilities?: string[];
   /** BaseProcess-specific UI settings (Windows only) */
   ui?: BaseProcessUiConfig;
+  /** ProcessContainer-specific networking settings. */
+  network?: {
+    /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
+    allowedProxyPeer?: string;
+  };
 }
 
 /**
@@ -232,6 +237,66 @@ export interface NetworkConfig {
   proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
   /** Automatically remove firewall rules after execution (default: true). Deprecated: use lifecycle.preservePolicy. */
   removeRulesOnExit?: boolean;
+  /** Outbound network policy. */
+  egress?: NetworkEgressConfig;
+  /** Inbound and host-loopback network policy. */
+  ingress?: NetworkIngressConfig;
+}
+
+/** Allow or deny network action. */
+export type NetworkAction = 'allow' | 'deny';
+
+/** Transport protocol selector. */
+export type NetworkProtocol = 'tcp' | 'udp' | 'icmp' | 'any';
+
+/** CIDR network peer. */
+export interface NetworkPeerConfig {
+  /** IPv4 or IPv6 CIDR. */
+  cidr: string;
+  /** CIDRs excluded from this peer. */
+  except?: string[];
+}
+
+/** Protocol and destination-port selector. */
+export interface NetworkPortConfig {
+  /** Transport protocol. Defaults to "any". */
+  protocol?: NetworkProtocol;
+  /** Destination port. Omission matches every port. */
+  port?: number;
+  /** Inclusive end of a destination-port range. Requires `port`. */
+  endPort?: number;
+}
+
+/** Outbound network rule. */
+export interface NetworkRuleConfig {
+  /** Destination CIDRs. Omission matches both IP families; an explicit array must be non-empty. */
+  to?: NetworkPeerConfig[];
+  /** Destination protocols and ports. Omission matches all; an explicit array must be non-empty. */
+  ports?: NetworkPortConfig[];
+}
+
+/** Outbound network policy. */
+export interface NetworkEgressConfig {
+  /** Action used when no explicit rule matches. Defaults to "deny". */
+  default?: NetworkAction;
+  /** Explicit allow rules. */
+  allow?: NetworkRuleConfig[];
+  /** Explicit deny rules. Deny rules take precedence. */
+  deny?: NetworkRuleConfig[];
+}
+
+/** Inbound and host-loopback network policy. */
+export interface NetworkIngressConfig {
+  /** Default action for LAN/private-network inbound traffic. */
+  default?: NetworkAction;
+  /** Bidirectional host-loopback connectivity action. */
+  hostLoopback?: NetworkAction;
+}
+
+/** Runtime values supplied separately from sandbox policy. */
+export interface RuntimeConfig {
+  /** HTTP/S loopback proxy URL. */
+  networkProxy?: string;
 }
 
 /**
@@ -336,6 +401,8 @@ export interface ContainerConfig {
   filesystem?: FilesystemConfig;
   /** Network access configuration */
   network?: NetworkConfig;
+  /** Runtime values supplied separately from sandbox policy. */
+  runtimeConfig?: RuntimeConfig;
   /** Experimental features (only applied when --experimental flag is set) */
   experimental?: {
     /** WSLC SDK configuration for Linux containers from Windows */
@@ -374,13 +441,13 @@ export type SandboxPolicy = {
   };
   /** Network access restrictions. All flags default to false (no network access). */
   network?: {
-      /** Whether to allow outbound connections to the Internet. (default: false) */
+      /** Whether to allow outbound connections to the Internet. (default: false) Legacy network field. */
       allowOutbound?: boolean;
-      /** Whether to allow connections to local networks. (default: false) */
+      /** Whether to allow connections to local networks. (default: false) Legacy network field. */
       allowLocalNetwork?: boolean;
-      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. */
+      /** When set, ONLY these outbound hosts are reachable. Requires allowOutbound. Legacy network field. */
       allowedHosts?: string[];
-      /** Hosts to block even when outbound is allowed. Requires allowOutbound. */
+      /** Hosts to block even when outbound is allowed. Requires allowOutbound. Legacy network field. */
       blockedHosts?: string[];
       /**
        * Proxy configuration. Routes cooperating HTTP traffic through this proxy.
@@ -392,8 +459,23 @@ export type SandboxPolicy = {
        * rejects it unless `allowTestingFeatures: true` is set in
        * SandboxSpawnOptions (which maps to the native
        * `--allow-testing-features` flag).
+       * Legacy network field.
        */
       proxy?: { builtinTestServer: true } | { localhost: number } | { url: string };
+      /** Schema 0.8 outbound network policy. Cannot be combined with legacy network fields. */
+      egress?: NetworkEgressConfig;
+      /** Schema 0.8 inbound and host-loopback policy. Cannot be combined with legacy network fields. */
+      ingress?: NetworkIngressConfig;
+  };
+  /** Schema 0.8 runtime values supplied separately from sandbox policy. */
+  runtimeConfig?: RuntimeConfig;
+  /** Schema 0.8 ProcessContainer-specific policy. */
+  processContainer?: {
+      /** ProcessContainer-specific networking settings. */
+      network?: {
+          /** Package family name or AppContainer profile authorized as the loopback proxy peer. */
+          allowedProxyPeer?: string;
+      };
   };
   /** UI access restrictions. All flags default to denied. */
   ui?: {

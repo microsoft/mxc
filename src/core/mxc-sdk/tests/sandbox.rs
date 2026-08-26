@@ -32,7 +32,6 @@ fn seatbelt_request(command: &str, timeout_ms: u32) -> SandboxRequest {
         } else {
             Some(timeout_ms)
         },
-        capture_denials: None,
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
     request.set_script(command);
@@ -58,7 +57,6 @@ fn process_container_request(version: &str, command: &str, timeout_ms: u32) -> S
         } else {
             Some(timeout_ms)
         },
-        capture_denials: None,
     };
     let mut request = build_request(&policy, None).expect("build_request should succeed");
     request.set_script(command);
@@ -125,7 +123,6 @@ fn version_older_than_supported_is_rejected() {
         network: None,
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
 
     let err =

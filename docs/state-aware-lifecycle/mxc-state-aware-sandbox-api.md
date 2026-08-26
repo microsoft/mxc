@@ -395,7 +395,6 @@ type DeprovisionMetadataFor<C extends StateAwareContainmentBackend> =
 interface ProvisionResult<C extends StateAwareContainmentBackend> {
   sandboxId: SandboxId<C>;
   metadata?: ProvisionMetadataFor<C>;
-  correlationVector?: string; // MS-CV to relay onto later phases (telemetry)
 }
 
 interface StartResult<C extends StateAwareContainmentBackend> {
@@ -664,7 +663,6 @@ State-aware-only fields:
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `phase` | `Phase` member | Yes | Discriminator. Absence means a one-shot request. |
-| `correlationVector` | string | No. Relayed by the client onto non-`provision` phases; absent on `provision` (seeded by the executor). Rejected as a parse error on one-shot requests. | Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in its result; the client relays it verbatim into later phases so the lifecycle shares a telemetry base prefix (emitted under `__TlgCV__`). Each non-`provision` phase validates the relayed value and *spins* a fresh child element off a mutable base (keeping repeat invocations distinct), passes an already-frozen vector through unchanged, and reseeds a new base if it is absent or malformed. Ignored unless experimental telemetry is enabled. See [telemetry docs](../telemetry/telemetry.md#correlating-a-lifecycle). |
 | `process` | `ProcessConfig` | Required for `exec`; absent otherwise. | Cross-backend execution fields. |
 
 Cross-cutting fields available to state-aware (state-aware-only at top level — backends
@@ -773,7 +771,7 @@ type NonExecResponseEnvelope<TResult> = { result: TResult } | { error: ErrorEnve
 
 | Phase | `TResult` shape |
 |---|---|
-| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object; correlationVector?: string }` |
+| `provision` | `{ sandboxId: SandboxId<C>; metadata?: object }` |
 | `start` | `{ metadata?: object }` |
 | `stop` | `{ metadata?: object }` |
 | `deprovision` | `{ metadata?: object }` |
@@ -1222,11 +1220,16 @@ pub trait StatefulSandboxBackend {
     /// `Library` (the library / FFI streaming path) means the caller drives
     /// the streams itself, so an implementation must surface separate raw pipe
     /// handles, allocate no pseudo-console, and not touch the host console.
-    /// `Executor` (the executor path) means the handle is relayed to the
-    /// binary's own stdio, where a pseudo-console is legitimate — and where
-    /// stderr may therefore arrive merged into stdout, leaving
-    /// `ExecHandle::stderr` null. A backend that probes the host to decide how
-    /// to wire stdio must confine that probe to the `Executor` case.
+    /// `Executor` (the relay path) means the handle is relayed to **the calling
+    /// process's** own stdio, where a pseudo-console is legitimate and stderr may
+    /// therefore arrive merged into stdout, leaving `ExecHandle::stderr` null. A
+    /// backend that probes the host to decide how to wire stdio must confine that
+    /// probe to the `Executor` case, where the probing process is the relay
+    /// target.
+    ///
+    /// The variant names describe the caller each was written for, not the
+    /// rule. What separates them is who consumes the streams; "in-process" does
+    /// not imply `Library`.
     ///
     /// A backend that cannot serve `Library` at all — because it relays the
     /// workload's output to the *host process's* own stdio rather than
@@ -1332,9 +1335,11 @@ pub struct DeprovisionResult<M> {
 }
 
 pub struct ExecHandle {
-    /// Stdout pipe handle from the running process. Executor relays to its own stdout.
+    /// Stdout pipe handle from the running process. The relay path writes it to
+    /// the calling process's own stdout.
     pub stdout: PipeHandle,
-    /// Stderr pipe handle from the running process. Executor relays to its own stderr.
+    /// Stderr pipe handle from the running process. The relay path writes it to
+    /// the calling process's own stderr.
     pub stderr: PipeHandle,
     /// Stdin pipe handle. Not consumed by the executor relay, which forwards
     /// no input; the streaming path hands it to an in-process caller.
@@ -1346,6 +1351,9 @@ pub struct ExecHandle {
     /// caller that assumes a refused kill succeeded can block forever waiting
     /// on a process that is still running.
     pub terminator: Box<dyn FnOnce() -> Result<(), MxcError> + Send>,
+    /// Closes the backend's own stdin write end. `None` when the backend
+    /// exposes no stdin.
+    pub stdin_closer: Option<Box<dyn FnOnce() + Send>>,
 }
 
 /// How an exec finished, as distinct from why a wait failed. A timeout is an
@@ -1376,9 +1384,7 @@ dispatcher from `experimental.<backend>.<phase>` and passed as the `config` para
 platform-abstracted pipe-handle wrapper — a kernel `HANDLE` on Windows, a file
 descriptor on Linux. The executor's outer driver reads from `ExecHandle.stdout` /
 `stderr`, awaits exit via `waiter`, and calls `terminator` to tear the exec down.
-It does **not** write to `stdin`: forwarding input needs an ownership model
-`ExecHandle` does not have yet, since a pipe reaches EOF only once every write
-handle is closed and the relay can only duplicate the backend's handle.
+It does **not** write to `stdin`.
 
 `mint_random_token()` is a small helper in `wxc_common` that produces a short hex string
 (mirroring the SDK's `randomBytes`-based id minting in `sandbox.ts`); it is used by the
@@ -1640,7 +1646,7 @@ wire `version` field) plus any cross-cutting fields the matrix marks as honored 
 that phase (for IsolationSession's `provision`, the required `network`
 acknowledgment). The Rust struct receives only what the wire's
 `experimental.isolation_session.provision` block carries —
-`{ "appId": "Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
+`{ "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }` — because that is what the dispatcher
 deserialises into `Self::ProvisionConfig` (§9.3). The SDK is responsible for splitting
 the consumer Config into top-level wire fields (cross-cutting, `version`) and the
 experimental sub-block; Rust sees only the post-split shape.
@@ -1946,7 +1952,7 @@ calls (and the executor stops gating them behind `--experimental`). For example,
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "experimental": {
     "isolation_session": {
-      "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
+      "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
     }
   }
 }
@@ -1961,7 +1967,7 @@ to this shape after the backend's state-aware path graduates:
   "containment": "isolation_session",
   "network": { "defaultPolicy": "allow", "allowLocalNetwork": true },
   "isolation_session": {
-    "provision": { "appId": "Contoso.App_8wekyb3d8bbwe" }
+    "provision": { "appId": "PFN:Contoso.App_8wekyb3d8bbwe" }
   }
 }
 ```

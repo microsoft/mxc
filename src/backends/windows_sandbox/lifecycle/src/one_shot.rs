@@ -13,6 +13,7 @@ use std::time::Duration;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, FailurePhase, ScriptResponse};
 use wxc_common::script_runner::{get_timeout_milliseconds, ScriptRunner};
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::control_plane::{self, HostVmLock};
 use crate::error::OneShotError;
@@ -125,6 +126,11 @@ impl WindowsSandboxRunner {
 }
 
 impl ScriptRunner for WindowsSandboxRunner {
+    fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
+    }
+
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         match self.run_one_shot(request, logger) {
             Ok(response) => response,

@@ -1,4 +1,4 @@
-# MXC Sandbox Policy Spec v1
+# MXC Sandbox Policy Spec v0.7.0
 
 ---
 

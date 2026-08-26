@@ -12,13 +12,6 @@ fn accepts_every_containment_value() {
         "lxc",
         "bubblewrap",
         "seatbelt",
-        "vm",
-        "windows_sandbox",
-        "microvm",
-        "hyperlight",
-        "isolation_session",
-        "wslc",
-        "apple_container",
     ] {
         let json = format!(
             r#"{{
@@ -139,6 +132,7 @@ fn accepts_every_process_container_ui_isolation_value() {
         let json = format!(
             r#"{{
                 "version": "0.8.0-alpha",
+                "containment": "processcontainer",
                 "processContainer": {{
                     "ui": {{
                         "isolation": "{process_container_ui_isolation}"
@@ -167,118 +161,7 @@ fn rejects_invalid_process_container_ui_isolation_value() {
     );
 }
 
-#[test]
-fn accepts_every_capture_denials_mode_value() {
-    for capture_denials_mode in ["allow", "block"] {
-        let json = format!(
-            r#"{{
-                "version": "0.8.0-alpha",
-                "processContainer": {{
-                    "captureDenials": {{
-                        "mode": "{capture_denials_mode}",
-                        "outputPath": "c:\\temp\\denials.log"
-                    }}
-                }},
-                "process": {{"commandLine": "echo"}}
-            }}"#
-        );
-
-        assert_valid(&json);
-    }
-}
-
-#[test]
-fn rejects_invalid_capture_denials_mode_value() {
-    assert_invalid(
-        r#"{
-            "version": "0.8.0-alpha",
-            "processContainer": {
-                "captureDenials": {
-                    "mode": "invalid",
-                    "outputPath": "c:\\temp\\denials.log"
-                }
-            },
-            "process": {"commandLine": "echo"}
-        }"#,
-    );
-}
-
-#[test]
-fn rejects_non_string_capture_denials_mode_value() {
-    for capture_denials_mode in ["123", "true", "[]", "{}"] {
-        let json = format!(
-            r#"{{
-                "version": "0.8.0-alpha",
-                "processContainer": {{
-                    "captureDenials": {{
-                        "mode": {capture_denials_mode},
-                        "outputPath": "c:\\temp\\denials.log"
-                    }}
-                }},
-                "process": {{"commandLine": "echo"}}
-            }}"#
-        );
-
-        assert_invalid(&json);
-    }
-}
-
-#[test]
-fn rejects_object_encoding_for_fieldless_enums() {
-    let cases = [
-        r#"{
-                "version": {"0.8.0-alpha": null},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "containment": {"process": null},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "network": {"defaultPolicy": {"allow": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "network": {"enforcementMode": {"both": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "ui": {"clipboard": {"all": null}},
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "processContainer": {
-                    "ui": {"isolation": {"desktop": null}}
-                },
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "processContainer": {
-                    "captureDenials": {"mode": {"block": null}}
-                },
-                "process": {"commandLine": "echo"}
-            }"#,
-        r#"{
-                "version": "0.8.0-alpha",
-                "seatbelt": {
-                    "launchMethod": {"exec": null}
-                },
-                "process": {"commandLine": "echo"}
-            }"#,
-    ];
-
-    for case in cases {
-        assert_invalid(case);
-    }
-}
-
-use mxc_config_contract::dev::{OneShotContainment, OneShotRequest};
+use mxc_config_contract::published::v0_8_0_alpha::{Containment, Request};
 
 #[test]
 fn appcontainer_containment_value_alias_maps_to_process_container() {
@@ -290,11 +173,11 @@ fn appcontainer_containment_value_alias_maps_to_process_container() {
         }
     }"#;
 
-    let request: OneShotRequest = serde_json::from_str(json).unwrap();
+    let request: Request = serde_json::from_str(json).unwrap();
 
     assert!(matches!(
         request.containment.as_ref(),
-        Some(OneShotContainment::ProcessContainer)
+        Some(Containment::ProcessContainer)
     ));
 }
 
@@ -308,10 +191,10 @@ fn macos_sandbox_containment_value_alias_maps_to_seatbelt() {
         }
     }"#;
 
-    let request: OneShotRequest = serde_json::from_str(json).unwrap();
+    let request: Request = serde_json::from_str(json).unwrap();
 
     assert!(matches!(
         request.containment.as_ref(),
-        Some(OneShotContainment::Seatbelt)
+        Some(Containment::Seatbelt)
     ));
 }

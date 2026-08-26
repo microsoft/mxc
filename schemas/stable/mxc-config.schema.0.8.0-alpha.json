@@ -1,0 +1,969 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+  "title": "MXC Configuration",
+  "description": "MXC container execution configuration. Defines the stable, non-experimental surface for one-shot sandbox execution requests.",
+  "additionalProperties": false,
+  "definitions": {
+    "BaseProcessUi": {
+      "additionalProperties": false,
+      "description": "BaseProcessContainer UI isolation settings.",
+      "properties": {
+        "desktopSystemControl": {
+          "description": "Whether desktop system control is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ime": {
+          "description": "Whether the IME (Input Method Editor) is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isolation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UiIsolation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "UI isolation level."
+        },
+        "systemSettings": {
+          "description": "System settings access level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CaptureDenials": {
+      "additionalProperties": false,
+      "description": "Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Native capture requires the complete compatible PSEC plus V2 Learning Mode API set. Requests that native capture cannot represent use guarded WPR with a compatible legacy SBOX or AppContainer containment tier.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CaptureDenialsMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted."
+        },
+        "outputPath": {
+          "description": "Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ \"denials\": [...], \"summary\": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed file in a protected per-run directory. Retained traces use `%LOCALAPPDATA%\\Microsoft\\MXC\\capture-denials\\retained`; non-retained traces use the system temporary directory.)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retainEtl": {
+          "description": "Keep the sealed ETL trace after analysis and report its path in output metadata. Defaults to `false`, which deletes the trace after analysis. Retention requires a terminal wait; abandoning the process handle deletes the internal trace. If post-seal analysis fails, the failure and retained path are exposed through `captureDenialsError` output metadata. Retained traces can contain sensitive resource paths and identifiers; callers are responsible for deleting them.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CaptureDenialsMode": {
+      "description": "How `captureDenials` handles each ungranted access check while recording it.",
+      "oneOf": [
+        {
+          "description": "`block` — the access stays **denied** and the denial is recorded. Deny-by-default containment is preserved; this is the safe default.",
+          "enum": [
+            "block"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`allow` — the access is **allowed** and recorded (audit mode). This relaxes deny-by-default for the run, so it is a security-sensitive choice and the runner emits a security warning.",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ClipboardPolicy": {
+      "description": "Clipboard access level.",
+      "enum": [
+        "none",
+        "read",
+        "write",
+        "all"
+      ],
+      "type": "string"
+    },
+    "Containment": {
+      "description": "Stable containment backend (abstract process intent or concrete backend).",
+      "oneOf": [
+        {
+          "description": "OS-native process sandbox (resolved per host).",
+          "enum": [
+            "process"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Windows AppContainer / BaseContainer.",
+          "enum": [
+            "processcontainer"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full Linux container.",
+          "enum": [
+            "lxc"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "macOS Seatbelt.",
+          "enum": [
+            "seatbelt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Unprivileged Linux bubblewrap sandbox.",
+          "enum": [
+            "bubblewrap"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Fallback": {
+      "additionalProperties": false,
+      "description": "AppContainer DACL-mutation fallback policy.",
+      "properties": {
+        "allowDaclMutation": {
+          "description": "Allow the runner to mutate DACLs as a fallback.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Filesystem": {
+      "additionalProperties": false,
+      "description": "Filesystem access policy.",
+      "properties": {
+        "deniedPaths": {
+          "description": "Paths explicitly denied (override broader allow rules).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "readonlyPaths": {
+          "description": "Paths the process can read but not write.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "readwritePaths": {
+          "description": "Paths the process can read and write.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LaunchMethod": {
+      "description": "Seatbelt inner-process launch method.",
+      "oneOf": [
+        {
+          "description": "sandbox_init() + exec (default). Works for third-party GUI apps.",
+          "enum": [
+            "exec"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Launch via macOS LaunchServices (`open`), then apply the sandbox to the inner shell via sandbox-exec. Required for apps with launch constraints.",
+          "enum": [
+            "open"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Lifecycle": {
+      "additionalProperties": false,
+      "description": "Container lifecycle settings.",
+      "properties": {
+        "destroyOnExit": {
+          "description": "Destroy the container when the process exits (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preservePolicy": {
+          "description": "Preserve the applied policy after exit (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Lxc": {
+      "additionalProperties": false,
+      "description": "LXC container settings.",
+      "properties": {
+        "distribution": {
+          "description": "Distribution image (e.g. `alpine`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "Distribution release (e.g. `3.23`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Network": {
+      "additionalProperties": false,
+      "description": "Network access policy.",
+      "properties": {
+        "allowLocalNetwork": {
+          "description": "Allow binding/listening on local IPs and accepting inbound connections.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedHosts": {
+          "description": "Hosts explicitly allowed.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "blockedHosts": {
+          "description": "Hosts explicitly blocked.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "defaultPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default outbound policy when no host rule matches."
+        },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Outbound network policy."
+        },
+        "enforcementMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEnforcement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the policy is enforced."
+        },
+        "ingress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkIngress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inbound and host-loopback network policy."
+        },
+        "proxy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Proxy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkAction": {
+      "description": "Allow or deny network action.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "NetworkEgress": {
+      "additionalProperties": false,
+      "description": "Outbound network policy.",
+      "properties": {
+        "allow": {
+          "description": "Explicit allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Action used when no explicit rule matches. Defaults to `deny`."
+        },
+        "deny": {
+          "description": "Explicit deny rules. Deny rules take precedence over allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "NetworkEnforcement": {
+      "description": "Network enforcement mechanism.",
+      "oneOf": [
+        {
+          "description": "Per-process capability-based filtering.",
+          "enum": [
+            "capabilities"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Host firewall rules.",
+          "enum": [
+            "firewall"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Both capability and firewall enforcement.",
+          "enum": [
+            "both"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "NetworkIngress": {
+      "additionalProperties": false,
+      "description": "Inbound and host-loopback network policy.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default action for LAN/private-network inbound traffic."
+        },
+        "hostLoopback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bidirectional host-loopback connectivity action."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkPeer": {
+      "additionalProperties": false,
+      "description": "CIDR network peer.",
+      "properties": {
+        "cidr": {
+          "description": "IPv4 or IPv6 CIDR.",
+          "type": "string"
+        },
+        "except": {
+          "description": "CIDRs excluded from this peer.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cidr"
+      ],
+      "type": "object"
+    },
+    "NetworkPolicy": {
+      "description": "Default network policy.",
+      "enum": [
+        "allow",
+        "block"
+      ],
+      "type": "string"
+    },
+    "NetworkPort": {
+      "additionalProperties": false,
+      "description": "Protocol and destination-port selector.",
+      "properties": {
+        "endPort": {
+          "description": "Inclusive end of a destination-port range. Requires `port`.",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Destination port. Omission matches every port.",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transport protocol. Defaults to `any`."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkProtocol": {
+      "description": "Transport protocol selector.",
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp",
+        "any"
+      ],
+      "type": "string"
+    },
+    "NetworkRule": {
+      "additionalProperties": false,
+      "description": "Outbound network rule.",
+      "properties": {
+        "ports": {
+          "description": "Destination protocols and ports. Omission matches all.",
+          "items": {
+            "$ref": "#/definitions/NetworkPort"
+          },
+          "minItems": 1,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Destination CIDRs. Omission matches both IP families.",
+          "items": {
+            "$ref": "#/definitions/NetworkPeer"
+          },
+          "minItems": 1,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Process": {
+      "additionalProperties": false,
+      "description": "Process execution settings.",
+      "properties": {
+        "commandLine": {
+          "description": "Command line (or script) to execute.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "description": "Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` (\"Working Directory\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "description": "Environment variables as `\"KEY=VALUE\"` strings.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout": {
+          "description": "Wall-clock timeout in milliseconds.",
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainer": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific settings.",
+      "properties": {
+        "capabilities": {
+          "description": "AppContainer capabilities (e.g. `internetClient`, `registryRead`). Each array entry must contain exactly one capability name; commas are rejected because BaseContainer uses commas as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "captureDenials": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CaptureDenials"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. MXC prefers native PSEC plus V2 Learning Mode when that API set can fully honor the request. Otherwise it retains the highest compatible legacy containment tier and uses guarded WPR capture, so `leastPrivilege`, `network.proxy`, and deny-path policies can remain enforced without weakening the request."
+        },
+        "learningMode": {
+          "description": "AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "leastPrivilege": {
+          "description": "Enforce least-privilege mode.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessContainerNetwork"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ProcessContainer-specific network configuration."
+        },
+        "ui": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BaseProcessUi"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "BaseProcessContainer UI settings (Windows)."
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainerNetwork": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific network configuration.",
+      "properties": {
+        "allowedProxyPeer": {
+          "description": "Installed package family name or AppContainer profile allowed to host the configured loopback proxy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Proxy": {
+      "additionalProperties": false,
+      "description": "Proxy configuration. Exactly one variant applies.",
+      "properties": {
+        "builtinTestServer": {
+          "description": "Have wxc launch its own built-in test proxy.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "localhost": {
+          "description": "External localhost proxy port.",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Proxy URL (parsed into host:port).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy.",
+      "properties": {
+        "networkProxy": {
+          "description": "HTTP/S loopback proxy URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Seatbelt": {
+      "additionalProperties": false,
+      "description": "macOS Seatbelt backend configuration.",
+      "properties": {
+        "extraMachLookups": {
+          "description": "Additional Mach service global-names the inner process may resolve.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "guiAccess": {
+          "description": "Allow GUI (WindowServer) access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "keychainAccess": {
+          "description": "Allow Keychain access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "launchMethod": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LaunchMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inner process launch method."
+        },
+        "nestedPty": {
+          "description": "Attach the inner process to a nested pty (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "profileOverride": {
+          "description": "Replace the generated profile entirely (advanced/testing escape hatch).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Ui": {
+      "additionalProperties": false,
+      "description": "Cross-platform UI isolation policy.",
+      "properties": {
+        "clipboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ClipboardPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clipboard access level."
+        },
+        "disable": {
+          "description": "Disable all UI access (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "injection": {
+          "description": "Allow UI injection.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UiIsolation": {
+      "description": "Desktop UI isolation level.",
+      "enum": [
+        "desktop",
+        "handles",
+        "atoms",
+        "container"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "process"
+  ],
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "_comment": {
+      "description": "Optional human-readable annotation. Accepted but ignored by the parser."
+    },
+    "containerId": {
+      "description": "Externally assigned container identifier.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "containment": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Containment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Containment backend to use for execution. Accepts the abstract `process` intent and stable concrete backends; the binary resolves the intent to a concrete backend per host at run time."
+    },
+    "fallback": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Fallback"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "AppContainer DACL-mutation fallback policy (Windows)."
+    },
+    "filesystem": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Filesystem"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Filesystem access policy. Shared across all backends."
+    },
+    "lifecycle": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lifecycle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Container lifecycle settings."
+    },
+    "lxc": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lxc"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "LXC container settings (Linux). Used when containment is `lxc`."
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Network"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Network access policy. Shared across all backends."
+    },
+    "process": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Process"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Process to execute and its environment."
+    },
+    "processContainer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProcessContainer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
+    },
+    "runtimeConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RuntimeConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy."
+    },
+    "seatbelt": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Seatbelt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`."
+    },
+    "ui": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Ui"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Cross-platform UI isolation policy."
+    },
+    "version": {
+      "description": "MXC config schema version (semver). Current stable: `0.8.0-alpha`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

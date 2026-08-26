@@ -1,0 +1,1404 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-dev.json",
+  "title": "MXC Configuration",
+  "description": "MXC container execution configuration. Defines the recommended config format for both one-shot and state-aware sandbox lifecycle requests. A few deprecated field spellings not listed here are also accepted via serde aliases.",
+  "additionalProperties": false,
+  "definitions": {
+    "AppleContainer": {
+      "description": "Apple Container backend config.",
+      "properties": {
+        "cpuCount": {
+          "description": "Requested virtual CPU count.",
+          "maximum": 4294967295,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "image": {
+          "description": "OCI image reference. The image must provide `/bin/sh`.",
+          "minLength": 1,
+          "type": "string"
+        },
+        "memoryMb": {
+          "description": "Requested memory limit in megabytes.",
+          "maximum": 18446744073709551615,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "image"
+      ],
+      "type": "object"
+    },
+    "BaseProcessUi": {
+      "additionalProperties": false,
+      "description": "BaseProcessContainer UI isolation settings.",
+      "properties": {
+        "desktopSystemControl": {
+          "description": "Whether desktop system control is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "ime": {
+          "description": "Whether the IME (Input Method Editor) is allowed.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "isolation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/UiIsolation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "UI isolation level."
+        },
+        "systemSettings": {
+          "description": "System settings access level.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CaptureDenials": {
+      "additionalProperties": false,
+      "description": "Windows denial-capture settings. The presence of the `captureDenials` object enables capture; all fields are optional. Native capture requires the complete compatible PSEC plus V2 Learning Mode API set. Requests that native capture cannot represent use guarded WPR with a compatible legacy SBOX or AppContainer containment tier.",
+      "properties": {
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CaptureDenialsMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How each ungranted access check is handled while it is recorded. Both modes log every access the policy does not grant to the ETL trace; the mode only decides whether that access is blocked or allowed. Defaults to `block` when omitted."
+        },
+        "outputPath": {
+          "description": "Absolute path where the JSON denials output file is written — the deliverable a consuming application reads to learn what the workload was denied. It is a single JSON document `{ \"denials\": [...], \"summary\": {...} }`. A per-run identifier (process id plus random suffix) is inserted into the file stem (e.g. `denials.json` -> `denials.<run-id>.json`) so concurrent and sequential captures do not collide; the actual path is reported on stderr. When omitted, MXC writes it to a managed per-run temporary file and prints its path on stderr. The parent directory must already exist. (The intermediate ETL trace is an internal, runner-managed file in a protected per-run directory. Retained traces use `%LOCALAPPDATA%\\Microsoft\\MXC\\capture-denials\\retained`; non-retained traces use the system temporary directory.)",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "retainEtl": {
+          "description": "Keep the sealed ETL trace after analysis and report its path in output metadata. Defaults to `false`, which deletes the trace after analysis. Retention requires a terminal wait; abandoning the process handle deletes the internal trace. If post-seal analysis fails, the failure and retained path are exposed through `captureDenialsError` output metadata. Retained traces can contain sensitive resource paths and identifiers; callers are responsible for deleting them.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "CaptureDenialsMode": {
+      "description": "How `captureDenials` handles each ungranted access check while recording it.",
+      "oneOf": [
+        {
+          "description": "`block` — the access stays **denied** and the denial is recorded. Deny-by-default containment is preserved; this is the safe default.",
+          "enum": [
+            "block"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`allow` — the access is **allowed** and recorded (audit mode). This relaxes deny-by-default for the run, so it is a security-sensitive choice and the runner emits a security warning.",
+          "enum": [
+            "allow"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "ClipboardPolicy": {
+      "description": "Clipboard access level.",
+      "enum": [
+        "none",
+        "read",
+        "write",
+        "all"
+      ],
+      "type": "string"
+    },
+    "Containment": {
+      "description": "Containment backend (abstract intent or concrete backend).",
+      "oneOf": [
+        {
+          "description": "OS-native process sandbox (resolved per host).",
+          "enum": [
+            "process"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Windows AppContainer / BaseContainer.",
+          "enum": [
+            "processcontainer"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "VM-class isolation (resolved per host).",
+          "enum": [
+            "vm"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Windows Sandbox (experimental).",
+          "enum": [
+            "windows_sandbox"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Full Linux container.",
+          "enum": [
+            "lxc"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "NanVix micro-VM (experimental).",
+          "enum": [
+            "microvm"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Hyperlight micro-VM (experimental).",
+          "enum": [
+            "hyperlight"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "WSL container (experimental).",
+          "enum": [
+            "wslc"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "macOS Seatbelt.",
+          "enum": [
+            "seatbelt"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Windows IsolationSession (experimental).",
+          "enum": [
+            "isolation_session"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Unprivileged Linux bubblewrap sandbox.",
+          "enum": [
+            "bubblewrap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Apple Container VM backend (experimental, macOS).",
+          "enum": [
+            "apple_container"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Experimental": {
+      "description": "Experimental features (only honored with `--experimental`). This block is intentionally **permissive** (no `deny_unknown_fields`): experimental backends are in flux, so the schema documents the known shapes for editor help without rejecting in-progress fields. The strict, closed contract is the stable (top-level) surface.",
+      "properties": {
+        "apple_container": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AppleContainer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Apple Container backend config (macOS)."
+        },
+        "isolation_session": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationSession"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "IsolationSession backend config (Windows)."
+        },
+        "seatbelt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Seatbelt"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Seatbelt backend config (pre-promotion alias)."
+        },
+        "telemetry": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Telemetry"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Telemetry configuration."
+        },
+        "test": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TestFeature"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Placeholder feature for testing experimental infrastructure."
+        },
+        "windows_sandbox": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WindowsSandbox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Windows Sandbox backend config."
+        },
+        "wslc": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Wslc"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "WSL container backend config."
+        }
+      },
+      "type": "object"
+    },
+    "Fallback": {
+      "additionalProperties": false,
+      "description": "AppContainer DACL-mutation fallback policy.",
+      "properties": {
+        "allowDaclMutation": {
+          "description": "Allow the runner to mutate DACLs as a fallback.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Filesystem": {
+      "additionalProperties": false,
+      "description": "Filesystem access policy.",
+      "properties": {
+        "deniedPaths": {
+          "description": "Paths explicitly denied (override broader allow rules).",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "readonlyPaths": {
+          "description": "Paths the process can read but not write.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "readwritePaths": {
+          "description": "Paths the process can read and write.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "IsolationSession": {
+      "description": "IsolationSession backend config. Carries only the per-phase state-aware nesting for the phases that take config (`provision`). The one-shot surface takes no backend configuration at all. `start`, `stop`, `deprovision`, and `exec` take no per-phase config payload: `start`, `stop` and `deprovision` are invoked with only the top-level `phase` and `sandboxId`, and `exec` additionally carries the top-level `process` block.",
+      "properties": {
+        "provision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/IsolationSessionProvisionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "State-aware provision-phase configuration."
+        }
+      },
+      "type": "object"
+    },
+    "IsolationSessionProvisionPhase": {
+      "description": "Provision-phase IsolationSession configuration (state-aware lifecycle).\n\nThe only phase that takes a per-phase payload, so it is its own type rather than a shared one: a shared type would advertise its fields on every phase in the generated schema. The domain configs and the SDK types are already split per phase; this keeps the wire model aligned with them.",
+      "properties": {
+        "appId": {
+          "description": "Optional identifier for the calling application.\n\n**A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "LaunchMethod": {
+      "description": "Seatbelt inner-process launch method.",
+      "oneOf": [
+        {
+          "description": "sandbox_init() + exec (default). Works for third-party GUI apps.",
+          "enum": [
+            "exec"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Launch via macOS LaunchServices (`open`), then apply the sandbox to the inner shell via sandbox-exec. Required for apps with launch constraints.",
+          "enum": [
+            "open"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "Lifecycle": {
+      "additionalProperties": false,
+      "description": "Container lifecycle settings.",
+      "properties": {
+        "destroyOnExit": {
+          "description": "Destroy the container when the process exits (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "preservePolicy": {
+          "description": "Preserve the applied policy after exit (default false).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Lxc": {
+      "additionalProperties": false,
+      "description": "LXC container settings.",
+      "properties": {
+        "distribution": {
+          "description": "Distribution image (e.g. `alpine`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "release": {
+          "description": "Distribution release (e.g. `3.23`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Network": {
+      "additionalProperties": false,
+      "description": "Network access policy.",
+      "properties": {
+        "allowLocalNetwork": {
+          "description": "Allow binding/listening on local IPs and accepting inbound connections.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "allowedHosts": {
+          "description": "Hosts explicitly allowed.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "blockedHosts": {
+          "description": "Hosts explicitly blocked.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "defaultPolicy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default outbound policy when no host rule matches."
+        },
+        "egress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEgress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Outbound network policy."
+        },
+        "enforcementMode": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEnforcement"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the policy is enforced."
+        },
+        "ingress": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkIngress"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inbound and host-loopback network policy."
+        },
+        "proxy": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Proxy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Proxy configuration (one of localhost / builtinTestServer / url)."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkAction": {
+      "description": "Allow or deny network action.",
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "NetworkEgress": {
+      "additionalProperties": false,
+      "description": "Outbound network policy.",
+      "properties": {
+        "allow": {
+          "description": "Explicit allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Action used when no explicit rule matches. Defaults to `deny`."
+        },
+        "deny": {
+          "description": "Explicit deny rules. Deny rules take precedence over allow rules.",
+          "items": {
+            "$ref": "#/definitions/NetworkRule"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "NetworkEnforcement": {
+      "description": "Network enforcement mechanism.",
+      "oneOf": [
+        {
+          "description": "Per-process capability-based filtering.",
+          "enum": [
+            "capabilities"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Host firewall rules.",
+          "enum": [
+            "firewall"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Both capability and firewall enforcement.",
+          "enum": [
+            "both"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "NetworkIngress": {
+      "additionalProperties": false,
+      "description": "Inbound and host-loopback network policy.",
+      "properties": {
+        "default": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default action for LAN/private-network inbound traffic."
+        },
+        "hostLoopback": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkAction"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Bidirectional host-loopback connectivity action."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkPeer": {
+      "additionalProperties": false,
+      "description": "CIDR network peer.",
+      "properties": {
+        "cidr": {
+          "description": "IPv4 or IPv6 CIDR.",
+          "type": "string"
+        },
+        "except": {
+          "description": "CIDRs excluded from this peer.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "cidr"
+      ],
+      "type": "object"
+    },
+    "NetworkPolicy": {
+      "description": "Default network policy.",
+      "enum": [
+        "allow",
+        "block"
+      ],
+      "type": "string"
+    },
+    "NetworkPort": {
+      "additionalProperties": false,
+      "description": "Protocol and destination-port selector.",
+      "properties": {
+        "endPort": {
+          "description": "Inclusive end of a destination-port range. Requires `port`.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "description": "Destination port. Omission matches every port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transport protocol. Defaults to `any`."
+        }
+      },
+      "type": "object"
+    },
+    "NetworkProtocol": {
+      "description": "Transport protocol selector.",
+      "enum": [
+        "tcp",
+        "udp",
+        "icmp",
+        "any"
+      ],
+      "type": "string"
+    },
+    "NetworkRule": {
+      "additionalProperties": false,
+      "description": "Outbound network rule.",
+      "properties": {
+        "ports": {
+          "description": "Destination protocols and ports. Omission matches all.",
+          "items": {
+            "$ref": "#/definitions/NetworkPort"
+          },
+          "minItems": 1,
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "to": {
+          "description": "Destination CIDRs. Omission matches both IP families.",
+          "items": {
+            "$ref": "#/definitions/NetworkPeer"
+          },
+          "minItems": 1,
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Phase": {
+      "description": "State-aware lifecycle phase.",
+      "enum": [
+        "provision",
+        "start",
+        "exec",
+        "stop",
+        "deprovision"
+      ],
+      "type": "string"
+    },
+    "PortMapping": {
+      "description": "A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).",
+      "properties": {
+        "containerPort": {
+          "description": "Container port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": "integer"
+        },
+        "protocol": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportProtocol"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Transport protocol for the mapping. Only `tcp` is currently supported."
+        },
+        "windowsPort": {
+          "description": "Host (Windows) port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "containerPort",
+        "windowsPort"
+      ],
+      "type": "object"
+    },
+    "Process": {
+      "additionalProperties": false,
+      "description": "Process execution settings.",
+      "properties": {
+        "commandLine": {
+          "description": "Command line (or script) to execute.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cwd": {
+          "description": "Working directory for the process. When omitted, backends substitute a directory the sandbox can use rather than inheriting the launcher's cwd: Windows ProcessContainer picks the first `readwritePaths` entry that is an existing directory, else the first such `readonlyPaths` entry, else the system drive root; Seatbelt applies the same precedence with a `/` fallback; LXC/WSL use the container root; NanVix and Hyperlight reject a working directory outright. See `docs/schema.md` (\"Working Directory\").",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "env": {
+          "description": "Environment variables as `\"KEY=VALUE\"` strings.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout": {
+          "description": "Wall-clock timeout in milliseconds.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainer": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific settings.",
+      "properties": {
+        "capabilities": {
+          "description": "AppContainer capabilities (e.g. `internetClient`, `registryRead`). Each array entry must contain exactly one capability name; commas are rejected because BaseContainer uses commas as its wire delimiter. `learningModeLogging` and `permissiveLearningMode` are reserved and rejected here; use `learningMode`, `--audit`, or the dedicated denial capture configuration instead.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "captureDenials": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/CaptureDenials"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Windows denial capture. When present, the runner records the sandboxed process's access attempts to a learning-mode ETL trace for later inspection. MXC prefers native PSEC plus V2 Learning Mode when that API set can fully honor the request. Otherwise it retains the highest compatible legacy containment tier and uses guarded WPR capture, so `leastPrivilege`, `network.proxy`, and deny-path policies can remain enforced without weakening the request."
+        },
+        "learningMode": {
+          "description": "AppContainer learning mode (deny-and-record): failed access checks are logged for diagnostics while the accesses stay denied; containment is unchanged. Distinct from the allow-all `permissiveLearningMode` capability, which is injected internally by the `--audit` CLI flag or dedicated denial-capture configuration.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "leastPrivilege": {
+          "description": "Enforce least-privilege mode.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ProcessContainerNetwork"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "ProcessContainer-specific network configuration."
+        },
+        "ui": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/BaseProcessUi"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "BaseProcessContainer UI settings (Windows)."
+        }
+      },
+      "type": "object"
+    },
+    "ProcessContainerNetwork": {
+      "additionalProperties": false,
+      "description": "ProcessContainer-specific network configuration.",
+      "properties": {
+        "allowedProxyPeer": {
+          "description": "Installed package family name or AppContainer profile allowed to host the configured loopback proxy.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Proxy": {
+      "additionalProperties": false,
+      "description": "Proxy configuration. Exactly one variant applies.",
+      "properties": {
+        "builtinTestServer": {
+          "description": "Have wxc launch its own built-in test proxy.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "localhost": {
+          "description": "External localhost proxy port.",
+          "maximum": 65535.0,
+          "minimum": 1.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "Proxy URL (parsed into host:port).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "RuntimeConfig": {
+      "additionalProperties": false,
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy.",
+      "properties": {
+        "networkProxy": {
+          "description": "HTTP/S loopback proxy URL.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Seatbelt": {
+      "additionalProperties": false,
+      "description": "macOS Seatbelt backend configuration.",
+      "properties": {
+        "extraMachLookups": {
+          "description": "Additional Mach service global-names the inner process may resolve.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "guiAccess": {
+          "description": "Allow GUI (WindowServer) access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "keychainAccess": {
+          "description": "Allow Keychain access.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "launchMethod": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/LaunchMethod"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Inner process launch method."
+        },
+        "nestedPty": {
+          "description": "Attach the inner process to a nested pty (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "profileOverride": {
+          "description": "Replace the generated profile entirely (advanced/testing escape hatch).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Telemetry": {
+      "description": "Telemetry configuration (`experimental.telemetry`).",
+      "properties": {
+        "enabled": {
+          "description": "Explicit telemetry override. `true` = force on, `false` = force off, omitted = disabled (default off).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TestFeature": {
+      "description": "Placeholder experimental feature.",
+      "properties": {
+        "message": {
+          "description": "Message to log when the feature is applied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "TransportProtocol": {
+      "description": "Port-forward transport protocol. Only `tcp` is currently supported by the vendored WSLC SDK runtime; `udp` is rejected at parse time.",
+      "enum": [
+        "tcp"
+      ],
+      "type": "string"
+    },
+    "Ui": {
+      "additionalProperties": false,
+      "description": "Cross-platform UI isolation policy.",
+      "properties": {
+        "clipboard": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ClipboardPolicy"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Clipboard access level."
+        },
+        "disable": {
+          "description": "Disable all UI access (default true).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "injection": {
+          "description": "Allow UI injection.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "UiIsolation": {
+      "description": "Desktop UI isolation level.",
+      "enum": [
+        "desktop",
+        "handles",
+        "atoms",
+        "container"
+      ],
+      "type": "string"
+    },
+    "WindowsSandbox": {
+      "description": "Windows Sandbox backend config.",
+      "properties": {
+        "daemonPipeName": {
+          "description": "Daemon named-pipe override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "idleTimeout": {
+          "description": "Idle timeout (legacy seconds field).",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "idleTimeoutMs": {
+          "description": "Idle timeout before teardown (ms).",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "Wslc": {
+      "description": "WSL container backend config.",
+      "properties": {
+        "cpuCount": {
+          "description": "vCPU count.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "gpu": {
+          "description": "Enable GPU passthrough.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "image": {
+          "description": "Container image reference.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageTarPath": {
+          "description": "Path to a local image tarball.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memoryMb": {
+          "description": "Memory limit (MB).",
+          "maximum": 18446744073709551615,
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "portMappings": {
+          "description": "Host → container port forwards. Only TCP is currently supported; the parser rejects `udp` because the WSLC SDK runtime returns `E_NOTIMPL` for UDP port mappings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "provision": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WslcProvisionPhase"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases."
+        },
+        "storagePath": {
+          "description": "Storage path override.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "targetOs": {
+          "description": "OS inside the WSL container.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "WslcProvisionPhase": {
+      "description": "Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).\n\nFilesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.",
+      "properties": {
+        "image": {
+          "description": "Container image reference (e.g. `alpine:latest`). Defaults to `alpine:latest` when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageTarPath": {
+          "description": "Path to a local image tarball to import instead of pulling.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    }
+  },
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema reference for editor validation. Accepted but ignored by the parser.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "_comment": {
+      "description": "Optional human-readable annotation. Accepted but ignored by the parser."
+    },
+    "containerId": {
+      "description": "Externally assigned container identifier.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "containment": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Containment"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Containment backend to use for execution. Accepts abstract intents (`process`, `vm`) and concrete backends; the binary resolves intents to a concrete backend per host at run time."
+    },
+    "correlationVector": {
+      "description": "Microsoft Correlation Vector (MS-CV) seeded at `provision` and returned in the provision result. The client relays it verbatim into every later state-aware phase so all phases of one lifecycle share a telemetry base prefix (emitted under `__TlgCV__`). The executor is the trust boundary: on each non-provision phase it validates the relayed value and *spins* a fresh child element off a mutable base (so multiple invocations of one phase stay distinct), passes an already-frozen vector through unchanged, and reseeds a brand-new base if the relayed value is absent or malformed — so a missing or hostile relay never reaches telemetry unvalidated. Ignored unless experimental telemetry is enabled; not valid on one-shot requests.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "experimental": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Experimental"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Experimental features. Only honored when `--experimental` is passed."
+    },
+    "fallback": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Fallback"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "AppContainer DACL-mutation fallback policy (Windows)."
+    },
+    "filesystem": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Filesystem"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Filesystem access policy. Shared across all backends."
+    },
+    "lifecycle": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lifecycle"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Container lifecycle settings."
+    },
+    "lxc": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Lxc"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "LXC container settings (Linux). Used when containment is `lxc`."
+    },
+    "network": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Network"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Network access policy. Shared across all backends."
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Phase"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "State-aware lifecycle phase. When present, the request is a state-aware request (`sandboxId` is required for non-provision phases); when absent, the request is one-shot."
+    },
+    "process": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Process"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Process to execute and its environment."
+    },
+    "processContainer": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProcessContainer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "ProcessContainer-specific settings (Windows). Used when containment is `processcontainer`."
+    },
+    "runtimeConfig": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RuntimeConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Runtime values supplied alongside, but separate from, sandbox policy."
+    },
+    "sandboxId": {
+      "description": "Sandbox identifier returned by a prior provision request. Required for non-provision state-aware phases.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "seatbelt": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Seatbelt"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "macOS Seatbelt backend configuration. Used when containment is `seatbelt`."
+    },
+    "ui": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Ui"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Cross-platform UI isolation policy."
+    },
+    "version": {
+      "description": "MXC config schema version (semver), e.g. `\"0.9.0-alpha\"`.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "type": "object"
+}

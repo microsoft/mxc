@@ -4,7 +4,7 @@
 // Wire-type conformance oracle (Phase 2C, option C).
 //
 // The generated module `../../src/generated/wire.ts` is emitted from the Rust
-// wire model (`wxc_common::wire`) by the `mxc_schema_gen --ts` Rust TypeScript
+// wire model (`wxc_common::wire`) by the `mxc_schema_gen types` Rust TypeScript
 // emitter. It is the single source of truth for the wire shape.
 //
 // This file asserts — at COMPILE TIME — that the hand-written public SDK types
@@ -49,6 +49,12 @@ import type {
   LifecycleConfig,
   FilesystemConfig,
   NetworkConfig,
+  NetworkEgressConfig,
+  NetworkIngressConfig,
+  NetworkPeerConfig,
+  NetworkPortConfig,
+  NetworkRuleConfig,
+  RuntimeConfig,
   UiConfig,
   ProcessContainerConfig,
   BaseProcessUiConfig,
@@ -68,6 +74,12 @@ import type {
   Lifecycle as WireLifecycle,
   Filesystem as WireFilesystem,
   Network as WireNetwork,
+  NetworkEgress as WireNetworkEgress,
+  NetworkIngress as WireNetworkIngress,
+  NetworkPeer as WireNetworkPeer,
+  NetworkPort as WireNetworkPort,
+  NetworkRule as WireNetworkRule,
+  RuntimeConfig as WireRuntimeConfig,
   Ui as WireUi,
   ProcessContainer as WireProcessContainer,
   BaseProcessUi as WireBaseProcessUi,
@@ -81,6 +93,8 @@ import type {
   Containment as WireContainment,
   NetworkPolicy as WireNetworkPolicy,
   NetworkEnforcement as WireNetworkEnforcement,
+  NetworkAction as WireNetworkAction,
+  NetworkProtocol as WireNetworkProtocol,
   UiIsolation as WireUiIsolation,
   TransportProtocol as WireTransportProtocol,
 } from '../../src/generated/wire.js';
@@ -116,6 +130,18 @@ type _NetDefaultPolicy = AssertTrue<
 type _NetEnforcement = AssertTrue<
   Equivalent<NonNullable<NetworkConfig['enforcementMode']>, WireNetworkEnforcement>
 >;
+type _NetworkEgressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkEgressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressDefault = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['default']>, WireNetworkAction>
+>;
+type _NetworkIngressHostLoopback = AssertTrue<
+  Equivalent<NonNullable<NetworkIngressConfig['hostLoopback']>, WireNetworkAction>
+>;
+type _NetworkPortProtocol = AssertTrue<
+  Equivalent<NonNullable<NetworkPortConfig['protocol']>, WireNetworkProtocol>
+>;
 type _BaseProcessUiIsolation = AssertTrue<
   Equivalent<NonNullable<BaseProcessUiConfig['isolation']>, WireUiIsolation>
 >;
@@ -131,6 +157,12 @@ type _ProcessVals = AssertTrue<Assignable<ProcessConfig, WireProcess>>;
 type _LifecycleVals = AssertTrue<Assignable<LifecycleConfig, WireLifecycle>>;
 type _FilesystemVals = AssertTrue<Assignable<FilesystemConfig, WireFilesystem>>;
 type _NetworkVals = AssertTrue<Assignable<NetworkConfig, WireNetwork>>;
+type _NetworkEgressVals = AssertTrue<Assignable<NetworkEgressConfig, WireNetworkEgress>>;
+type _NetworkIngressVals = AssertTrue<Assignable<NetworkIngressConfig, WireNetworkIngress>>;
+type _NetworkPeerVals = AssertTrue<Assignable<NetworkPeerConfig, WireNetworkPeer>>;
+type _NetworkPortVals = AssertTrue<Assignable<NetworkPortConfig, WireNetworkPort>>;
+type _NetworkRuleVals = AssertTrue<Assignable<NetworkRuleConfig, WireNetworkRule>>;
+type _RuntimeConfigVals = AssertTrue<Assignable<RuntimeConfig, WireRuntimeConfig>>;
 type _UiVals = AssertTrue<Assignable<UiConfig, WireUi>>;
 type _ProcessContainerVals = AssertTrue<Assignable<ProcessContainerConfig, WireProcessContainer>>;
 type _BaseProcessUiVals = AssertTrue<Assignable<BaseProcessUiConfig, WireBaseProcessUi>>;
@@ -166,7 +198,9 @@ type _FilesystemKeys = AssertTrue<Equivalent<OnlyInPublic<FilesystemConfig, Wire
 
 // `NetworkConfig.removeRulesOnExit` is deprecated (use `lifecycle.preservePolicy`)
 // and not a wire `network` field.
-type _NetworkKeys = AssertTrue<Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>>;
+type _NetworkKeys = AssertTrue<
+  Equivalent<OnlyInPublic<NetworkConfig, WireNetwork>, 'removeRulesOnExit'>
+>;
 
 // `ProcessContainerConfig.name` is the deprecated AppContainer profile name
 // (superseded by top-level `containerId`); not a wire `processContainer` field.
@@ -197,6 +231,12 @@ type _ProcessWireKeys = AssertTrue<Equivalent<OnlyInWire<ProcessConfig, WireProc
 type _LifecycleWireKeys = AssertTrue<Equivalent<OnlyInWire<LifecycleConfig, WireLifecycle>, never>>;
 type _FilesystemWireKeys = AssertTrue<Equivalent<OnlyInWire<FilesystemConfig, WireFilesystem>, never>>;
 type _NetworkWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkConfig, WireNetwork>, never>>;
+type _NetworkEgressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkEgressConfig, WireNetworkEgress>, never>>;
+type _NetworkIngressWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkIngressConfig, WireNetworkIngress>, never>>;
+type _NetworkPeerWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPeerConfig, WireNetworkPeer>, never>>;
+type _NetworkPortWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkPortConfig, WireNetworkPort>, never>>;
+type _NetworkRuleWireKeys = AssertTrue<Equivalent<OnlyInWire<NetworkRuleConfig, WireNetworkRule>, never>>;
+type _RuntimeConfigWireKeys = AssertTrue<Equivalent<OnlyInWire<RuntimeConfig, WireRuntimeConfig>, never>>;
 type _UiWireKeys = AssertTrue<Equivalent<OnlyInWire<UiConfig, WireUi>, never>>;
 type _BaseProcessUiWireKeys = AssertTrue<Equivalent<OnlyInWire<BaseProcessUiConfig, WireBaseProcessUi>, never>>;
 // `wslc.provision` is the state-aware-only nested provision-phase config; the
@@ -232,8 +272,12 @@ type _RootWireKeys = AssertTrue<
 // Reference the assertion aliases so they read as intentionally load-bearing.
 export type WireConformanceAssertions = [
   _Clipboard, _Containment,
-  _NetDefaultPolicy, _NetEnforcement, _BaseProcessUiIsolation, _PortProtocol,
+  _NetDefaultPolicy, _NetEnforcement,
+  _NetworkEgressDefault, _NetworkIngressDefault, _NetworkIngressHostLoopback,
+  _NetworkPortProtocol, _BaseProcessUiIsolation, _PortProtocol,
   _ProcessVals, _LifecycleVals, _FilesystemVals, _NetworkVals, _UiVals,
+  _NetworkEgressVals, _NetworkIngressVals, _NetworkPeerVals, _NetworkPortVals,
+  _NetworkRuleVals, _RuntimeConfigVals,
   _ProcessContainerVals, _BaseProcessUiVals, _WslcVals, _AppleContainerVals, _PortMappingVals,
   _SeatbeltVals, _LxcVals,
   _ProcessKeys, _LifecycleKeys, _FilesystemKeys, _NetworkKeys, _UiKeys,
@@ -241,6 +285,8 @@ export type WireConformanceAssertions = [
   _SeatbeltKeys, _LxcKeys,
   _RootVals, _RootKeys,
   _ProcessWireKeys, _LifecycleWireKeys, _FilesystemWireKeys, _NetworkWireKeys,
+  _NetworkEgressWireKeys, _NetworkIngressWireKeys, _NetworkPeerWireKeys,
+  _NetworkPortWireKeys, _NetworkRuleWireKeys, _RuntimeConfigWireKeys,
   _UiWireKeys, _BaseProcessUiWireKeys, _WslcWireKeys, _AppleContainerWireKeys, _PortMappingWireKeys,
   _LxcWireKeys, _ProcessContainerWireKeys, _SeatbeltWireKeys, _RootWireKeys,
 ];

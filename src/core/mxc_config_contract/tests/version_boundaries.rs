@@ -11,7 +11,11 @@ mod compatibility;
 mod containment;
 #[path = "version_boundaries/experimental.rs"]
 mod experimental;
+#[path = "version_boundaries/network.rs"]
+mod network;
 #[path = "version_boundaries/process_container.rs"]
 mod process_container;
 #[path = "version_boundaries/seatbelt.rs"]
 mod seatbelt;
+#[path = "version_boundaries/state_aware.rs"]
+mod state_aware;

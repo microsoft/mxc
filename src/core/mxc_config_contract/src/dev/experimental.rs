@@ -7,6 +7,7 @@ use std::num::{NonZeroU16, NonZeroU32, NonZeroU64};
 
 /// Placeholder feature used to exercise experimental configuration plumbing.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TestFeature {
     /// The message for the test feature.
@@ -16,6 +17,7 @@ pub struct TestFeature {
 
 /// One-shot telemetry override.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Telemetry {
     /// Whether telemetry is enabled.
@@ -25,6 +27,7 @@ pub struct Telemetry {
 
 /// Compatibility settings accepted for one-shot Windows Sandbox requests.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OneShotWindowsSandbox {
     /// Idle timeout before teardown, in milliseconds.
@@ -38,18 +41,18 @@ pub struct OneShotWindowsSandbox {
     pub daemon_pipe_name: OptionalField<String>,
 }
 
-#[rustfmt::skip]
 string_enum! {
-/// Transport protocol for a WSLC port mapping.
-#[derive(Debug)]
-pub enum TransportProtocol {
-    /// TCP transport.
-    Tcp => ["tcp"],
-}
+    /// Transport protocol for a WSLC port mapping.
+    #[derive(Debug)]
+    pub enum TransportProtocol {
+        /// TCP transport.
+        Tcp => ["tcp"],
+    }
 }
 
 /// A host-to-container WSLC port mapping.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PortMapping {
     /// Non-zero TCP port on the Windows host.
@@ -63,6 +66,7 @@ pub struct PortMapping {
 
 /// One-shot WSLC backend settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OneShotWslc {
     /// Target operating system inside the container.
@@ -93,6 +97,8 @@ pub struct OneShotWslc {
 
 /// One-shot Apple Container backend settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schema-gen", schemars(rename = "AppleContainer"))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OneShotAppleContainer {
     /// OCI image reference. The image must provide `/bin/sh`.
@@ -107,6 +113,7 @@ pub struct OneShotAppleContainer {
 
 /// Experimental settings.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OneShotExperimental {
     /// Optional placeholder test feature.

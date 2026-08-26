@@ -180,6 +180,18 @@ jobs:
           sudo systemctl start lxc-net
           sudo systemctl is-active --quiet lxc-net
 
+      # A bridged veth reaches the LXC firewall chain only while br_netfilter
+      # delivers bridged packets to iptables, and the backend refuses to
+      # report success for a policy it cannot enforce.
+      - name: Enable bridge netfilter
+        if: matrix.os_label == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo modprobe br_netfilter
+          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
+          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
+
       - name: Restore execute permission on mxc-exec-mac
         if: matrix.os_label == 'macos'
         shell: bash

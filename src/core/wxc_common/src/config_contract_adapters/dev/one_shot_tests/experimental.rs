@@ -4,7 +4,7 @@
 use super::common::{adapt, assert_matches_current_wire_deserialization, request_with_containment};
 
 const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "process",
     "process": {
         "commandLine": "echo hello"
@@ -20,7 +20,7 @@ const TEST_FEATURE_AND_TELEMETRY_REQUEST_JSON: &str = r#"{
 }"#;
 
 const WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "windows_sandbox",
     "process": {
         "commandLine": "echo hello"
@@ -35,7 +35,7 @@ const WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
 }"#;
 
 const WSLC_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "wslc",
     "process": {
         "commandLine": "echo hello"
@@ -65,7 +65,7 @@ const WSLC_REQUEST_JSON: &str = r#"{
 }"#;
 
 const APPLE_CONTAINER_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "containment": "apple_container",
     "process": {
         "commandLine": "echo hello"
