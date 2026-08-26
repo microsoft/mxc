@@ -32,5 +32,19 @@ jobs:
       - name: Setup Rust toolchain
         run: rustup update stable
 
-      # No build settings are passed: feature selection lives in the csproj.
-      - run: dotnet build Microsoft.Mxc.Sdk.slnx
+      # Exercise the opt-in backend build as one complete native unit. The
+      # managed tests dry-run both backends and verify WSLC's daemon + SDK DLL
+      # were propagated into the application output.
+      - name: Build .NET SDK
+        run: dotnet build Microsoft.Mxc.Sdk.slnx
+
+      - name: Test default backend availability
+        run: dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --no-build --no-restore
+
+      - name: Build .NET SDK with optional backends
+        if: matrix.os_label == 'windows'
+        run: dotnet build Microsoft.Mxc.Sdk.slnx -p:MxcWithWslc=true -p:MxcWithIsolationSession=true
+
+      - name: Test optional backend availability
+        if: matrix.os_label == 'windows'
+        run: dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true

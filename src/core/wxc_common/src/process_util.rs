@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
@@ -9,15 +10,53 @@ use crate::error::WxcError;
 use crate::sandbox_process::StreamCloser;
 use crate::string_util;
 
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Foundation::{
     CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0,
 };
 use windows::Win32::Security::{PSID, SECURITY_ATTRIBUTES};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows::Win32::System::LibraryLoader::{
+    GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+};
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::System::IO::CancelIoEx;
 use windows_core::BOOL;
+
+/// Resolve the loaded module containing `address`.
+///
+/// Library consumers cannot use [`std::env::current_exe`] to locate native
+/// sidecars: a framework-dependent .NET application may load `mxc_ffi.dll`
+/// directly from its NuGet runtime-asset directory while `current_exe` points
+/// at `dotnet.exe` or the managed application host.
+pub fn module_path_for_address(address: *const ()) -> Result<PathBuf, String> {
+    let mut module = HMODULE::default();
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address.cast()),
+            &mut module,
+        )
+    }
+    .map_err(|error| format!("failed to locate the loaded module: {error}"))?;
+
+    let mut path = vec![0u16; 32_768];
+    let len = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+    if len == 0 {
+        return Err(format!(
+            "failed to resolve the loaded module path: {}",
+            windows::core::Error::from_thread()
+        ));
+    }
+    if len >= path.len() {
+        return Err("the loaded module path exceeds the Windows path limit".to_string());
+    }
+    path.truncate(len);
+    Ok(PathBuf::from(std::ffi::OsString::from_wide(&path)))
+}
 
 /// A readable end of an anonymous pipe (e.g. the child's stdout/stderr),
 /// owning the handle and closing it on drop. Implements [`std::io::Read`]
@@ -553,6 +592,19 @@ pub fn resolve_sibling_binary(name: &str) -> Result<PathBuf, WxcError> {
 mod tests {
     use super::*;
     use windows::Win32::Storage::FileSystem::WriteFile;
+
+    #[test]
+    fn module_path_for_address_finds_the_containing_binary() {
+        let path = module_path_for_address(
+            module_path_for_address_finds_the_containing_binary as *const (),
+        )
+        .unwrap();
+        assert!(
+            path.is_file(),
+            "resolved module does not exist: {}",
+            path.display()
+        );
+    }
 
     /// Creates a non-inheritable pipe pair for use in tests.
     /// Unlike `create_std_pipes`, neither end is marked inheritable, which

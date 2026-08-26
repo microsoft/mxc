@@ -14,9 +14,13 @@ crate-type = ["cdylib", "staticlib", "lib"]
 
 [dependencies]
 mxc-sdk = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 
 [features]
+# WSL Container backend (Windows only, experimental). The managed package must
+# also stage wxc-wslc-daemon.exe and wslcsdk.dll beside its application host.
+wslc = ["mxc-sdk/wslc"]
 # IsolationSession backend (Windows only, experimental). Needed by the
 # `attached_console_ffi` example.
 isolation_session = ["mxc-sdk/isolation_session"]

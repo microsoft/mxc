@@ -44,6 +44,9 @@ jobs:
       - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
         run: node scripts/check-dotnet-errorcode-parity.js
 
+      - name: Check C# API parity with Rust SDK surfaces
+        run: node scripts/check-dotnet-api-parity.js
+
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 

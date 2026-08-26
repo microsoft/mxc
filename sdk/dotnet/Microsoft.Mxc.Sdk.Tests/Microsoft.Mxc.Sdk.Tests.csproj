@@ -10,6 +10,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <!-- The native detail struct is marshalled with raw pointers. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefineConstants Condition="'$(MxcWithWslc)' == 'true'">$(DefineConstants);MXC_WITH_WSLC</DefineConstants>
+    <DefineConstants Condition="'$(MxcWithIsolationSession)' == 'true'">$(DefineConstants);MXC_WITH_ISOLATION_SESSION</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,6 +20,10 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Mxc.Sdk\Microsoft.Mxc.Sdk.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\golden\*.json" Link="golden\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

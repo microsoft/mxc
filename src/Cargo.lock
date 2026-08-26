@@ -1562,6 +1562,7 @@ version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "serde",
  "serde_json",
 ]
 

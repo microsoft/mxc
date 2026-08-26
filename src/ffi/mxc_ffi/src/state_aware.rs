@@ -687,3 +687,18 @@ mod tests {
         assert_eq!(timed_out.exit_code, 0, "no exit code exists for a timeout");
     }
 }
+#[test]
+fn managed_state_aware_goldens_are_accepted_by_native_contract() {
+    for fixture in [
+        include_str!("../../../../sdk/dotnet/golden/state-aware-wslc-provision.json"),
+        include_str!("../../../../sdk/dotnet/golden/state-aware-wslc-exec.json"),
+    ] {
+        if let Err(error) = run_state_aware_json(fixture, true, true) {
+            assert_eq!(
+                error.code,
+                mxc_sdk::ErrorCode::BackendUnavailable,
+                "golden must parse and validate; feature-off is the only accepted failure: {error}"
+            );
+        }
+    }
+}
