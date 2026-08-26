@@ -230,11 +230,8 @@ every entry.
 `prepare-windows-host.ps1`:
 
 - `process-t3` — runs `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`, then verifies the workload interpreters:
-  `pwsh` and `git` are required (they gate 10 of the 19 `T3-Workloads.ps1`
-  cases, so their absence means a mis-imaged pool and fails the job), while
-  `node` and `python` only emit a warning because the suite reports their
-  cases as skipped.
+  `prepare-null-device --no-sacl`, then calls the shared workload-interpreter
+  check ([below](#workload-interpreters)).
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
@@ -262,6 +259,42 @@ message instead of surfacing later as an opaque backend error.
 - `hyperlight` — no-op.
 
 macOS has no preparation step.
+
+### Workload interpreters
+
+Some suites do not just exercise MXC's primitives — they run *real programs*
+(`pwsh`, `git`, `node`, `python`, `cmd`) inside the sandbox and assert on what
+those programs produce. `Assert-WorkloadInterpreters` in
+`prepare-windows-host.ps1` verifies that host-side inventory up front, so a
+missing tool is reported once as a preparation result rather than repeatedly as
+a confusing mid-suite failure.
+
+The check is **suite-agnostic by design**. It describes what a Windows
+validation *host* is expected to provide, not what any one suite consumes, so
+any current or future suite that shells out to these programs is served by the
+same list. `T3-Workloads.ps1` is simply the first caller; wiring up the next one
+needs no change here.
+
+Its inventory lives in a single table, each entry carrying:
+
+- `Candidates` — the command names to try, in order. Resolution mirrors what the
+  suites themselves do: `python` is tried before `python3`, and a match under
+  `WindowsApps` is ignored because that is a Microsoft Store alias stub rather
+  than a real interpreter.
+- `Required` — whether an absence fails the job or only warns. Today only
+  `pwsh` is required; its absence means a mis-imaged pool. `git`, `node`, and
+  `python` warn, because suites are expected to report their dependent cases as
+  skipped rather than failing.
+- `Remedy` — the image-level fix, quoted in whichever message is emitted. The
+  tools are **verified, never installed**, for the same reason the optional
+  features are: provisioning a toolchain mid-run would mask the image drift the
+  check exists to surface.
+
+Because a warning is deliberately not a failure, an absent optional interpreter
+silently shrinks coverage while the job still shows green. GitHub's pass/fail
+icon cannot express "passed, but with less coverage than yesterday" — a future
+test-analysis portal is intended to surface skip counts so that erosion is
+visible.
 
 ## Log collection
 

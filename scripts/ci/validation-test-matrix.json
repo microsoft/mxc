@@ -393,22 +393,19 @@
       {
         "os": "windows-25h2",
         "backends": [
-          "process-t3",
-          "wslc"
+          "process-t3"
         ]
       },
       {
         "os": "windows-24h2",
         "backends": [
-          "process-t3",
-          "wslc"
+          "process-t3"
         ]
       },
       {
         "os": "windows-23h2",
         "backends": [
-          "process-t3",
-          "wslc"
+          "process-t3"
         ]
       }
     ]
