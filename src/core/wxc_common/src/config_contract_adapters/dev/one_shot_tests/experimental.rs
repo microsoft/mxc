@@ -244,10 +244,6 @@ const DEVELOPMENT_CONTAINMENT_CASES: &[DevelopmentContainmentCase] = &[
         input: "isolation_session",
         expected: "isolation_session",
     },
-    DevelopmentContainmentCase {
-        input: "apple_container",
-        expected: "apple_container",
-    },
 ];
 
 #[test]
