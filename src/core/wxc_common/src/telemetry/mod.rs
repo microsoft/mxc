@@ -140,6 +140,10 @@ thread_local! {
     /// telemetry test's forced-active state and trip the global panic hook into
     /// the sink. Never set outside tests.
     static TEST_FORCE_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only authorization override for emit-path tests that run on
+    /// non-Windows hosts or intentionally isolate event mapping from the
+    /// persisted consent and policy stores.
+    static TEST_FORCE_AUTHORIZED: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether the emit glue should proceed. In production this is exactly
@@ -151,6 +155,19 @@ fn emit_active() -> bool {
         return true;
     }
     mxc_telemetry::is_active()
+}
+
+/// Re-check live authorization immediately before one logical emission.
+///
+/// Provider registration records only that telemetry was authorized at
+/// initialization. Consent withdrawal or a newly blocking administrative
+/// policy must suppress the next emission from an already-running process.
+fn emission_is_authorized() -> bool {
+    #[cfg(test)]
+    if let Some(authorized) = TEST_FORCE_AUTHORIZED.with(|value| value.get()) {
+        return authorized;
+    }
+    consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
 }
 
 /// Claim the single terminal-emit slot for this process. Returns `true` if a
@@ -173,6 +190,7 @@ fn reset_for_test() {
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = None;
     TEST_FORCE_ACTIVE.with(|f| f.set(false));
+    TEST_FORCE_AUTHORIZED.with(|value| value.set(None));
     events::test_sink::clear();
 }
 
@@ -267,6 +285,10 @@ pub fn emit_completion(
     if !active {
         return;
     }
+    if !emission_is_authorized() {
+        shutdown();
+        return;
+    }
     if already_emitted() {
         return;
     }
@@ -321,6 +343,10 @@ pub fn emit_completion(
 /// observable. `duration_ms` is reported as `0` because no execution occurred.
 pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
     if !active {
+        return;
+    }
+    if !emission_is_authorized() {
+        shutdown();
         return;
     }
     if already_emitted() {
@@ -537,7 +563,7 @@ fn emit_crash(ctx: TelemetryContext<'_>, exit_code: i32, reason: FailureReason) 
 /// where the OS reclaims the ETW registration at process exit. It also carries
 /// **no** panic message text, which can contain paths or other PII.
 pub fn emit_panic() {
-    if !emit_active() || already_emitted() {
+    if !emit_active() || !emission_is_authorized() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
@@ -567,7 +593,7 @@ pub fn emit_panic() {
 /// tears the process down via `ExitProcess`, and the main thread may still be
 /// live. It is allocation-light and emits no free-form text.
 pub fn emit_cancellation() {
-    if !emit_active() || already_emitted() {
+    if !emit_active() || !emission_is_authorized() || already_emitted() {
         return;
     }
     let correlation_vector = process_correlation_vector();
@@ -700,6 +726,10 @@ pub fn emit_state_aware(
     if !active {
         return;
     }
+    if !emission_is_authorized() {
+        shutdown();
+        return;
+    }
     if already_emitted() {
         return;
     }
@@ -816,6 +846,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
         set_process_correlation_vector("iso:wxc-abcd");
@@ -854,6 +885,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("start");
         set_process_correlation_vector("iso:wxc-abcd");
@@ -888,6 +920,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
 
@@ -1235,6 +1268,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
 
         // Provision-style success envelope → one MXC.Execution, no MXC.Error.
         let envelope = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
@@ -1260,6 +1294,7 @@ mod tests {
         // Fresh slot for the error case (the emit above claimed it once).
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
         let err = Err(MxcError::policy_validation("bad policy"));
         emit_state_aware(
             true,
@@ -1298,6 +1333,7 @@ mod tests {
         let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
         events::test_sink::install();
+        TEST_FORCE_AUTHORIZED.with(|value| value.set(Some(true)));
 
         // Register the real ETW provider; on Windows this makes is_active() true.
         assert!(
@@ -1319,6 +1355,42 @@ mod tests {
         );
 
         mxc_telemetry::shutdown();
+        reset_for_test();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_withdrawal_and_policy_block_suppress_the_next_emission() {
+        let store = tempfile::tempdir().expect("temp dir");
+        let env = test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        consent::set_consent(true, "test").expect("set consent");
+
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        set_process_context(&ContainmentBackend::IsolationSession);
+
+        consent::withdraw_consent().expect("withdraw consent");
+        emit_panic();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "withdrawal must suppress the next logical emission"
+        );
+
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        consent::set_consent(true, "test").expect("restore consent");
+        env.set_policy_value(0);
+
+        emit_cancellation();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "a newly blocking policy must suppress the next logical emission"
+        );
+
         reset_for_test();
     }
 }

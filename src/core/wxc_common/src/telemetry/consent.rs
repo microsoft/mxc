@@ -509,8 +509,9 @@ fn persist_presented_decision(
 /// Withdrawal does not require a permitting administrative policy. Off
 /// Windows it succeeds as a typed `NotApplicable` result without storage.
 pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
-    let current_status = get_status();
-    if current_status.effective_state == ConsentState::NotApplicable {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let current_status = get_status();
         return Ok(ConsentActionOutcome {
             result: ConsentActionResult::NotApplicable,
             status: current_status,
@@ -518,17 +519,20 @@ pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
         });
     }
 
-    platform::with_store_lock(|| {
-        platform::begin_withdrawal()?;
-        platform::write(false, "withdrawal")?;
-        platform::finish_withdrawal()?;
-        Ok(ConsentActionOutcome {
-            result: ConsentActionResult::Withdrawn,
-            status: platform::read_status_unlocked(),
-            policy: super::policy::get_policy(),
+    #[cfg(target_os = "windows")]
+    {
+        platform::with_store_lock(|| {
+            platform::begin_withdrawal()?;
+            platform::write(false, "withdrawal")?;
+            platform::finish_withdrawal()?;
+            Ok(ConsentActionOutcome {
+                result: ConsentActionResult::Withdrawn,
+                status: platform::read_status_unlocked(),
+                policy: super::policy::get_policy(),
+            })
         })
-    })
-    .map_err(ConsentActionError::Persist)
+        .map_err(ConsentActionError::Persist)
+    }
 }
 
 /// Current time as Unix seconds. Debug/support provenance only (see
