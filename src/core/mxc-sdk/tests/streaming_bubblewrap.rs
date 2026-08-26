@@ -50,8 +50,10 @@ fn bwrap_request(command: &str, timeout_ms: u32) -> SandboxRequest {
     request
 }
 
-/// Whether `pid` still has a `/proc` entry. A zombie still has one, so this
-/// distinguishes "reaped" from merely "exited".
+/// Whether `pid` still has a `/proc` entry. An exited child stays a zombie --
+/// with a live `/proc` entry -- until its parent `wait()`s and the kernel
+/// releases its pid and exit status; that is "reaped". So this distinguishes a
+/// child the SDK actually collected from one it merely stopped running.
 fn proc_entry_exists(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
@@ -80,23 +82,36 @@ fn streaming_bubblewrap_bidirectional_stdio() {
 
 #[test]
 fn streaming_bubblewrap_wait_with_output_captures_both_streams() {
-    // Drains both streams concurrently, avoiding the take-both deadlock.
+    // Each stream exceeds the 64 KiB pipe buffer, so a sequential drain would
+    // deadlock. Bounded here rather than by the sandbox timeout, which does not
+    // interrupt a blocked reader.
     if !bwrap_available() {
         return;
     }
-    let proc = spawn_sandbox(bwrap_request("echo to-out; echo to-err 1>&2", 0)).expect("spawn");
+    const BYTES: usize = 256 * 1024;
+    let script = format!("yes a | head -c {BYTES}; yes b | head -c {BYTES} 1>&2");
 
-    let output = proc.wait_with_output().expect("wait_with_output");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let proc = spawn_sandbox(bwrap_request(&script, 30_000)).expect("spawn");
+        let _ = tx.send(proc.wait_with_output());
+    });
+
+    let output = rx
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("deadlocked: streams are not drained concurrently")
+        .expect("wait_with_output");
+
     assert_eq!(output.outcome, WaitOutcome::Exited(0));
+    assert_eq!(output.stdout.len(), BYTES, "stdout fully drained");
+    assert_eq!(output.stderr.len(), BYTES, "stderr fully drained");
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains("to-out"),
-        "stdout: {:?}",
-        String::from_utf8_lossy(&output.stdout)
+        output.stdout.iter().all(|b| *b == b'a' || *b == b'\n'),
+        "stdout carries its own stream"
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("to-err"),
-        "stderr: {:?}",
-        String::from_utf8_lossy(&output.stderr)
+        output.stderr.iter().all(|b| *b == b'b' || *b == b'\n'),
+        "stderr carries its own stream"
     );
 }
 

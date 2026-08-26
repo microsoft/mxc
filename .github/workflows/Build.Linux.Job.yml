@@ -91,8 +91,11 @@ jobs:
           # sandbox can start (no-op on kernels without this knob).
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
-      # Must run after the install: these skip when bwrap is absent, so running
-      # them earlier would silently exercise nothing.
+      # The job defaults working-directory to src/core/lxc, so the `Test lxc`
+      # step above covers only the lxc package -- nothing else in this job runs
+      # mxc-sdk's tests, making this step their sole CI coverage. It must follow
+      # the install: these skip when bwrap is absent, so running them earlier
+      # would silently exercise nothing.
       - name: Test Bubblewrap streaming (mxc-sdk)
         working-directory: src
         run: cargo test --locked --release --target ${{ matrix.target }}
