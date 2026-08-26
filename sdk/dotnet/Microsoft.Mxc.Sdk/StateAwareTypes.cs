@@ -100,10 +100,14 @@ public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOption
     {
         ArgumentNullException.ThrowIfNull(network, parameterName);
         if (network.DefaultPolicy != StateAwareNetworkDefault.Allow
-            || network.AllowLocalNetwork != true)
+            || network.AllowLocalNetwork != true
+            || network.AllowedHosts is { Count: > 0 }
+            || network.BlockedHosts is { Count: > 0 }
+            || network.Proxy is not null)
         {
             throw new ArgumentException(
-                "IsolationSession requires default allow with local network access.",
+                "IsolationSession requires default allow with local network access, "
+                    + "no host rules, and no proxy.",
                 parameterName);
         }
     }

@@ -83,12 +83,17 @@ public class SandboxAdapterTests
     [Fact]
     public async Task SandboxProcessContractSupportsInMemoryFakes()
     {
-        using ISandboxProcess process = new FakeSandboxProcess("fake output");
+        using var fake = new FakeSandboxProcess("fake output");
+        ISandboxProcess process = fake;
 
         using var reader = new StreamReader(process.StandardOutput!);
+        using var closer = process.StandardOutputCloser;
+        Assert.NotNull(closer);
+        closer.Close();
         var output = await reader.ReadToEndAsync(TestContext.Current.CancellationToken);
         var result = await process.WaitAsync(TestContext.Current.CancellationToken);
 
+        Assert.True(fake.OutputCloseRequested);
         Assert.Equal("fake output", output);
         Assert.Equal(0, result.ExitCode);
         Assert.False(result.TimedOut);
@@ -113,8 +118,10 @@ public class SandboxAdapterTests
         public Stream? StandardInput => Stream.Null;
         public Stream? StandardOutput => _stdout;
         public Stream? StandardError => Stream.Null;
-        public SandboxStreamCloser? StandardOutputCloser => null;
-        public SandboxStreamCloser? StandardErrorCloser => null;
+        public bool OutputCloseRequested { get; private set; }
+        public ISandboxStreamCloser? StandardOutputCloser =>
+            new FakeSandboxStreamCloser(() => OutputCloseRequested = true);
+        public ISandboxStreamCloser? StandardErrorCloser => null;
         public IReadOnlyList<string> Warnings => Array.Empty<string>();
         public SandboxOutputMetadata? OutputMetadata => null;
 
@@ -139,5 +146,14 @@ public class SandboxAdapterTests
         }
 
         public void Dispose() => _stdout.Dispose();
+    }
+
+    private sealed class FakeSandboxStreamCloser(Action close) : ISandboxStreamCloser
+    {
+        public void Close() => close();
+
+        public void Dispose()
+        {
+        }
     }
 }

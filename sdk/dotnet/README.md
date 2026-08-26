@@ -101,8 +101,10 @@ Register those singleton instances with the application's DI container, or
 construct the adapters directly. Unit tests can inject fakes or mocks of either
 interface without loading the native MXC library. Streaming adapter methods
 return `ISandboxProcess`, which can also be implemented with in-memory streams
-and deterministic wait results. The existing `MxcSandbox` and `MxcLifecycle`
-static methods retain their concrete `MxcSandboxProcess` convenience APIs.
+and deterministic wait results. Fake processes can return an
+`ISandboxStreamCloser` to model cancellation of a blocking output read. The
+existing `MxcSandbox` and `MxcLifecycle` static methods retain their concrete
+`MxcSandboxProcess` convenience APIs.
 
 ### Discovering host backends
 
@@ -369,7 +371,7 @@ var policy = new SandboxPolicy
 
 The tools helper reads `PATH` and well-known toolchain variables, removes
 nonexistent and system-critical directories, deduplicates paths, and adds the
-extra drive-root and PSReadLine grants required when `pwsh.exe` is present.
+PSReadLine directory required when `pwsh.exe` is present.
 The profile helper discovers per-user tool installations, while the temporary
 files helper grants the configured host temporary directory read-write.
 
@@ -631,22 +633,29 @@ var options = new WslcExecOptions
         Proxy = new UrlNetworkProxyPolicy("http://proxy.example:8080"),
     },
 };
-RunResult run = await MxcLifecycle.ExecInSandboxAsync(id, "make test", options);
+SandboxWaitResult outcome =
+    MxcLifecycle.ExecInSandboxAttached(id, "make test", options);
 ```
 
 `ExecInSandbox` and `ExecInSandboxAsync` hand the workload ordinary pipes and
-leave this process's console untouched. Their wait results report
+leave this process's console untouched. On backends that support streaming
+state-aware exec (currently IsolationSession), their wait results report
 `StateAwareExecOptions.TimeoutMs` expirations through `TimedOut`, matching
-one-shot execution. `ExecInSandboxAttached` relays the
-workload onto this process's stdio instead, so a shell inside the sandbox gets a
-real terminal and renders and resizes normally; it returns no handle and no
-captured output. It refuses with `ErrorCode.MalformedRequest` when this
-process's stdout and stdin are not both terminals, and when another attached
-exec is already running — one runs at a time per process. A pseudo-console
-carries one output stream, so the sandbox's stderr arrives merged into stdout.
-For its duration the workload owns the console: raw VT, so no echo and no line
-input, and keystrokes — `Ctrl-C` included — reach the workload rather than your
-process. The console is restored on return.
+one-shot execution. Windows Sandbox and WSLC do not support these streaming
+forms.
+
+`ExecInSandboxAttached` relays the workload onto this process's stdio instead,
+so a shell inside the sandbox gets a real terminal and renders and resizes
+normally; it returns no handle and no captured output. WSLC supports this
+attached form, but currently reports a daemon-enforced workload timeout as an
+exit outcome rather than setting `TimedOut`. It refuses with
+`ErrorCode.MalformedRequest` when this process's stdout and stdin are not both
+terminals, and when another attached exec is already running — one runs at a
+time per process. A pseudo-console carries one output stream, so the sandbox's
+stderr arrives merged into stdout. For its duration the workload owns the
+console: raw VT, so no echo and no line input, and keystrokes — `Ctrl-C`
+included — reach the workload rather than your process. The console is restored
+on return.
 
 `ProvisionResult.MetadataJson` carries backend-typed provision metadata, such as
 the per-instance agent user identity. IsolationSession metadata is also
@@ -654,8 +663,8 @@ available as `ProvisionResult.IsolationSessionMetadata`.
 
 Every phase has a `DryRun...` counterpart that parses and validates the request
 without creating, starting, executing in, stopping, or destroying a sandbox.
-Windows Sandbox supports attached exec and exec dry-run, but not the streaming
-`ExecInSandbox` / `ExecInSandboxAsync` forms.
+Windows Sandbox and WSLC support attached exec and exec dry-run, but not the
+streaming `ExecInSandbox` / `ExecInSandboxAsync` forms.
 
 Cross-cutting policy (`Network`, `Filesystem`) is sent as supplied. A backend
 that cannot honour a value rejects it with `ErrorCode.PolicyValidation` rather

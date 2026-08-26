@@ -170,6 +170,40 @@ public class MxcLifecycleTests
                 options));
     }
 
+    [Theory]
+    [InlineData("allowedHosts")]
+    [InlineData("blockedHosts")]
+    [InlineData("proxy")]
+    public void BuildProvisionEnvelope_RejectsMutatedIsolationSessionNetworkRestrictions(
+        string restriction)
+    {
+        var options = new IsolationSessionProvisionOptions(
+            new StateAwareNetworkPolicy
+            {
+                DefaultPolicy = StateAwareNetworkDefault.Allow,
+                AllowLocalNetwork = true,
+            });
+
+        switch (restriction)
+        {
+            case "allowedHosts":
+                options.Network.AllowedHosts = ["example.com"];
+                break;
+            case "blockedHosts":
+                options.Network.BlockedHosts = ["example.com"];
+                break;
+            case "proxy":
+                options.Network.Proxy = new UrlNetworkProxyPolicy(
+                    "http://proxy.example:8080");
+                break;
+        }
+
+        Assert.Throws<ArgumentException>(
+            () => MxcLifecycle.BuildProvisionEnvelope(
+                StateAwareContainment.IsolationSession,
+                options));
+    }
+
     [Fact]
     public void ExecInSandbox_UnregisteredPrefix_ThrowsUnsupportedContainment()
     {

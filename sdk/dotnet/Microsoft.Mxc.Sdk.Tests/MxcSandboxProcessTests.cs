@@ -16,6 +16,17 @@ public class MxcSandboxProcessTests
     private static bool HostCanSpawn =>
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1";
 
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData(0u, null)]
+    [InlineData(1u, 1u)]
+    public void NormalizeTimeout_TreatsZeroAsNoManagedDeadline(
+        uint? timeoutMs,
+        uint? expected)
+    {
+        Assert.Equal(expected, MxcSandboxProcess.NormalizeTimeout(timeoutMs));
+    }
+
     [Fact]
     public void Spawn_NullPolicy_Throws()
     {

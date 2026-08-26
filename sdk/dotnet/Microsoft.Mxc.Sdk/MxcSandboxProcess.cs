@@ -9,6 +9,15 @@ using Microsoft.Mxc.Sdk.Native;
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
+/// Injectable handle that interrupts reads from one sandbox output stream.
+/// </summary>
+public interface ISandboxStreamCloser : IDisposable
+{
+    /// <summary>Close the associated reader.</summary>
+    void Close();
+}
+
+/// <summary>
 /// Injectable abstraction for a live sandboxed process. Implement this
 /// interface in tests to provide in-memory streams and deterministic outcomes.
 /// </summary>
@@ -27,10 +36,10 @@ public interface ISandboxProcess : IDisposable
     Stream? StandardError { get; }
 
     /// <summary>A handle that can interrupt standard-output reads.</summary>
-    SandboxStreamCloser? StandardOutputCloser { get; }
+    ISandboxStreamCloser? StandardOutputCloser { get; }
 
     /// <summary>A handle that can interrupt standard-error reads.</summary>
-    SandboxStreamCloser? StandardErrorCloser { get; }
+    ISandboxStreamCloser? StandardErrorCloser { get; }
 
     /// <summary>Security warnings emitted while applying the policy.</summary>
     IReadOnlyList<string> Warnings { get; }
@@ -138,8 +147,11 @@ public sealed class MxcSandboxProcess : ISandboxProcess
     internal MxcSandboxProcess(MxcSandboxHandle handle, uint? timeoutMs = null)
     {
         _handle = handle;
-        _timeoutMs = timeoutMs;
+        _timeoutMs = NormalizeTimeout(timeoutMs);
     }
+
+    internal static uint? NormalizeTimeout(uint? timeoutMs) =>
+        timeoutMs is 0 ? null : timeoutMs;
 
     /// <summary>
     /// The child's OS process id (its PID on Unix, process id on Windows).
@@ -228,6 +240,12 @@ public sealed class MxcSandboxProcess : ISandboxProcess
     /// </remarks>
     public SandboxStreamCloser? StandardErrorCloser =>
         GetReadCloser(stdout: false);
+
+    ISandboxStreamCloser? ISandboxProcess.StandardOutputCloser =>
+        StandardOutputCloser;
+
+    ISandboxStreamCloser? ISandboxProcess.StandardErrorCloser =>
+        StandardErrorCloser;
 
     /// <summary>
     /// Security warnings emitted while applying the sandbox policy.
@@ -729,7 +747,7 @@ public sealed class MxcSandboxProcess : ISandboxProcess
 /// Independently closes a sandbox output reader, making a blocking read return
 /// EOF without terminating the sandboxed process.
 /// </summary>
-public sealed class SandboxStreamCloser : IDisposable
+public sealed class SandboxStreamCloser : ISandboxStreamCloser
 {
     private readonly MxcStreamCloserHandle _handle;
 
