@@ -38,6 +38,8 @@ skip() {
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
 command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
+command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
+command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the peer needs it to host a listener."
 [ -f "$LXC_EXEC" ] || skip "lxc-exec binary not built; run build.sh first."
 
 OVERLAP_CONFIG="$REPO_DIR/tests/configs/lxc_network_deny_precedence_overlap.json"
@@ -92,6 +94,98 @@ assert_no_forward_reference() {
         fail "a FORWARD rule still references chain '$1' after teardown."
     fi
 }
+
+# ---------------------------------------------------------------------------
+# A CI-controlled peer, standing in for the destination both runs probe.
+#
+# The chain hooks FORWARD, so it only ever sees traffic the host routes on the
+# container's behalf.  A listener on the host or on the bridge gateway arrives
+# through INPUT instead, answers with no firewall installed at all, and so
+# cannot stand in for a reachable destination.  The peer lives in its own
+# network namespace behind a veth, reachable only through the forwarded path.
+#
+# Both runs aim here, which is what lets the control run do its job: it shows
+# this exact address is reachable when only the allow list names it, so the
+# overlap run's blocked verdict can only be the deny entry winning.
+#
+# This replaces api.github.com, whose rate-limited 403 was indistinguishable
+# from a working deny rule and turned a healthy firewall red when the remote
+# service, not this repository, was at fault.  Both fixtures still name
+# 0.0.0.0/0 and ::/0, so the deliberate choice of literal CIDRs over a hostname
+# described above is unaffected.
+PEER_NETNS="mxc-denyprec-peer"
+PEER_HOST_VETH="mxcdph0"
+PEER_VETH="mxcdpp0"
+# A dedicated slice of RFC 5737 TEST-NET-3, distinct from the ranges the other
+# peer-backed suites claim.  The host routes by longest matching prefix, so two
+# peers sharing a range let whichever suite ran last capture the other's
+# traffic.
+PEER_HOST_IP="198.51.100.9"
+PEER_IP="198.51.100.10"
+PEER_PREFIX="29"
+PEER_PORT="443"
+
+PEER_LISTENER_PID=""
+teardown_peer() {
+    if [ -n "$PEER_LISTENER_PID" ]; then
+        kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
+    fi
+    ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
+    ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
+}
+trap teardown_peer EXIT
+
+# Clear anything an aborted earlier run left behind, then build the peer.
+teardown_peer
+ip netns add "$PEER_NETNS" || fail "could not create the peer namespace."
+ip link add "$PEER_HOST_VETH" type veth peer name "$PEER_VETH" \
+    || fail "could not create the peer veth pair."
+ip link set "$PEER_VETH" netns "$PEER_NETNS" \
+    || fail "could not move the peer interface into its namespace."
+ip addr add "$PEER_HOST_IP/$PEER_PREFIX" dev "$PEER_HOST_VETH" \
+    || fail "could not address the host side of the peer veth."
+ip link set "$PEER_HOST_VETH" up || fail "could not bring up the peer veth."
+ip netns exec "$PEER_NETNS" ip addr add "$PEER_IP/$PEER_PREFIX" dev "$PEER_VETH" \
+    || fail "could not address the peer."
+ip netns exec "$PEER_NETNS" ip link set "$PEER_VETH" up \
+    || fail "could not bring up the peer interface."
+ip netns exec "$PEER_NETNS" ip link set lo up \
+    || fail "could not bring up the peer loopback."
+ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
+    || fail "could not route the peer back to the container."
+
+# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
+# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
+# only an ACCEPT in the container's FORWARD chain permits.
+ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
+    >/dev/null 2>&1 &
+PEER_LISTENER_PID=$!
+sleep 1
+kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
+    || fail "the peer listener did not start on $PEER_IP:$PEER_PORT."
+
+# Alive is not the same as reachable: confirm the listener answers across the
+# veth, so a peer that never bound is reported as harness breakage rather than
+# mistaken for the control run being blocked.
+python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
+import socket, sys
+s = socket.socket()
+s.settimeout(5)
+try:
+    s.connect((sys.argv[1], int(sys.argv[2])))
+except OSError as exc:
+    print(exc)
+    sys.exit(1)
+finally:
+    s.close()
+PY
+
+# Drift guard: both fixtures must aim at this peer, or the run would probe a
+# stale address and prove nothing.  Fail loudly if script and fixture disagree.
+for cfg in "$OVERLAP_CONFIG" "$CONTROL_CONFIG"; do
+    grep -Fq "$PEER_IP" "$cfg" \
+        || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
+done
 
 echo "Running LXC deny-precedence enforcement test..."
 
