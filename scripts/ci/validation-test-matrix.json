@@ -93,9 +93,7 @@
           "backends": [
             "process-t3",
             "wslc",
-            "windows-sandbox",
-            "microvm",
-            "hyperlight"
+            "windows-sandbox"
           ]
         }
       }
