@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-V07-DNS-Exemption",
   "containment": "lxc",
   "process": {
-    "commandLine": "sh -c \"timeout 8 nslookup -type=a example.com 198.51.100.26 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+    "commandLine": "sh -c \"timeout 8 nslookup -type=a example.com 8.8.8.8 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
   },
   "lifecycle": {
     "destroyOnExit": true

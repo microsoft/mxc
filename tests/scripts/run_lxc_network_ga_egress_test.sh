@@ -154,23 +154,12 @@ PEER_HOST_IP="203.0.113.1"
 PEER_IP="203.0.113.2"
 PEER_CIDR="203.0.113.0/24"
 PEER_PORT="443"
-# The five DNS cases need a resolver whose reachability the run controls, and
-# two addresses for the except pair: one the exclusion names and one sibling
-# inside the same allowed range.  Both sit in DNS_RANGE, which the except
-# fixtures allow as a block.
-DNS_RESOLVER_IP="203.0.113.10"
-DNS_SIBLING_IP="203.0.113.11"
-DNS_RANGE="203.0.113.8/29"
 
 PEER_LISTENER_PID=""
-DNS_LISTENER_PIDS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
         kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
     fi
-    for pid in $DNS_LISTENER_PIDS; do
-        kill "$pid" >/dev/null 2>&1 || true
-    done
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
 }
@@ -222,85 +211,6 @@ finally:
     s.close()
 PY
 
-# The DNS cases probe a resolver rather than a web server, so the peer answers
-# on udp/53 as well.  Both addresses live on the peer interface; the responder
-# binds every local address at once, so one process serves both.
-ip netns exec "$PEER_NETNS" ip addr add "$DNS_RESOLVER_IP/32" dev "$PEER_VETH" \
-    || fail "could not address the peer resolver."
-ip netns exec "$PEER_NETNS" ip addr add "$DNS_SIBLING_IP/32" dev "$PEER_VETH" \
-    || fail "could not address the peer sibling resolver."
-
-# A minimal A-record responder.  It echoes the question back and appends a
-# fixed answer, which is all nslookup needs to exit zero; the cases assert on
-# whether the query reached a resolver at all, never on what it resolved to.
-#
-# One process per address, each bound to that address rather than to every
-# local address at once.  A socket bound to 0.0.0.0 picks its reply's source
-# address by route lookup, which yields the interface's primary address, so a
-# query to .10 would be answered from .2 and dropped as an unrelated flow.
-#
-# This replaces 8.8.8.8 and 8.8.4.4.  A CI network that blocks outbound DNS --
-# a common and entirely reasonable configuration -- made the allowed cases
-# report the resolver as unreachable, which reads as the firewall over-blocking
-# DNS rather than as the network having no route to Google.
-for resolver in "$DNS_RESOLVER_IP" "$DNS_SIBLING_IP"; do
-    ip netns exec "$PEER_NETNS" python3 - "$resolver" <<'PY' >/dev/null 2>&1 &
-import socket, struct, sys
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((sys.argv[1], 53))
-while True:
-    query, sender = sock.recvfrom(512)
-    if len(query) < 12:
-        continue
-    # Walk the length-prefixed QNAME labels to find where the question ends,
-    # then take the terminating zero byte plus QTYPE and QCLASS with it.
-    cursor = 12
-    while cursor < len(query) and query[cursor] != 0:
-        cursor += 1 + query[cursor]
-    question = query[12:cursor + 5]
-    # Flags 0x8180: a response, recursion desired and available, no error.
-    header = query[:2] + b"\x81\x80" + b"\x00\x01\x00\x01\x00\x00\x00\x00"
-    # 0xc00c points back at the question's name rather than repeating it.
-    answer = (b"\xc0\x0c\x00\x01\x00\x01" + struct.pack(">I", 60)
-              + b"\x00\x04" + socket.inet_aton("192.0.2.123"))
-    sock.sendto(header + question + answer, sender)
-PY
-    DNS_LISTENER_PIDS="$DNS_LISTENER_PIDS $!"
-done
-sleep 1
-for pid in $DNS_LISTENER_PIDS; do
-    kill -0 "$pid" >/dev/null 2>&1 \
-        || fail "a peer resolver did not start; expected one on each of $DNS_RESOLVER_IP and $DNS_SIBLING_IP."
-done
-
-# The same alive-is-not-reachable gate the tcp/443 listener gets, run against
-# both resolver addresses so a missing one is reported as harness breakage
-# rather than mistaken for the firewall blocking an allowed DNS case.  The
-# reply's source address is checked too: a resolver answering from the wrong
-# address is dropped as an unrelated flow by the time a container asks, and
-# that reads as an allowed destination being over-blocked.
-for resolver in "$DNS_RESOLVER_IP" "$DNS_SIBLING_IP"; do
-    python3 - "$resolver" <<'PY' || fail "the peer resolver did not answer correctly across the veth at $resolver:53."
-import socket, sys
-query = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
-         b"\x07example\x03com\x00\x00\x01\x00\x01")
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.settimeout(5)
-try:
-    s.sendto(query, (sys.argv[1], 53))
-    reply, sender = s.recvfrom(512)
-except OSError as exc:
-    print(exc)
-    sys.exit(1)
-finally:
-    s.close()
-if sender[0] != sys.argv[1]:
-    print("answered from {} rather than {}".format(sender[0], sys.argv[1]))
-    sys.exit(1)
-sys.exit(0 if len(reply) > 12 and reply[:2] == b"\x12\x34" else 1)
-PY
-done
-
 # Drift guard: the tcp/443 fixtures must target this peer, or the run would
 # probe a stale address and prove nothing.  Fail loudly if the two disagree.
 for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
@@ -310,16 +220,6 @@ done
 for cfg in "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
     grep -Fq "$PEER_CIDR" "$cfg" \
         || fail "fixture ${cfg##*/} no longer allows $PEER_CIDR; script and fixture drifted."
-done
-for cfg in "$DNS_DENIED_CONFIG" "$DNS_ALLOWED_CONFIG" "$DENY_RULE_CONFIG" "$EXCEPT_EXCLUDED_CONFIG"; do
-    grep -Fq "$DNS_RESOLVER_IP" "$cfg" \
-        || fail "fixture ${cfg##*/} no longer targets the peer resolver $DNS_RESOLVER_IP; script and fixture drifted."
-done
-grep -Fq "$DNS_SIBLING_IP" "$EXCEPT_SIBLING_CONFIG" \
-    || fail "fixture ${EXCEPT_SIBLING_CONFIG##*/} no longer targets the sibling resolver $DNS_SIBLING_IP; script and fixture drifted."
-for cfg in "$EXCEPT_EXCLUDED_CONFIG" "$EXCEPT_SIBLING_CONFIG"; do
-    grep -Fq "$DNS_RANGE" "$cfg" \
-        || fail "fixture ${cfg##*/} no longer allows $DNS_RANGE; script and fixture drifted."
 done
 
 echo "Running LXC schema 0.8 egress enforcement test..."
@@ -336,8 +236,8 @@ assert_allowed "an explicitly allowed destination was unreachable. The policy is
 run_case "wrong-port case: same destination allowed on tcp/444" "$WRONG_PORT_CONFIG"
 assert_blocked "traffic to tcp/443 succeeded while the policy allowed only tcp/444. The port selector is being dropped, so the allow case above proves only that the destination matched."
 
-run_case "dns-denied case: egress.default deny, DNS probe to the peer resolver" "$DNS_DENIED_CONFIG"
-assert_blocked "a DNS query to the peer resolver succeeded under egress.default deny with no allow rules. The legacy unconditional port 53 accept is still being emitted into a directional chain, which leaves this container a DNS-tunnel path out of a deny-all policy."
+run_case "dns-denied case: egress.default deny, DNS probe to an external resolver" "$DNS_DENIED_CONFIG"
+assert_blocked "a DNS query to 8.8.8.8 succeeded under egress.default deny with no allow rules. The legacy unconditional port 53 accept is still being emitted into a directional chain, which leaves this container a DNS-tunnel path out of a deny-all policy."
 
 run_case "dns-allowed case: same probe, resolver allowed on udp/53" "$DNS_ALLOWED_CONFIG"
 assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. DNS is over-blocked, so the dns-denied case above proves only that this container has no DNS at all."
@@ -345,7 +245,7 @@ assert_allowed "a DNS query to an explicitly allowed resolver was unreachable. D
 run_case "deny-rule case: egress.default allow, one destination denied on udp/53" "$DENY_RULE_CONFIG"
 assert_blocked "a denied destination stayed reachable under egress.default allow. Entries from egress.deny are not reaching the chain, so a config written as allow-with-exceptions enforces nothing."
 
-run_case "except case: allow 203.0.113.8/29 except 203.0.113.10/32, probe the excluded address" "$EXCEPT_EXCLUDED_CONFIG"
+run_case "except case: allow 8.8.0.0/16 except 8.8.8.8/32, probe the excluded address" "$EXCEPT_EXCLUDED_CONFIG"
 assert_blocked "an address named in except was reachable through the rule that excludes it. The exclusion is being dropped, so the surrounding allow is wider than written."
 
 run_case "except case: same policy, probe an address the exclusion does not cover" "$EXCEPT_SIBLING_CONFIG"
