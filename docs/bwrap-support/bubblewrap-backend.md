@@ -251,9 +251,10 @@ disagreed with the one behind the rules would hand the workload an address the
 chain never authorized. An IPv6 rule programs `ip6tables`, but the sandbox's
 namespace has no IPv6 connectivity today — slirp4netns is launched without
 `--enable-ipv6` — so an allowed IPv6 destination stays unreachable regardless
-of the rule (see #955). The terminal verdict of the unmatched family still
-follows `defaultPolicy`, so a v4-only allowlist under `block` does not leave
-IPv6 open.
+of the rule (see #955). MXC emits a warning naming those destinations rather
+than refusing them, since the posture fails closed. The terminal verdict of the
+unmatched family still follows `defaultPolicy`, so a v4-only allowlist under
+`block` does not leave IPv6 open.
 
 An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
 Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule

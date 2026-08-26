@@ -1105,10 +1105,7 @@ fn convert_wire_config(
                 NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
             )
         {
-            let msg = "Bubblewrap: network.proxy cannot be combined with \
-                       network.enforcementMode='firewall' or 'both'. The cooperative \
-                       env-var proxy enforces hosts at the proxy layer; iptables-based \
-                       enforcement requires privilege and is mutually exclusive.";
+            let msg = crate::error::BWRAP_PROXY_WITH_FIREWALL_MSG;
             return Err(WxcError::ConfigParse(msg.to_string()));
         }
 

@@ -462,6 +462,21 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     conflicts.then_some(BWRAP_EXTERNAL_PROXY_HOST_RULES)
 }
 
+/// Validate-time twin of the parser's proxy + firewall-enforcement rejection.
+///
+/// [`ResolvedNetworkMode::from_request`] tests the proxy first and returns
+/// `ProxyOnly`, so `enforcementMode` is never consulted on that path and a
+/// programmatic caller's explicit field is discarded in silence. Not
+/// schema-gated, matching the parser.
+pub fn proxy_with_firewall_rejection(request: &ExecutionRequest) -> Option<&'static str> {
+    let conflicts = request.policy.network_proxy.is_enabled()
+        && matches!(
+            request.policy.network_enforcement_mode,
+            NetworkEnforcementMode::Firewall | NetworkEnforcementMode::Both
+        );
+    conflicts.then_some(wxc_common::error::BWRAP_PROXY_WITH_FIREWALL_MSG)
+}
+
 /// Validate-time twin of [`local_network_diagnostic`]: the same mismatch, but
 /// only for schemas that reject it rather than warn.
 ///
@@ -1172,6 +1187,42 @@ mod tests {
         r.policy.network_proxy.builtin_test_server = true;
         r.policy.allowed_hosts = vec!["10.0.0.1".into()];
         assert!(external_proxy_host_rules_rejection(&r).is_none());
+    }
+
+    /// The parser refuses this pairing; the runner did not, and could not:
+    /// `from_request` returns `ProxyOnly` before `enforcementMode` is read, so
+    /// a programmatic caller's explicit field was dropped without a word.
+    #[test]
+    fn a_proxy_with_firewall_enforcement_is_rejected() {
+        let mut r = base_request();
+        r.policy.network_proxy.address = Some(ProxyAddress::new("127.0.0.1".into(), 3128));
+
+        for mode in [
+            NetworkEnforcementMode::Firewall,
+            NetworkEnforcementMode::Both,
+        ] {
+            r.policy.network_enforcement_mode = mode.clone();
+            assert_eq!(
+                proxy_with_firewall_rejection(&r),
+                Some(wxc_common::error::BWRAP_PROXY_WITH_FIREWALL_MSG),
+                "{mode:?} must be refused with the parser's own message"
+            );
+        }
+
+        // `is_enabled()` covers both proxy flavors, so the builtin refuses too.
+        let mut builtin = base_request();
+        builtin.policy.network_proxy.builtin_test_server = true;
+        builtin.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        assert!(proxy_with_firewall_rejection(&builtin).is_some());
+
+        // Negative controls: the default mode never invokes iptables, and the
+        // gate must key on the proxy rather than on the mode alone.
+        r.policy.network_enforcement_mode = NetworkEnforcementMode::Capabilities;
+        assert!(proxy_with_firewall_rejection(&r).is_none());
+
+        r.policy.network_enforcement_mode = NetworkEnforcementMode::Firewall;
+        r.policy.network_proxy.address = None;
+        assert!(proxy_with_firewall_rejection(&r).is_none());
     }
 
     /// A directional runtime proxy must not trip the legacy host-list guard.
