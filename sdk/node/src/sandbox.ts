@@ -19,6 +19,7 @@ import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
 const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
+const MAX_U32 = 0xFFFF_FFFF;
 
 /**
  * Generates a random 8-character alphanumeric string for the app container name.
@@ -441,6 +442,8 @@ export function createConfigFromPolicy(
 /**
  * Creates an experimental Apple Container config for macOS.
  *
+ * TODO(#972): Remove the config-only warning when Apple Container runtime
+ * execution lands.
  * Runtime execution is not implemented yet; spawning the returned config
  * currently fails with `unsupported_containment` before creating resources.
  */
@@ -460,7 +463,7 @@ export function createAppleContainerConfig(
     }
     if (options.cpuCount !== undefined &&
         (!Number.isInteger(options.cpuCount) || options.cpuCount <= 0 ||
-            options.cpuCount > 0xFFFF_FFFF)) {
+            options.cpuCount > MAX_U32)) {
         throw new Error('Apple Container cpuCount must be a positive 32-bit integer.');
     }
     if (options.memoryMb !== undefined &&
