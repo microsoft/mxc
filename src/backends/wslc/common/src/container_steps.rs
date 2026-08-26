@@ -43,6 +43,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{PortMapping, ScriptResponse};
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
 
+use crate::error::WslcError;
 use crate::policy_mapping::VolumeMount;
 use crate::wsl_container_runner::{wslc_prerequisite_error, WSLContainerRunner};
 use crate::wslc_bindings::*;
@@ -52,14 +53,10 @@ use crate::wslc_bindings::*;
 // ---------------------------------------------------------------------------
 
 /// Build a `ScriptResponse` error from an HRESULT failure with an optional
-/// SDK-provided message.
+/// SDK-provided message. Thin wrapper over [`WslcError::Sdk`], which owns the
+/// message formatting and the `LaunchFailed` phase attribution.
 pub(crate) fn sdk_error(context: &str, hr: HRESULT, sdk_msg: &str) -> ScriptResponse {
-    let msg = if sdk_msg.is_empty() {
-        format!("{}: HRESULT 0x{:08X}", context, hr as u32)
-    } else {
-        format!("{}: {} (HRESULT 0x{:08X})", context, sdk_msg, hr as u32)
-    };
-    ScriptResponse::error(&msg)
+    WslcError::sdk(context, hr, sdk_msg).into_response()
 }
 
 /// NUL-terminate `value` for a C string the WSLc SDK will read, rejecting an
@@ -73,9 +70,10 @@ fn cstr_bytes(field: &str, value: &str) -> Result<Vec<u8>, ScriptResponse> {
     std::ffi::CString::new(value)
         .map(|c| c.into_bytes_with_nul())
         .map_err(|_| {
-            ScriptResponse::error(&format!(
+            WslcError::Rejected(format!(
                 "{field} contains an interior NUL byte, which is not a valid C string"
             ))
+            .into_response()
         })
 }
 
@@ -425,9 +423,10 @@ impl ProcessSettings {
         let mut cwd_cstr: Option<Vec<u8>> = None;
         if !working_directory.is_empty() {
             if !working_directory.starts_with('/') {
-                return Err(ScriptResponse::error(&format!(
+                return Err(WslcError::Rejected(format!(
                     "working_directory must be an absolute in-container path (got {working_directory:?})"
-                )));
+                ))
+                .into_response());
             }
             let c = cstr_bytes("working_directory", working_directory)?;
             let hr = sdk.WslcSetProcessSettingsWorkingDirectory(&mut raw, c.as_ptr() as PCSTR);
@@ -666,7 +665,7 @@ pub const KEEPALIVE_SCRIPT: &str = "while true; do sleep 86400; done";
 /// resolvable. The returned [`WslcSdk`] holds raw function pointers; keep it
 /// alive for the duration of all SDK use.
 pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptResponse> {
-    let sdk = WslcSdk::load().map_err(|e| ScriptResponse::error(&e))?;
+    let sdk = WslcSdk::load().map_err(|e| WslcError::Unavailable(e).into_response())?;
 
     let mut missing = WslcComponentFlags::WSLC_COMPONENT_FLAG_NONE;
     let hr = sdk.WslcGetMissingComponents(&mut missing);
@@ -674,7 +673,7 @@ pub unsafe fn load_sdk_checked(logger: &mut Logger) -> Result<WslcSdk, ScriptRes
         return Err(sdk_error("WslcGetMissingComponents failed", hr, ""));
     }
     if missing.any_missing() {
-        return Err(ScriptResponse::error(&wslc_prerequisite_error(missing)));
+        return Err(WslcError::Unavailable(wslc_prerequisite_error(missing)).into_response());
     }
     let _ = writeln!(logger, "[WSLC][daemon] Runtime check passed");
     Ok(sdk)
@@ -789,14 +788,15 @@ pub unsafe fn resolve_image(
         ),
         None => (String::new(), String::new()),
     };
-    Err(ScriptResponse::error(&format!(
+    Err(WslcError::Rejected(format!(
         "WSLC image '{}' not found locally. Pre-pull it with: \
          wxc-exec.exe --setup-wslc --image {}{} \
          (or scripts\\setup-wslc.ps1 -Image {}{}). \
          MXC does not pull images at run time; \
          see docs/wsl/wsl-container-support-plan.md.",
         image, image, storage_arg_wxc, image, storage_arg_ps,
-    )))
+    ))
+    .into_response())
 }
 
 /// Create a daemon-owned container with `keepalive` as its init process, so it

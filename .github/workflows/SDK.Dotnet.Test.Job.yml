@@ -1,0 +1,74 @@
+name: SDK .NET Tests
+
+on:
+  workflow_call:
+
+jobs:
+  sdk-dotnet-tests:
+    name: SDK .NET Tests (${{ matrix.os_label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_label: windows
+            runner: windows-latest
+          - os_label: linux
+            runner: ubuntu-latest
+          - os_label: macos
+            runner: macos-26
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: sdk/dotnet
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.x
+
+      # The csproj regenerates the P/Invoke layer by invoking cargo, so this
+      # lane needs the Rust toolchain.
+      - name: Setup Rust toolchain
+        run: rustup update stable
+
+      - name: Build .NET SDK
+        run: dotnet build Microsoft.Mxc.Sdk.slnx
+
+      # `--no-build` reuses the compile above rather than repeating it.
+      #
+      # Tests needing a prepared sandbox host gate on MXC_E2E_HOST_PREPPED,
+      # deliberately left unset: no runner satisfies it, and the same variable
+      # also gates the isolation-session tests, which additionally need an
+      # OS-side service. Those report as skips, so what this lane establishes is
+      # the managed surface plus the native library loading on this platform.
+      #
+      # A zero exit code is not sufficient evidence on its own, because a run in
+      # which every test skipped also exits 0. Parsing the summary is what
+      # separates "passed" from "ran nothing".
+      - name: Test default backend availability
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'dotnet-test.log'
+          dotnet test --solution Microsoft.Mxc.Sdk.slnx --no-build 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "dotnet test exited $code" }
+          $out = Get-Content -LiteralPath $log -Raw
+          if ($out -notmatch 'succeeded:\s+(\d+)') {
+            throw 'The run exited 0 but its summary could not be parsed, so nothing establishes what ran.'
+          }
+          if ([int]$Matches[1] -eq 0) {
+            throw 'The run passed no tests. A run in which everything skipped also exits 0, so this is a failure rather than a pass.'
+          }
+          Write-Host "$($Matches[1]) tests passed"
+
+      # Exercise the opt-in backends as one complete native unit. The managed
+      # tests dry-run both backends and verify WSLC's daemon + SDK DLL were
+      # propagated into the application output.
+      - name: Build .NET SDK with optional backends
+        if: matrix.os_label == 'windows'
+        run: dotnet build Microsoft.Mxc.Sdk.slnx -p:MxcWithWslc=true -p:MxcWithIsolationSession=true
+
+      - name: Test optional backend availability
+        if: matrix.os_label == 'windows'
+        run: dotnet test Microsoft.Mxc.Sdk.Tests/Microsoft.Mxc.Sdk.Tests.csproj --no-build --no-restore -p:MxcWithWslc=true -p:MxcWithIsolationSession=true
