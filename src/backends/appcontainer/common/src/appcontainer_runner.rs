@@ -38,13 +38,11 @@ use crate::guarded_capture::{
 };
 use crate::job_object::UiJobObject;
 use crate::launch_diagnostics::diagnose_create_process_failure;
+use crate::network_policy_helpers::{add_default_network_capabilities, allows_network_egress};
 use crate::process_mitigation;
 use wxc_common::error::WxcError;
 use wxc_common::logger::Logger;
-use wxc_common::models::{
-    ExecutionRequest, FailurePhase, NetworkEnforcementMode, NetworkPolicy, SandboxOutputMetadata,
-    ScriptResponse,
-};
+use wxc_common::models::{ExecutionRequest, FailurePhase, SandboxOutputMetadata, ScriptResponse};
 use wxc_common::process_util::{
     create_std_pipes, InterruptiblePipeReader, OwnedHandle, PipeReadCanceller, PipeWriter,
     SendOwnedHandle, SidAndAttributes,
@@ -54,7 +52,7 @@ use wxc_common::sandbox_process::{
     SandboxBackend, SandboxProcess, StdioMode, StreamCloser,
 };
 use wxc_common::script_runner::get_timeout_milliseconds;
-use wxc_common::validator::validate_network_policy_support;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 use wxc_common::{string_util, ui_policy};
 
 pub(crate) const CAPTURE_DENIALS_FALLBACK_UNSUPPORTED_MSG: &str =
@@ -178,7 +176,7 @@ fn parse_environment_block(block: *const u16) -> Vec<(String, String)> {
 
 /// Parse explicit `KEY=VALUE` strings into entry pairs, optionally injecting
 /// proxy env vars (stripping any pre-existing proxy vars first).
-fn build_explicit_entries(
+pub(crate) fn build_explicit_entries(
     env_vars: &[String],
     proxy_address: Option<&wxc_common::models::ProxyAddress>,
 ) -> Vec<(String, String)> {
@@ -200,7 +198,10 @@ fn build_explicit_entries(
 
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
-fn inject_proxy_vars(entries: &mut Vec<(String, String)>, addr: &wxc_common::models::ProxyAddress) {
+pub(crate) fn inject_proxy_vars(
+    entries: &mut Vec<(String, String)>,
+    addr: &wxc_common::models::ProxyAddress,
+) {
     entries.retain(|(key, _)| {
         !PROXY_VAR_NAMES
             .iter()
@@ -712,16 +713,7 @@ impl AppContainerScriptRunner {
         let mut capabilities_to_add: Vec<String> = request.policy.capabilities.clone();
         capabilities_to_add.push("AgenticAppContainer".to_string());
 
-        let use_capabilities_for_network = matches!(
-            request.policy.network_enforcement_mode,
-            NetworkEnforcementMode::Capabilities | NetworkEnforcementMode::Both
-        );
-        if use_capabilities_for_network
-            && request.policy.default_network_policy == NetworkPolicy::Allow
-            && !capabilities_to_add.iter().any(|c| c == "internetClient")
-        {
-            capabilities_to_add.push("internetClient".to_string());
-        }
+        add_default_network_capabilities(&request.policy, &mut capabilities_to_add);
 
         // --- Derive SIDs for each capability ---
         // `owned_capability_sids` owns the derived SIDs (freed on drop); it
@@ -1529,9 +1521,43 @@ impl AppContainerScriptRunner {
 }
 
 impl SandboxBackend for AppContainerScriptRunner {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        // AppContainer naturally enforces host-loopback deny. Advertise the
+        // field so shared validation accepts that default posture; `validate`
+        // below rejects the unsupported allow value.
+        NetworkPolicySupport::EGRESS_DEFAULT
+            | NetworkPolicySupport::INGRESS_DEFAULT
+            | NetworkPolicySupport::HOST_LOOPBACK
+            | NetworkPolicySupport::RUNTIME_PROXY
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
-
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| ingress.default == wxc_common::models::NetworkAction::Allow)
+            && !allows_network_egress(&request.policy)
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.default='allow' cannot be combined with denied network egress \
+                 on the AppContainer fallback because privateNetworkClientServer grants \
+                 bidirectional private-network access",
+            ));
+        }
+        if request
+            .policy
+            .network_ingress
+            .as_ref()
+            .is_some_and(|ingress| {
+                ingress.host_loopback == wxc_common::models::NetworkAction::Allow
+            })
+        {
+            return Err(ScriptResponse::error(
+                "network.ingress.hostLoopback='allow' is not supported by the AppContainer fallback",
+            ));
+        }
         // AppContainer fallback tiers have no native capture path, so retainEtl
         // is honored only by a guarded-WPR provider that can transfer the ETL.
         validate_retain_etl_supported(
@@ -2462,6 +2488,122 @@ mod tests {
         let runner = AppContainerScriptRunner::new();
         let request = ExecutionRequest::default();
         assert!(runner.validate(&request).is_ok());
+    }
+
+    #[test]
+    fn validate_runner_rejects_proxy_peer_identity() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.allowed_proxy_peer = Some("Contoso.Proxy_123".to_string());
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not drop the BaseContainer-only proxy identity");
+        assert!(error.error_message.contains("not supported"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_host_loopback() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Deny,
+            host_loopback: wxc_common::models::NetworkAction::Allow,
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept host-loopback access");
+        assert!(error.error_message.contains("network.ingress.hostLoopback"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_directional_default_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy::default());
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "AppContainer naturally enforces the schema 0.8 default-deny posture"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_ingress_allow_with_egress_deny() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy::default());
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not weaken denied private-network egress");
+        assert!(error
+            .error_message
+            .contains("privateNetworkClientServer grants bidirectional"));
+    }
+
+    #[test]
+    fn validate_runner_accepts_ingress_and_egress_allow() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_mode_specified = true;
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+        request.policy.network_ingress = Some(wxc_common::models::NetworkIngressPolicy {
+            default: wxc_common::models::NetworkAction::Allow,
+            ..Default::default()
+        });
+
+        assert!(
+            runner.validate(&request).is_ok(),
+            "bidirectional private-network access is compatible with allow defaults"
+        );
+    }
+
+    #[test]
+    fn validate_runner_rejects_egress_allow_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            allow: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress allow rules");
+        assert!(error.error_message.contains("allow/deny rules"));
+    }
+
+    #[test]
+    fn validate_runner_rejects_egress_deny_rules() {
+        let runner = AppContainerScriptRunner::new();
+        let mut request = ExecutionRequest::default();
+        request.policy.network_egress = Some(wxc_common::models::NetworkEgressPolicy {
+            deny: vec![wxc_common::models::NetworkRule {
+                to: Vec::new(),
+                ports: Vec::new(),
+            }],
+            ..Default::default()
+        });
+
+        let error = runner
+            .validate(&request)
+            .expect_err("AppContainer must not accept directional egress deny rules");
+        assert!(error.error_message.contains("allow/deny rules"));
     }
 
     #[test]

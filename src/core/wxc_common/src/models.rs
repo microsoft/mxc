@@ -262,13 +262,20 @@ impl Default for WindowsSandboxConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct IsolationSessionProvisionConfig {
-    /// Optional identifier for the calling application — the Package Family
-    /// Name for a packaged app, any string otherwise. Carried verbatim into
-    /// the `sandboxId`; MXC does not interpret or verify it.
+    /// Optional identifier for the calling application, associating the
+    /// provisioned agent user with its owning app.
     ///
-    /// An explicitly-supplied empty string is a **distinct** value from an
-    /// absent one and round-trips as such. A JSON `null` is a second spelling
-    /// of absent.
+    /// **A packaged app must pass its Package Family Name in the form
+    /// `PFN:<packageFamilyName>`** (e.g. `PFN:Contoso.App_8wekyb3d8bbwe`) — the
+    /// literal `PFN:` prefix followed by the PFN. A non-empty value is used
+    /// verbatim, so a bare PFN without the prefix will **not** be treated as
+    /// PFN-scoped. An unpackaged app may pass any string. Carried verbatim
+    /// inside the returned `SandboxId` so later lifecycle phases can recover it
+    /// without the caller re-supplying it.
+    ///
+    /// On an unpackaged host an explicitly-supplied empty string is a
+    /// **distinct** value from an absent one and round-trips as such. A JSON
+    /// `null` is a second spelling of absent.
     pub app_id: Option<String>,
 }
 

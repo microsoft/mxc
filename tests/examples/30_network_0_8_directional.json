@@ -1,0 +1,32 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "directional-network-example",
+  "containment": "process",
+  "process": {
+    "commandLine": "echo schema 0.8 directional network example"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [
+            {
+              "cidr": "192.0.2.0/24"
+            }
+          ],
+          "ports": [
+            {
+              "protocol": "tcp",
+              "port": 443
+            }
+          ]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}

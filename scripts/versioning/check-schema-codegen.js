@@ -48,7 +48,17 @@ try {
   // Build + run the generator. Quiet so only our diagnostics surface.
   execFileSync(
     "cargo",
-    ["run", "-q", "-p", "mxc_schema_gen", "--", tmpOut],
+    [
+      "run",
+      "-q",
+      "-p",
+      "mxc_schema_gen",
+      "--",
+      "schema",
+      "--legacy-wire",
+      "--out",
+      tmpOut,
+    ],
     { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
   );
   const generated = readFileSync(tmpOut, "utf8");
@@ -70,7 +80,7 @@ try {
         `      committed:  ${JSON.stringify(c[line])}\n` +
         `      generated:  ${JSON.stringify(g[line])}\n` +
         `    Regenerate with (from the repo root; the Cargo workspace is in src/):\n` +
-        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
+        `      cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`
     );
   }
 } finally {

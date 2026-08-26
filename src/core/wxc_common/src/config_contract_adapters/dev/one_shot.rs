@@ -92,14 +92,36 @@ fn convert_process_container(value: contract::ProcessContainer) -> wire::Process
         capabilities,
         capture_denials,
         ui,
+        network,
     } = value;
     wire::ProcessContainer {
         least_privilege: least_privilege.into_option(),
         learning_mode: learning_mode.into_option(),
-        capabilities: capabilities.into_option(),
+        capabilities: capabilities.into_option().map(|capabilities| {
+            capabilities
+                .into_iter()
+                .map(contract::ProcessContainerCapability::into_inner)
+                .collect()
+        }),
         capture_denials: capture_denials.into_option().map(convert_capture_denials),
         ui: ui.into_option().map(convert_process_container_ui),
-        network: None,
+        network: network.into_option().map(convert_process_container_network),
+    }
+}
+
+fn convert_process_container_network(
+    value: contract::ProcessContainerNetwork,
+) -> wire::ProcessContainerNetwork {
+    let contract::ProcessContainerNetwork { allowed_proxy_peer } = value;
+    wire::ProcessContainerNetwork {
+        allowed_proxy_peer: allowed_proxy_peer.into_option(),
+    }
+}
+
+fn convert_runtime_config(value: contract::RuntimeConfig) -> wire::RuntimeConfig {
+    let contract::RuntimeConfig { network_proxy } = value;
+    wire::RuntimeConfig {
+        network_proxy: network_proxy.into_option(),
     }
 }
 
@@ -269,6 +291,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         process_container,
         ui,
         seatbelt,
+        runtime_config,
         experimental,
     } = request;
     wire::MxcConfig {
@@ -289,7 +312,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         filesystem: filesystem.into_option().map(convert_filesystem),
         fallback: fallback.into_option().map(convert_fallback),
         network: network.into_option().map(convert_network),
-        runtime_config: None,
+        runtime_config: runtime_config.into_option().map(convert_runtime_config),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
         experimental: experimental.into_option().map(convert_experimental),

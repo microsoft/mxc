@@ -711,6 +711,10 @@ const _: () = {
     ["Offset of field: WslcPushImageOptions::progressCallbackContext"]
         [::std::mem::offset_of!(WslcPushImageOptions, progressCallbackContext) - 24usize];
 };
+pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_UNKNOWN: WslcIdentityTokenType = 0;
+pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_TOKEN: WslcIdentityTokenType = 1;
+pub const WslcIdentityTokenType_WSLC_IDENTITY_TOKEN_TYPE_CREDENTIALS: WslcIdentityTokenType = 2;
+pub type WslcIdentityTokenType = ::std::os::raw::c_int;
 impl WslcComponentFlags {
     pub const WSLC_COMPONENT_FLAG_NONE: WslcComponentFlags = WslcComponentFlags(0);
     pub const WSLC_COMPONENT_FLAG_VIRTUAL_MACHINE_PLATFORM: WslcComponentFlags =
@@ -771,6 +775,9 @@ pub type WslcInstallCallback = ::std::option::Option<
         context: PVOID,
     ),
 >;
+pub const WslcInstallOptions_WSLC_INSTALL_OPTION_NONE: WslcInstallOptions = 0;
+pub const WslcInstallOptions_WSLC_INSTALL_OPTION_REPAIR: WslcInstallOptions = 1;
+pub type WslcInstallOptions = ::std::os::raw::c_int;
 pub struct WslcSdk {
     __library: ::libloading::Library,
     pub WslcInitSessionSettings: Result<
@@ -855,6 +862,15 @@ pub struct WslcSdk {
         unsafe extern "C" fn(
             session: WslcSession,
             containerSettings: *const WslcContainerSettings,
+            container: *mut WslcContainer,
+            errorMessage: *mut PWSTR,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
+    pub WslcOpenContainer: Result<
+        unsafe extern "C" fn(
+            session: WslcSession,
+            nameOrId: PCSTR,
             container: *mut WslcContainer,
             errorMessage: *mut PWSTR,
         ) -> HRESULT,
@@ -1010,6 +1026,14 @@ pub struct WslcSdk {
         ) -> HRESULT,
         ::libloading::Error,
     >,
+    pub WslcSetContainerInitProcessIOCallbacks: Result<
+        unsafe extern "C" fn(
+            container: WslcContainer,
+            callbacks: *const WslcProcessCallbacks,
+            context: PVOID,
+        ) -> HRESULT,
+        ::libloading::Error,
+    >,
     pub WslcGetProcessPid: Result<
         unsafe extern "C" fn(process: WslcProcess, pid: *mut u32) -> HRESULT,
         ::libloading::Error,
@@ -1119,6 +1143,7 @@ pub struct WslcSdk {
             username: PCSTR,
             password: PCSTR,
             identityToken: *mut PSTR,
+            tokenType: *mut WslcIdentityTokenType,
             errorMessage: *mut PWSTR,
         ) -> HRESULT,
         ::libloading::Error,
@@ -1154,7 +1179,12 @@ pub struct WslcSdk {
     pub WslcGetVersion:
         Result<unsafe extern "C" fn(version: *mut WslcVersion) -> HRESULT, ::libloading::Error>,
     pub WslcInstallWithDependencies: Result<
-        unsafe extern "C" fn(progressCallback: WslcInstallCallback, context: PVOID) -> HRESULT,
+        unsafe extern "C" fn(
+            components: WslcComponentFlags,
+            options: WslcInstallOptions,
+            progressCallback: WslcInstallCallback,
+            context: PVOID,
+        ) -> HRESULT,
         ::libloading::Error,
     >,
 }
@@ -1206,6 +1236,7 @@ impl WslcSdk {
             .get(b"WslcInitContainerSettings\0")
             .map(|sym| *sym);
         let WslcCreateContainer = __library.get(b"WslcCreateContainer\0").map(|sym| *sym);
+        let WslcOpenContainer = __library.get(b"WslcOpenContainer\0").map(|sym| *sym);
         let WslcStartContainer = __library.get(b"WslcStartContainer\0").map(|sym| *sym);
         let WslcSetContainerSettingsName = __library
             .get(b"WslcSetContainerSettingsName\0")
@@ -1259,6 +1290,9 @@ impl WslcSdk {
         let WslcSetProcessSettingsCallbacks = __library
             .get(b"WslcSetProcessSettingsCallbacks\0")
             .map(|sym| *sym);
+        let WslcSetContainerInitProcessIOCallbacks = __library
+            .get(b"WslcSetContainerInitProcessIOCallbacks\0")
+            .map(|sym| *sym);
         let WslcGetProcessPid = __library.get(b"WslcGetProcessPid\0").map(|sym| *sym);
         let WslcGetProcessExitEvent = __library.get(b"WslcGetProcessExitEvent\0").map(|sym| *sym);
         let WslcGetProcessState = __library.get(b"WslcGetProcessState\0").map(|sym| *sym);
@@ -1308,6 +1342,7 @@ impl WslcSdk {
             WslcReleaseCrashDumpSubscription,
             WslcInitContainerSettings,
             WslcCreateContainer,
+            WslcOpenContainer,
             WslcStartContainer,
             WslcSetContainerSettingsName,
             WslcSetContainerSettingsInitProcess,
@@ -1331,6 +1366,7 @@ impl WslcSdk {
             WslcSetProcessSettingsCmdLine,
             WslcSetProcessSettingsEnvVariables,
             WslcSetProcessSettingsCallbacks,
+            WslcSetContainerInitProcessIOCallbacks,
             WslcGetProcessPid,
             WslcGetProcessExitEvent,
             WslcGetProcessState,
@@ -1512,6 +1548,20 @@ impl WslcSdk {
             containerSettings,
             container,
             errorMessage,
+        )
+    }
+    pub unsafe fn WslcOpenContainer(
+        &self,
+        session: WslcSession,
+        nameOrId: PCSTR,
+        container: *mut WslcContainer,
+        errorMessage: *mut PWSTR,
+    ) -> HRESULT {
+        (self
+            .WslcOpenContainer
+            .as_ref()
+            .expect("Expected function, got error."))(
+            session, nameOrId, container, errorMessage
         )
     }
     pub unsafe fn WslcStartContainer(
@@ -1771,6 +1821,17 @@ impl WslcSdk {
             .as_ref()
             .expect("Expected function, got error."))(processSettings, callbacks, context)
     }
+    pub unsafe fn WslcSetContainerInitProcessIOCallbacks(
+        &self,
+        container: WslcContainer,
+        callbacks: *const WslcProcessCallbacks,
+        context: PVOID,
+    ) -> HRESULT {
+        (self
+            .WslcSetContainerInitProcessIOCallbacks
+            .as_ref()
+            .expect("Expected function, got error."))(container, callbacks, context)
+    }
     pub unsafe fn WslcGetProcessPid(&self, process: WslcProcess, pid: *mut u32) -> HRESULT {
         (self
             .WslcGetProcessPid
@@ -1948,6 +2009,7 @@ impl WslcSdk {
         username: PCSTR,
         password: PCSTR,
         identityToken: *mut PSTR,
+        tokenType: *mut WslcIdentityTokenType,
         errorMessage: *mut PWSTR,
     ) -> HRESULT {
         (self
@@ -1959,6 +2021,7 @@ impl WslcSdk {
             username,
             password,
             identityToken,
+            tokenType,
             errorMessage,
         )
     }
@@ -2012,12 +2075,19 @@ impl WslcSdk {
     }
     pub unsafe fn WslcInstallWithDependencies(
         &self,
+        components: WslcComponentFlags,
+        options: WslcInstallOptions,
         progressCallback: WslcInstallCallback,
         context: PVOID,
     ) -> HRESULT {
         (self
             .WslcInstallWithDependencies
             .as_ref()
-            .expect("Expected function, got error."))(progressCallback, context)
+            .expect("Expected function, got error."))(
+            components,
+            options,
+            progressCallback,
+            context,
+        )
     }
 }

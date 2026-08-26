@@ -325,11 +325,11 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
             eprintln!(
-                "[wxc-exec] WARNING: stdin is a TTY but the state-aware Windows Sandbox exec \
-                 path does not currently forward interactive PTY input to the guest. Any data \
-                 you type will be dropped; the guest child will see immediate EOF on stdin. \
-                 Pipe stdin instead (e.g. `< /dev/null` or `< file`), or use the one-shot \
-                 backend for now. (Tracked: TODO h6-pty-plumbing -- ConPTY support.)"
+                "WARNING: stdin is a TTY but the state-aware Windows Sandbox exec path does not \
+                 currently forward interactive PTY input to the guest. Any data you type will be \
+                 dropped; the guest child will see immediate EOF on stdin. Redirect stdin from a \
+                 file or the null device to send input. (Tracked: TODO h6-pty-plumbing -- ConPTY \
+                 support.)"
             );
             let _ = stream.shutdown(std::net::Shutdown::Write);
         } else {
@@ -763,7 +763,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         // Before any work: this backend relays to the executor's stdio, so it
-        // cannot serve an in-process caller, and running the workload first
+        // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
         if consumer == ExecConsumer::Library {
             return Err(wxc_common::state_aware_backend::unsupported_library_exec(
@@ -807,6 +807,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             stdout: null,
             stderr: null,
             stdin: null,
+            stdin_closer: None,
             // `Exited`, not `TimedOut`: this backend runs the workload to
             // completion inside `exec` and reports what the guest returned, so
             // there is no live process left to have timed out. A `Library` path
@@ -1057,7 +1058,7 @@ mod tests {
     /// A `Library` exec is refused before the backend looks for the daemon.
     ///
     /// This backend relays the workload's output to *this process's* stdio, so
-    /// it cannot serve an in-process caller. The refusal has to precede any
+    /// it cannot return exec streams to the caller. The refusal has to precede any
     /// work: refusing after the workload ran would report "unsupported" for
     /// something that already took effect.
     ///
@@ -1074,10 +1075,9 @@ mod tests {
                 None,
                 ExecConsumer::Library,
             )
-            .expect_err("an in-process caller must be refused");
+            .expect_err("a streams-consuming caller must be refused");
         assert!(
-            err.message
-                .contains("does not support exec for an in-process caller"),
+            err.message.contains("cannot return exec streams"),
             "expected the shared refusal ahead of id and daemon checks, got: {}",
             err.message
         );

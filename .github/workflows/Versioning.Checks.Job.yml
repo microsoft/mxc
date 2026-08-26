@@ -41,6 +41,9 @@ jobs:
       - name: Check Rust toolchain sync (rust-toolchain.toml == ADO template)
         run: node scripts/versioning/check-rust-toolchain-sync.js
 
+      - name: Check dotnet ErrorCode parity (C# enum == native MXC_STATUS_*)
+        run: node scripts/check-dotnet-errorcode-parity.js
+
       - name: Check schema is in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-schema-codegen.js
 
@@ -49,6 +52,12 @@ jobs:
 
       - name: Check SDK wire types are in sync with the Rust wire model (codegen)
         run: node scripts/versioning/check-sdk-types-codegen.js
+
+      - name: Check exact contract generated artifacts and fixtures
+        run: node scripts/versioning/check-contract-codegen.js
+
+      - name: Check C# bindings codegen (regenerates and asserts entry points)
+        run: node scripts/check-dotnet-bindings-codegen.js
 
       - name: Validate config corpus against dev schema
         run: node scripts/versioning/validate-configs.js

@@ -9,7 +9,7 @@ use crate::state_aware_wire::StateAwareWireInput;
 #[test]
 fn extract_experimental_value_returns_none_when_absent() {
     let source = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "start",
         "sandboxId": "sandbox-id"
     }"#;
@@ -20,7 +20,7 @@ fn extract_experimental_value_returns_none_when_absent() {
 #[test]
 fn extract_experimental_value_preserves_empty_object() {
     let source = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "start",
         "sandboxId": "sandbox-id",
         "experimental": {}
@@ -35,7 +35,7 @@ fn extract_experimental_value_preserves_empty_object() {
 #[test]
 fn extract_experimental_value_preserves_backend_payload_and_telemetry() {
     let source = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "provision",
         "containment": "isolation_session",
         "network": {
@@ -72,7 +72,7 @@ fn extract_experimental_value_preserves_backend_payload_and_telemetry() {
 #[test]
 fn into_state_aware_wire_input_packages_config_raw_value_and_source_text() {
     let source = r#"{
-        "version": "0.8.0-alpha",
+        "version": "0.9.0-alpha",
         "phase": "start",
         "sandboxId": "sandbox-id",
         "experimental": {

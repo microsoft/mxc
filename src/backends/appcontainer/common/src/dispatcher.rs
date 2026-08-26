@@ -78,6 +78,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::sandbox_process::{Runner, SandboxBackend, SandboxProcess, StdioMode};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::NetworkPolicySupport;
 
 /// Result of a successful dispatch decision: a phased handle holding a
 /// runner and (optionally) a `DaclManager`, with **private fields** so
@@ -293,6 +294,13 @@ enum SelectedBackend {
 }
 
 impl SandboxBackend for SelectedBackend {
+    fn network_policy_support(&self) -> NetworkPolicySupport {
+        match self {
+            SelectedBackend::BaseContainer(b) => b.network_policy_support(),
+            SelectedBackend::AppContainer(a) => a.network_policy_support(),
+        }
+    }
+
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         match self {
             SelectedBackend::BaseContainer(b) => b.validate(request),

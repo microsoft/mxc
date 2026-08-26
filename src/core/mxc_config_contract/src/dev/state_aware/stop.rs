@@ -12,6 +12,7 @@ string_marker! {
 
 /// Experimental settings accepted by the `stop` phase.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StopExperimental {
     /// Optional telemetry override.
@@ -21,6 +22,7 @@ pub struct StopExperimental {
 
 /// A complete state-aware `stop` request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StopRequest {
     /// Optional JSON Schema reference for editor validation.

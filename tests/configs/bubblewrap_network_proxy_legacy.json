@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Proxy-Legacy",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "set -e; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo SANDBOX_PROXY=$HTTP_PROXY; curl -fsSL https://api.github.com/zen > /dev/null; echo LEGACY_PROXY_OK"
+    "commandLine": "set -e; echo SANDBOX_NETNS=$(readlink /proc/self/ns/net); echo SANDBOX_PROXY=$HTTP_PROXY; curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK; echo LEGACY_PROXY_OK"
   },
   "network": {
     "defaultPolicy": "allow",

@@ -183,9 +183,15 @@ device state into collection.
 
 - **`Microsoft.Mxc.Sdk`** — the class library (public API + generated P/Invoke).
 - **`Microsoft.Mxc.Sdk.Sample`** — a console sample (`dotnet run`).
-- **`Microsoft.Mxc.Sdk.Tests`** — xUnit tests (`dotnet test`).
+- **`Microsoft.Mxc.Sdk.ConsoleDriver`** — an operator-run driver that hosts an
+  interactive terminal inside an isolation session. Terminal behaviour has no
+  automated oracle, so its `interactive`, `streaming` and `resize` scenarios are
+  judged by whoever runs them; each states what to look for.
+- **`Microsoft.Mxc.Sdk.Tests`** — xUnit v3 tests. The lifecycle and streaming
+  end-to-end tests need a capable host and skip, with a reason, unless
+  `MXC_E2E_HOST_PREPPED=1`.
 
-Build/test everything: `dotnet test sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
+Build/test everything: `dotnet test --solution sdk/dotnet/Microsoft.Mxc.Sdk.slnx`.
 
 Run native telemetry-consent integration tests in the **Debug** configuration.
 
@@ -197,9 +203,9 @@ Run native telemetry-consent integration tests in the **Debug** configuration.
 2. Next to the managed assembly, and `runtimes/<rid>/native/` (NuGet layout).
 3. The Cargo build output: `src/target/{debug,release}/` (for local dev/test).
 
-So after building the Rust workspace (`build.bat` / `cargo build`), the sample
-and tests find the native library with no extra steps. For packaging,
-`build.bat` copies `mxc_ffi.dll` into `runtimes/<rid>/native/` for `dotnet pack`.
+A build of this project puts the freshly built `mxc_ffi` next to the managed
+assembly. For packaging, `build.bat` populates `runtimes/<rid>/native/` for
+`dotnet pack`.
 
 ## Supported surface
 
@@ -212,32 +218,94 @@ state-aware lifecycle is IsolationSession, Windows-only and experimental).
 ### State-aware lifecycle
 
 `MxcLifecycle` drives a sandbox through provision → start → exec → stop →
-deprovision:
+deprovision. The backend is chosen explicitly at provision; the later phases
+identify the sandbox by the opaque `SandboxId` provision returns.
 
 ```csharp
-var provisioned = MxcLifecycle.ProvisionSandbox(new ProvisionSandboxOptions
-{
-    Filesystem = new FilesystemPolicy { ReadwritePaths = { @"C:\Temp" } },
-});
-SandboxId id = provisioned.SandboxId;
+// IsolationSession accepts only the unrestricted-network posture, and refuses
+// an absent policy: its container runs on a network MXC can neither filter nor
+// deny, so the caller states that posture.
+var provisioned = MxcLifecycle.ProvisionSandbox(
+    StateAwareContainment.IsolationSession,
+    new ProvisionSandboxOptions
+    {
+        Network = new StateAwareNetworkPolicy
+        {
+            DefaultPolicy = StateAwareNetworkDefault.Allow,
+            AllowLocalNetwork = true,
+        },
+    });
+SandboxId id = provisioned.SandboxId;   // opaque — carry it forward, never parse it
 
-MxcLifecycle.StartSandbox(id);
-
-// Live streaming exec (an MxcSandboxProcess, like Spawn):
-using (var proc = MxcLifecycle.ExecInSandbox(id, "cmd /c echo hi"))
+// Provision mints host-side resources, so deprovision has to run even when a
+// later phase throws.
+try
 {
-    // ... read proc.StandardOutput, proc.Wait() ...
+    MxcLifecycle.StartSandbox(id);
+
+    // Live streaming exec (an MxcSandboxProcess, like Spawn):
+    using (var proc = MxcLifecycle.ExecInSandbox(id, "cmd /c echo hi"))
+    {
+        // ... read proc.StandardOutput, proc.Wait() ...
+    }
+    // or run to completion:
+    RunResult run = await MxcLifecycle.ExecInSandboxAsync(id, "cmd /c echo hi");
+
+    // or attached to this process's console, for an interactive session:
+    SandboxWaitResult outcome = MxcLifecycle.ExecInSandboxAttached(id, "powershell.exe");
 }
-// or run to completion:
-RunResult run = await MxcLifecycle.ExecInSandboxAsync(id, "cmd /c echo hi");
-
-MxcLifecycle.StopSandbox(id);
-MxcLifecycle.DeprovisionSandbox(id);
+finally
+{
+    try
+    {
+        MxcLifecycle.StopSandbox(id);
+    }
+    catch (MxcException)
+    {
+        // A failed stop must not prevent the deprovision that frees the account.
+    }
+    try
+    {
+        MxcLifecycle.DeprovisionSandbox(id);
+    }
+    catch (MxcException e)
+    {
+        Console.Error.WriteLine($"deprovision failed, resources may leak: {e.Message}");
+    }
+}
 ```
+
+`ExecInSandbox` and `ExecInSandboxAsync` hand the workload ordinary pipes and
+leave this process's console untouched. `ExecInSandboxAttached` relays the
+workload onto this process's stdio instead, so a shell inside the sandbox gets a
+real terminal and renders and resizes normally; it returns no handle and no
+captured output. It refuses with `ErrorCode.MalformedRequest` when this
+process's stdout and stdin are not both terminals, and when another attached
+exec is already running — one runs at a time per process. A pseudo-console
+carries one output stream, so the sandbox's stderr arrives merged into stdout.
+For its duration the workload owns the console: raw VT, so no echo and no line
+input, and keystrokes — `Ctrl-C` included — reach the workload rather than your
+process. The console is restored on return.
+
+`ProvisionResult.MetadataJson` carries backend-typed provision metadata, such as
+the per-instance agent user identity.
+
+Cross-cutting policy (`Network`, `Filesystem`) is sent as supplied. A backend
+that cannot honour a value rejects it with `ErrorCode.PolicyValidation` rather
+than ignoring it.
 
 The only state-aware backend, IsolationSession, is Windows-only and needs its
 OS-side service; on a host or build without it, these calls throw an
-`MxcException` with `ErrorCode.UnsupportedPhase` / `BackendUnavailable`.
+`MxcException` with `ErrorCode.BackendUnavailable`. Windows builds exclude it
+unless you pass `-p:MxcWithIsolationSession=true`.
+
+**IsolationSession is refused from a single-threaded apartment**, which
+`[STAThread]` makes the default for WinForms and WPF entry points. Call it from
+an MTA thread — `Task.Run` reaches one from a GUI application — or from a
+console application, which is MTA unless it opts out.
+
+**`StartSandbox` is refused in Session 0.** Provision succeeds first and mints an
+account, so a caller in that position still has to deprovision.
 
 ## ABI stability
 
@@ -258,10 +326,10 @@ than linking third-party code directly against `mxc_ffi`.
   `src/ffi/mxc_ffi/build.rs`, gated behind the crate's **`dotnetsdk`** cargo
   feature (off by default, so normal/backend builds don't compile csbindgen).
   It is **not committed** (gitignored) — the `GenerateNativeBindings` MSBuild
-  target in the csproj (re)generates it before every C# compile by running
-  `cargo build -p mxc_ffi --features dotnetsdk`, so a plain `dotnet build`
-  produces fresh bindings that can never drift from the Rust FFI. (This means
-  building the C# SDK requires the Rust toolchain on PATH.)
+  target in the csproj regenerates it at build time by invoking cargo, so a
+  plain `dotnet build` produces fresh bindings that can never drift from the
+  Rust FFI. (This means building the C# SDK requires the Rust toolchain on
+  PATH.)
   `scripts/check-dotnet-bindings-codegen.js` runs that codegen and asserts the
   expected entry points are produced, catching a broken/renamed C ABI in CI.
 - The `ErrorCode` enum mirrors the native `MXC_STATUS_*` constants;

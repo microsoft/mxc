@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Wire types for the mutable `0.8.0-alpha` state-aware configuration
+//! Wire types for the mutable `0.9.0-alpha` state-aware configuration
 //! contract.
 
 macro_rules! string_marker {
@@ -12,6 +12,31 @@ macro_rules! string_marker {
         $(#[$meta])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         $vis struct $name;
+
+        #[cfg(feature = "schema-gen")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> String {
+                stringify!($name).to_string()
+            }
+
+            fn json_schema(
+                _generator: &mut schemars::gen::SchemaGenerator,
+            ) -> schemars::schema::Schema {
+                use schemars::schema::{
+                    InstanceType, Schema, SchemaObject, SingleOrVec,
+                };
+
+                Schema::Object(SchemaObject {
+                    instance_type: Some(SingleOrVec::Single(Box::new(
+                        InstanceType::String,
+                    ))),
+                    enum_values: Some(vec![serde_json::Value::String(
+                        $wire_value.to_string(),
+                    )]),
+                    ..Default::default()
+                })
+            }
+        }
 
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

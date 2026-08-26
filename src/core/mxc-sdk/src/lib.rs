@@ -24,7 +24,6 @@
 //!     network: None,
 //!     ui: None,
 //!     timeout_ms: None,
-//!     capture_denials: None,
 //! };
 //! let mut request = build_request(&policy, None)?;
 //! request.set_script("echo hi");
@@ -41,15 +40,14 @@
 //!
 //! The selected backend is driven by the `containment` field in the request:
 //! [`build_request`] resolves the host's native one, and
-//! [`build_request_with_containment`] takes an explicit [`Containment`] — the
-//! same choice the TypeScript SDK makes with
-//! `createConfigFromPolicy(policy, containment)`.
+//! [`build_request_with_containment`] takes an explicit [`Containment`].
 //!
 //! | Backend | Host | Selected by |
 //! |---------|------|-------------|
 //! | Bubblewrap | Linux | [`Containment::Process`] |
 //! | Seatbelt | macOS | [`Containment::Process`] |
 //! | ProcessContainer (AppContainer / BaseContainer) | Windows | [`Containment::Process`] |
+//! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
 //! WSLC is **experimental**: build with the crate's `wslc` feature, and call
@@ -57,9 +55,10 @@
 //! on the request. Its container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
-//! Other backends (Windows Sandbox, IsolationSession, MicroVM, Hyperlight,
-//! LXC) return an [`Error`] with [`ErrorCode::UnsupportedContainment`]; drive
-//! the standalone executor binaries for those.
+//! Backends with no [`Containment`] variant return an [`Error`] with
+//! [`ErrorCode::UnsupportedContainment`]; drive the standalone executor
+//! binaries for those. IsolationSession refuses the one-shot surface the same
+//! way, and is reached through the state-aware lifecycle below.
 //!
 //! # Diagnosing a failure
 //!
@@ -84,12 +83,13 @@
 //! `Display` renders both, so logging the error alone does not lose them.
 //!
 //! ```no_run
-//! use mxc_sdk::{build_request_with_containment, run, Containment, SandboxPolicy, WslcSection};
+//! use mxc_sdk::{
+//!     build_request_with_containment, run, Containment, SandboxPolicy, WslcSection,
+//! };
 //!
 //! # let policy = SandboxPolicy {
 //! #     version: "0.7.0-alpha".to_string(),
 //! #     filesystem: None, network: None, ui: None, timeout_ms: None,
-//! #     capture_denials: None,
 //! # };
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
@@ -99,31 +99,36 @@
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
 //!
-//! | Entry point            | Stdio                                   |
-//! |------------------------|-----------------------------------------|
-//! | [`run`]                | captured (stdout/stderr returned)       |
-//! | [`spawn_sandbox`]      | live (stream, feed stdin, kill)         |
-//! | [`run_state_aware_json`] | state-aware envelope phases (JSON in/out) |
-//! | [`exec_sandbox`]       | state-aware exec, live (stream/kill)    |
+//! ## Choosing an entry point
 //!
-//! ## State-aware lifecycle
+//! |             | one-shot            | state-aware                           | Stdio                                    |
+//! |-------------|---------------------|---------------------------------------|------------------------------------------|
+//! | **capture** | [`run`]             | `exec_sandbox(…)?.wait_with_output()` | captured                                 |
+//! | **handle**  | [`spawn_sandbox`]   | [`exec_sandbox`]                      | live pipes (stream, kill); no TTY        |
+//! | **attach**  | *not available*     | [`exec_attached`]                     | this process's stdio; TTY if it has one  |
 //!
-//! [`run_state_aware_json`] drives the envelope phases — `provision`, `start`,
-//! `stop`, `deprovision` (and a dry run of any phase) — taking the wire-format
-//! request JSON and returning the response-envelope JSON. [`exec_sandbox`] runs
-//! the `exec` phase as a live streaming [`Sandbox`], the same handle
-//! [`spawn_sandbox`] returns. Three backends implement the lifecycle —
-//! IsolationSession, WSLc and Windows Sandbox, all Windows-only — but only
-//! IsolationSession serves a streaming `exec` in-process; see [`exec_sandbox`]
-//! for what the other two return there, and the crate README for how each one
-//! is compiled in.
+//! [`run_state_aware_json`] sits alongside these and drives the *other*
+//! state-aware phases — `provision`, `start`, `stop`, `deprovision`, and a dry
+//! run of any phase — taking the wire-format request JSON and returning the
+//! response-envelope JSON. The crate README covers which backends implement the
+//! lifecycle and how each is compiled in.
 //!
-//! ## No pty
+//! **IsolationSession is refused from a single-threaded apartment.**
 //!
-//! The child's stdio is always wired to ordinary pipes — the library never
-//! allocates a pty. [`run`] captures both streams; with [`spawn_sandbox`],
-//! stream the handle's `take_stdout`/`take_stderr`, or let
-//! [`wait`](Sandbox::wait) drain and discard any untaken stream.
+//! ## Pty allocation
+//!
+//! Every entry point except [`exec_attached`] wires the child's stdio to
+//! ordinary pipes and allocates no pty. [`run`] captures both streams; with
+//! [`spawn_sandbox`] or [`exec_sandbox`], stream the handle's
+//! `take_stdout`/`take_stderr`, or let [`wait`](Sandbox::wait) drain and
+//! discard any untaken stream.
+//!
+//! Under [`exec_attached`], IsolationSession allocates a pseudo-console and
+//! forwards stdin, so interactive shells render and resize. A pseudo-console
+//! has one output stream, so the sandbox's stderr arrives merged into stdout.
+//!
+//! [`exec_attached`] is verified against IsolationSession only.
+//!
 //! Policy security warnings are available through [`Sandbox::warnings`] and
 //! [`Output::warnings`].
 //!
@@ -136,12 +141,15 @@
 
 mod sandbox;
 
+pub use mxc_engine::configs;
 pub use mxc_engine::policy;
 pub use mxc_engine::{
     available_backends, available_tools_policy, build_request, build_request_with_containment,
     platform_support, temporary_files_policy, user_profile_policy, AvailableBackend,
-    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, PlatformSupport,
-    SandboxPolicy, SandboxRequest, WslcSection,
+    BackendCapability, Containment, Error, ErrorCode, FilesystemPolicyResult, NetworkAction,
+    NetworkEgressSection, NetworkIngressSection, NetworkPeerSection, NetworkPortSection,
+    NetworkProtocol, NetworkRuleSection, PlatformSupport, RuntimeConfigSection, SandboxPolicy,
+    SandboxRequest, WslcSection,
 };
 
 pub use sandbox::{
@@ -187,8 +195,10 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// response-envelope JSON string.
 ///
 /// Handles the envelope phases — `provision`, `start`, `stop`, `deprovision` —
-/// and a dry run of any phase. A non-dry-run `exec` streams its output, so it is
-/// rejected here; drive it through [`exec_sandbox`] instead.
+/// and a dry run of any phase. A non-dry-run `exec` produces no envelope, so it
+/// is rejected here; run it through an exec entry point instead:
+/// [`exec_attached`] to attach the workload to this process's stdio, or
+/// [`exec_sandbox`] to drive the pipes yourself.
 ///
 /// The request JSON is the same wire format the executor accepts (an object with
 /// a `phase` field). Errors (malformed request, unsupported phase, backend
@@ -215,14 +225,38 @@ pub fn run_state_aware_json(
 /// The request JSON must be an `exec`-phase state-aware request (with a
 /// `sandboxId` identifying a started sandbox). No pty is allocated.
 ///
-/// `experimental` opts in to the experimental backends, as for
-/// [`run_state_aware_json`]. **IsolationSession is the only backend that serves
-/// a streaming `exec` in-process**: the streaming dispatcher asks for
-/// `ExecConsumer::Library`, which WSLc refuses outright because it relays to the
-/// executor's stdio, and Windows Sandbox has no streaming arm at all
-/// (`unsupported_phase`). IsolationSession's arm additionally needs
-/// `mxc_engine/isolation_session`, which this crate does not forward yet — so
-/// today this entry point cannot return a live handle from a stock build.
+/// **IsolationSession is the only backend that serves this**, and only with this
+/// crate's `isolation_session` feature; the others cannot hand back pipes and
+/// refuse. `experimental` opts in to the experimental backends, as for
+/// [`run_state_aware_json`].
+///
+/// [`Sandbox::kill`] reaches only the foreground process here; a descendant the
+/// workload backgrounded is reclaimed when the sandbox is stopped and
+/// deprovisioned.
 pub fn exec_sandbox(request_json: &str, experimental: bool) -> Result<Sandbox, Error> {
     mxc_engine::exec_state_aware_json(request_json, experimental).map(Sandbox::new)
+}
+
+/// Run the `exec` phase of a state-aware request **attached to this process's
+/// stdio**, blocking until the sandboxed process exits.
+///
+/// The backend relays the workload's output onto this process's stdout and
+/// stderr; see *Pty allocation* for which backends also forward stdin and
+/// allocate a pseudo-console.
+///
+/// **This process's stdout and stdin must both be terminals**, or the call is
+/// refused with [`ErrorCode::MalformedRequest`] and nothing is run.
+///
+/// A spent `scriptTimeout` arrives as [`WaitOutcome::Exited`]: a backend
+/// relaying to a caller's stdio reports an exit code, and the relay rejects
+/// anything else.
+///
+/// `experimental` opts in to the experimental backends, as for
+/// [`run_state_aware_json`].
+pub fn exec_attached(request_json: &str, experimental: bool) -> Result<WaitOutcome, Error> {
+    use wxc_common::state_aware_backend::ExecOutcome;
+    mxc_engine::exec_state_aware_attached(request_json, experimental).map(|outcome| match outcome {
+        ExecOutcome::Exited(code) => WaitOutcome::Exited(code),
+        ExecOutcome::TimedOut => WaitOutcome::TimedOut,
+    })
 }

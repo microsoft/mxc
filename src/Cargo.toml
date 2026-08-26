@@ -27,6 +27,7 @@ members = [
     "core/mxc_darwin",
     "core/mxc_engine",
     "core/mxc_pty",
+    "core/mxc_schema_support",
     "core/mxc-sdk",
     "core/wxc",
     "core/wxc_common",
@@ -57,7 +58,7 @@ split-debuginfo = "packed"
 strip = "debuginfo"
 
 [workspace.package]
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 
@@ -82,6 +83,7 @@ mxc_build_common = { path = "core/mxc_build_common" }
 mxc_config_contract = { path = "core/mxc_config_contract" }
 mxc_engine = { path = "core/mxc_engine" }
 mxc_pty = { path = "core/mxc_pty" }
+mxc_schema_support = { path = "core/mxc_schema_support" }
 mxc-sdk = { path = "core/mxc-sdk" }
 mxc_telemetry = { path = "mxc_telemetry" }
 nanvix_runner = { path = "backends/nanvix/runner" }
@@ -91,9 +93,11 @@ plm = { path = "host/plm" }
 quick-xml = "0.41"
 sandbox_spec = { path = "core/generated/base_container_specification" }
 seatbelt_common = { path = "backends/seatbelt/common" }
+same-file = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "0.1"
+schemars = "0.8"
 sha2 = "0.10"
 tempfile = "3"
 thiserror = "2"

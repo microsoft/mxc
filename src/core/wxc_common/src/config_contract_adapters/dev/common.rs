@@ -4,10 +4,11 @@
 use crate::wire;
 use mxc_config_contract::dev as contract;
 use mxc_config_contract::ContractVersion;
+use std::num::NonZeroU16;
 
 pub(super) fn convert_version(value: contract::Version) -> &'static str {
     match value {
-        contract::Version::V0_8_0Alpha => ContractVersion::V0_8_0Alpha.as_str(),
+        contract::Version::V0_9_0Alpha => ContractVersion::V0_9_0Alpha.as_str(),
     }
 }
 
@@ -56,6 +57,91 @@ fn convert_network_enforcement_mode(
     }
 }
 
+fn convert_network_action(value: contract::NetworkAction) -> wire::NetworkAction {
+    match value {
+        contract::NetworkAction::Allow => wire::NetworkAction::Allow,
+        contract::NetworkAction::Deny => wire::NetworkAction::Deny,
+    }
+}
+
+fn convert_network_protocol(value: contract::NetworkProtocol) -> wire::NetworkProtocol {
+    match value {
+        contract::NetworkProtocol::Tcp => wire::NetworkProtocol::Tcp,
+        contract::NetworkProtocol::Udp => wire::NetworkProtocol::Udp,
+        contract::NetworkProtocol::Icmp => wire::NetworkProtocol::Icmp,
+        contract::NetworkProtocol::Any => wire::NetworkProtocol::Any,
+    }
+}
+
+fn convert_network_peer(value: contract::NetworkPeer) -> wire::NetworkPeer {
+    let contract::NetworkPeer { cidr, except } = value;
+    wire::NetworkPeer {
+        cidr,
+        except: except.into_option(),
+    }
+}
+
+fn convert_network_peers(value: Vec<contract::NetworkPeer>) -> Vec<wire::NetworkPeer> {
+    value.into_iter().map(convert_network_peer).collect()
+}
+
+fn convert_network_port(value: contract::NetworkPort) -> wire::NetworkPort {
+    let contract::NetworkPort {
+        port,
+        end_port,
+        protocol,
+    } = value;
+    wire::NetworkPort {
+        port: port.into_option().map(NonZeroU16::get),
+        end_port: end_port.into_option().map(NonZeroU16::get),
+        protocol: protocol.into_option().map(convert_network_protocol),
+    }
+}
+
+fn convert_network_ports(value: Vec<contract::NetworkPort>) -> Vec<wire::NetworkPort> {
+    value.into_iter().map(convert_network_port).collect()
+}
+
+fn convert_network_rule(value: contract::NetworkRule) -> wire::NetworkRule {
+    let contract::NetworkRule { to, ports } = value;
+    wire::NetworkRule {
+        to: to
+            .into_option()
+            .map(|to| convert_network_peers(to.into_inner())),
+        ports: ports
+            .into_option()
+            .map(|ports| convert_network_ports(ports.into_inner())),
+    }
+}
+
+fn convert_network_rules(value: Vec<contract::NetworkRule>) -> Vec<wire::NetworkRule> {
+    value.into_iter().map(convert_network_rule).collect()
+}
+
+fn convert_network_egress(value: contract::NetworkEgress) -> wire::NetworkEgress {
+    let contract::NetworkEgress {
+        default,
+        allow,
+        deny,
+    } = value;
+    wire::NetworkEgress {
+        default: default.into_option().map(convert_network_action),
+        allow: allow.into_option().map(convert_network_rules),
+        deny: deny.into_option().map(convert_network_rules),
+    }
+}
+
+fn convert_network_ingress(value: contract::NetworkIngress) -> wire::NetworkIngress {
+    let contract::NetworkIngress {
+        default,
+        host_loopback,
+    } = value;
+    wire::NetworkIngress {
+        default: default.into_option().map(convert_network_action),
+        host_loopback: host_loopback.into_option().map(convert_network_action),
+    }
+}
+
 pub(super) fn convert_network(value: contract::Network) -> wire::Network {
     let contract::Network {
         default_policy,
@@ -64,6 +150,8 @@ pub(super) fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts,
         blocked_hosts,
         proxy,
+        egress,
+        ingress,
     } = value;
     wire::Network {
         default_policy: default_policy
@@ -76,8 +164,8 @@ pub(super) fn convert_network(value: contract::Network) -> wire::Network {
         allowed_hosts: allowed_hosts.into_option(),
         blocked_hosts: blocked_hosts.into_option(),
         proxy: proxy.into_option().map(convert_proxy),
-        egress: None,
-        ingress: None,
+        egress: egress.into_option().map(convert_network_egress),
+        ingress: ingress.into_option().map(convert_network_ingress),
     }
 }
 

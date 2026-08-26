@@ -6,14 +6,15 @@
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
  * Emitted from the generated JSON Schema (itself generated from the Rust wire
- * model `wxc_common::wire`) by the `mxc_schema_gen --ts` TypeScript emitter
- * (`wxc_common::ts_emit`). This is a drift oracle, not public API: it is never
+ * model `wxc_common::wire`) by the `mxc_schema_gen types --legacy-wire`
+ * TypeScript emitter (`mxc_schema_support`). This is a drift oracle, not public
+ * API: it is never
  * exported from the SDK. The conformance test asserts the hand-written public
  * types in `../types.ts` still match these. CI gate:
  * `scripts/versioning/check-sdk-types-codegen.js`.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --ts sdk/node/src/generated/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --legacy-wire --out sdk/node/src/generated/wire.ts
  */
 /**
  * BaseProcessContainer UI isolation settings.
@@ -147,7 +148,9 @@ export interface IsolationSession {
  */
 export interface IsolationSessionProvisionPhase {
   /**
-   * Optional application identifier for the calling application. For a packaged application this is the Package Family Name; for an unpackaged one it may be any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
+   * Optional identifier for the calling application.
+   * 
+   * **A packaged application must supply its Package Family Name in the form `PFN:<packageFamilyName>`** (for example `PFN:Contoso.App_8wekyb3d8bbwe`). An unpackaged application may pass any string. Carried inside the `sandboxId` so later lifecycle phases can recover it without the caller re-supplying it.
    */
   appId?: string | null;
   [k: string]: unknown;
@@ -672,7 +675,7 @@ export interface MXCConfiguration {
    */
   ui?: Ui | null;
   /**
-   * MXC config schema version (semver), e.g. `"0.8.0-alpha"`.
+   * MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
    */
   version?: string | null;
 }

@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Proxy-Builtin",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "curl -fsSL https://api.github.com/zen && echo PROXY_OK"
+    "commandLine": "curl -fsSL --max-time 15 http://mxc-test.invalid/ | grep -q MXC_TEST_ORIGIN_OK && echo PROXY_OK"
   },
   "network": {
     "defaultPolicy": "allow",

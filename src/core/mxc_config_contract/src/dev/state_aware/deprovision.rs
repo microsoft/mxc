@@ -12,6 +12,7 @@ string_marker! {
 
 /// Experimental settings accepted by the `deprovision` phase.
 #[derive(Debug, serde::Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeprovisionExperimental {
     /// Optional telemetry override.
@@ -21,6 +22,7 @@ pub struct DeprovisionExperimental {
 
 /// A complete state-aware `deprovision` request.
 #[derive(Debug, Deserialize)]
+#[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeprovisionRequest {
     /// Optional JSON Schema reference for editor validation.

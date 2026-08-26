@@ -1,0 +1,8 @@
+{
+  "version": "0.9.0-alpha",
+  "phase": "provision",
+  "containment": "windows_sandbox",
+  "network": {
+    "defaultPolicy": "block"
+  }
+}

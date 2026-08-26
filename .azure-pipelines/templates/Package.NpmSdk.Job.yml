@@ -2,6 +2,9 @@
 # Licensed under the MIT License.
 
 parameters:
+- name: isOfficialBuild
+  type: boolean
+  default: false
 - name: targets
   type: object
   default:
@@ -34,6 +37,13 @@ jobs:
 
   steps:
     - checkout: self
+
+    # The post-job SBOM generator inspects the Rust workspace. Configure Cargo
+    # for the appropriate mirror so network isolation does not send it to crates.io.
+    - ${{ if eq(parameters.isOfficialBuild, true) }}:
+      - template: Cargo.Setup.Private.yml@self
+    - ${{ else }}:
+      - template: Cargo.Setup.Public.yml@self
 
     - task: UseNode@1
       displayName: Use Node.js 20
