@@ -64,8 +64,7 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::network_iptables::{
-    ingress_chain_name_for, installs_firewall, HostIpv6State, Ip6tablesStatus,
-    NetworkIptablesManager,
+    ingress_chain_name_for, plan_network, HostIpv6State, Ip6tablesStatus, NetworkIptablesManager,
 };
 
 /// IP family an inbound chain is being built for.
@@ -553,7 +552,7 @@ impl IngressManager {
         logger: &mut Logger,
     ) -> Result<bool, String> {
         let uses_directional_schema = self.uses_directional_schema;
-        if !installs_firewall(policy, uses_directional_schema) {
+        if !plan_network(policy, uses_directional_schema).installs_firewall() {
             logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
         }
@@ -1244,7 +1243,7 @@ mod permissive_spec_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::network_iptables::installs_firewall;
+    use crate::network_iptables::plan_network;
     use wxc_common::models::{
         NetworkAction, NetworkEnforcementMode, NetworkIngressPolicy, NetworkPolicy,
     };
@@ -2960,7 +2959,7 @@ mod tests {
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
             assert!(
-                installs_firewall(&policy, false),
+                plan_network(&policy, false).installs_firewall(),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
                  deny chain even with nothing to restrict outbound"
             );
@@ -2976,7 +2975,7 @@ mod tests {
             legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
-            !installs_firewall(&policy, false),
+            !plan_network(&policy, false).installs_firewall(),
             "a policy naming no firewall mode, no posture, no hosts and no proxy has \
              nothing inbound to enforce"
         );
@@ -2990,7 +2989,7 @@ mod tests {
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
 
-        assert!(installs_firewall(&policy, true));
+        assert!(plan_network(&policy, true).installs_firewall());
     }
 
     #[test]
@@ -2998,6 +2997,6 @@ mod tests {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.network_egress = Some(Default::default());
 
-        assert!(!installs_firewall(&policy, true));
+        assert!(!plan_network(&policy, true).installs_firewall());
     }
 }

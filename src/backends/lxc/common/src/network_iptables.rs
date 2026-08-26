@@ -19,18 +19,61 @@ use wxc_common::models::{
     ProxyHostPin,
 };
 
-/// True when the policy grants the container no reachable peer in either
-/// direction.
+/// The network topology this run gives the container.
 ///
-/// Only a directional schema states such a posture; legacy schemas answer
-/// false.
-pub(crate) fn permits_no_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    if !uses_directional_schema || policy.network_proxy.is_enabled() {
-        return false;
+/// The two schemas describe a policy in different terms, and each reaches its
+/// own variants: `Isolated` is stated only by 0.8, `Unfiltered` and
+/// `ProxyWithoutEnforcement` only by 0.7.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NetworkPlan {
+    /// Loopback only, with no veth to filter.
+    Isolated,
+
+    /// A veth, with chains scoped to it.
+    Filtered,
+
+    /// A veth with no chains, under a mode that asked for none.
+    Unfiltered,
+
+    /// A proxy named under a mode that installs nothing. The runner injects
+    /// the proxy environment either way, so the container would advertise a
+    /// proxy while direct egress stayed open.
+    ProxyWithoutEnforcement,
+}
+
+impl NetworkPlan {
+    /// True when the container starts with no network interface.
+    pub(crate) fn omits_interface(self) -> bool {
+        matches!(self, Self::Isolated)
+    }
+
+    /// True when this run installs firewall chains.
+    pub(crate) fn installs_firewall(self) -> bool {
+        matches!(self, Self::Filtered)
+    }
+}
+
+/// Decide the topology, splitting on the schema first so neither schema's
+/// rules have to reason about the other's.
+pub(crate) fn plan_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> NetworkPlan {
+    if uses_directional_schema {
+        plan_directional(policy)
+    } else {
+        plan_legacy(policy)
+    }
+}
+
+/// 0.8 states its posture in the policy and carries no mode to opt out of, so
+/// a stated posture always enforces.
+fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
+    // A proxy is a peer, so naming one is not granting nothing: the container
+    // has to reach it.
+    if policy.network_proxy.is_enabled() {
+        return NetworkPlan::Filtered;
     }
 
     if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
-        return false;
+        return NetworkPlan::Filtered;
     }
 
     let egress_permits_nothing = policy
@@ -42,31 +85,33 @@ pub(crate) fn permits_no_network(policy: &ContainerPolicy, uses_directional_sche
         ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
     });
 
-    egress_permits_nothing && ingress_permits_nothing
-}
-
-/// True when this run installs firewall chains.
-///
-/// A run carries one schema. 0.8 states a posture with no mode to opt out of,
-/// so it always enforces; 0.7 enforces only where the config asked for it.
-pub(crate) fn installs_firewall(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    if permits_no_network(policy, uses_directional_schema) {
-        return false;
-    }
-
-    if uses_directional_schema {
-        true
+    if egress_permits_nothing && ingress_permits_nothing {
+        NetworkPlan::Isolated
     } else {
-        NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode)
+        NetworkPlan::Filtered
     }
 }
 
-/// True when the container needs a reachable network.
+/// 0.7 names an enforcement mode, and only some modes install rules.
+fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
+    if NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode) {
+        return NetworkPlan::Filtered;
+    }
+
+    if policy.network_proxy.is_enabled() {
+        return NetworkPlan::ProxyWithoutEnforcement;
+    }
+
+    NetworkPlan::Unfiltered
+}
+
+/// True when the container needs a reachable address.
 ///
-/// Wider than [`installs_firewall`]: host lists resolve names, and a proxy has
-/// to be reachable, even where the declared mode installs nothing.
+/// Wider than [`NetworkPlan::installs_firewall`]: host lists resolve names,
+/// and a proxy has to be reachable, even where the declared mode installs
+/// nothing.
 pub(crate) fn needs_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    installs_firewall(policy, uses_directional_schema)
+    plan_network(policy, uses_directional_schema).installs_firewall()
         || !policy.allowed_hosts.is_empty()
         || !policy.blocked_hosts.is_empty()
         || policy.network_proxy.is_enabled()
@@ -2055,12 +2100,9 @@ impl NetworkIptablesManager {
         logger: &mut Logger,
     ) -> Result<bool, String> {
         let uses_directional_schema = self.uses_directional_schema;
-        if !installs_firewall(policy, uses_directional_schema) {
-            // The runner injects HTTP(S)_PROXY from this same policy whatever
-            // happens here, so reporting success would leave a container that
-            // advertises a proxy and restricts nothing: any client ignoring the
-            // environment reaches the network directly.
-            if policy.network_proxy.is_enabled() {
+        let plan = plan_network(policy, uses_directional_schema);
+        if !plan.installs_firewall() {
+            if plan == NetworkPlan::ProxyWithoutEnforcement {
                 return Err(
                     "network.proxy requires network.enforcementMode='firewall' or 'both'. \
                      This policy enables a proxy under 'capabilities', where no iptables \
@@ -4606,7 +4648,7 @@ mod tests {
             };
 
             assert_eq!(
-                installs_firewall(&policy, false),
+                plan_network(&policy, false).installs_firewall(),
                 expected,
                 "{label}: a 0.7 policy is answered by the mode it names, not by the \
                  hosts it happens to list"
@@ -4642,7 +4684,7 @@ mod tests {
         };
 
         assert!(
-            installs_firewall(&policy, true),
+            plan_network(&policy, true).installs_firewall(),
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
@@ -4652,8 +4694,9 @@ mod tests {
     fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
         let policy = ContainerPolicy::default();
 
-        assert!(permits_no_network(&policy, true));
-        assert!(!installs_firewall(&policy, true));
+        let plan = plan_network(&policy, true);
+        assert!(plan.omits_interface());
+        assert!(!plan.installs_firewall());
     }
 
     #[test]
@@ -4667,7 +4710,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!permits_no_network(&policy, true));
+        assert!(!plan_network(&policy, true).omits_interface());
     }
 
     #[test]
@@ -4681,7 +4724,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!permits_no_network(&policy, true));
+        assert!(!plan_network(&policy, true).omits_interface());
     }
 
     // Resolving a host name and reaching a proxy both need the interface up,
@@ -4691,7 +4734,7 @@ mod tests {
         let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
         policy.blocked_hosts = vec!["example.com".to_string()];
 
-        assert!(!installs_firewall(&policy, false));
+        assert!(!plan_network(&policy, false).installs_firewall());
         assert!(needs_network(&policy, false));
     }
 

@@ -828,7 +828,7 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
     );
 
     assert!(
-        !installs_firewall(&policy, true),
+        !plan_network(&policy, true).installs_firewall(),
         "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }

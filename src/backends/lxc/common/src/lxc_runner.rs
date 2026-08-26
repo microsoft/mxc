@@ -17,9 +17,7 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 use crate::filesystem_mounts;
 use crate::lxc_bindings::LxcContainer;
 use crate::network_ingress::IngressManager;
-use crate::network_iptables::{
-    installs_firewall, needs_network, permits_no_network, NetworkIptablesManager,
-};
+use crate::network_iptables::{needs_network, plan_network, NetworkIptablesManager};
 use crate::signal_cleanup;
 
 /// Comment marker on every `/etc/hosts` line this runner writes, so a later
@@ -252,10 +250,11 @@ impl LxcScriptRunner {
 
         let uses_directional_schema =
             wxc_common::supports_directional_network(&request.schema_version);
+        let plan = plan_network(&request.policy, uses_directional_schema);
 
         // LXC reads the network section only as the container starts; the
         // firewall decision below is too late.
-        if permits_no_network(&request.policy, uses_directional_schema) {
+        if plan.omits_interface() {
             // `up` keeps 127.0.0.1 available to a workload that binds it.
             for (key, value) in [("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")] {
                 if let Err(e) = container.set_config_item(key, value) {
@@ -340,7 +339,7 @@ impl LxcScriptRunner {
             }
         }
 
-        let use_firewall = installs_firewall(&request.policy, uses_directional_schema);
+        let use_firewall = plan.installs_firewall();
 
         // Kept in scope for post-execution cleanup; `None` when there is no
         // netns PID and no firewall was requested (nothing to enforce).
