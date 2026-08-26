@@ -138,8 +138,7 @@ npm test
 npm run test:integration
 
 # C# SDK (from sdk/dotnet/)
-dotnet test --solution Microsoft.Mxc.Sdk.slnx   # Debug only; builds mxc_ffi via cargo (Rust toolchain required)
-                                                 # telemetry tests need the debug-only MXC_TEST_LOCALAPPDATA_OVERRIDE, so `-c Release` fails by design
+dotnet test --solution Microsoft.Mxc.Sdk.slnx   # builds mxc_ffi via cargo (Rust toolchain required)
 
 # Local PowerShell helpers — run from repo root, require built binaries
 tests\scripts\run_test_configs.ps1            # All test configs via wxc_test_driver
@@ -153,8 +152,6 @@ tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox st
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
 sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_ci_backend_tests.sh.
-tests\scripts\run_telemetry_consent_smoke_test.ps1  # Telemetry consent + policy CLI E2E (Windows; debug binary only)
-
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
 cargo test -p wxc_e2e_tests -- --ignored    # Include stress tests (run_on_repeat)
@@ -227,8 +224,8 @@ Core references:
 - `docs/examples.md` — annotated configuration examples (see also `tests/examples/` and `tests/configs/`)
 - `docs/diagnostics.md` — diagnostic logging knobs (env vars, log file format)
 - `docs/ci-validation-infrastructure.md` — validation (E2E) test matrix: workflows and job names, catalog format, per-backend coverage and status, and the runbook for adding/removing an OS, backend, or plan
+- `docs/host-prep.md` — `wxc-host-prep.exe` host setup binary (`prepare-system-drive` / `unprepare-system-drive` for the AppContainer ACEs on the system-drive root, plus `prepare-null-device` / `verify-null-device` / `dump-null-device` for the `\Device\Null` security descriptor that AppContainer-based backends require). Owns elevation via embedded `requireAdministrator` manifest — `wxc-exec.exe` no longer self-elevates.
 - `docs/sandbox-policy/0.7.0/policy.md` — sandbox policy 0.7.0 specification
-- `docs/sandbox-policy/v1/policy.md` — sandbox policy v1 specification
 - `docs/telemetry/telemetry.md` — telemetry overview; `docs/telemetry/telemetry-consent-design.md` (Windows-only consent design and per-SDK surface) and `docs/telemetry/telemetry-administrative-policy.md` (the MDM / Group Policy ceiling)
 
 Per-backend guides:

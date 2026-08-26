@@ -31,6 +31,26 @@ pub use consent::ConsentState;
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
 pub use policy::PolicyState;
 
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct FailureReporter {
+    reported: Mutex<std::collections::HashSet<String>>,
+}
+
+#[cfg(target_os = "windows")]
+impl FailureReporter {
+    fn report(&self, signature: String, emit: impl FnOnce(&str)) {
+        let is_new = self
+            .reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(signature.clone());
+        if is_new {
+            emit(&signature);
+        }
+    }
+}
+
 #[cfg(any(test, all(feature = "test-support", debug_assertions)))]
 pub mod test_support {
     use super::consent::test_support::LocalAppDataGuard;

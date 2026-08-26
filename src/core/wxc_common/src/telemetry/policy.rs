@@ -125,9 +125,9 @@ pub fn is_blocked_by_policy() -> bool {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{PolicyState, POLICY_VALUE_OPTIONAL};
-    use std::collections::HashSet;
+    use crate::telemetry::FailureReporter;
     use std::io::Write;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
 
@@ -166,24 +166,6 @@ mod platform {
         /// A policy is configured but could not be read: wrong value type
         /// (e.g. `REG_SZ`), access denied, or a corrupt/failing registry.
         Unreadable,
-    }
-
-    #[derive(Default)]
-    struct FailureReporter {
-        reported: Mutex<HashSet<String>>,
-    }
-
-    impl FailureReporter {
-        fn report(&self, signature: String, emit: impl FnOnce(&str)) {
-            let is_new = self
-                .reported
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .insert(signature.clone());
-            if is_new {
-                emit(&signature);
-            }
-        }
     }
 
     fn report_policy_read_failure(operation: &str, error: &std::io::Error) {
@@ -374,7 +356,7 @@ mod platform {
 
     #[cfg(test)]
     mod failure_reporter {
-        use super::FailureReporter;
+        use crate::telemetry::FailureReporter;
         use std::sync::Mutex;
 
         #[test]
