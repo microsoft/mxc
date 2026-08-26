@@ -321,7 +321,16 @@ mod tests {
             }
             _ => panic!("process-container golden selected the wrong containment"),
         }
-        build_request_from_json(process_container)
+        let mut buildable_process_container: serde_json::Value =
+            serde_json::from_str(process_container).expect("process-container golden parses");
+        buildable_process_container["containment"]["captureDenials"]["outputPath"] =
+            serde_json::Value::String(
+                std::env::temp_dir()
+                    .join("denials.json")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        build_request_from_json(&buildable_process_container.to_string())
             .expect("process-container golden builds a public SDK request");
 
         let directional_network =
