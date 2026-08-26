@@ -512,11 +512,11 @@ pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
     #[cfg(not(target_os = "windows"))]
     {
         let current_status = get_status();
-        return Ok(ConsentActionOutcome {
+        Ok(ConsentActionOutcome {
             result: ConsentActionResult::NotApplicable,
             status: current_status,
             policy: super::policy::get_policy(),
-        });
+        })
     }
 
     #[cfg(target_os = "windows")]
@@ -1322,16 +1322,9 @@ mod platform {
         Ok(None)
     }
 
+    #[cfg(test)]
     pub(super) fn write(_granted: bool, _source: &str) -> Result<(), String> {
         Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
-    }
-
-    pub(super) fn begin_withdrawal() -> Result<(), String> {
-        Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
-    }
-
-    pub(super) fn finish_withdrawal() -> Result<(), String> {
-        Ok(())
     }
 
     pub(super) fn write_presented(
