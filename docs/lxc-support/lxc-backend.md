@@ -164,12 +164,18 @@ depends on the entry and on `defaultPolicy`:
 | `blockedHosts` | `block` | Reported as unresolved and skipped. The closing DROP already denies the destination, so the unwritten rule was redundant |
 | `blockedHosts` | `allow` | **Fails firewall setup.** The chain ends in ACCEPT, so the unwritten DROP was the only thing that would have denied that destination, and skipping it silently converts a deny into an allow |
 
-One gap remains open and is not detected: under `defaultPolicy: "block"`, an
-`allowedHosts` entry broad enough to cover a destination whose `blockedHosts`
-rule went unwritten still reaches that destination. Detecting it would require
-the address the failed entry was *meant* to resolve to, which is by definition
-unavailable, so no check over the policy text can be complete — and a partial
-check would imply a guarantee this code cannot make.
+An allow that covers every address is detected: under `defaultPolicy: "block"`,
+an `allowedHosts` entry whose prefix length is zero, alongside a `blockedHosts`
+entry that resolved to nothing, fails firewall setup. The allow is evaluated
+before the closing DROP, so it would accept whatever the blocked host resolves
+to for the container, and deny precedence could not hold.
+
+One gap remains open and is not detected: an `allowedHosts` entry with a
+bounded prefix may still happen to cover the destination whose `blockedHosts`
+rule went unwritten. Deciding that would require the address the failed entry
+was *meant* to resolve to, which is by definition unavailable, so no check over
+the policy text can be complete — and a partial check would imply a guarantee
+this code cannot make.
 
 ### Schema 0.8 egress rules
 
@@ -197,10 +203,13 @@ address. That is the GA decision:
 first-class policy surface and that queries fail when the rules do not allow the
 resolver's IP.
 
-**One resolver sits outside that.** LXC's own bridge resolver stays reachable
-whatever the policy says, and no egress rule can block it. A container keeps
-ordinary name resolution; what a directional posture takes away is the
-unasked-for route to an *external* resolver. Closing that gap is not done here.
+**The bridge resolver is no longer outside that.** While egress was filtered on
+the host, a container's query to its own gateway was delivered locally and no
+rule ever saw it. The chain now sits in the container's namespace and governs
+that query like any other destination, so a directional posture that does not
+allow the resolver's address blocks name resolution through it. The legacy
+0.7 host-list path still carries an unconditional port 53 accept and is
+unaffected.
 
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
@@ -229,16 +238,18 @@ and no address management.
 This is the enforcement point the 0.8.0 networking contract specifies, and it
 is where inbound filtering already lives.
 
-Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` does not currently keep the egress chains alive. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
+Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` suppresses that teardown on both the explicit path and the drop path. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
 
 ### Inbound (ingress) policy
 
 Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
 
-Every `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install.
+Every inbound `iptables`/`ip6tables` subprocess is spawned with `LC_ALL=C` and `LANG=C`. Inbound teardown decides whether a non-zero exit means "already absent" by matching iptables' own diagnostic text, and that text is localized, so an unpinned locale would turn a benign already-absent result on a non-English host into a fatal error and abort every fresh install. The egress path pins no locale and needs none, because nothing there reads iptables' diagnostic text.
 
 Under 0.7.0, inbound filtering is installed only when the configuration
-requests a firewall enforcement mode. Under 0.8.0 it is always installed.
+requests a firewall enforcement mode. Under 0.8.0 it is installed whenever the
+container is given a network interface; a policy that permits nothing is given
+none, and so needs no chain.
 
 | 0.7.0 | 0.8.0 | Effect | Notes |
 |-------|-------|--------|-------|
@@ -257,7 +268,7 @@ Default-deny is not a containment boundary against the sandboxed workload, in ei
 
 Egress used to be described as exempt from this, on the grounds that its chains sat on the host out of the workload's reach. They did — and on the default bridged topology they also filtered nothing, which is why enforcement moved into the namespace. The exemption was never worth what it cost.
 
-Unlike egress, the inbound chain honors the lifecycle's `preservePolicy`: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
+The inbound chain honors the lifecycle's `preservePolicy` as the egress chains do: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
 ### Cooperative proxy
 
@@ -319,7 +330,9 @@ before the script runs — so the name resolves, and it resolves to an address
 the chain allows. The URL itself is left alone: rewriting its host to an IP
 literal would break SNI and certificate validation for an `https://` proxy.
 Every address the proxy host resolved to is opened, since they all belong to
-that same proxy. If the hosts entry cannot be written, execution **fails**
+that same proxy, up to a cap of sixteen; a longer answer is trimmed to its
+first sixteen addresses, which still includes the one the container is pinned
+to. If the hosts entry cannot be written, execution **fails**
 rather than running a container whose proxy is unreachable.
 
 ## Usage
