@@ -292,6 +292,56 @@ function Resolve-HostPaths {
 }
 
 # -----------------------------------------------------------------------
+# TEMPORARY: scratch-root ancestor grants for pwsh-driven workloads
+#
+# pwsh before 7.7, and git run underneath it, resolve the *whole ancestor
+# chain* of the working directory at startup -- not just the directory
+# itself. The policy only grants the leaf (`$ScratchRoot\rw`), so every
+# segment above it is denied and the interpreter fails before reaching
+# the behaviour these tests exist to check:
+#
+#   W4/W5  git: "Unable to read current working directory: Permission denied"
+#   W17    pwsh falls back to C:\ as its location, then Set-Location is
+#          denied at the first ungranted ancestor.
+#
+# MXC's own diagnostic suggests adding the drive root to `readonlyPaths`.
+# We deliberately do NOT do that: at T3 a policy path lands as an
+# inheritable ACE (`filesystem_dacl.rs` sets inheritable = is_dir()), so
+# naming C:\ would propagate an ACL rewrite across the entire system
+# drive on every run and again on teardown. Granting the ancestors of
+# $ScratchRoot achieves the same resolution with a far smaller blast
+# radius.
+#
+# The drive root itself is intentionally absent: `wxc-host-prep
+# prepare-system-drive` already grants sandbox tokens traverse access
+# there, which is all path resolution needs.
+#
+# REMOVE these grants and the warning once pwsh 7.7+ is out of preview
+# and baked into the validation images.
+# -----------------------------------------------------------------------
+
+# Ancestors of $ScratchRoot, deepest first, stopping *below* the drive
+# root. On a CI runner ($env:TEMP = C:\a\_temp) that is
+# mxc-t3-workloads, _temp, a.
+function Get-PwshAncestorGrants {
+    $grants = @()
+    $dir  = [System.IO.Path]::GetFullPath($ScratchRoot)
+    $root = [System.IO.Path]::GetPathRoot($dir).TrimEnd('\')
+    while ($dir -and $dir.TrimEnd('\') -ne $root) {
+        $grants += $dir
+        $parent = Split-Path $dir -Parent
+        if (-not $parent -or $parent -eq $dir) { break }
+        $dir = $parent
+    }
+    return $grants
+}
+
+function Write-PwshAncestorGrantWarning {
+    param([Parameter(Mandatory)] [string]$Id)
+    Write-Host ("  [{0}] WARNING: granting read-only {1} so pwsh/git can resolve the working directory's ancestor chain. TEMPORARY -- remove once pwsh 7.7 ships out of preview." -f $Id, ((Get-PwshAncestorGrants) -join ', ')) -ForegroundColor Yellow
+}
+
+# -----------------------------------------------------------------------
 # Workloads
 # -----------------------------------------------------------------------
 function W1-CmdTypeMarker {
@@ -388,9 +438,11 @@ function W4-PwshGitStatus {
     # `C:\Users\...` metadata-access checks that the AppContainer SID
     # doesn't have grants for.
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"& git -C '$repo' status --porcelain; exit `$LASTEXITCODE`""
+    Write-PwshAncestorGrantWarning -Id 'W4'
     $cfg = New-Config -Name 'w4-git-status' `
         -CommandLine $cmd `
         -ReadWrite @("$ScratchRoot\rw") `
+        -ReadOnly (Get-PwshAncestorGrants) `
         -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w4.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 90
@@ -412,9 +464,11 @@ function W5-PwshGitLog {
         Initialize-Repo -Dir $repo
     }
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"& git -C '$repo' log --oneline -n 10; exit `$LASTEXITCODE`""
+    Write-PwshAncestorGrantWarning -Id 'W5'
     $cfg = New-Config -Name 'w5-git-log' `
         -CommandLine $cmd `
         -ReadWrite @("$ScratchRoot\rw") `
+        -ReadOnly (Get-PwshAncestorGrants) `
         -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w5.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 90
@@ -685,8 +739,9 @@ function W17-PwshSetLocation {
     }
     $target = Initialize-ChdirTarget
     $cmd = "pwsh.exe -NoProfile -NoLogo -Command `"Set-Location -LiteralPath '$target'; Get-ChildItem -Name; exit 0`""
+    Write-PwshAncestorGrantWarning -Id 'W17'
     $cfg = New-Config -Name 'w17-pwsh-cd' -CommandLine $cmd `
-        -ReadWrite @("$ScratchRoot\rw") -Cwd "$ScratchRoot\rw"
+        -ReadWrite @("$ScratchRoot\rw") -ReadOnly (Get-PwshAncestorGrants) -Cwd "$ScratchRoot\rw"
     $log = "$ScratchRoot\log\w17.log"
     $r = Invoke-Workload -ConfigPath $cfg -LogPath $log -TimeoutSec 60
     $pass = ($r.ExitCode -eq 0) -and ($r.Stdout -match 'chdir-marker\.txt')
