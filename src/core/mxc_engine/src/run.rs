@@ -386,7 +386,7 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
         // WHP is delay-loaded; check before pyhl::install warms a VM.
         #[cfg(target_os = "windows")]
         if !hyperlight_common::is_whp_available() {
-            return Err(MxcError::unsupported_containment(
+            return Err(MxcError::backend_unavailable(
                 "Hyperlight requires Windows Hypervisor Platform (WHP). \
                  Enable the HypervisorPlatform Windows optional feature and reboot.",
             ));
