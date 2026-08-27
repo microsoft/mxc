@@ -17,7 +17,7 @@ fi
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_test.json"
 
-# run_lxc_all_tests.sh reports 77 as SKIPPEED.
+# run_lxc_all_tests.sh reports 77 as SKIPPED.
 SKIP_EXIT=77
 skip() {
     echo "SKIP: $1"
