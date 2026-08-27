@@ -50,8 +50,7 @@ pub enum ResourceType {
     File,
     /// User-interface resource (clipboard, window handle, input, etc.).
     Ui,
-    /// Network endpoint. Reserved for future network/WFP capture; the
-    /// current Windows backend does not yet produce this variant.
+    /// Network endpoint reported by a supported backend source.
     Network,
     /// A named OS capability (AppContainer / brokered capability) the
     /// workload was denied. Capability records may be produced under either
@@ -75,6 +74,76 @@ pub enum AccessType {
     Unknown,
 }
 
+/// Source component that produced an actionable network denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkDenialSource {
+    /// Tessera/processmodel schema 0.8 WFP enforcement.
+    Tessera,
+}
+
+/// Stable policy reason for an actionable network denial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NetworkDenialReason {
+    /// A direct-egress attempt matched Tessera's default-deny baseline.
+    DirectDefaultDeny,
+}
+
+/// Direction of a denied network operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NetworkDirection {
+    /// Inbound traffic.
+    Inbound,
+    /// Outbound traffic.
+    Outbound,
+    /// Forwarded traffic.
+    Forward,
+    /// The source supplied an unrecognized direction value.
+    Unknown,
+}
+
+/// Additional structured data carried by an actionable network denial.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkDenialDetails {
+    /// Enforcement component that produced the denial.
+    pub source: NetworkDenialSource,
+    /// Stable policy reason assigned by the source adapter.
+    pub reason: NetworkDenialReason,
+    /// Traffic direction reported by WFP.
+    pub direction: NetworkDirection,
+    /// IP protocol number when the source supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<u8>,
+    /// Local numeric IP address when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_address: Option<String>,
+    /// Local host-order port when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_port: Option<u16>,
+    /// Remote numeric IP address.
+    pub remote_address: String,
+    /// Remote host-order port when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_port: Option<u16>,
+    /// Application identifier supplied by the WFP NetEvent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_id: Option<String>,
+    /// Runtime WFP filter identifier used to correlate the event to its live filter.
+    #[serde(with = "decimal_u64")]
+    pub filter_id: u64,
+}
+
+/// Resource-family-specific metadata attached to a denial.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum DenialDetails {
+    /// Structured WFP network-denial metadata.
+    Network(NetworkDenialDetails),
+}
+
 /// One denied `(resource, accessType)` observation surfaced to consumers.
 ///
 /// A `DeniedResource` describes a single resource the sandboxed workload
@@ -93,6 +162,7 @@ pub enum AccessType {
 ///     access_type: AccessType::Read,
 ///     pid: 1234,
 ///     filetime: 132_847_890_123_456_789,
+///     details: None,
 /// };
 /// let json = serde_json::to_string(&denial)?;
 /// assert!(json.contains("\"resourceType\":\"file\""));
@@ -132,6 +202,11 @@ pub struct DeniedResource {
     /// JavaScript consumers do not lose precision.
     #[serde(with = "decimal_u64")]
     pub filetime: u64,
+
+    /// Optional resource-family-specific metadata. Existing non-network
+    /// records omit this field, preserving their JSON shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<DenialDetails>,
 }
 
 /// De-duplication key for a denial: the `(resource, accessType)` pair.
@@ -166,6 +241,7 @@ mod tests {
             access_type: AccessType::Read,
             pid: 1234,
             filetime: 132_847_890_123_456_789,
+            details: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains("\"resource\":\"C:"), "got {json}");
@@ -185,6 +261,7 @@ mod tests {
             access_type: AccessType::Write,
             pid: 9999,
             filetime: 42,
+            details: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         let parsed: DeniedResource = serde_json::from_str(&json).unwrap();
@@ -233,7 +310,38 @@ mod tests {
             access_type: AccessType::Read,
             pid: 1,
             filetime: 1,
+            details: None,
         };
         assert_eq!(r.dedup_key(), (r"C:\a".to_string(), AccessType::Read));
+    }
+
+    #[test]
+    fn network_details_are_additive_and_preserve_u64_filter_id() {
+        let r = DeniedResource {
+            resource: "tcp://203.0.113.10:443".to_string(),
+            resource_type: ResourceType::Network,
+            access_type: AccessType::Unknown,
+            pid: 0,
+            filetime: 42,
+            details: Some(DenialDetails::Network(NetworkDenialDetails {
+                source: NetworkDenialSource::Tessera,
+                reason: NetworkDenialReason::DirectDefaultDeny,
+                direction: NetworkDirection::Outbound,
+                protocol: Some(6),
+                local_address: None,
+                local_port: None,
+                remote_address: "203.0.113.10".to_string(),
+                remote_port: Some(443),
+                application_id: Some(r"\device\harddiskvolume3\app.exe".to_string()),
+                filter_id: u64::MAX,
+            })),
+        };
+
+        let json = serde_json::to_value(&r).unwrap();
+        assert_eq!(json["details"]["kind"], "network");
+        assert_eq!(json["details"]["filterId"], u64::MAX.to_string());
+        assert_eq!(json["details"]["reason"], "directDefaultDeny");
+        assert!(json["details"].get("localAddress").is_none());
+        assert_eq!(serde_json::from_value::<DeniedResource>(json).unwrap(), r);
     }
 }

@@ -43,6 +43,8 @@ mod extractors;
 #[cfg(target_os = "windows")]
 mod ffi;
 #[cfg(target_os = "windows")]
+mod network_extractors;
+#[cfg(target_os = "windows")]
 mod path_norm;
 #[cfg(target_os = "windows")]
 mod process_lifetime;

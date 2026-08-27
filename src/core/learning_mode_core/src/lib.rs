@@ -41,7 +41,10 @@ pub mod verbose_logging;
 
 pub use analyze::{AnalysisResult, AnalyzeError, DenialAnalyzer, ProcessLifetime};
 pub use emit::{write_document, DenialsDocument, DenialsOutputPointer};
-pub use model::{AccessType, DedupKey, DeniedResource, ResourceType};
+pub use model::{
+    AccessType, DedupKey, DenialDetails, DeniedResource, NetworkDenialDetails, NetworkDenialReason,
+    NetworkDenialSource, NetworkDirection, ResourceType,
+};
 pub use paired_output::{
     relocate_output_file, relocate_paired_output_files, write_paired_output_files,
     ExistingOutputPolicy, RelocationOutcome,

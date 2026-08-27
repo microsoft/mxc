@@ -385,6 +385,7 @@ mod tests {
                     access_type: AccessType::Read,
                     pid: owner_pid,
                     filetime: 1,
+                    details: None,
                 }]),
             }))
         }
@@ -513,6 +514,7 @@ mod tests {
             access_type: AccessType::Read,
             pid: 4321,
             filetime: 7,
+            details: None,
         }])
     }
 
