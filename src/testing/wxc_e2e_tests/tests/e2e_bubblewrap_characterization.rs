@@ -151,11 +151,19 @@ fn bubblewrap_timeout_is_enforced() {
     if !ready() {
         return;
     }
+    // Named so the assertion messages below cannot drift from the values they
+    // describe when these are tuned.
+    const TIMEOUT_MS: u64 = 1500;
+    const DESCENDANT_SLEEP_SECS: u64 = 8;
+    // Comfortably above the timeout and comfortably below the descendant's
+    // lifetime, so a pass means teardown did not wait the descendant out.
+    const MAX_ELAPSED: Duration = Duration::from_secs(6);
+
     let mut cfg = config(
         "timeout",
-        "echo CHAR_BEFORE; (/bin/sleep 8; echo CHAR_AFTER) & wait",
+        &format!("echo CHAR_BEFORE; (/bin/sleep {DESCENDANT_SLEEP_SECS}; echo CHAR_AFTER) & wait"),
     );
-    cfg["process"]["timeout"] = json!(1500);
+    cfg["process"]["timeout"] = json!(TIMEOUT_MS);
     let started = Instant::now();
     let result = run_platform_config_value("bwrap timeout", &cfg, &[], None);
     let elapsed = started.elapsed();
@@ -175,7 +183,8 @@ fn bubblewrap_timeout_is_enforced() {
          Output:\n{out}"
     );
     assert!(
-        elapsed < Duration::from_secs(6),
-        "a 1500ms timeout should not wait out the 8s descendant; took {elapsed:?}"
+        elapsed < MAX_ELAPSED,
+        "a {TIMEOUT_MS}ms timeout should not wait out the {DESCENDANT_SLEEP_SECS}s \
+         descendant; took {elapsed:?}"
     );
 }
