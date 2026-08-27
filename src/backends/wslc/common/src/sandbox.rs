@@ -394,6 +394,41 @@ impl Drop for WslcSandboxProcess {
 mod tests {
     use super::*;
 
+    /// The rejections must abort the request, not tear a container down after
+    /// building one. `SandboxBackend::spawn` is the streaming entry point the
+    /// Rust SDK uses; it must refuse before `start_container` touches the WSLC
+    /// SDK. Asserting on a host with no WSLC SDK at all is what proves the
+    /// ordering: were the guard to run late, we would see an SDK-load failure
+    /// instead of the policy message.
+    #[test]
+    fn spawn_rejects_policy_before_touching_the_sdk() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            policy: wxc_common::models::ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut runner = WSLContainerRunner::new(&wxc_common::models::WslcConfig::default());
+
+        let err = runner
+            .spawn(&request, &mut logger, StdioMode::Pipes)
+            .err()
+            .expect("a rejected policy must not produce a live container");
+        assert!(
+            err.error_message.contains("ui section is not supported"),
+            "the refusal must come from the policy gate, not from bring-up: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
     /// The exact contradiction the streaming contract forbids: a timed-out run
     /// is killed, so the container *has* an exit code to report — and reporting
     /// it would turn `wait`'s `Err(TimedOut)` into a later `Ok(Some(137))`.

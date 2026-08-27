@@ -85,7 +85,23 @@ rules do not apply — see the empirical finding in the plan history). Proxy is 
 | `deniedPaths` | rejected if overlapping/nested under a mount (a standalone denied path is accepted); no Deny primitive | rejected | rejected |
 | `network.defaultPolicy` | honored: `Block` → `None`, `Allow` → `Bridged` | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
 | `network` host filtering (`allowedHosts` / `blockedHosts`) | rejected | rejected | rejected |
+| `network.allowLocalNetwork` | rejected if `true` — WSLc networking is all-or-nothing, and the state-aware surface has no port-mapping escape hatch | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
+| `network.enforcementMode` | rejected unless `capabilities` — `firewall` / `both` ask for per-rule enforcement the container cannot perform | rejected (any explicit network-mode field) | rejected (any explicit network-mode field) |
 | `network.proxy` | rejected | rejected | honored — **`url` form only** (`localhost` / `builtinTestServer` forms → `policy_validation`); injected as `HTTP_PROXY` / `HTTPS_PROXY` env vars |
+| `ui` | rejected | rejected | rejected |
+| `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
+| `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
+
+`ui` is rejected by **presence, not value**, on every phase. A WSLc container runs Linux, so the
+section's Windows job-object UI limits (`JOB_OBJECT_UILIMIT_*`) have no analogue inside it and no
+phase could honor it. Presence is the only workable test because `UiPolicy`'s defaults are full
+lockdown — an explicitly supplied lockdown `ui` is indistinguishable *by value* from an absent one,
+so a value-based check would let the single most restrictive request a caller can write through
+unenforced. The parse-derived `ContainerPolicy::ui_specified` flag is what closes that gap.
+
+Every rejection above **aborts the phase before anything is created**: the dispatcher runs each
+`validate_*` hook ahead of the phase body, and `connect_daemon()` lives inside `provision()`, so a
+refused provision never even spawns the daemon — let alone a VM or container.
 
 Filesystem policy is fixed at `provision` and immutable afterwards.
 

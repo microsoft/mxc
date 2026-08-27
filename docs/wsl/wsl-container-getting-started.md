@@ -372,6 +372,15 @@ filtering at the proxy layer, or remove the host lists. The bare
 `defaultPolicy` forms with **no** host lists remain supported: `"block"` is a
 full network cutoff and `"allow"` is full outbound (NAT).
 
+### `enforcementMode` must be `capabilities`
+
+For the same reason, `network.enforcementMode: "firewall"` (or `"both"`) is
+**rejected**: both ask for per-rule firewall enforcement inside a container that
+has no `CAP_NET_ADMIN` to apply it with. The default `"capabilities"` is
+accepted — it is an honest description of WSLC's all-or-nothing network, so an
+explicitly supplied `"capabilities"` is accepted rather than refused merely for
+being present.
+
 ### Inbound: `allowLocalNetwork` is not supported
 
 `network.allowLocalNetwork: true` (a blanket grant to bind/listen and accept
@@ -400,6 +409,30 @@ default, is a no-op and is accepted.)
 Paths in `filesystem.readwritePaths` and `filesystem.readonlyPaths` are mounted
 into the container. Host path `C:\workspace` becomes `/mnt/c/workspace` inside
 the container.
+
+### `ui` is not supported
+
+A `ui` section is **rejected**. The section maps to Windows job-object UI limits
+(`JOB_OBJECT_UILIMIT_*`); a WSLC container runs Linux inside the WSL2 VM, so
+those limits have no analogue and nothing in the backend could apply them.
+
+The check is on **presence, not value**. `ui`'s defaults are full lockdown, so
+an explicitly supplied lockdown `ui` is indistinguishable *by value* from an
+absent one — a value-based check would let the single most restrictive request
+you can write through unenforced. Omit the section entirely.
+
+### `lifecycle`: `destroyOnExit` is honored, `preservePolicy` is not
+
+`lifecycle.destroyOnExit` **is** honored: it selects the SDK's
+`WSLC_CONTAINER_FLAG_AUTO_REMOVE`, so both `true` (the default) and `false`
+behave as documented.
+
+`lifecycle.preservePolicy: true` is **rejected** — WSLC has no
+policy-persistence primitive, so there is nothing for the flag to select.
+
+Note the state-aware surface differs: it rejects the whole `lifecycle` section
+at parse time, because a multi-invocation sandbox's lifetime is driven by the
+explicit `provision` / `deprovision` phases rather than by per-run flags.
 
 ## Troubleshooting
 

@@ -25,6 +25,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, NetworkPolicy, ScriptResponse, WslcConfig};
+use wxc_common::mxc_error::MxcError;
 use wxc_common::sandbox_process::StdioMode;
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::string_util::{to_wide, CoTaskMemPWSTR};
@@ -32,6 +33,7 @@ use wxc_common::validator::{validate_network_policy_support, NetworkPolicySuppor
 
 use crate::container_steps::sdk_error;
 use crate::error::WslcError;
+use crate::policy;
 use crate::policy_mapping;
 use crate::stream_buffer::{stream_pair, StreamReader, StreamWriter};
 use crate::wslc_bindings::*;
@@ -655,7 +657,20 @@ impl ScriptRunner for WSLContainerRunner {
     /// Mirrors the config parser so requests reaching the engine directly
     /// (an already-built `ExecutionRequest`, bypassing the parser) fail here
     /// instead of late in `execute` on the broken in-container iptables path.
+    ///
+    /// This is the single validation hook for **both** one-shot surfaces:
+    /// `ScriptRunner::run` calls it before `execute`, and
+    /// `SandboxBackend::spawn` calls it (via `SandboxBackend::validate`) before
+    /// `start_container`. Every rejection here therefore aborts the request
+    /// with no container, session, or WSL VM created.
+    ///
+    /// Checks run lifecycle → ui → network, so a request that trips several
+    /// gets a stable, most-structural-first message.
     fn validate_runner(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+        reject_unsupported_lifecycle(request)?;
+        // Not phase-specific — a WSLc container runs Linux, so `ui` has no
+        // meaning on any surface. Shared with the state-aware phases.
+        policy::reject_ui_policy(request).map_err(as_rejection)?;
         if request.policy.needs_host_filtering() {
             return Err(WslcError::Rejected(
                 "WSLc: per-host egress filtering (allowedHosts with \
@@ -676,6 +691,7 @@ impl ScriptRunner for WSLContainerRunner {
             )
             .into_response());
         }
+        policy::reject_unsupported_enforcement_mode(request).map_err(as_rejection)?;
         // The shared validator returns an untagged response; retag it so its
         // rejections reach SDK callers as `policy_validation` like the checks above.
         validate_network_policy_support(request, NetworkPolicySupport::LEGACY)
@@ -686,6 +702,45 @@ impl ScriptRunner for WSLContainerRunner {
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
         unsafe { self.run_internal(request, logger) }
     }
+}
+
+/// Retag a shared [`policy`] rejection as a WSLc one, so it reaches SDK callers
+/// as `policy_validation` (`FailurePhase::Rejected`) with the same message the
+/// state-aware surface emits.
+fn as_rejection(err: MxcError) -> ScriptResponse {
+    WslcError::Rejected(err.message).into_response()
+}
+
+/// Refuses the `lifecycle` settings the one-shot surface cannot honour.
+///
+/// Value-based rather than presence-based (unlike `ui`), because the defaults
+/// genuinely match the behaviour:
+///
+/// * `destroyOnExit` **is** honoured — it selects
+///   `WSLC_CONTAINER_FLAG_AUTO_REMOVE` on the container settings, so both
+///   values are accepted.
+/// * `preservePolicy: true` asks for filesystem and network policy to outlive
+///   the run. WSLc installs no persistent host-side enforcement: `rw`/`ro`
+///   paths become container volume mounts and the network posture is a
+///   container networking mode, both of which are properties of the container
+///   object itself and cannot be retained independently of it. There is
+///   nothing to preserve, so the request is refused rather than silently
+///   dropped.
+///
+/// The state-aware surface needs no counterpart: the parser rejects the whole
+/// one-shot `lifecycle` section on state-aware requests.
+fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    if request.lifecycle.preserve_policy {
+        return Err(WslcError::Rejected(
+            "WSLc: lifecycle.preservePolicy=true is not supported. WSLc installs no persistent \
+             host-side filesystem or network enforcement — mounts and the container networking \
+             mode belong to the container itself — so there is no policy to preserve past the \
+             run."
+                .to_string(),
+        )
+        .into_response());
+    }
+    Ok(())
 }
 
 impl WSLContainerRunner {
@@ -2429,6 +2484,167 @@ mod tests {
             let runner = WSLContainerRunner::new(&WslcConfig::default());
             assert!(runner.validate_runner(&request).is_ok());
         }
+    }
+
+    // -- Accept-but-ignore closures --------------------------------------
+    //
+    // Each of these fields used to be parsed, carried into the runner, and
+    // then never read — so a caller got a container that silently did not
+    // have the posture they asked for. They are now refused, and refused
+    // from `validate_runner`, which both `ScriptRunner::run` and
+    // `SandboxBackend::spawn` call *before* any container exists.
+
+    /// A WSLc container runs Linux; `ui` maps to Windows job-object UI limits
+    /// (`JOB_OBJECT_UILIMIT_*`) with no analogue inside it.
+    ///
+    /// Presence-based: `UiPolicy::default()` is full lockdown, so an
+    /// explicitly-supplied lockdown `ui` is indistinguishable by value from an
+    /// absent one. A value-based check would let the single most restrictive
+    /// request a caller can write through unenforced.
+    #[test]
+    fn validate_runner_rejects_supplied_ui() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                ui: wxc_common::models::UiPolicy::default(),
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(
+            err.error_message.contains("ui section is not supported"),
+            "got: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
+    #[test]
+    fn validate_runner_accepts_absent_ui() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            ..Default::default()
+        };
+        assert!(!request.policy.ui_specified);
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// `destroyOnExit` is genuinely honoured (it selects
+    /// `WSLC_CONTAINER_FLAG_AUTO_REMOVE`), so both values stay accepted;
+    /// `preservePolicy` is not, so only it is refused. Checking both together
+    /// is the point — a blanket `lifecycle` rejection would break the
+    /// `wslc_destroy_on_exit_*` configs.
+    #[test]
+    fn validate_runner_rejects_preserve_policy_but_accepts_both_destroy_on_exit_values() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+
+        for destroy_on_exit in [true, false] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                lifecycle: wxc_common::models::LifecycleConfig {
+                    destroy_on_exit,
+                    preserve_policy: false,
+                },
+                ..Default::default()
+            };
+            assert!(
+                runner.validate_runner(&request).is_ok(),
+                "destroyOnExit={destroy_on_exit} is honoured and must stay accepted"
+            );
+        }
+
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            lifecycle: wxc_common::models::LifecycleConfig {
+                destroy_on_exit: true,
+                preserve_policy: true,
+            },
+            ..Default::default()
+        };
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert!(
+            err.error_message.contains("preservePolicy"),
+            "got: {}",
+            err.error_message
+        );
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+    }
+
+    /// `firewall` / `both` ask for per-rule enforcement the container cannot
+    /// perform (no `CAP_NET_ADMIN`). Value-based, unlike `ui`: the default
+    /// `capabilities` honestly describes WSLc's all-or-nothing network, so an
+    /// explicit `capabilities` is accepted rather than refused for being
+    /// present.
+    #[test]
+    fn validate_runner_rejects_unimplementable_enforcement_modes() {
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+
+        for mode in [
+            wxc_common::models::NetworkEnforcementMode::Firewall,
+            wxc_common::models::NetworkEnforcementMode::Both,
+        ] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                policy: wxc_common::models::ContainerPolicy {
+                    network_enforcement_mode: mode.clone(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let err = runner
+                .validate_runner(&request)
+                .expect_err(&format!("{mode:?} must be rejected"));
+            assert!(
+                err.error_message.contains("enforcementMode"),
+                "got: {}",
+                err.error_message
+            );
+        }
+
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                network_enforcement_mode: wxc_common::models::NetworkEnforcementMode::Capabilities,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(runner.validate_runner(&request).is_ok());
+    }
+
+    /// The rejections must abort the request, not tear a container down after
+    /// building one. Both one-shot entry points route through
+    /// `validate_runner`, and both call it before any container exists —
+    /// `ScriptRunner::run` ahead of `execute`, and `SandboxBackend::spawn`
+    /// ahead of `start_container` (asserted in `sandbox.rs`).
+    #[test]
+    fn validate_runner_rejects_before_any_container_work() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            script_code: "echo hi".to_string(),
+            policy: wxc_common::models::ContainerPolicy {
+                ui_specified: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let runner = WSLContainerRunner::new(&WslcConfig::default());
+        let err = runner.validate_runner(&request).unwrap_err();
+        assert_eq!(
+            err.failure_phase,
+            wxc_common::models::FailurePhase::Rejected,
+            "a policy refusal is a rejection, not a runtime failure"
+        );
     }
 
     // -- Host-stdio forwarding (`StdioMode::Inherit`) --------------------

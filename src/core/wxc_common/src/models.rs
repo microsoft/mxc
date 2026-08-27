@@ -751,12 +751,13 @@ pub struct ContainerPolicy {
     /// indistinguishable from the other fields here. Parse-derived, never on
     /// the wire.
     ///
-    /// Consumed only by IsolationSession today, which has no UI-restriction
-    /// primitive and refuses a supplied UI policy rather than accepting and
-    /// dropping it. The other backends that do not enforce `policy.ui` — LXC
-    /// and Bubblewrap on Linux, Seatbelt on macOS, Windows Sandbox — still
-    /// accept and ignore it, so this flag being set does not mean a UI policy
-    /// was honored anywhere; it means only that the caller supplied one.
+    /// Consumed by IsolationSession and WSLc today, neither of which has a
+    /// UI-restriction primitive: both refuse a supplied UI policy rather than
+    /// accepting and dropping it. The other backends that do not enforce
+    /// `policy.ui` — LXC and Bubblewrap on Linux, Seatbelt on macOS, Windows
+    /// Sandbox — still accept and ignore it, so this flag being set does not
+    /// mean a UI policy was honored anywhere; it means only that the caller
+    /// supplied one.
     #[serde(skip)]
     pub ui_specified: bool,
     /// BaseProcessContainer-specific UI config (Windows only, from processContainer.ui).
