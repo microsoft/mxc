@@ -162,13 +162,14 @@ fn the_proxy_accept_names_the_proxy_address_port_and_protocol() {
     let rules = appended_rules(&issued, "iptables", manager.chain_name());
     let accepts: Vec<&&Vec<String>> = rules
         .iter()
-        .filter(|rule| action_of(rule) == Some("ACCEPT"))
+        .filter(|rule| action_of(rule) == Some("ACCEPT") && !has_pair(rule, "-o", "lo"))
         .collect();
 
     assert_eq!(
         accepts.len(),
         1,
-        "a proxied chain must carry exactly one ACCEPT, for the proxy; actual: {rules:?}"
+        "a proxied chain must carry exactly one ACCEPT reaching off-box, for the proxy; \
+         actual: {rules:?}"
     );
     let accept = accepts[0];
     assert!(
@@ -199,8 +200,17 @@ fn the_proxy_accept_is_appended_before_the_closing_drop() {
 
     assert_eq!(
         actions,
-        vec![Some("ACCEPT"), Some("DROP")],
-        "a proxied chain must read exactly 'accept the proxy, drop the rest'; actual: {rules:?}"
+        vec![Some("ACCEPT"), Some("ACCEPT"), Some("DROP")],
+        "a proxied chain must read exactly 'keep loopback, accept the proxy, drop the rest'; \
+         actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[0], "-o", "lo"),
+        "loopback comes first; actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[1], "-d", "10.9.8.7"),
+        "the proxy ACCEPT comes second; actual: {rules:?}"
     );
 }
 
@@ -256,11 +266,12 @@ fn proxy_mode_opens_no_dns_port() {
     }
 }
 
-// The base exemptions belong to the ordinary allow/block posture. `-i lo`
-// and ESTABLISHED,RELATED in a deny-all proxy chain would let flows the proxy
-// never brokered keep running.
+// Intra-container loopback is allowed on every backend with a private
+// loopback, proxy or not. The conntrack exemption is a different matter: in a
+// deny-all proxy chain it would let flows the proxy never brokered keep
+// running.
 #[test]
-fn proxy_mode_emits_no_base_exemptions() {
+fn proxy_mode_keeps_loopback_and_drops_the_conntrack_exemption() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
     let (manager, issued, result) = apply_and_collect("proxy-nobase", &policy);
@@ -272,10 +283,15 @@ fn proxy_mode_emits_no_base_exemptions() {
         "the proxied chain must have been programmed at all; issued: {issued:?}"
     );
 
+    assert!(
+        rules.iter().any(|rule| has_pair(rule, "-o", "lo")),
+        "a proxied container must still reach its own loopback; actual: {rules:?}"
+    );
+
     for rule in rules {
         assert!(
             !has_pair(rule, "-i", "lo"),
-            "a proxied chain must not carry the loopback exemption; actual: {rule:?}"
+            "this chain hangs off OUTPUT, where -i never matches; actual: {rule:?}"
         );
         assert!(
             !has_pair(rule, "--state", "ESTABLISHED,RELATED"),
@@ -326,11 +342,11 @@ fn a_proxy_combined_with_a_block_list_is_refused() {
     );
 }
 
-// The proxy endpoint is IPv4, so nothing authorizes IPv6 egress. The v6
-// chain must therefore hold its closing DROP and nothing else -- leaving it
-// empty would fail open the moment the chain is hooked.
+// The proxy endpoint is IPv4, so nothing authorizes IPv6 egress off-box. The
+// v6 chain must therefore reach its closing DROP with only loopback allowed --
+// leaving it empty would fail open the moment the chain is hooked.
 #[test]
-fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
+fn the_ipv6_chain_allows_only_loopback_before_its_closing_drop_in_proxy_mode() {
     let policy = policy_with_proxy("10.9.8.7", 3128);
 
     let (manager, issued, result) = apply_and_collect("proxy-v6", &policy);
@@ -341,8 +357,13 @@ fn the_ipv6_chain_carries_only_its_closing_drop_in_proxy_mode() {
 
     assert_eq!(
         actions,
-        vec![Some("DROP")],
-        "the IPv6 chain of a proxied container must be a bare deny-all; actual: {rules:?}"
+        vec![Some("ACCEPT"), Some("DROP")],
+        "the IPv6 chain of a proxied container must deny everything it can route; \
+         actual: {rules:?}"
+    );
+    assert!(
+        has_pair(rules[0], "-o", "lo"),
+        "the only IPv6 ACCEPT must be the loopback one; actual: {rules:?}"
     );
 }
 
@@ -362,7 +383,7 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
 
     let rules = appended_rules(&issued, "iptables", manager.chain_name());
     assert!(
-        rules.iter().any(|rule| has_pair(rule, "-i", "lo")),
+        rules.iter().any(|rule| has_pair(rule, "-o", "lo")),
         "a non-proxied chain must still carry the loopback exemption; actual: {rules:?}"
     );
     assert!(

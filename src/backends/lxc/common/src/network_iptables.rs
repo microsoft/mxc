@@ -309,12 +309,10 @@ impl CreatedResources {
             v4: FamilyResources {
                 chain: v4_chain,
                 hook: v4_hook,
-                ..Default::default()
             },
             v6: FamilyResources {
                 chain: v6_chain,
                 hook: v6_hook,
-                ..Default::default()
             },
         }
     }
@@ -749,10 +747,24 @@ impl NetworkIptablesManager {
         }
     }
 
+    /// The rule keeping a container's traffic to its own loopback out of the
+    /// policy, which 0.8 requires of every backend holding a private loopback.
+    ///
+    /// The selector is `-o`, the outgoing interface. This chain hangs off
+    /// OUTPUT, and `iptables` refuses `-i` on OUTPUT outright while accepting
+    /// it into a user chain without complaint -- an `-i lo` here installs
+    /// clean and then matches nothing, leaving loopback to the closing DROP.
+    fn build_loopback_accept_rule_args(chain_name: &str) -> Vec<String> {
+        ["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
     fn build_base_chain_rule_args(chain_name: &str) -> Vec<Vec<String>> {
         vec![
-            vec!["-A", chain_name, "-i", "lo", "-j", "ACCEPT"],
-            vec![
+            Self::build_loopback_accept_rule_args(chain_name),
+            [
                 "-A",
                 chain_name,
                 "-m",
@@ -761,11 +773,11 @@ impl NetworkIptablesManager {
                 "ESTABLISHED,RELATED",
                 "-j",
                 "ACCEPT",
-            ],
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
         ]
-        .into_iter()
-        .map(|args| args.into_iter().map(String::from).collect())
-        .collect()
     }
 
     /// The unconditional port 53 accept that only the legacy host-list path
@@ -815,12 +827,14 @@ impl NetworkIptablesManager {
 
     /// Build the ACCEPT rules that open the proxy endpoints, and nothing else.
     ///
-    /// These are the only allow rules a proxied chain carries; every other
-    /// destination is left to the chain's closing DROP.
+    /// Apart from the loopback accept every chain carries, these are the only
+    /// allow rules a proxied chain holds; every other destination is left to
+    /// the chain's closing DROP.
     ///
     /// The rules are IPv4 only, so they must not be run through `ip6tables`. A
-    /// proxied IPv6 chain therefore holds its closing DROP alone, which is the
-    /// fail-closed outcome -- IPv6 egress is denied rather than left open.
+    /// proxied IPv6 chain therefore reaches its closing DROP with nothing but
+    /// loopback allowed, which is the fail-closed outcome -- IPv6 egress is
+    /// denied rather than left open.
     fn build_proxy_chain_rule_args(
         chain_name: &str,
         endpoints: &[ProxyEndpoint],
@@ -1804,7 +1818,11 @@ impl NetworkIptablesManager {
         msg
     }
 
-    fn run_iptables_rule_args(&self, args: &[Vec<String>], logger: &mut Logger) -> Result<(), String> {
+    fn run_iptables_rule_args(
+        &self,
+        args: &[Vec<String>],
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         for rule in args {
             let rule_args: Vec<&str> = rule.iter().map(String::as_str).collect();
             self.run_iptables(&rule_args, logger)?;
@@ -1812,7 +1830,11 @@ impl NetworkIptablesManager {
         Ok(())
     }
 
-    fn run_ip6tables_rule_args(&self, args: &[Vec<String>], logger: &mut Logger) -> Result<(), String> {
+    fn run_ip6tables_rule_args(
+        &self,
+        args: &[Vec<String>],
+        logger: &mut Logger,
+    ) -> Result<(), String> {
         for rule in args {
             let rule_args: Vec<&str> = rule.iter().map(String::as_str).collect();
             self.run_ip6tables(&rule_args, logger)?;
@@ -1975,11 +1997,7 @@ impl NetworkIptablesManager {
         ) {
             Ok(()) => Ok(created),
             Err(e) => {
-                let residual = self.teardown_created(
-                    &self.chain_name,
-                    &created,
-                    logger,
-                );
+                let residual = self.teardown_created(&self.chain_name, &created, logger);
                 Err((e, residual))
             }
         }
@@ -2045,26 +2063,30 @@ impl NetworkIptablesManager {
 
         if proxy_mode {
             // Proxy mode is "deny all except the proxy", so the chain carries
-            // the proxy ACCEPTs and its closing DROP and nothing else.
+            // the loopback accept, the proxy ACCEPTs and its closing DROP and
+            // nothing else.
             //
-            // None of the base exemptions belong here. There is no port 53
-            // accept because the container resolves the proxy through the
-            // hosts-file pin instead, and an unscoped one would be a standing
-            // DNS-tunnel exfil path through a posture whose whole point is
-            // that the proxy is the only reachable destination. There is no
-            // `-i lo` accept because every packet reaching this chain arrived
-            // on the container's veth by construction, and no
-            // ESTABLISHED,RELATED accept because return traffic flows toward
-            // the container and never traverses it -- such a rule would only
-            // let flows opened before the chain existed keep running straight
-            // through the deny-all posture.
+            // None of the remaining base exemptions belong here. There is no
+            // port 53 accept because the container resolves the proxy through
+            // the hosts-file pin instead, and an unscoped one would be a
+            // standing DNS-tunnel exfil path through a posture whose whole
+            // point is that the proxy is the only reachable destination. There
+            // is no ESTABLISHED,RELATED accept because every packet the
+            // container sends the proxy already matches an endpoint ACCEPT --
+            // such a rule would only let flows opened before the chain existed
+            // keep running straight through the deny-all posture.
             //
             // The allow list is not programmed either: an entry naming
             // anything but the proxy contradicts the model, and one naming the
             // proxy is already covered. A block list never reaches here.
+            let loopback_rules = vec![Self::build_loopback_accept_rule_args(&self.chain_name)];
+            self.run_iptables_rule_args(&loopback_rules, logger)?;
+            if ipv6_enabled {
+                self.run_ip6tables_rule_args(&loopback_rules, logger)?;
+            }
             let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
             self.run_iptables_rule_args(&proxy_rules, logger)?;
-            for rule in &proxy_rules {
+            for rule in loopback_rules.iter().chain(proxy_rules.iter()) {
                 logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
             }
             if !policy.allowed_hosts.is_empty() {
@@ -2076,7 +2098,8 @@ impl NetworkIptablesManager {
             if ipv6_enabled {
                 logger.log_line(
                     "IPv6 egress is denied outright while a proxy is configured: the proxy \
-                     endpoint is IPv4, so the IPv6 chain carries only its closing DROP.",
+                     endpoint is IPv4, so the IPv6 chain carries its loopback accept and \
+                     its closing DROP.",
                 );
             }
         } else {
@@ -2283,11 +2306,7 @@ impl NetworkIptablesManager {
             self.chain_name
         ));
 
-        let residual = self.teardown_created(
-            &self.chain_name,
-            &self.created,
-            logger,
-        );
+        let residual = self.teardown_created(&self.chain_name, &self.created, logger);
 
         // A removal command can fail, and what survived is still ours. Clearing
         // the gate here regardless would strand it: Drop would then skip the
@@ -2574,7 +2593,8 @@ mod tests {
     #[test]
     fn a_namespaced_manager_hooks_its_chain_into_output() {
         let fake = super::test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("lxc-hooked", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("lxc-hooked", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_requesting_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
@@ -2770,7 +2790,8 @@ mod tests {
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: chain is not empty");
 
-        let mut manager = NetworkIptablesManager::new("survivor", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("survivor", EgressHookPoint::ContainerNetns(4242));
         let retained = manager
             .retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
         assert!(retained, "a non-empty residual must be retained");
@@ -2789,7 +2810,8 @@ mod tests {
         // which would resurrect the collision the ownership record exists to
         // prevent.
         fake.forget_issued();
-        let mut clean = NetworkIptablesManager::new("fully-rolled-back", EgressHookPoint::ContainerNetns(4242));
+        let mut clean =
+            NetworkIptablesManager::new("fully-rolled-back", EgressHookPoint::ContainerNetns(4242));
         let retained_clean = clean.retain_residual_ownership(CreatedResources::default());
         assert!(!retained_clean, "an empty residual must not be retained");
 
@@ -2819,7 +2841,8 @@ mod tests {
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: chain is not empty");
 
-        let mut manager = NetworkIptablesManager::new("adopted", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("adopted", EgressHookPoint::ContainerNetns(4242));
         let mut apply_log = Logger::new(Mode::Buffer);
         let outcome = Err((
             "append failed".to_string(),
@@ -2846,7 +2869,8 @@ mod tests {
         // manager owning nothing, so the assertion above cannot be satisfied by
         // retaining unconditionally.
         fake.forget_issued();
-        let mut clean = NetworkIptablesManager::new("clean-failure", EgressHookPoint::ContainerNetns(4242));
+        let mut clean =
+            NetworkIptablesManager::new("clean-failure", EgressHookPoint::ContainerNetns(4242));
         let mut clean_log = Logger::new(Mode::Buffer);
         let clean_result = clean.record_apply_outcome(
             Err(("boom".to_string(), CreatedResources::default())),
@@ -2939,7 +2963,8 @@ mod tests {
         let fake = test_firewall::install();
         fake.fail_every_command("iptables: permission denied");
 
-        let mut manager = NetworkIptablesManager::new("stubborn", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("stubborn", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let mut first = Logger::new(Mode::Buffer);
@@ -2971,7 +2996,8 @@ mod tests {
         // and leave Drop nothing to retry.  Without it, "still owned after a
         // failure" would be satisfied by never releasing ownership at all.
         let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("released", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("released", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let mut first = Logger::new(Mode::Buffer);
@@ -3004,7 +3030,8 @@ mod tests {
         // reverse declaration order, and this manager still owns a chain, so
         // its Drop runs a teardown that must not reach the real binary.
         let _fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("already-owned", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("already-owned", EgressHookPoint::ContainerNetns(4242));
         manager.retain_residual_ownership(CreatedResources::for_test(true, false, false, false));
 
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
@@ -3031,7 +3058,8 @@ mod tests {
         // The fake is declared first so it outlives `manager`, whose Drop tears
         // down the chains this apply creates.
         let fake = test_firewall::install();
-        let mut manager = NetworkIptablesManager::new("fresh", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("fresh", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
         let result = manager.apply_firewall_rules(&policy, &mut logger);
@@ -3071,7 +3099,8 @@ mod tests {
 
     #[test]
     fn chain_name_sanitization() {
-        let mgr = NetworkIptablesManager::new("my-container_123", EgressHookPoint::ContainerNetns(4242));
+        let mgr =
+            NetworkIptablesManager::new("my-container_123", EgressHookPoint::ContainerNetns(4242));
         assert_eq!(mgr.chain_name, chain_name_for("my-container_123"));
         assert!(mgr.chain_name.starts_with("MXC-my-cont-"));
     }
@@ -3909,11 +3938,52 @@ mod tests {
     }
 
     #[test]
+    fn no_egress_rule_selects_an_incoming_interface() {
+        let chain_name = "MXC-sel";
+        let endpoints = vec![ProxyEndpoint {
+            ip: "10.0.3.1".to_string(),
+            port: 3128,
+        }];
+        let mut rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
+        rules.extend(NetworkIptablesManager::build_legacy_dns_exemption_rule_args(chain_name));
+        rules.extend(NetworkIptablesManager::build_proxy_chain_rule_args(
+            chain_name, &endpoints,
+        ));
+        rules.push(NetworkIptablesManager::build_loopback_accept_rule_args(
+            chain_name,
+        ));
+
+        for rule in &rules {
+            assert!(
+                !rule.iter().any(|arg| arg == "-i"),
+                "these chains are reached from OUTPUT, where iptables refuses -i outright; \
+                 into a user chain it is accepted and then matches nothing: {rule:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_chain_body_permits_traffic_to_the_containers_own_loopback() {
+        let chain_name = "MXC-lo";
+        let expected = strings(&["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]);
+
+        assert!(
+            NetworkIptablesManager::build_base_chain_rule_args(chain_name).contains(&expected),
+            "an ordinary chain must leave intra-container loopback alone"
+        );
+        assert_eq!(
+            NetworkIptablesManager::build_loopback_accept_rule_args(chain_name),
+            expected,
+            "the proxy path installs this rule directly, on both families"
+        );
+    }
+
+    #[test]
     fn base_chain_rules_are_two_family_agnostic_rules_in_documented_order() {
         let chain_name = "MXC-base";
         let rules = NetworkIptablesManager::build_base_chain_rule_args(chain_name);
         let expected = vec![
-            strings(&["-A", chain_name, "-i", "lo", "-j", "ACCEPT"]),
+            strings(&["-A", chain_name, "-o", "lo", "-j", "ACCEPT"]),
             strings(&[
                 "-A",
                 chain_name,
@@ -3987,7 +4057,8 @@ mod tests {
 
     #[test]
     fn chain_names_carry_the_mxc_prefix_within_the_iptables_length_ceiling() {
-        let short_manager = NetworkIptablesManager::new("short", EgressHookPoint::ContainerNetns(4242));
+        let short_manager =
+            NetworkIptablesManager::new("short", EgressHookPoint::ContainerNetns(4242));
         assert!(
             short_manager.chain_name.starts_with("MXC-short-"),
             "a short ASCII name should stay legible in the slug; actual: {}",
@@ -4056,7 +4127,8 @@ mod tests {
 
     #[test]
     fn a_non_firewall_policy_is_a_successful_no_op() {
-        let mut manager = NetworkIptablesManager::new("skip-noop", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("skip-noop", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_requiring_no_firewall();
         let mut logger = Logger::new(Mode::Buffer);
 
@@ -4193,7 +4265,8 @@ mod tests {
             address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
             builtin_test_server: false,
         };
-        let mut manager = NetworkIptablesManager::new("proxy-gate", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("proxy-gate", EgressHookPoint::ContainerNetns(4242));
         let mut logger = Logger::new(Mode::Buffer);
 
         let result = manager.apply_firewall_rules(&policy, &mut logger);
@@ -4220,7 +4293,8 @@ mod tests {
             address: None,
             builtin_test_server: true,
         };
-        let mut manager = NetworkIptablesManager::new("builtin-gate", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("builtin-gate", EgressHookPoint::ContainerNetns(4242));
         let mut logger = Logger::new(Mode::Buffer);
 
         assert!(
@@ -4234,7 +4308,8 @@ mod tests {
     #[test]
     fn a_proxy_free_policy_still_skips_cleanly_under_capabilities() {
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
-        let mut manager = NetworkIptablesManager::new("no-proxy-skip", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("no-proxy-skip", EgressHookPoint::ContainerNetns(4242));
         let mut logger = Logger::new(Mode::Buffer);
 
         assert_eq!(
@@ -4652,7 +4727,8 @@ mod tests {
         let fake = test_firewall::install();
         fake.fail_commands_matching("OUTPUT", "iptables: No chain/target/match by that name");
 
-        let mut manager = NetworkIptablesManager::new("stranded", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("stranded", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut logger = Logger::new(Mode::Buffer);
 
@@ -4683,7 +4759,8 @@ mod tests {
         // which is the shape of a busy or half-broken host.
         let fake = test_firewall::install();
 
-        let mut manager = NetworkIptablesManager::new("still-hooked", EgressHookPoint::ContainerNetns(4242));
+        let mut manager =
+            NetworkIptablesManager::new("still-hooked", EgressHookPoint::ContainerNetns(4242));
         let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
         let mut apply_logger = Logger::new(Mode::Buffer);
         manager
@@ -4713,12 +4790,10 @@ mod tests {
         // result is the point: these deletes are the ones being failed, and a
         // release on success shows up as the command never being issued.
         assert!(
-            issued
-                .iter()
-                .any(|cmd| cmd[0] == "iptables"
-                    && cmd[1] == "-D"
-                    && cmd[2] == "OUTPUT"
-                    && cmd.last() == Some(&chain)),
+            issued.iter().any(|cmd| cmd[0] == "iptables"
+                && cmd[1] == "-D"
+                && cmd[2] == "OUTPUT"
+                && cmd.last() == Some(&chain)),
             "a hook that installed must still be owned, and so still be removed; \
              issued: {issued:?}"
         );
