@@ -371,6 +371,8 @@ fn resolve_runner_inner(
 
 /// Construct the Hyperlight runner, shared by the Windows and Linux bodies.
 /// Requires x86_64 (Hyperlight needs KVM or WHP) and the `hyperlight` feature.
+/// On Windows, pre-checks that `winhvplatform.dll` is loadable so a missing
+/// WHP becomes a typed error rather than a delay-load SEH exception.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcError> {
     #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
@@ -379,6 +381,14 @@ fn resolve_hyperlight(request: &ExecutionRequest) -> Result<ResolvedRunner, MxcE
             return Err(MxcError::malformed_request(
                 "Hyperlight (Hyperlight+Unikraft) is an experimental feature. \
                  Use --experimental flag.",
+            ));
+        }
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(target_os = "windows")]
+        if !hyperlight_common::is_whp_available() {
+            return Err(MxcError::unsupported_containment(
+                "Hyperlight requires Windows Hypervisor Platform (WHP). \
+                 Enable the HypervisorPlatform Windows optional feature and reboot.",
             ));
         }
         Ok(ResolvedRunner::without_guard(Box::new(
