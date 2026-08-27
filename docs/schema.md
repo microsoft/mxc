@@ -304,11 +304,15 @@ backend (via job-object UI restrictions plus the Win32k mitigation — see
 [`process-container/UIPolicy_Schema.md`](process-container/UIPolicy_Schema.md))
 and by the macOS Seatbelt backend (via the generated sandbox profile). Other
 backends do not implement UI restrictions; each backend's documentation states
-whether it applies, rejects, or ignores the section. **IsolationSession refuses
-any supplied `ui` at every phase on both surfaces** — no `ui` posture is truthful
+whether it applies, rejects, or ignores the section. **IsolationSession and WSLc
+refuse any supplied `ui` at every phase on both surfaces**, and each accepts an
+omitted one without applying any UI restriction — so the section's default-deny
+reading does not hold on either. The reasons differ: no `ui` posture is truthful
 for a session-isolated sandbox (see
-[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)) —
-and accepts an omitted one without applying any UI restriction. The Windows
+[`isolation-session/state-aware-rust.md`](isolation-session/state-aware-rust.md)),
+while a WSLc container runs Linux and has no analogue of the Windows job-object
+limits `ui` maps to (see [`wsl/wslc-state-aware.md`](wsl/wslc-state-aware.md)).
+The Windows
 `processContainer.ui` sub-block carries additional ProcessContainer-only fields
 (`isolation`, `desktopSystemControl`, `systemSettings`, `ime`) and is valid only
 when `containment` is `processcontainer`.

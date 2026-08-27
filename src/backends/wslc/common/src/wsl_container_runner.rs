@@ -711,14 +711,24 @@ fn as_rejection(err: MxcError) -> ScriptResponse {
     WslcError::Rejected(err.message).into_response()
 }
 
+/// The first line [`WSLContainerRunner::start_container`] writes, before the
+/// filesystem gate and any SDK call. Shared with the tests, which assert its
+/// absence to prove a rejection aborted before any container work.
+pub(crate) const START_CONTAINER_BANNER: &str = "[WSLC] Starting WSL Container runner";
+
 /// Refuses the `lifecycle` settings the one-shot surface cannot honour.
 ///
 /// Value-based rather than presence-based (unlike `ui`), because the defaults
 /// genuinely match the behaviour:
 ///
-/// * `destroyOnExit` **is** honoured — it selects
-///   `WSLC_CONTAINER_FLAG_AUTO_REMOVE` on the container settings, so both
-///   values are accepted.
+/// * `destroyOnExit: true` (the default) is honoured — it selects
+///   `WSLC_CONTAINER_FLAG_AUTO_REMOVE` and [`StartedContainer::destroy`] stops
+///   and deletes the container.
+/// * `destroyOnExit: false` is refused. [`StartedContainer`] owns the
+///   [`WslcSessionGuard`], whose `Drop` terminates the session — and with it
+///   the session-scoped container — regardless of the flag, and the WSLC SDK
+///   has no cross-process re-attach. The outcome is identical to `true`, so
+///   accepting `false` would promise a container that is already gone.
 /// * `preservePolicy: true` asks for filesystem and network policy to outlive
 ///   the run. WSLc installs no persistent host-side enforcement: `rw`/`ro`
 ///   paths become container volume mounts and the network posture is a
@@ -730,6 +740,17 @@ fn as_rejection(err: MxcError) -> ScriptResponse {
 /// The state-aware surface needs no counterpart: the parser rejects the whole
 /// one-shot `lifecycle` section on state-aware requests.
 fn reject_unsupported_lifecycle(request: &ExecutionRequest) -> Result<(), ScriptResponse> {
+    if !request.lifecycle.destroy_on_exit {
+        return Err(WslcError::Rejected(
+            "WSLc: lifecycle.destroyOnExit=false is not supported by the one-shot WSLc surface. \
+             The container is scoped to a session this process owns, and terminating that \
+             session at the end of the run removes the container regardless of the AutoRemove \
+             flag. Omit the field (or set it to true), or use the state-aware lifecycle, whose \
+             daemon holds the session open across phases."
+                .to_string(),
+        )
+        .into_response());
+    }
     if request.lifecycle.preserve_policy {
         return Err(WslcError::Rejected(
             "WSLc: lifecycle.preservePolicy=true is not supported. WSLc installs no persistent \
@@ -1370,7 +1391,7 @@ impl WSLContainerRunner {
         logger: &mut Logger,
         output: OutputMode,
     ) -> Result<StartedContainer, ScriptResponse> {
-        let _ = writeln!(logger, "[WSLC] Starting WSL Container runner");
+        let _ = writeln!(logger, "{START_CONTAINER_BANNER}");
 
         // WSLc provision-time filesystem-policy gate (D6 normalization → D3
         // delegation → denied-path overlap), shared verbatim with the
@@ -2448,6 +2469,53 @@ mod tests {
         assert!(err.error_message.contains("allowLocalNetwork"));
     }
 
+    /// The two surfaces refuse `allowLocalNetwork` with deliberately different
+    /// remedies: one-shot has `experimental.wslc.portMappings` to point at,
+    /// state-aware has no port-mapping primitive at all. Unifying the messages
+    /// — the obvious tidy-up — would send state-aware users after a dead end.
+    /// Both must classify as `policy_validation`, which is the phase, not the
+    /// message, that `mxc_engine::dispatch::map_spawn_error` reads.
+    #[test]
+    fn both_surfaces_reject_allow_local_network_with_surface_specific_remedies() {
+        let request = ExecutionRequest {
+            containment: wxc_common::models::ContainmentBackend::Wslc,
+            policy: wxc_common::models::ContainerPolicy {
+                allow_local_network: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let one_shot = WSLContainerRunner::new(&WslcConfig::default())
+            .validate_runner(&request)
+            .unwrap_err();
+        assert_eq!(
+            one_shot.failure_phase,
+            wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            one_shot.error_message.contains("portMappings"),
+            "one-shot has a port-mapping primitive and must name it; got: {}",
+            one_shot.error_message
+        );
+
+        let state_aware = crate::policy::validate_provision_policy(&request).unwrap_err();
+        assert_eq!(
+            state_aware.code,
+            wxc_common::mxc_error::MxcErrorCode::PolicyValidation
+        );
+        assert!(
+            !state_aware.message.contains("portMappings"),
+            "state-aware has no port-mapping primitive to point at; got: {}",
+            state_aware.message
+        );
+        assert!(
+            state_aware.message.contains("allowLocalNetwork"),
+            "got: {}",
+            state_aware.message
+        );
+    }
+
     #[test]
     fn validate_runner_tags_shared_validator_rejections() {
         // The shared network validator builds untagged responses; WSLc retags them
@@ -2536,48 +2604,58 @@ mod tests {
         assert!(runner.validate_runner(&request).is_ok());
     }
 
-    /// `destroyOnExit` is genuinely honoured (it selects
-    /// `WSLC_CONTAINER_FLAG_AUTO_REMOVE`), so both values stay accepted;
-    /// `preservePolicy` is not, so only it is refused. Checking both together
-    /// is the point — a blanket `lifecycle` rejection would break the
-    /// `wslc_destroy_on_exit_*` configs.
+    /// `destroyOnExit: true` matches what one-shot does; `false` and
+    /// `preservePolicy: true` do not. The accepted value is the near-miss a
+    /// blanket `lifecycle` rejection would swallow.
     #[test]
-    fn validate_runner_rejects_preserve_policy_but_accepts_both_destroy_on_exit_values() {
+    fn validate_runner_rejects_the_lifecycle_settings_one_shot_cannot_honour() {
         let runner = WSLContainerRunner::new(&WslcConfig::default());
 
-        for destroy_on_exit in [true, false] {
-            let request = ExecutionRequest {
-                containment: wxc_common::models::ContainmentBackend::Wslc,
-                lifecycle: wxc_common::models::LifecycleConfig {
-                    destroy_on_exit,
-                    preserve_policy: false,
-                },
-                ..Default::default()
-            };
-            assert!(
-                runner.validate_runner(&request).is_ok(),
-                "destroyOnExit={destroy_on_exit} is honoured and must stay accepted"
-            );
-        }
-
-        let request = ExecutionRequest {
+        let accepted = ExecutionRequest {
             containment: wxc_common::models::ContainmentBackend::Wslc,
             lifecycle: wxc_common::models::LifecycleConfig {
                 destroy_on_exit: true,
-                preserve_policy: true,
+                preserve_policy: false,
             },
             ..Default::default()
         };
-        let err = runner.validate_runner(&request).unwrap_err();
         assert!(
-            err.error_message.contains("preservePolicy"),
-            "got: {}",
-            err.error_message
+            runner.validate_runner(&accepted).is_ok(),
+            "destroyOnExit=true is what one-shot does and must stay accepted"
         );
-        assert_eq!(
-            err.failure_phase,
-            wxc_common::models::FailurePhase::Rejected
-        );
+
+        for (lifecycle, needle) in [
+            (
+                wxc_common::models::LifecycleConfig {
+                    destroy_on_exit: false,
+                    preserve_policy: false,
+                },
+                "destroyOnExit=false",
+            ),
+            (
+                wxc_common::models::LifecycleConfig {
+                    destroy_on_exit: true,
+                    preserve_policy: true,
+                },
+                "preservePolicy",
+            ),
+        ] {
+            let request = ExecutionRequest {
+                containment: wxc_common::models::ContainmentBackend::Wslc,
+                lifecycle,
+                ..Default::default()
+            };
+            let err = runner.validate_runner(&request).unwrap_err();
+            assert!(
+                err.error_message.contains(needle),
+                "expected {needle}; got: {}",
+                err.error_message
+            );
+            assert_eq!(
+                err.failure_phase,
+                wxc_common::models::FailurePhase::Rejected
+            );
+        }
     }
 
     /// `firewall` / `both` ask for per-rule enforcement the container cannot

@@ -345,14 +345,18 @@ Write-Host "`n--- Timeout Tests ---" -ForegroundColor Cyan
 $null = $results.Add((Run-WslcTest "wslc_timeout.json" -ExpectedExit -1 -OutputContains "Starting long task"))
 
 Write-Host "`n--- Lifecycle Tests ---" -ForegroundColor Cyan
-# Smoke tests only: assert config parses and payload runs. WSLC's session
-# teardown reaps session-scoped containers regardless of AutoRemove, so
-# destroyOnExit has no externally observable effect via `wslc list`.
-# True semantic verification requires a runner-side log assertion (TODO).
+# `destroyOnExit: true` is a smoke test only: WSLC's session teardown reaps
+# session-scoped containers regardless of AutoRemove, so `true` has no
+# externally observable effect -- it is accepted because that teardown is
+# exactly what it asks for.
 $null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_true.json" `
     -OutputContains "PASS: container ran (destroyOnExit=true)"))
-$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false.json" `
-    -OutputContains "PASS: container ran (destroyOnExit=false)"))
+# `false` asks for a container that outlives the run, which one-shot cannot
+# deliver. It is refused before any container is created, so the payload must
+# never run.
+$null = $results.Add((Run-WslcTest "wslc_destroy_on_exit_false_rejected.json" `
+    -ExpectedExit -1 `
+    -OutputContains "destroyOnExit=false"))
 
 Write-Host "`n--- State-Aware Lifecycle Tests ---" -ForegroundColor Cyan
 # Delegate the multi-invocation provision/start/exec/stop/deprovision lifecycle

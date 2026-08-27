@@ -625,6 +625,48 @@ mod tests {
         }
     }
 
+    /// Guards against over-rejection, which the refusal tests cannot see. Each
+    /// value is the near-miss of a rejected one — `capabilities` vs `firewall`,
+    /// `allowLocalNetwork: false` vs `true`, absent `ui` vs supplied — so a gate
+    /// that flipped between value- and presence-based would fail here only.
+    #[test]
+    fn validate_provision_accepts_the_postures_wslc_can_honour() {
+        let runner = WslcStateAwareRunner::new();
+        for (label, policy) in [
+            (
+                "explicit capabilities enforcement mode",
+                ContainerPolicy {
+                    network_enforcement_mode:
+                        wxc_common::models::NetworkEnforcementMode::Capabilities,
+                    ..Default::default()
+                },
+            ),
+            (
+                "explicit allowLocalNetwork=false",
+                ContainerPolicy {
+                    allow_local_network: false,
+                    ..Default::default()
+                },
+            ),
+            (
+                "absent ui",
+                ContainerPolicy {
+                    ui_specified: false,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let request = ExecutionRequest {
+                policy,
+                ..Default::default()
+            };
+            assert!(
+                runner.validate_provision(&request, None).is_ok(),
+                "{label} is honoured by WSLc and must not be rejected"
+            );
+        }
+    }
+
     #[test]
     fn map_network_maps_block_to_none() {
         let req = ExecutionRequest {

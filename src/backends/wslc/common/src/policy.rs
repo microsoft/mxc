@@ -187,9 +187,13 @@ pub(crate) fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), MxcErro
 /// enforcement the container cannot perform — it has no `CAP_NET_ADMIN` — so
 /// accepting either would assert a guarantee that does not exist.
 ///
-/// Shared by every WSLc phase and by the one-shot / streaming
-/// `validate_runner`, for the same reason as the UI check: it is a property of
-/// the backend, not of a phase.
+/// Called only by [`validate_provision_policy`] and the one-shot / streaming
+/// `WSLContainerRunner::validate_runner` — the two places a network posture is
+/// settable. Post-provision and exec deliberately do not call it: they reject
+/// the whole network mode by presence via [`reject_post_provision_network_mode`]
+/// (the parser sets `network_mode_specified` for `enforcementMode` too), which
+/// is broader — routing them here would wrongly accept `capabilities` after
+/// provision.
 pub(crate) fn reject_unsupported_enforcement_mode(
     request: &ExecutionRequest,
 ) -> Result<(), MxcError> {

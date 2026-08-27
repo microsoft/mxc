@@ -421,11 +421,17 @@ an explicitly supplied lockdown `ui` is indistinguishable *by value* from an
 absent one — a value-based check would let the single most restrictive request
 you can write through unenforced. Omit the section entirely.
 
-### `lifecycle`: `destroyOnExit` is honored, `preservePolicy` is not
+### `lifecycle`: only `destroyOnExit: true` is supported
 
-`lifecycle.destroyOnExit` **is** honored: it selects the SDK's
-`WSLC_CONTAINER_FLAG_AUTO_REMOVE`, so both `true` (the default) and `false`
-behave as documented.
+`lifecycle.destroyOnExit: true` (the default) is honored: it selects the SDK's
+`WSLC_CONTAINER_FLAG_AUTO_REMOVE`, and teardown stops and deletes the container.
+
+`lifecycle.destroyOnExit: false` is **rejected**. It asks for the container to
+outlive the run, which a one-shot invocation cannot deliver: the container is
+scoped to a session this process owns, terminating that session at the end of
+the run reaps the container regardless of the AutoRemove flag, and the WSLC SDK
+has no cross-process re-attach. Use the state-aware lifecycle if you need a
+container to persist — its daemon holds the session open across phase processes.
 
 `lifecycle.preservePolicy: true` is **rejected** — WSLC has no
 policy-persistence primitive, so there is nothing for the flag to select.

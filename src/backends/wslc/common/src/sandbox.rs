@@ -393,13 +393,15 @@ impl Drop for WslcSandboxProcess {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wsl_container_runner::START_CONTAINER_BANNER;
 
-    /// The rejections must abort the request, not tear a container down after
-    /// building one. `SandboxBackend::spawn` is the streaming entry point the
-    /// Rust SDK uses; it must refuse before `start_container` touches the WSLC
-    /// SDK. Asserting on a host with no WSLC SDK at all is what proves the
-    /// ordering: were the guard to run late, we would see an SDK-load failure
-    /// instead of the policy message.
+    /// Rejections must abort, not tear down a container after building one.
+    ///
+    /// The message alone cannot prove that: on a host that *has* `wslcsdk.dll`,
+    /// a guard moved after `start_container` would leak a container and still
+    /// return this exact message. The banner is what makes the check
+    /// host-independent — `start_container` writes it as its first statement,
+    /// so an untouched buffer proves it was never entered.
     #[test]
     fn spawn_rejects_policy_before_touching_the_sdk() {
         let request = ExecutionRequest {
@@ -426,6 +428,11 @@ mod tests {
         assert_eq!(
             err.failure_phase,
             wxc_common::models::FailurePhase::Rejected
+        );
+        assert!(
+            !logger.get_buffer().contains(START_CONTAINER_BANNER),
+            "guard must run before `start_container`; logger: {}",
+            logger.get_buffer()
         );
     }
 
