@@ -1,0 +1,18 @@
+{
+  "version": "0.8.0-alpha",
+  "containerId": "CLI-LXC-V08-Legacy-Block",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "sh -c \"for p in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do ip route 2>/dev/null | grep -q default && break || sleep 1; done; nc -z -w 5 140.82.114.6 443 >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  },
+  "network": {
+    "defaultPolicy": "block"
+  }
+}

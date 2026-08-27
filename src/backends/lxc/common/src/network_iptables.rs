@@ -75,14 +75,21 @@ fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
         return NetworkPlan::Filtered;
     }
 
-    let egress_permits_nothing = policy
-        .network_egress
-        .as_ref()
-        .is_none_or(|egress| egress.default == NetworkAction::Deny && egress.allow.is_empty());
+    // A 0.8 request may state its posture in the legacy fields, and the parser
+    // leaves these sections empty when it does.  Absence means the posture was
+    // stated elsewhere, so fall back to the legacy fields rather than reading
+    // it as a denial.
+    let egress_permits_nothing = match policy.network_egress.as_ref() {
+        Some(egress) => egress.default == NetworkAction::Deny && egress.allow.is_empty(),
+        None => matches!(policy.default_network_policy, NetworkPolicy::Block),
+    };
 
-    let ingress_permits_nothing = policy.network_ingress.as_ref().is_none_or(|ingress| {
-        ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
-    });
+    let ingress_permits_nothing = match policy.network_ingress.as_ref() {
+        Some(ingress) => {
+            ingress.default == NetworkAction::Deny && ingress.host_loopback == NetworkAction::Deny
+        }
+        None => !policy.allow_local_network,
+    };
 
     if egress_permits_nothing && ingress_permits_nothing {
         NetworkPlan::Isolated
