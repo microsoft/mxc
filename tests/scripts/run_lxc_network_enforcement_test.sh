@@ -152,6 +152,10 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
 
+# Without this the container's packets stop at the host and never reach the peer.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
+
 HOSTS_BACKUP="$(mktemp)"
 cat /etc/hosts > "$HOSTS_BACKUP"
 printf '%s %s\n' "$PEER_IP" "$PEER_HOSTNAME" >> /etc/hosts

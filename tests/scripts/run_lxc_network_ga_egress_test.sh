@@ -5,7 +5,7 @@
 # name the right chain, and still filter nothing.
 #
 # The tcp/443 cases probe a CI-controlled peer this script stands up in its own
-# routed namespace.  No remote service can turn the positive path red.
+# routed namespace.  The udp/53 cases still query a public resolver.
 #
 # A directional posture carries no port 53 exemption, unlike the legacy chain,
 # which is what the two DNS cases pin.
@@ -168,6 +168,10 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
     || fail "could not bring up the egress peer loopback."
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the egress peer back to the container."
+
+# Without this the container's packets stop at the host and never reach the peer.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
 
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.

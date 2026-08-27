@@ -143,6 +143,10 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
 
+# Without this the container's packets stop at the host and never reach the peer.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
+
 # The firewall matches the port and not the payload, so plain HTTP on tcp/443
 # is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \

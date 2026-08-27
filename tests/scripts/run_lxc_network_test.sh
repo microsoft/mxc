@@ -30,6 +30,8 @@ fail() {
 }
 
 [ "$(id -u)" -eq 0 ] || skip "requires root for iptables and LXC."
+command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
+command -v lxc-create >/dev/null 2>&1 || skip "LXC (lxc-create) is not installed."
 command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
 command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the peer needs it to host a listener."
 
@@ -89,6 +91,10 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
     || fail "could not bring up the peer loopback."
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
+
+# Without this the container's packets stop at the host and never reach the peer.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
+    || skip "could not enable IPv4 forwarding."
 
 HOSTS_BACKUP="$(mktemp)"
 cat /etc/hosts > "$HOSTS_BACKUP"
