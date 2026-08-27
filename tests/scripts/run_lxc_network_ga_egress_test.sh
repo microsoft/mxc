@@ -125,9 +125,6 @@ assert_allowed() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# A CI-controlled peer for the positive path.
-#
 # A listener on the host or on the bridge gateway is delivered through INPUT
 # and answers with no firewall in the path.  The peer lives in its own network
 # namespace behind a veth, reached only through the FORWARD hook the chain

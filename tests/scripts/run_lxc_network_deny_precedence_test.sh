@@ -95,9 +95,6 @@ assert_no_forward_reference() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# A CI-controlled peer, standing in for the destination both runs probe.
-#
 # A listener on the host or on the bridge gateway is delivered through INPUT
 # and answers with no firewall in the path.  The peer lives in its own network
 # namespace behind a veth, reached only through the FORWARD hook the chain

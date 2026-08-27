@@ -17,8 +17,7 @@ fi
 
 CONFIG="$REPO_DIR/tests/configs/lxc_network_test.json"
 
-# An honest skip for a missing prerequisite: exit 77 so run_lxc_all_tests.sh
-# records SKIPPED rather than PASS. A suite that could not run must not look green.
+# run_lxc_all_tests.sh reports 77 as SKIPPEED.
 SKIP_EXIT=77
 skip() {
     echo "SKIP: $1"
@@ -34,9 +33,6 @@ fail() {
 command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
 command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the peer needs it to host a listener."
 
-# ---------------------------------------------------------------------------
-# A CI-controlled peer, standing in for the allowed destination.
-#
 # A listener on the host or on the bridge gateway is delivered through INPUT
 # and answers with no firewall in the path.  The peer lives in its own network
 # namespace behind a veth, reached only through the FORWARD hook the chain

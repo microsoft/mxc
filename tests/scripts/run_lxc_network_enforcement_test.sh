@@ -23,8 +23,7 @@ if [ ! -f "$LXC_EXEC" ]; then
     LXC_EXEC="$REPO_DIR/src/target/debug/lxc-exec"
 fi
 
-# An honest skip for a missing prerequisite: exit 77 so run_lxc_all_tests.sh
-# records SKIPPED rather than PASS. A suite that could not run must not look green.
+# exit 77 so run_lxc_all_tests.sh records SKIPPED rather than PASS.
 SKIP_EXIT=77
 skip() {
     echo "SKIP: $1"
@@ -95,9 +94,6 @@ assert_no_forward_reference() {
     fi
 }
 
-# ---------------------------------------------------------------------------
-# A CI-controlled peer, standing in for the destination both cases probe.
-#
 # A listener on the host or on the bridge gateway is delivered through INPUT
 # and answers with no firewall in the path.  The peer lives in its own network
 # namespace behind a veth, reached only through the FORWARD hook the chain
