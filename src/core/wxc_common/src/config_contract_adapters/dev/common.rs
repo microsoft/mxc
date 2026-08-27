@@ -17,12 +17,16 @@ pub(super) fn convert_process(value: contract::Process) -> wire::Process {
         command_line,
         cwd,
         env,
+        parent_task_id,
+        task_display_name,
         timeout,
     } = value;
     wire::Process {
         command_line: Some(command_line.into_inner()),
         cwd: cwd.into_option(),
         env: env.into_option(),
+        parent_task_id: parent_task_id.into_option(),
+        task_display_name: task_display_name.into_option(),
         timeout: timeout.into_option(),
     }
 }

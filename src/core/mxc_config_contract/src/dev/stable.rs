@@ -30,6 +30,12 @@ pub struct Process {
     /// Optional environment entries encoded as `KEY=VALUE` strings.
     #[serde(default)]
     pub env: OptionalField<Vec<String>>,
+    /// Optional existing IsoTask parent for the launched process.
+    #[serde(default)]
+    pub parent_task_id: OptionalField<String>,
+    /// Optional friendly IsoTask display name for the launched process.
+    #[serde(default)]
+    pub task_display_name: OptionalField<String>,
     /// Optional execution timeout in milliseconds.
     #[serde(default)]
     pub timeout: OptionalField<u32>,

@@ -31,6 +31,8 @@ fn convert_process(value: contract::Process) -> wire::Process {
         command_line: Some(command_line.into_inner()),
         cwd: cwd.into_option(),
         env: env.into_option(),
+        parent_task_id: None,
+        task_display_name: None,
         timeout: timeout.into_option(),
     }
 }

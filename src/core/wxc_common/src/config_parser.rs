@@ -741,44 +741,68 @@ fn convert_wire_config(
     // non-exec state-aware phases (require_process == false) or when the driver
     // signalled a CLI command-line override (allow_missing_command).
     let command_required = require_process && !allow_missing_command;
-    let (script_code, working_directory, script_timeout, env) = match cfg.process {
-        Some(process) => {
-            let script_code = match process.command_line {
-                Some(s) if !s.is_empty() => s,
-                Some(_) if command_required => {
-                    return Err(WxcError::ConfigParse(
-                        "process.commandLine cannot be empty".to_string(),
-                    ));
-                }
-                None if command_required => {
-                    return Err(WxcError::ConfigParse(
-                        "Missing required field: process.commandLine".to_string(),
-                    ));
-                }
-                _ => String::new(),
-            };
+    let (script_code, working_directory, script_timeout, env, parent_task_id, task_display_name) =
+        match cfg.process {
+            Some(process) => {
+                let script_code = match process.command_line {
+                    Some(s) if !s.is_empty() => s,
+                    Some(_) if command_required => {
+                        return Err(WxcError::ConfigParse(
+                            "process.commandLine cannot be empty".to_string(),
+                        ));
+                    }
+                    None if command_required => {
+                        return Err(WxcError::ConfigParse(
+                            "Missing required field: process.commandLine".to_string(),
+                        ));
+                    }
+                    _ => String::new(),
+                };
 
-            // Null bytes can hide malicious payloads from audit logs.
-            if script_code.contains('\0') {
+                // Null bytes can hide malicious payloads from audit logs.
+                if script_code.contains('\0') {
+                    return Err(WxcError::ConfigParse(
+                        "process.commandLine must not contain null bytes".to_string(),
+                    ));
+                }
+
+                let parent_task_id = process.parent_task_id.unwrap_or_default();
+                if parent_task_id.contains('\0') {
+                    return Err(WxcError::ConfigParse(
+                        "process.parentTaskId must not contain null bytes".to_string(),
+                    ));
+                }
+
+                let task_display_name = process.task_display_name.unwrap_or_default();
+                if task_display_name.contains('\0') {
+                    return Err(WxcError::ConfigParse(
+                        "process.taskDisplayName must not contain null bytes".to_string(),
+                    ));
+                }
+
+                (
+                    script_code,
+                    process.cwd.unwrap_or_default(),
+                    process.timeout.unwrap_or(0),
+                    process.env.unwrap_or_default(),
+                    parent_task_id,
+                    task_display_name,
+                )
+            }
+            None if command_required => {
                 return Err(WxcError::ConfigParse(
-                    "process.commandLine must not contain null bytes".to_string(),
+                    "'process' section is required".into(),
                 ));
             }
-
-            (
-                script_code,
-                process.cwd.unwrap_or_default(),
-                process.timeout.unwrap_or(0),
-                process.env.unwrap_or_default(),
-            )
-        }
-        None if command_required => {
-            return Err(WxcError::ConfigParse(
-                "'process' section is required".into(),
-            ));
-        }
-        None => (String::new(), String::new(), 0, Vec::new()),
-    };
+            None => (
+                String::new(),
+                String::new(),
+                0,
+                Vec::new(),
+                String::new(),
+                String::new(),
+            ),
+        };
 
     // Containment backend selection. The wire enum has already constrained the
     // value to a known variant (invalid strings fail at deserialize); abstract
@@ -1388,6 +1412,8 @@ fn convert_wire_config(
         script_code,
         working_directory,
         script_timeout,
+        parent_task_id,
+        task_display_name,
         containment,
         lifecycle,
         policy,
@@ -4779,6 +4805,60 @@ mod tests {
 
         let req = load_request(&encoded, &mut logger, true).unwrap();
         assert_eq!(req.script_timeout, 9000);
+    }
+
+    #[test]
+    fn process_section_task_attribution_parsed() {
+        let json = r#"{
+            "process": {
+                "commandLine": "echo hi",
+                "parentTaskId": "parent-task-id",
+                "taskDisplayName": "OpenClaw agent process"
+            }
+        }"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert_eq!(req.parent_task_id, "parent-task-id");
+        assert_eq!(req.task_display_name, "OpenClaw agent process");
+    }
+
+    #[test]
+    fn process_section_task_attribution_defaults_when_absent() {
+        let json = r#"{"process": {"commandLine": "echo hi"}}"#;
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let req = load_request(&encoded, &mut logger, true).unwrap();
+        assert!(req.parent_task_id.is_empty());
+        assert!(req.task_display_name.is_empty());
+    }
+
+    #[test]
+    fn process_section_parent_task_id_rejects_null_bytes() {
+        let json =
+            "{\"process\":{\"commandLine\":\"echo hi\",\"parentTaskId\":\"parent\\u0000id\"}}";
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("process.parentTaskId must not contain null bytes"));
+    }
+
+    #[test]
+    fn process_section_task_display_name_rejects_null_bytes() {
+        let json =
+            "{\"process\":{\"commandLine\":\"echo hi\",\"taskDisplayName\":\"name\\u0000tail\"}}";
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("process.taskDisplayName must not contain null bytes"));
     }
 
     #[test]

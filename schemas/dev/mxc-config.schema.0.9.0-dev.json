@@ -770,6 +770,20 @@
             "null"
           ]
         },
+        "parentTaskId": {
+          "description": "Existing IsoTask parent for the launched process. Honored by the IsolationSession backend; ignored by other backends.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "taskDisplayName": {
+          "description": "Friendly IsoTask display name for the launched process. Honored by the IsolationSession backend; ignored by other backends.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "timeout": {
           "description": "Wall-clock timeout in milliseconds.",
           "maximum": 4294967295,

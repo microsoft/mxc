@@ -1110,6 +1110,14 @@
           },
           "type": "array"
         },
+        "parentTaskId": {
+          "description": "Optional existing IsoTask parent for the launched process.",
+          "type": "string"
+        },
+        "taskDisplayName": {
+          "description": "Optional friendly IsoTask display name for the launched process.",
+          "type": "string"
+        },
         "timeout": {
           "description": "Optional execution timeout in milliseconds.",
           "maximum": 4294967295,

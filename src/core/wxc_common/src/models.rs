@@ -953,6 +953,10 @@ pub struct ExecutionRequest {
     pub script_code: String,
     pub working_directory: String,
     pub script_timeout: u32,
+    /// Existing IsoTask parent for the launched process.
+    pub parent_task_id: String,
+    /// Friendly IsoTask display name for the launched process.
+    pub task_display_name: String,
     /// Which containment backend to use. Default: ProcessContainer.
     pub containment: ContainmentBackend,
     /// Shared lifecycle settings.

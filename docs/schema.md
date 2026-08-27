@@ -100,6 +100,8 @@ cannot mix both formats in one request.
                                            //  than inheriting the launcher's — see
                                            //  "Working Directory" below)
         "env": ["MY_VAR=value"],           // Environment variables as KEY=VALUE
+        "parentTaskId": "{task-id}",        // Optional IsoTask parent (IsolationSession only)
+        "taskDisplayName": "wxc-exec",      // Optional friendly task name (IsolationSession only)
         "timeout": 30000                   // Timeout in ms (0 = no timeout)
     },
 

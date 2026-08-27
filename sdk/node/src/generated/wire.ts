@@ -366,6 +366,14 @@ export interface Process {
    */
   env?: string[] | null;
   /**
+   * Existing IsoTask parent for the launched process. Honored by the IsolationSession backend; ignored by other backends.
+   */
+  parentTaskId?: string | null;
+  /**
+   * Friendly IsoTask display name for the launched process. Honored by the IsolationSession backend; ignored by other backends.
+   */
+  taskDisplayName?: string | null;
+  /**
    * Wall-clock timeout in milliseconds.
    */
   timeout?: number | null;

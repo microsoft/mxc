@@ -590,6 +590,14 @@ export interface Process {
    */
   env?: string[];
   /**
+   * Optional existing IsoTask parent for the launched process.
+   */
+  parentTaskId?: string;
+  /**
+   * Optional friendly IsoTask display name for the launched process.
+   */
+  taskDisplayName?: string;
+  /**
    * Optional execution timeout in milliseconds.
    */
   timeout?: number;

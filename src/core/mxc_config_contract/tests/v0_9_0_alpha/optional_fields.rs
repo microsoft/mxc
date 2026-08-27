@@ -182,6 +182,16 @@ fn rejects_null_optional_fields() {
                 r#""process": {"commandLine": "echo", "env": null}"#,
             ),
             (
+                "process.parentTaskId",
+                version,
+                r#""process": {"commandLine": "echo", "parentTaskId": null}"#,
+            ),
+            (
+                "process.taskDisplayName",
+                version,
+                r#""process": {"commandLine": "echo", "taskDisplayName": null}"#,
+            ),
+            (
                 "process.timeout",
                 version,
                 r#""process": {"commandLine": "echo", "timeout": null}"#,
