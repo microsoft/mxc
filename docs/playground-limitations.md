@@ -46,6 +46,19 @@ work if the ACL is set:
 icacls C:\Python314 /grant "ALL APPLICATION PACKAGES:(OI)(CI)(RX)" /T
 ```
 
+### git and files created by an elevated process
+
+git refuses a repository whose owner is not the caller (`fatal: detected dubious
+ownership`). It makes one exception — a repo owned by `BUILTIN\Administrators` is
+accepted if the caller is *itself* an elevated administrator — and a contained
+process can never qualify, because the AppContainer token drops that membership.
+
+An elevated process's token hands out `BUILTIN\Administrators` as the default
+owner of everything it creates, so **any repo cloned or created while elevated is
+unusable from inside a container**, even though the same repo works fine on the
+host. Create it unelevated, reassign the owner, or add it to `safe.directory` in
+protected (system/global) git config.
+
 This is a Windows security model limitation, not an MXC bug.
 
 ## Network Limitations

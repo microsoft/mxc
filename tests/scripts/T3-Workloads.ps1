@@ -402,6 +402,42 @@ function W3-PwshGitVersion {
         -ExitCode $r.ExitCode -Detail "stdout=$($r.Stdout.Trim())" -Stderr $r.Stderr
 }
 
+function Repair-FixtureOwnership {
+    param([string]$Dir)
+    # An elevated process's token hands out BUILTIN\Administrators as the
+    # *default owner* of everything it creates, so on a CI agent the repo this
+    # harness just built is owned by Administrators rather than by the user.
+    #
+    # git then refuses it: `detected dubious ownership`. git accepts an
+    # Administrators-owned repo only when the caller is *itself* an elevated
+    # administrator, and a contained process never is -- the AppContainer token
+    # drops that membership by construction. So the check fires inside the
+    # sandbox and cannot be satisfied there.
+    #
+    # That is an artifact of who built the fixture, not of containment: on a
+    # non-elevated dev box the same repo is user-owned and W4/W5 pass. Restamp
+    # the tree so the fixture is identical in both places and the workloads
+    # test git-in-a-sandbox rather than git's host ownership heuristic.
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $items = @(Get-Item -LiteralPath $Dir -Force) +
+             @(Get-ChildItem -LiteralPath $Dir -Recurse -Force -ErrorAction SilentlyContinue)
+    $restamped = 0
+    foreach ($item in $items) {
+        try {
+            $acl = Get-Acl -LiteralPath $item.FullName
+            if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]) -eq $user) { continue }
+            $acl.SetOwner($user)
+            Set-Acl -LiteralPath $item.FullName -AclObject $acl
+            $restamped++
+        } catch {
+            Write-Host ("  WARNING: could not set owner on {0}: {1}" -f $item.FullName, $_.Exception.Message) -ForegroundColor Yellow
+        }
+    }
+    if ($restamped -gt 0) {
+        Write-Host ("  reowned {0} fixture object(s) to {1} (harness is running elevated)" -f $restamped, $user.Value)
+    }
+}
+
 function Initialize-Repo {
     param([string]$Dir)
     # Build a tiny standalone repo via real git, then we'll exercise
@@ -420,6 +456,7 @@ function Initialize-Repo {
     } finally {
         Pop-Location
     }
+    Repair-FixtureOwnership -Dir $Dir
 }
 
 function W4-PwshGitStatus {

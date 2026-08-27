@@ -148,6 +148,15 @@ across the system drive on every run and again on teardown — acceptable on a
 disposable runner, which is why the switch is off by default and only CI opts
 in. Temporary until pwsh 7.7 leaves preview.
 
+The suite's git workloads also restamp the ownership of the repo they build.
+The 1ES agent runs elevated, and an elevated token's *default owner* is
+`BUILTIN\Administrators`, so a fixture created there is Administrators-owned;
+git refuses such a repo ("detected dubious ownership") unless the caller is
+itself an elevated administrator, which a contained process never is. That is a
+property of the agent rather than of containment — the identical fixture is
+user-owned on a dev box — so the suite reowns it to the current user and keeps
+the two environments testing the same thing.
+
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
 accepted-id lists (`ValidateSet` on Windows, the `case` arms on Unix) are what
