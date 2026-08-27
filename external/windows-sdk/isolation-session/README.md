@@ -3,6 +3,13 @@
 This directory tracks provenance for the generated Rust bindings in
 `src/backends/isolation_session/bindings/`. The WinMD file itself is NOT checked in.
 
+The bindings crate contains two generated projections:
+
+- `bindings.rs` projects `Windows.AI.IsolationSession.Preview` for the stable
+  provisioning and lifecycle APIs.
+- `official_bindings.rs` projects `Windows.AI.IsolationSession` for
+  IsoTask-aware process options and process launch.
+
 ## Source
 
 The WinMD file is produced by an internal Microsoft Windows OS build and is

@@ -4,4 +4,12 @@
 [tool]
 windows_bindgen_version = "0.62.1"
 target_windows_crate = "0.62"
-generated_date = "2026-08-14"
+generated_date = "2026-08-27"
+
+[projections.preview]
+namespace = "Windows.AI.IsolationSession.Preview"
+output = "src/backends/isolation_session/bindings/src/bindings.rs"
+
+[projections.official]
+namespace = "Windows.AI.IsolationSession"
+output = "src/backends/isolation_session/bindings/src/official_bindings.rs"

@@ -7,7 +7,7 @@
 
 use wxc_common::models::ExecutionRequest;
 
-use isolation_session_bindings::bindings::IsoSessionProcessOptions;
+use isolation_session_bindings::official_bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
 use super::error::{op, transport_err, IsolationSessionError};
@@ -41,6 +41,10 @@ pub(super) struct ProcessOptions {
     pub timeout_ms: u32,
     /// Empty = default working directory.
     pub working_directory: String,
+    /// Empty = use the session's default process-task parent.
+    pub parent_task_id: String,
+    /// Empty = let the broker derive the process-task display name.
+    pub task_display_name: String,
     pub env_vars: Vec<(String, String)>,
     pub redirect_flags: u32,
     /// `true` asks the OS API to set up a ConPTY in the isolation session.
@@ -84,6 +88,8 @@ pub(super) fn build_process_options(
         arguments: format!("/c {}", request.script_code),
         timeout_ms: request.script_timeout,
         working_directory: request.working_directory.clone(),
+        parent_task_id: request.parent_task_id.clone(),
+        task_display_name: request.task_display_name.clone(),
         env_vars,
         redirect_flags: compute_redirect_flags(interactive),
         interactive,
@@ -160,6 +166,18 @@ pub(super) fn build_iso_process_options(
         proc_options
             .SetWorkingDirectory(&HSTRING::from(&options.working_directory))
             .map_err(|e| transport_err(op::OPTIONS_WORKING_DIR, "set failed", &e))?;
+    }
+
+    if !options.parent_task_id.is_empty() {
+        proc_options
+            .SetParentTaskId(&HSTRING::from(&options.parent_task_id))
+            .map_err(|e| transport_err(op::OPTIONS_PARENT_TASK_ID, "set failed", &e))?;
+    }
+
+    if !options.task_display_name.is_empty() {
+        proc_options
+            .SetTaskDisplayName(&HSTRING::from(&options.task_display_name))
+            .map_err(|e| transport_err(op::OPTIONS_TASK_DISPLAY_NAME, "set failed", &e))?;
     }
 
     proc_options
@@ -319,6 +337,19 @@ mod tests {
         };
         let opts = build_process_options(&request, false);
         assert_eq!(opts.working_directory, r"C:\Windows");
+    }
+
+    #[test]
+    fn options_maps_task_attribution() {
+        let request = ExecutionRequest {
+            script_code: "echo hi".to_string(),
+            parent_task_id: "parent-task-id".to_string(),
+            task_display_name: "OpenClaw agent process".to_string(),
+            ..Default::default()
+        };
+        let opts = build_process_options(&request, false);
+        assert_eq!(opts.parent_task_id, "parent-task-id");
+        assert_eq!(opts.task_display_name, "OpenClaw agent process");
     }
 
     #[test]

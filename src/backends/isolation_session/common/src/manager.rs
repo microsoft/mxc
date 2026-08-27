@@ -11,8 +11,10 @@ use wxc_common::sandbox_process::StreamCloser;
 use wxc_common::state_aware_backend::ExecOutcome;
 
 use isolation_session_bindings::bindings::{
-    IsoSessionFeature, IsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
-    IsoSessionUserResult,
+    IsoSessionFeature, IsoSessionOps, IsoSessionUserResult,
+};
+use isolation_session_bindings::official_bindings::{
+    IsoSessionOps as OfficialIsoSessionOps, IsoSessionProcess, IsoSessionProcessResult,
 };
 use windows::Win32::Foundation::{CO_E_NOTINITIALIZED, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::System::Com::{
@@ -29,8 +31,8 @@ use windows_core::{HSTRING, PCWSTR};
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
 use super::error::{
-    activation_error, check_result, format_iso_error, lifecycle_err, op, sta_refusal,
-    transport_err, IsolationSessionError, StalePromotion,
+    activation_error, check_result, format_iso_error, format_official_iso_error, lifecycle_err, op,
+    sta_refusal, transport_err, IsolationSessionError, StalePromotion,
 };
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
@@ -148,6 +150,10 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
         // API at all.
         Err(e) => Err(activation_error(e.code().0 as u32, &e.message())),
     }
+}
+
+fn activate_official_process_api() -> Result<OfficialIsoSessionOps, IsolationSessionError> {
+    OfficialIsoSessionOps::new().map_err(|e| activation_error(e.code().0 as u32, &e.message()))
 }
 
 /// Decides whether the host supports app-scoped registration — i.e. the
@@ -367,10 +373,10 @@ impl IsolationSessionManager {
         &self,
         options: &ProcessOptions,
     ) -> Result<StartedProcess, IsolationSessionError> {
+        let process_ops = activate_official_process_api()?;
         let proc_options = build_iso_process_options(options)?;
 
-        let async_op = self
-            .ops
+        let async_op = process_ops
             .RunProcessWithOptionsAsync(
                 &self.agent_user_name,
                 &HSTRING::from(&options.process_path),
@@ -389,7 +395,7 @@ impl IsolationSessionManager {
             .IsError()
             .map_err(|e| transport_err(op::RUN_PROCESS, "get IsError failed", &e))?;
         if is_error {
-            return Err(format_iso_error(
+            return Err(format_official_iso_error(
                 op::RUN_PROCESS,
                 &err,
                 StalePromotion::Eligible,

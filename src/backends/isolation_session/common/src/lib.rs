@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 
 //! IsolationSession backend — executes scripts in an isolated Windows
-//! session via the in-proc `Windows.AI.IsolationSession.Preview` `IsoSessionOps`
-//! API. `IsolationSessionRunner` is the only externally-reachable type;
+//! session via the in-proc IsolationSession WinRT APIs. The stable Preview API
+//! owns provisioning and lifecycle operations; the official API owns
+//! IsoTask-aware process creation. `IsolationSessionRunner` is the only
+//! externally-reachable type;
 //! the granular lifecycle wrapper (`IsolationSessionManager`) and helpers
 //! are module-private.
 //!

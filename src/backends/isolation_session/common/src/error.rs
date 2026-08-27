@@ -14,6 +14,7 @@ use wxc_common::models::ScriptResponse;
 use wxc_common::mxc_error::{ApiFailure, MxcError, MxcErrorCode};
 
 use isolation_session_bindings::bindings::{IsoSessionError, IsoSessionResult};
+use isolation_session_bindings::official_bindings::IsoSessionError as OfficialIsoSessionError;
 
 /// Interface-qualified names of the API operations this backend invokes.
 ///
@@ -41,6 +42,9 @@ pub(super) mod op {
     pub(crate) const OPTIONS_NEW: &str = "IsoSessionProcessOptions.new";
     pub(crate) const OPTIONS_TIMEOUT: &str = "IsoSessionProcessOptions.SetTimeoutMilliseconds";
     pub(crate) const OPTIONS_WORKING_DIR: &str = "IsoSessionProcessOptions.SetWorkingDirectory";
+    pub(crate) const OPTIONS_PARENT_TASK_ID: &str = "IsoSessionProcessOptions.SetParentTaskId";
+    pub(crate) const OPTIONS_TASK_DISPLAY_NAME: &str =
+        "IsoSessionProcessOptions.SetTaskDisplayName";
     pub(crate) const OPTIONS_INTERACTIVE: &str = "IsoSessionProcessOptions.SetInteractiveConsole";
     pub(crate) const OPTIONS_REDIRECT_STDIN: &str =
         "IsoSessionProcessOptions.SetRedirectStandardInput";
@@ -351,15 +355,46 @@ pub(super) fn format_iso_error(
     err: &IsoSessionError,
     promotion: StalePromotion,
 ) -> IsolationSessionError {
+    format_iso_error_fields(
+        operation,
+        err.Message(),
+        err.Remediation(),
+        err.Code(),
+        promotion,
+    )
+}
+
+/// Reads an official API error's components and classifies them using the same
+/// rules as the Preview lifecycle API.
+pub(super) fn format_official_iso_error(
+    operation: &str,
+    err: &OfficialIsoSessionError,
+    promotion: StalePromotion,
+) -> IsolationSessionError {
+    format_iso_error_fields(
+        operation,
+        err.Message(),
+        err.Remediation(),
+        err.Code(),
+        promotion,
+    )
+}
+
+fn format_iso_error_fields(
+    operation: &str,
+    message_result: windows_core::Result<windows_core::HSTRING>,
+    remediation_result: windows_core::Result<windows_core::HSTRING>,
+    code_result: windows_core::Result<windows_core::HRESULT>,
+    promotion: StalePromotion,
+) -> IsolationSessionError {
     // Both getters are best-effort and may also answer with an empty string,
     // so both collapse to `None` here and `IsoApiFailure::new` decides what an
     // absent value means for each field.
-    let message = err
-        .Message()
+    let message = message_result
         .map(|h| h.to_string())
         .ok()
         .filter(|m| !m.is_empty());
-    let remediation = err.Remediation().map(|h| h.to_string()).ok();
+    let remediation = remediation_result.map(|h| h.to_string()).ok();
 
     // `Code()` is the classification-critical field: it drives the `Stale`
     // promotion, so fabricating 0 when the getter fails would silently
@@ -367,7 +402,7 @@ pub(super) fn format_iso_error(
     // read failure instead and leave the code unknown, which also keeps
     // `nativeCode` off the wire rather than carrying the getter's own
     // HRESULT — that would describe reading the field, not the operation.
-    match err.Code() {
+    match code_result {
         Ok(code) => classify_api_failure(
             IsoApiFailure::new(operation, Some(code.0 as u32), message, remediation),
             promotion,

@@ -180,11 +180,9 @@ pub struct Process {
     pub cwd: Option<String>,
     /// Environment variables as `"KEY=VALUE"` strings.
     pub env: Option<Vec<String>>,
-    /// Existing IsoTask parent for the launched process. Honored by the
-    /// IsolationSession backend; ignored by other backends.
+    /// Existing IsoTask parent for the launched process. IsolationSession only.
     pub parent_task_id: Option<String>,
-    /// Friendly IsoTask display name for the launched process. Honored by the
-    /// IsolationSession backend; ignored by other backends.
+    /// Friendly IsoTask display name for the launched process. IsolationSession only.
     pub task_display_name: Option<String>,
     /// Wall-clock timeout in milliseconds.
     pub timeout: Option<u32>,

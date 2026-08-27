@@ -771,14 +771,14 @@
           ]
         },
         "parentTaskId": {
-          "description": "Existing IsoTask parent for the launched process. Honored by the IsolationSession backend; ignored by other backends.",
+          "description": "Existing IsoTask parent for the launched process. IsolationSession only.",
           "type": [
             "string",
             "null"
           ]
         },
         "taskDisplayName": {
-          "description": "Friendly IsoTask display name for the launched process. Honored by the IsolationSession backend; ignored by other backends.",
+          "description": "Friendly IsoTask display name for the launched process. IsolationSession only.",
           "type": [
             "string",
             "null"

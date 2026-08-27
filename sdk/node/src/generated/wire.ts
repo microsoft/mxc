@@ -366,11 +366,11 @@ export interface Process {
    */
   env?: string[] | null;
   /**
-   * Existing IsoTask parent for the launched process. Honored by the IsolationSession backend; ignored by other backends.
+   * Existing IsoTask parent for the launched process. IsolationSession only.
    */
   parentTaskId?: string | null;
   /**
-   * Friendly IsoTask display name for the launched process. Honored by the IsolationSession backend; ignored by other backends.
+   * Friendly IsoTask display name for the launched process. IsolationSession only.
    */
   taskDisplayName?: string | null;
   /**

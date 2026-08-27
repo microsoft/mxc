@@ -811,6 +811,16 @@ fn convert_wire_config(
 
     validate_single_backend_section(containment.clone(), &present_backend_sections)?;
 
+    if containment != ContainmentBackend::IsolationSession
+        && (!parent_task_id.is_empty() || !task_display_name.is_empty())
+    {
+        return Err(WxcError::ConfigParse(
+            "process.parentTaskId and process.taskDisplayName are supported only by \
+             containment 'isolation_session'"
+                .to_string(),
+        ));
+    }
+
     // LXC configuration
     let lxc_config = match cfg.lxc {
         Some(l) => LxcConfig {
@@ -4810,6 +4820,7 @@ mod tests {
     #[test]
     fn process_section_task_attribution_parsed() {
         let json = r#"{
+            "containment": "isolation_session",
             "process": {
                 "commandLine": "echo hi",
                 "parentTaskId": "parent-task-id",
@@ -4859,6 +4870,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("process.taskDisplayName must not contain null bytes"));
+    }
+
+    #[test]
+    fn process_section_task_attribution_rejects_other_backends() {
+        for field in [
+            r#""parentTaskId": "parent-task-id""#,
+            r#""taskDisplayName": "OpenClaw agent process""#,
+        ] {
+            let json = format!(
+                r#"{{
+                    "containment": "process",
+                    "process": {{"commandLine": "echo hi", {field}}}
+                }}"#
+            );
+            let encoded = base64_encode(json.as_bytes());
+            let mut logger = test_logger();
+
+            let error = load_request(&encoded, &mut logger, true).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("supported only by containment 'isolation_session'"));
+        }
     }
 
     #[test]
