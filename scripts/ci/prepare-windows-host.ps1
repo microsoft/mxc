@@ -152,10 +152,23 @@ function Initialize-ProcessContainerHost {
 # a missing one is an image problem, not something the job can fix mid-run.
 function Assert-WorkloadInterpreters {
     $interpreters = @(
-        @{ Name = 'pwsh';   Candidates = @('pwsh');              Required = $true;  Remedy = 'install PowerShell 7 in the image' },
-        @{ Name = 'git';    Candidates = @('git');               Required = $false; Remedy = 'install Git for Windows in the image' },
-        @{ Name = 'node';   Candidates = @('node');              Required = $false; Remedy = 'install Node.js in the image' },
-        @{ Name = 'python'; Candidates = @('python', 'python3'); Required = $false; Remedy = 'install Python in the image' }
+        @{ Name = 'pwsh';    Candidates = @('pwsh');              Required = $true;  Remedy = 'install PowerShell 7 in the image' },
+        @{ Name = 'git';     Candidates = @('git');               Required = $false; Remedy = 'install Git for Windows in the image' },
+        @{ Name = 'node';    Candidates = @('node');              Required = $false; Remedy = 'install Node.js in the image' },
+        @{ Name = 'npm';     Candidates = @('npm');               Required = $false; Remedy = 'install Node.js in the image (npm ships with it)' },
+        @{ Name = 'npx';     Candidates = @('npx');               Required = $false; Remedy = 'install Node.js in the image (npx ships with it)' },
+        @{ Name = 'python';  Candidates = @('python', 'python3'); Required = $false; Remedy = 'install Python in the image' },
+        @{ Name = 'pip';     Candidates = @('pip', 'pip3');       Required = $false; Remedy = 'install Python in the image (pip ships with it)' },
+        @{ Name = 'dotnet';  Candidates = @('dotnet');            Required = $false; Remedy = 'install the .NET SDK in the image' },
+        @{ Name = 'az';      Candidates = @('az');                Required = $false; Remedy = 'install the Azure CLI in the image' },
+        @{ Name = 'gh';      Candidates = @('gh');                Required = $false; Remedy = 'install the GitHub CLI in the image' },
+        @{ Name = 'openssl'; Candidates = @('openssl');           Required = $false; Remedy = 'install OpenSSL in the image' },
+        # Windows-only
+        @{ Name = 'nuget';   Candidates = @('nuget');             Required = $false; Remedy = 'install the NuGet CLI in the image' },
+        @{ Name = 'winapp';  Candidates = @('winapp');            Required = $false; Remedy = 'install the Windows App Development CLI (winget install Microsoft.WinAppCli) in the image' },
+        @{ Name = 'winget';  Candidates = @('winget');            Required = $false; AllowStoreAlias = $true; Remedy = 'install the Windows Package Manager (App Installer) in the image' },
+        @{ Name = 'scoop';   Candidates = @('scoop');             Required = $false; Remedy = 'install Scoop in the image' },
+        @{ Name = 'choco';   Candidates = @('choco');             Required = $false; Remedy = 'install Chocolatey in the image' }
     )
 
     $missing = @()
@@ -163,10 +176,16 @@ function Assert-WorkloadInterpreters {
         $resolved = $null
         foreach ($candidate in $tool.Candidates) {
             $found = Get-Command $candidate -ErrorAction SilentlyContinue
-            # A command resolving into WindowsApps is a Microsoft Store
+            # A command resolving into WindowsApps is normally a Microsoft Store
             # AppExecutionAlias stub: a 0-byte redirect that opens the Store
             # rather than running, which the suite deliberately ignores.
-            if ($found -and $found.Source -notlike '*\WindowsApps\*') {
+            #
+            # WindowsApps is also how App Installer legitimately delivers winget,
+            # and a working alias is indistinguishable from a stub by path or by
+            # size (both are 0-byte reparse points). So entries that ship that
+            # way opt out of the filter via AllowStoreAlias; blanket-filtering
+            # them reports an installed tool as missing.
+            if ($found -and ($tool['AllowStoreAlias'] -or $found.Source -notlike '*\WindowsApps\*')) {
                 $resolved = $found.Source
                 break
             }

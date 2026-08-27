@@ -32,7 +32,6 @@ the individual local test scripts are documented in
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
-| `scripts/ci/assert-workload-interpreters.sh` | Shared Linux/macOS workload-interpreter inventory check. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
@@ -289,10 +288,17 @@ Every one of the three scripts also runs the workload-interpreter check
 ### Workload interpreters
 
 Some suites do not just exercise MXC's primitives — they run *real programs*
-(`pwsh`, `git`, `node`, `python`, `cmd`) inside the sandbox and assert on what
-those programs produce. Each preparation script verifies that host-side
-inventory up front, so a missing tool is reported once as a preparation result
-rather than repeatedly as a confusing mid-suite failure.
+inside the sandbox and assert on what those programs produce. Each preparation
+script verifies that host-side inventory up front, so a missing tool is reported
+once as a preparation result rather than repeatedly as a confusing mid-suite
+failure.
+
+The list is `pwsh`, `git`, `node`, `npm`, `npx`, `python`, `pip`, `dotnet`, `az`,
+`gh`, and `openssl` on every OS, plus `nuget`, `winapp` (the Windows App
+Development CLI), `winget`, `scoop`, and `choco` on Windows only, and `brew` on
+macOS only. The Windows five have no Unix counterpart — except NuGet, which Unix
+reaches through `dotnet nuget` rather than a standalone binary, so checking for
+one there would warn forever.
 
 The check is **suite-agnostic by design**, and runs for *every* backend rather
 than only the ones whose suites happen to need it today. It describes what a
@@ -301,18 +307,22 @@ any current or future suite that shells out to these programs is served by the
 same list. `T3-Workloads.ps1` is simply the first caller; wiring up the next one
 needs no change here.
 
-There are two implementations, because the two host families share no shell:
-`Assert-WorkloadInterpreters` in `prepare-windows-host.ps1`, and
-`assert-workload-interpreters.sh`, which Linux and macOS both invoke. The Unix
-script is written to bash 3.2 — no associative arrays — because that is what
-macOS still ships.
+Each preparation script carries its own copy — `Assert-WorkloadInterpreters` in
+`prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
+scripts.
 
 Each inventory entry carries:
 
 - the command names to try, in order. Resolution mirrors what the suites
-  themselves do: on Windows `python` is tried before `python3` and a match under
-  `WindowsApps` is ignored (that is a Microsoft Store alias stub, not a real
-  interpreter), while on Unix `python3` is tried first.
+  themselves do: on Windows `python` is tried before `python3`, while on Unix
+  `python3` is tried first.
+- on Windows, whether a match under `WindowsApps` counts. By default it does
+  not: that is usually a Microsoft Store `AppExecutionAlias` stub, a 0-byte
+  redirect that opens the Store rather than running. But `WindowsApps` is also
+  how App Installer legitimately ships `winget`, and a working alias is
+  indistinguishable from a stub by path or size — both are 0-byte reparse
+  points — so entries delivered that way set `AllowStoreAlias` and opt out.
+  Without it the check reports an installed `winget` as missing.
 - whether an absence fails the job or only warns. On Windows only `pwsh` is
   required; its absence means a mis-imaged pool. Everything else warns, because
   suites are expected to report their dependent cases as skipped rather than

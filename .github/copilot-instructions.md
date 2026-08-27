@@ -91,10 +91,12 @@ matrix `backend` id: `scripts/ci/prepare-windows-host.ps1`,
 `scripts/ci/prepare-linux-host.sh`, and `scripts/ci/prepare-macos-host.sh`. A
 backend with no prerequisites is an explicit no-op, so the step runs
 unconditionally for every entry. Independent of the backend id, all three also
-verify the host's workload interpreters (`pwsh`, `git`, `node`, `python`) —
-Windows in `Assert-WorkloadInterpreters`, Linux and macOS via the shared
-bash-3.2-compatible `scripts/ci/assert-workload-interpreters.sh`. Interpreters
-are verified, never installed.
+verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
+`npx`, `python`, `pip`, `dotnet`, `az`, `gh`, `openssl`, plus `nuget`, `winapp`,
+`winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
+Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
+duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
+platform's list can diverge. These are verified, never installed.
 
 **Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
 (Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map
