@@ -2160,6 +2160,10 @@ impl NetworkIptablesManager {
             Self::publish_created(created);
             return Err(e);
         }
+        logger.log_line(&format!(
+            "OUTPUT hook installed in the container namespace for chain {} (iptables).",
+            self.chain_name
+        ));
 
         if ipv6_enabled {
             created.v6.hook = true;
@@ -2169,6 +2173,10 @@ impl NetworkIptablesManager {
                 Self::publish_created(created);
                 return Err(e);
             }
+            logger.log_line(&format!(
+                "OUTPUT hook installed in the container namespace for chain {} (ip6tables).",
+                self.chain_name
+            ));
         }
 
         Ok(())

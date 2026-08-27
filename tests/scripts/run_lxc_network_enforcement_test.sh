@@ -1,7 +1,7 @@
 #!/bin/bash
 # LXC network policy enforcement test
 #
-# Every other network script asserts that the FORWARD hook was *installed*.
+# Every other network script asserts that the OUTPUT hook was *installed*.
 # That is a log line, and a hook can install cleanly, name the right chain,
 # and still match no packet -- which is exactly how a fully populated deny-all
 # chain that filtered nothing once passed every script in this directory.
