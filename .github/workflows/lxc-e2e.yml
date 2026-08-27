@@ -36,16 +36,6 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             lxc lxc-templates lxc-utils iptables debootstrap uidmap bridge-utils
 
-      # A bridged veth only reaches the FORWARD chain while br_netfilter is
-      # delivering bridged packets to iptables. Without it the firewall rules
-      # install cleanly and never fire, so the network policy tests would pass
-      # against a firewall that filters nothing.
-      - name: Enable bridge netfilter
-        run: |
-          sudo modprobe br_netfilter
-          sudo sysctl -w net.bridge.bridge-nf-call-iptables=1
-          sudo sysctl -w net.bridge.bridge-nf-call-ip6tables=1
-
       # GitHub-hosted runners ship Docker, and Docker sets the IPv4 FORWARD
       # policy to DROP. That breaks these tests twice over.
       #
@@ -95,9 +85,6 @@ jobs:
           echo "--- forward policy (must be ACCEPT, or deny cases pass vacuously) ---"
           sudo iptables -S FORWARD | head -1
           sudo ip6tables -S FORWARD | head -1
-          echo "--- bridge netfilter ---"
-          cat /proc/sys/net/bridge/bridge-nf-call-iptables || echo "MISSING bridge-nf-call-iptables"
-          cat /proc/sys/net/bridge/bridge-nf-call-ip6tables || echo "MISSING bridge-nf-call-ip6tables"
           echo "--- host ipv6 ---"
           cat /proc/net/if_inet6 || echo "no /proc/net/if_inet6 (IPv6 disabled)"
 

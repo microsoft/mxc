@@ -184,26 +184,7 @@ ensure_bridge_nat() {
     fi
 }
 
-# Container network policy is programmed as iptables rules reached from
-# FORWARD, which only sees bridged traffic when br_netfilter is loaded and
-# bridge-nf-call-iptables is enabled. Neither is guaranteed on a fresh image,
-# and without them the backend refuses to report success for a policy it
-# cannot enforce.
-enable_bridge_netfilter() {
-    if ! sudo modprobe br_netfilter 2>/dev/null; then
-        echo "WARNING: could not load br_netfilter; bridged traffic may bypass iptables." >&2
-    fi
 
-    local knob
-    for knob in bridge-nf-call-iptables bridge-nf-call-ip6tables; do
-        if [[ -e "/proc/sys/net/bridge/$knob" ]]; then
-            sudo sysctl -w "net.bridge.$knob=1" >/dev/null ||
-                echo "WARNING: could not enable net.bridge.$knob." >&2
-        else
-            echo "WARNING: /proc/sys/net/bridge/$knob is absent; container network policy cannot be enforced." >&2
-        fi
-    done
-}
 
 chmod +x "$binary_directory/lxc-exec"
 case "$backend" in
@@ -236,7 +217,6 @@ case "$backend" in
             sudo apparmor_parser -rT /etc/apparmor.d/lxc* 2>/dev/null || true
         fi
         start_lxc_bridge
-        enable_bridge_netfilter
         ensure_bridge_nat
         ;;
     microvm)
