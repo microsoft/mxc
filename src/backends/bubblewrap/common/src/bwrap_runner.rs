@@ -512,8 +512,8 @@ impl BubblewrapScriptRunner {
                     .stderr(Stdio::piped());
             }
             StdioMode::Inherit => {
-                // The child (bwrap, PID 1 of the sandbox) inherits the binary's
-                // stdio directly — a TTY when the binary has one.
+                // The child (bwrap) inherits the binary's stdio directly — a
+                // TTY when the binary has one.
                 command
                     .stdin(Stdio::inherit())
                     .stdout(Stdio::inherit())
@@ -523,9 +523,10 @@ impl BubblewrapScriptRunner {
         // Pipes mode: put bwrap in its own process group so a timeout / `kill()`
         // can tree-kill it with a single `killpg` without touching the host's
         // group. Inherit mode keeps bwrap in the executor's group (so it retains
-        // the controlling terminal and can't be SIGTTIN-stopped reading it); it's
-        // PID 1 of the new pid namespace (`--unshare-pid`), so killing the root
-        // process alone tears the whole sandbox down.
+        // the controlling terminal and can't be SIGTTIN-stopped reading it);
+        // there, killing bwrap relies on `--die-with-parent` to take the
+        // sandbox down, since bwrap forks and is not itself PID 1 of the new
+        // pid namespace.
         let group = stdio == StdioMode::Pipes;
         if group {
             command.process_group(0);
@@ -638,7 +639,7 @@ struct BwrapChild {
     stderr_canceller: Option<ReadCanceller>,
     /// `true` when bwrap leads its own process group (`Pipes` mode), so
     /// termination signals the whole group; `false` for `Inherit` mode, where
-    /// killing bwrap (pid 1 of the namespace) alone tears the sandbox down.
+    /// killing bwrap relies on `--die-with-parent` to take the sandbox with it.
     group: bool,
     proxy: UnixProxyCoordinator,
     proxy_network: Option<proxy_network::ProxyNetworkNamespace>,
@@ -785,8 +786,8 @@ impl Drop for BubblewrapSandboxProcess {
         // Kill and reap the child *before* removing network enforcement —
         // otherwise an abandoned-but-running sandbox would keep egressing after
         // its iptables/proxy rules were torn down, and the child would leak as
-        // a zombie. `kill()` group-kills (bwrap is PID 1 of the pid namespace),
-        // then we reap.
+        // a zombie. `kill()` group-kills in `Pipes` mode and relies on
+        // `--die-with-parent` otherwise, then we reap.
         let _ = self.kill();
         let _ = self.inner.child.wait();
         self.run_teardown();

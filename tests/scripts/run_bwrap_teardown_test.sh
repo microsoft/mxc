@@ -61,10 +61,16 @@ assert_no_survivors() {
     fi
 
     # The run must actually have timed out; otherwise there was never anything
-    # to leak and the assertions below are vacuous.
+    # to leak and the assertions below are vacuous. A nonzero exit alone is not
+    # enough -- any backend error raised after TEARDOWN_STARTED would satisfy
+    # the survivor checks trivially -- so pin the timeout diagnostic itself.
     if [ "$rc" = 0 ]; then
         echo "$out"
         fail "$label (the run did not time out, so this proves nothing)"
+    fi
+    if ! grep -qF "script timed out" <<<"$out"; then
+        echo "$out"
+        fail "$label (exited $rc for some reason other than the timeout, so this proves nothing)"
     fi
     if ! grep -qF "TEARDOWN_STARTED" <<<"$out"; then
         echo "$out"
@@ -77,6 +83,10 @@ assert_no_survivors() {
 
     if pgrep -f "$sleep_marker" >/dev/null 2>&1; then
         pgrep -af "$sleep_marker" || true
+        # Clean up before failing: the marker uniquely identifies this test's
+        # descendant, and leaving it sleeping for ~16 minutes would pollute the
+        # host and skew the baseline counts of any later run.
+        pkill -f "$sleep_marker" || true
         fail "$label (a backgrounded descendant outlived the sandbox)"
     fi
 
@@ -104,6 +114,9 @@ if command -v slirp4netns >/dev/null 2>&1; then
         "bubblewrap_teardown_timeout_netns.json" "sleep 986"
 else
     echo "SKIP: slirp4netns not installed; the private-namespace teardown case needs it."
+    # 77, not 0: run_bwrap_all_tests.sh must record SKIPPED, not a false PASS,
+    # or strict CI cannot tell that the slirp case never ran.
+    exit 77
 fi
 
 echo "All Bubblewrap teardown tests passed."
