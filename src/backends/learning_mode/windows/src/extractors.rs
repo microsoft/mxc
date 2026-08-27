@@ -107,6 +107,8 @@ pub struct RawDenial {
     pub access_type: AccessType,
     /// Kernel `FILETIME` of the event.
     pub filetime: u64,
+    /// Optional resource-family-specific metadata.
+    pub details: Option<learning_mode_core::DenialDetails>,
     /// Originating ETW event ID (kept for diagnostics).
     pub event_id: u16,
     /// Symbolic category of the originating provider, for verbose logging
@@ -138,6 +140,9 @@ pub fn extract_denial(
     if !is_learning_mode_event(parts.provider, parts.event_id) {
         return Err(VerboseLoggingExclusionReason::UnsupportedEventSchema);
     }
+    if parts.provider == crate::network_extractors::NETWORK_DECISION_PROVIDER {
+        return crate::network_extractors::extract_network_denial(parts);
+    }
 
     match parts.event_id {
         ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
@@ -159,6 +164,10 @@ pub fn extract_denial(
 pub(crate) fn verbose_logging_classification(
     parts: &DecodedEventParts,
 ) -> (Option<AccessType>, Option<ResourceType>) {
+    if parts.provider == crate::network_extractors::NETWORK_DECISION_PROVIDER {
+        return crate::network_extractors::verbose_logging_classification(parts);
+    }
+
     match parts.event_id {
         ACCESS_CHECK_EVENT_ID | PRIVACY_ACCESS_CHECK_EVENT_ID => {
             let Some(object_type) = find_prop(&parts.props, "ObjectType") else {
@@ -221,13 +230,20 @@ pub(crate) fn is_learning_mode_event(provider: GUID, event_id: u16) -> bool {
                 | LEARNING_MODE_VIOLATION_EVENT_ID
                 | PRIVACY_ACCESS_CHECK_EVENT_ID
         )
+    } else if provider == crate::network_extractors::NETWORK_DECISION_PROVIDER {
+        event_id == crate::network_extractors::NETWORK_DECISION_EVENT_ID
     } else {
         false
     }
 }
 
 pub(crate) fn effective_event_pid(parts: &DecodedEventParts, header_pid: u32) -> Option<u32> {
-    if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
+    if parts.provider == crate::network_extractors::NETWORK_DECISION_PROVIDER {
+        // Public WFP NetEvents carry package/application identity but no
+        // reliable workload PID. PID 0 is the explicit wire sentinel for
+        // unavailable process identity.
+        Some(0)
+    } else if parts.event_id == CAPABILITY_DENIAL_EVENT_ID {
         effective_capability_event_pid(
             find_prop(&parts.props, "ProcessId").map(std::string::String::as_str),
         )
@@ -256,6 +272,8 @@ pub(crate) fn verbose_logging_provider_for_guid(provider: GUID) -> Option<Verbos
         Some(VerboseLoggingProvider::KernelGeneral)
     } else if provider == PRIVACY_LEARNING_MODE_PROVIDER {
         Some(VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode)
+    } else if provider == crate::network_extractors::NETWORK_DECISION_PROVIDER {
+        Some(VerboseLoggingProvider::LearningModeNetworkDecision)
     } else {
         None
     }
@@ -272,6 +290,9 @@ pub(crate) fn verbose_logging_provider_guid(provider: VerboseLoggingProvider) ->
         }
         VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode => {
             format_guid_braced_uppercase(PRIVACY_LEARNING_MODE_PROVIDER)
+        }
+        VerboseLoggingProvider::LearningModeNetworkDecision => {
+            format_guid_braced_uppercase(crate::network_extractors::NETWORK_DECISION_PROVIDER)
         }
     }
 }
@@ -410,6 +431,9 @@ fn is_identity_property(name: &str) -> bool {
 
 fn looks_like_file_path_property(name: &str, value: &str, object_type: Option<&str>) -> bool {
     let normalized = NormalizedPropertyName(name);
+    if normalized.equals("applicationid") {
+        return true;
+    }
     if normalized.ends_with("path") || normalized.ends_with("filename") {
         return true;
     }
@@ -693,6 +717,7 @@ pub fn build_denial_from_access_check(
         object_name,
         access_type,
         filetime,
+        details: None,
         event_id: parts.event_id,
         provider,
         verbose_logging_properties: sanitize_properties(&parts.props),
@@ -783,6 +808,7 @@ pub fn build_denial_from_learning_mode(
         object_name,
         access_type: AccessType::Unknown,
         filetime,
+        details: None,
         event_id: parts.event_id,
         provider,
         verbose_logging_properties: sanitize_properties(&parts.props),
@@ -848,6 +874,7 @@ pub fn build_denial_from_capability(
         object_name,
         access_type: AccessType::Unknown,
         filetime,
+        details: None,
         event_id: parts.event_id,
         provider,
         verbose_logging_properties: sanitize_properties(&parts.props),

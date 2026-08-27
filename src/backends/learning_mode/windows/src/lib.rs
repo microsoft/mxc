@@ -48,6 +48,8 @@ mod etl_filter;
 #[cfg(target_os = "windows")]
 mod extractors;
 #[cfg(target_os = "windows")]
+mod network_extractors;
+#[cfg(target_os = "windows")]
 mod path_norm;
 #[cfg(target_os = "windows")]
 mod process_lifetime;

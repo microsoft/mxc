@@ -509,6 +509,7 @@ mod tests {
                 access_type: AccessType::Unknown,
                 pid: 42,
                 filetime: 1,
+                details: None,
             }],
             DenialSummary::new(7, 1, false),
         );

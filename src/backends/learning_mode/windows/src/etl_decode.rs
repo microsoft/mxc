@@ -287,6 +287,7 @@ impl<'visitor> Accumulator<'visitor> {
             access_type: raw.access_type,
             pid: raw.pid,
             filetime: raw.filetime,
+            details: raw.details,
         });
     }
 
@@ -1073,7 +1074,10 @@ fn normalized_filetime(timestamp: i64, acc: &mut Accumulator<'_>) -> Option<u64>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{AccessType, ResourceType};
+    use learning_mode_core::{
+        AccessType, DenialDetails, NetworkDenialDetails, NetworkDenialReason, NetworkDenialSource,
+        NetworkDirection, ResourceType,
+    };
 
     const SCOPED_PID: u32 = 42;
     const SCOPED_START_FILETIME: u64 = 100;
@@ -1365,6 +1369,7 @@ mod tests {
             object_name: path.to_string(),
             access_type: access,
             filetime: 1,
+            details: None,
             event_id: 4907,
             provider:
                 learning_mode_core::VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
@@ -1500,6 +1505,7 @@ mod tests {
                 access_type: AccessType::Read,
                 pid: 1,
                 filetime: 1,
+                details: None,
             })
             .collect();
         accumulator.seen = (0..MAX_UNIQUE_DENIALS)
@@ -1680,6 +1686,142 @@ mod tests {
             filetime,
             kv,
         )
+    }
+
+    fn network_event(pid: u32, filetime: u64, kv: &[(&str, &str)]) -> CollectedEvent {
+        event_with_provider(
+            crate::network_extractors::NETWORK_DECISION_PROVIDER,
+            crate::network_extractors::NETWORK_DECISION_EVENT_ID,
+            pid,
+            filetime,
+            kv,
+        )
+    }
+
+    #[test]
+    fn managed_network_events_route_actionable_and_verbose_outcomes() {
+        let common = [
+            ("SchemaVersion", "1"),
+            ("Mode", "1"),
+            ("NormalDecision", "1"),
+            ("EffectiveDecision", "1"),
+            ("OriginalTimestamp", "500"),
+            ("FilterId", "9001"),
+            ("Direction", "0x3901"),
+        ];
+        let app_isolation = common
+            .into_iter()
+            .chain([
+                ("SourceDomain", "1"),
+                ("Reason", "1"),
+                ("FieldFlags", "64"),
+                ("SublayerGuid", "{FFE221C3-92A8-4564-A59F-DAFB70756020}"),
+                ("CapabilityId", "0"),
+            ])
+            .collect::<Vec<_>>();
+        let tessera = common
+            .into_iter()
+            .chain([
+                ("SourceDomain", "2"),
+                ("Reason", "100"),
+                ("FieldFlags", "179"),
+                ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+                ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+                ("ApplicationId", r"\Device\HarddiskVolume3\app.exe"),
+                ("Protocol", "6"),
+                ("RemoteAddress", "203.0.113.10"),
+                ("RemotePort", "443"),
+                ("TagVersion", "1"),
+                ("PolicyModel", "1"),
+                ("RuleKind", "1"),
+                ("RuleOrdinal", "0"),
+            ])
+            .collect::<Vec<_>>();
+        let explicit_deny = common
+            .into_iter()
+            .chain([
+                ("SourceDomain", "2"),
+                ("Reason", "101"),
+                ("FieldFlags", "128"),
+                ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+                ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+                ("TagVersion", "1"),
+                ("PolicyModel", "1"),
+                ("RuleKind", "2"),
+                ("RuleOrdinal", "4"),
+            ])
+            .collect::<Vec<_>>();
+
+        let events = [
+            network_event(777, 600, &app_isolation),
+            network_event(777, 601, &tessera),
+            network_event(777, 602, &explicit_deny),
+        ];
+        let analysis = resources_from_events(&events);
+
+        assert_eq!(analysis.denials.len(), 2);
+        assert_eq!(analysis.denials[0].resource, "internetClient");
+        assert_eq!(analysis.denials[0].resource_type, ResourceType::Capability);
+        assert_eq!(analysis.denials[0].pid, 0);
+        assert_eq!(analysis.denials[0].filetime, 500);
+        assert_eq!(analysis.denials[1].resource, "tcp://203.0.113.10:443");
+        assert_eq!(
+            analysis.denials[1].details,
+            Some(DenialDetails::Network(NetworkDenialDetails {
+                source: NetworkDenialSource::Tessera,
+                reason: NetworkDenialReason::DirectDefaultDeny,
+                direction: NetworkDirection::Outbound,
+                protocol: Some(6),
+                local_address: None,
+                local_port: None,
+                remote_address: "203.0.113.10".to_string(),
+                remote_port: Some(443),
+                application_id: Some(r"\Device\HarddiskVolume3\app.exe".to_string()),
+                filter_id: 9001,
+            }))
+        );
+        assert!(analysis.verbose_logging.signatures.iter().any(|aggregate| {
+            aggregate.signature.provider == VerboseLoggingProvider::LearningModeNetworkDecision
+                && aggregate.signature.reason
+                    == VerboseLoggingExclusionReason::IntentionalNetworkPolicyDeny
+        }));
+    }
+
+    #[test]
+    fn process_lifetime_scope_excludes_broker_emitted_network_events() {
+        let event = network_event(
+            777,
+            150,
+            &[
+                ("SchemaVersion", "1"),
+                ("SourceDomain", "2"),
+                ("Mode", "1"),
+                ("NormalDecision", "1"),
+                ("EffectiveDecision", "1"),
+                ("Reason", "100"),
+                ("FieldFlags", "144"),
+                ("OriginalTimestamp", "150"),
+                ("FilterId", "9001"),
+                ("Direction", "0x3901"),
+                ("ProviderGuid", "{2F8C6D14-3B7E-4A59-9C08-1D4E7A6B2F30}"),
+                ("SublayerGuid", "{7B1E9A2C-9D4F-4C8A-B321-5E6D2F8A1C44}"),
+                ("RemoteAddress", "203.0.113.10"),
+                ("TagVersion", "1"),
+                ("PolicyModel", "1"),
+                ("RuleKind", "1"),
+                ("RuleOrdinal", "0"),
+            ],
+        );
+        let lifetimes = [ProcessLifetime {
+            pid: 42,
+            start_filetime: 100,
+            end_filetime: 200,
+        }];
+
+        let analysis = resources_from_events_for_process_lifetimes(&[event], Some(&lifetimes));
+
+        assert!(analysis.denials.is_empty());
+        assert!(analysis.verbose_logging.signatures.is_empty());
     }
 
     /// Mirrors the real `Mode="Normal"` (`block`) capture: file/registry

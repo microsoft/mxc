@@ -268,6 +268,7 @@ pub(crate) fn extract_denials(
             object_name: name.to_string(),
             access_type: AccessType::Unknown,
             filetime,
+            details: None,
             event_id: parts.event_id,
             provider,
             verbose_logging_properties: crate::extractors::sanitize_properties(&parts.props),

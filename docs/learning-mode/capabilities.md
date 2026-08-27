@@ -224,6 +224,48 @@ sandbox policy:
 - `filetime` is a decimal string containing the Windows `FILETIME` value, so
   JavaScript consumers retain all 64 bits without numeric precision loss.
 
+### Network denial sources
+
+Feature-enabled Windows builds can add WFP decisions to the managed Learning
+Mode ETL through the manifested
+`Microsoft-Windows-LearningMode-NetworkDecision` provider
+(`{71237669-21C3-4101-BD2F-FF38945D725A}`). MXC accepts event ID `1`,
+`NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
+the WFP subscription, runtime-filter lookup, subject scoping, event
+normalization, queue draining, and ETW flush before the trace is sealed.
+
+MXC currently recognizes two normalized source domains:
+
+- App Isolation missing-capability decisions map capability IDs `0`, `1`, and
+  `2` to `internetClient`, `internetClientServer`, and
+  `privateNetworkClientServer`.
+- Tessera direct-network default-deny decisions carrying the version-1
+  ProcessModel filter tag map a complete remote endpoint to a `network`
+  resource such as `tcp://203.0.113.10:443` or
+  `udp://[2001:db8::1]:53`.
+
+Tessera explicit denies, allow exclusions, and proxy-containment decisions are
+intentional authored policy rather than missing grants. They are retained in
+the verbose logging artifact but are not emitted as policy recommendations;
+recommending a direct allow for proxy containment could bypass the proxy.
+Malformed events, unknown reasons, identity mismatches, and incomplete
+endpoints are also verbose-only.
+Legacy, malformed, and future Tessera filter tags are normalized as the
+unknown reason and remain verbose-only until their policy meaning is proven.
+
+Actionable network records include an additive `details` object with
+`kind: "network"` and the normalized source, reason, direction, protocol,
+endpoint, application ID, and runtime filter ID. The WFP event does not provide
+a reliable workload PID, so these records use `pid: 0`; the broker-provided
+package, user, and application identities remain available to the decoder for
+validation and diagnostics. `filetime` is the original WFP event timestamp
+carried in the normalized payload, not the later ETW emission time.
+
+This source is available only through native managed broker capture. The
+guarded-WPR fallback filters ETW by exact workload process generations, while
+the normalized network event's ETW header identifies the broker process, so
+guarded-WPR analysis intentionally excludes it.
+
 ### Verbose logging event signatures
 
 Every successful decode also writes a deterministic sibling file:
