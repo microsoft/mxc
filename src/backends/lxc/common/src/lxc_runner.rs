@@ -254,8 +254,26 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        // LXC reads the network section only as the container starts; the
-        // firewall decision below is too late.
+        // A config write does not reach a running container's file, and LXC
+        // applies the network section only as the container starts.  Stop
+        // first, so this run's topology is the one that takes effect.
+        if container.is_running() {
+            let _ = writeln!(
+                logger,
+                "Container already running; stopping it so this run's network policy applies."
+            );
+            if let Err(e) = container.stop() {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Failed to stop a container left running by an earlier run: {}. \
+                     Its network policy is the earlier run's, so the script was not run.",
+                    e
+                ));
+            }
+        }
+
         if plan.omits_interface() {
             // `up` keeps 127.0.0.1 available to a workload that binds it.
             for (key, value) in [("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")] {
@@ -273,27 +291,24 @@ impl LxcScriptRunner {
                 logger,
                 "Policy permits no network; starting the container with no interface."
             );
-        }
-
-        // Everything above only wrote to the config file, and LXC reads that
-        // file as the container starts.  A container an earlier run left
-        // running is still on that run's topology, so stop it and let the
-        // start below apply this run's.
-        if container.is_running() {
-            let _ = writeln!(
-                logger,
-                "Container already running; stopping it so this run's network policy applies."
-            );
-            if let Err(e) = container.stop() {
-                if self.destroy_on_exit || container_created {
+        } else if !container_created {
+            // An earlier run over this container id may have appended an
+            // override removing the interface, and that outlives the run that
+            // wrote it.  Delete it so the interface the container was created
+            // with takes effect again.
+            if let Err(e) = container.remove_config_item("lxc.net.0.type", "empty") {
+                if self.destroy_on_exit {
                     let _ = container.destroy();
                 }
                 return ScriptResponse::error(&format!(
-                    "Failed to stop a container left running by an earlier run: {}. \
-                     Its network policy is the earlier run's, so the script was not run.",
+                    "Failed to restore the container network interface: {}",
                     e
                 ));
             }
+            let _ = writeln!(
+                logger,
+                "Restoring the container network interface left removed by an earlier run."
+            );
         }
 
         let _ = writeln!(logger, "Starting LXC container...");
