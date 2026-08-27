@@ -57,6 +57,7 @@ BLOCKED_HOSTNAME="blocked.nettest.mxc.test"
 BLOCKED_IP="198.51.100.19"
 
 PEER_LISTENER_PID=""
+IP_FORWARD_WAS=""
 HOSTS_BACKUP=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
@@ -69,6 +70,9 @@ teardown_peer() {
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" > /etc/hosts
         rm -f "$HOSTS_BACKUP"
+    fi
+    if [ -n "$IP_FORWARD_WAS" ]; then
+        sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
 trap teardown_peer EXIT
@@ -93,6 +97,7 @@ ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
 
 # Without this the container's packets stop at the host and never reach the peer.
+IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip "could not enable IPv4 forwarding."
 

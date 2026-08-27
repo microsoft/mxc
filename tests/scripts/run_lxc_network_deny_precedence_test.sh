@@ -115,12 +115,16 @@ PEER_PREFIX="29"
 PEER_PORT="443"
 
 PEER_LISTENER_PID=""
+IP_FORWARD_WAS=""
 teardown_peer() {
     if [ -n "$PEER_LISTENER_PID" ]; then
         kill "$PEER_LISTENER_PID" >/dev/null 2>&1 || true
     fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
+    if [ -n "$IP_FORWARD_WAS" ]; then
+        sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
+    fi
 }
 trap teardown_peer EXIT
 
@@ -144,6 +148,7 @@ ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
 
 # Without this the container's packets stop at the host and never reach the peer.
+IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip "could not enable IPv4 forwarding."
 
