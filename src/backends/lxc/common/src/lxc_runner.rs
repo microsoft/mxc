@@ -382,7 +382,9 @@ impl LxcScriptRunner {
                     if self.destroy_on_exit || container_created {
                         let _ = container.destroy();
                     }
-                    return ScriptResponse::error("Failed to apply inbound network firewall rules.");
+                    return ScriptResponse::error(
+                        "Failed to apply inbound network firewall rules.",
+                    );
                 }
                 Err(e) => {
                     if self.destroy_on_exit || container_created {
