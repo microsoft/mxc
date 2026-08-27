@@ -85,7 +85,7 @@ mxc/schemas/
 │   └── mxc-config.schema.0.8.0-alpha.json  (shipped — current stable)
 └── dev/
     ├── mxc-config.schema.0.9.0-dev.json    (rolling parser — currently authoritative)
-    └── mxc-config.schema.0.8.0-alpha.json  (exact closed contract — future authority)
+    └── mxc-config.schema.0.9.0-alpha.json  (exact closed contract — future authority)
 ```
 
 Retired stable schema files are **kept as immutable historical artifacts** — the
@@ -98,7 +98,7 @@ transition:
 - `mxc-config.schema.0.9.0-dev.json` is generated from the rolling
   `wxc_common::wire` model. It remains authoritative for runtime parsing and
   corpus validation until exact dispatch is enabled.
-- `mxc-config.schema.0.8.0-alpha.json` is generated from the exact
+- `mxc-config.schema.0.9.0-alpha.json` is generated from the exact
   `mxc_config_contract::dev` model. It describes all eight closed one-shot and
   state-aware roots, including recursively closed experimental structures, but
   does not become authoritative until exact dispatch replaces the rolling
@@ -207,7 +207,7 @@ by the current parser and the closed mutable contract under
 
 ```text
 cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.0.9.0-dev.json
-cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.8.0-alpha --out schemas/dev/mxc-config.schema.0.8.0-alpha.json
+cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --version 0.9.0-alpha --out schemas/dev/mxc-config.schema.0.9.0-alpha.json
 ```
 
 Also regenerate their TypeScript oracles with the corresponding

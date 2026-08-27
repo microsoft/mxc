@@ -21,6 +21,7 @@ pub mod microvm_staging;
 pub mod models;
 pub mod mxc_error;
 mod network_parser;
+pub use network_parser::directional_network_support;
 pub use network_parser::host_is_canonical_loopback;
 pub use network_parser::supports_directional_network;
 pub mod proxy_env;

@@ -35,10 +35,17 @@ fn has_process_container_network_fields(network: &wire::ProcessContainerNetwork)
         .is_some_and(|peer| !peer.trim().is_empty())
 }
 
-pub fn supports_directional_network(version: &str) -> bool {
+/// Returns directional-network support for a valid schema version.
+///
+/// `None` leaves malformed-version diagnostics to the schema parser.
+pub fn directional_network_support(version: &str) -> Option<bool> {
     semver::Version::parse(version)
+        .ok()
         .map(|version| version.major > 0 || version.minor >= 8)
-        .unwrap_or(false)
+}
+
+pub fn supports_directional_network(version: &str) -> bool {
+    directional_network_support(version).unwrap_or(false)
 }
 
 pub(crate) fn directional_network_version_error() -> WxcError {

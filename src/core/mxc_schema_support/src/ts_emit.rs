@@ -51,6 +51,7 @@ pub(crate) fn emit_ts(schema: &Value) -> String {
 }
 
 pub(crate) fn emit_contract_ts(schema: &Value, version: &str) -> String {
+    let module_version = version.replace(['.', '-'], "_");
     let banner = format!(
         "\
 // Copyright (c) Microsoft Corporation.
@@ -60,16 +61,20 @@ pub(crate) fn emit_contract_ts(schema: &Value, version: &str) -> String {
 /**
  * GENERATED FILE — DO NOT EDIT BY HAND.
  *
- * Emitted from the exact MXC {version} development contract by
+ * Emitted from the exact MXC {version} contract by
  * mxc_schema_gen. This is a drift oracle, not public API, and is not exported
  * from the SDK.
  *
  * Regenerate with:
- *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version {version} --out sdk/node/src/generated/v0_8_0_alpha/wire.ts
+ *   cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- types --version {version} --out sdk/node/src/generated/v{module_version}/wire.ts
  */
 "
     );
-    emit_ts_with_banner(schema, &banner)
+    let mut output = emit_ts_with_banner(schema, &banner);
+    while output.ends_with("\n\n") {
+        output.pop();
+    }
+    output
 }
 
 fn emit_ts_with_banner(schema: &Value, banner: &str) -> String {
@@ -512,6 +517,20 @@ mod tests {
             ts.contains("export type MXCConfiguration = OneShotRequest | ExecRequest;"),
             "{ts}"
         );
+    }
+
+    #[test]
+    fn contract_output_has_one_terminal_newline() {
+        let schema = json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        });
+
+        let ts = emit_contract_ts(&schema, "0.8.0-alpha");
+
+        assert!(ts.ends_with('\n'));
+        assert!(!ts.ends_with("\n\n"));
     }
 
     #[test]

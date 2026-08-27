@@ -15,17 +15,16 @@ use mxc_sdk::{build_request_with_containment, Containment, ErrorCode};
 /// The network acknowledgment this backend requires; an absent policy is
 /// refused.
 fn iso_policy() -> SandboxPolicy {
+    let mut network = NetworkSection::default();
+    network.allow_outbound = true;
+    network.allow_local_network = true;
+
     SandboxPolicy {
         version: "0.7.0-alpha".to_string(),
         filesystem: None,
-        network: Some(NetworkSection {
-            allow_outbound: true,
-            allow_local_network: true,
-            ..Default::default()
-        }),
+        network: Some(network),
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     }
 }
 

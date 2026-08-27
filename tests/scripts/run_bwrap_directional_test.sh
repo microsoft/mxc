@@ -126,12 +126,18 @@ fi
 
 WORK_DIR="$(mktemp -d)"
 LISTENER_PID=""
+CONTROL_PID=""
 cleanup() {
     if [ -n "$LISTENER_PID" ]; then
         kill "$LISTENER_PID" 2>/dev/null || true
         wait "$LISTENER_PID" 2>/dev/null || true
     fi
+    if [ -n "$CONTROL_PID" ]; then
+        kill "$CONTROL_PID" 2>/dev/null || true
+        wait "$CONTROL_PID" 2>/dev/null || true
+    fi
     exec 9>&- 2>/dev/null || true
+    exec 8>&- 2>/dev/null || true
     rm -rf "$WORK_DIR"
 }
 trap cleanup EXIT
@@ -164,6 +170,34 @@ if [ -z "$LISTENER_PORT" ]; then
     exit 1
 fi
 echo "  host listener is on 127.0.0.1:$LISTENER_PORT (10.0.2.2:$LISTENER_PORT from the sandbox)"
+
+# A second listener on a port the proxy policy does not allow. The parity
+# workloads assert that direct egress is refused, which only proves
+# enforcement against a destination that is otherwise live -- an internet
+# address would be refused just as readily on a runner with no route out.
+mkfifo "$WORK_DIR/control.pipe"
+exec 8<>"$WORK_DIR/control.pipe"
+# 8>&- keeps the listener from inheriting the write end: holding one itself
+# would mean its stdin never reports EOF, orphaning it if this script is killed.
+"$TEST_PROXY" --ready-file "$WORK_DIR/control.port" --bind-address 127.0.0.1 \
+    <"$WORK_DIR/control.pipe" >"$WORK_DIR/control.log" 2>&1 8>&- &
+CONTROL_PID=$!
+for _ in $(seq 1 100); do
+    [ -s "$WORK_DIR/control.port" ] && break
+    if ! kill -0 "$CONTROL_PID" 2>/dev/null; then
+        cat "$WORK_DIR/control.log"
+        echo "FAIL: the control listener exited before publishing its port."
+        exit 1
+    fi
+    sleep 0.1
+done
+CONTROL_PORT="$(cat "$WORK_DIR/control.port" 2>/dev/null || true)"
+if [ -z "$CONTROL_PORT" ]; then
+    cat "$WORK_DIR/control.log"
+    echo "FAIL: the control listener did not publish a port."
+    exit 1
+fi
+echo "  control listener is on 127.0.0.1:$CONTROL_PORT (10.0.2.2:$CONTROL_PORT from the sandbox)"
 
 # The two external anchors the egress assertions are built on. An allow proves
 # the rule fired only if the destination is otherwise reachable, and a deny
@@ -345,6 +379,7 @@ run_parity() {
     local label="$1"
     local config="$2"
     sed -e "s/{{PROXY_HOST}}/127.0.0.1/g" -e "s/{{PROXY_PORT}}/$LISTENER_PORT/g" \
+        -e "s/{{CONTROL_PORT}}/$CONTROL_PORT/g" \
         "$REPO_DIR/tests/configs/$config" >"$WORK_DIR/$config"
     local out
     local rc=0

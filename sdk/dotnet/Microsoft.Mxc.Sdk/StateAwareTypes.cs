@@ -4,46 +4,83 @@
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
-/// Optional Entra credentials for provisioning an IsolationSession cloud-agent
-/// sandbox. When supplied at provision, the same credentials must be supplied at
-/// start. Hosts that do not support Entra agents surface a
-/// <see cref="ErrorCode.BackendUnavailable"/> error.
+/// The containment backend a sandbox is provisioned under. Selected at
+/// provision; the later phases identify the sandbox by the <see cref="SandboxId"/>
+/// provision returned, so they take no containment.
 /// </summary>
-public sealed class SandboxUserCredentials
+public enum StateAwareContainment
 {
-    /// <summary>The user principal name (UPN).</summary>
-    public string Upn { get; set; } = string.Empty;
+    /// <summary>Windows IsolationSession (experimental; requires its OS-side service).</summary>
+    IsolationSession,
+}
 
-    /// <summary>The WAM token authorising the identity.</summary>
-    public string WamToken { get; set; } = string.Empty;
+/// <summary>
+/// The default action for traffic with no matching rule. The zero value is
+/// <see cref="Block"/>, so a policy left unset denies rather than allows.
+/// </summary>
+public enum StateAwareNetworkDefault
+{
+    /// <summary>Deny traffic by default.</summary>
+    Block,
+
+    /// <summary>Allow traffic by default.</summary>
+    Allow,
+}
+
+/// <summary>
+/// Network posture sent on a state-aware lifecycle request. This is the wire
+/// vocabulary the lifecycle phases use, a different layer from the one-shot
+/// <see cref="NetworkPolicy"/>.
+/// </summary>
+public sealed class StateAwareNetworkPolicy
+{
+    /// <summary>The default action for outbound traffic.</summary>
+    public StateAwareNetworkDefault DefaultPolicy { get; set; }
+
+    /// <summary>Whether the sandbox may reach the local network.</summary>
+    public bool AllowLocalNetwork { get; set; }
+}
+
+/// <summary>
+/// Filesystem posture sent on a state-aware lifecycle request. This is the wire
+/// vocabulary the lifecycle phases use, a different layer from the one-shot
+/// <see cref="FilesystemPolicy"/>.
+/// </summary>
+public sealed class StateAwareFilesystemPolicy
+{
+    /// <summary>Paths the sandbox can read and write.</summary>
+    public List<string> ReadwritePaths { get; set; } = new();
+
+    /// <summary>Paths the sandbox can read but not write.</summary>
+    public List<string> ReadonlyPaths { get; set; } = new();
+
+    /// <summary>Paths explicitly denied, overriding broader allow rules.</summary>
+    public List<string> DeniedPaths { get; set; } = new();
 }
 
 /// <summary>Options for <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>
 public sealed class ProvisionSandboxOptions
 {
     /// <summary>
-    /// Filesystem policy applied at provision (immutable for the sandbox's
-    /// lifetime). Shares the same shape as one-shot <see cref="FilesystemPolicy"/>.
+    /// Network posture for the sandbox, fixed for its lifetime. Sent only when
+    /// supplied; a backend may refuse an absent policy rather than default it.
     /// </summary>
-    public FilesystemPolicy? Filesystem { get; set; }
+    public StateAwareNetworkPolicy? Network { get; set; }
 
-    /// <summary>Optional Entra credentials for a cloud-agent sandbox.</summary>
-    public SandboxUserCredentials? User { get; set; }
-}
-
-/// <summary>Options for <see cref="MxcLifecycle.StartSandbox"/>.</summary>
-public sealed class StartSandboxOptions
-{
     /// <summary>
-    /// Selected IsoSession size profile — one of <c>small</c>, <c>medium</c>,
-    /// <c>large</c>, or <c>composable</c>. Emitted as the typed
-    /// <c>configurationId</c> the wire model validates; an unrecognized value is
-    /// rejected natively rather than silently downgraded.
+    /// Filesystem policy applied at provision, immutable for the sandbox's
+    /// lifetime.
     /// </summary>
-    public string? Size { get; set; }
+    public StateAwareFilesystemPolicy? Filesystem { get; set; }
 
-    /// <summary>Optional Entra credentials (must match those given at provision).</summary>
-    public SandboxUserCredentials? User { get; set; }
+    /// <summary>
+    /// Application identity for the sandbox, fixed at provision. A packaged app
+    /// passes its Package Family Name as <c>PFN:&lt;packageFamilyName&gt;</c>.
+    /// Validated structurally only: no control characters, at most 256
+    /// characters; an explicitly supplied empty string is a distinct value from
+    /// omitting the field.
+    /// </summary>
+    public string? AppId { get; set; }
 }
 
 /// <summary>The result of <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>

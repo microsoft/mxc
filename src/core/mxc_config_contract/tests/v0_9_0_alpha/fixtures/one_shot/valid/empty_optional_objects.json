@@ -1,0 +1,14 @@
+{
+  "version": "0.9.0-alpha",
+  "process": {
+    "commandLine": "echo empty"
+  },
+  "lifecycle": {},
+  "filesystem": {},
+  "fallback": {},
+  "network": {},
+  "ui": {},
+  "processContainer": {
+    "ui": {}
+  }
+}

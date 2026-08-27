@@ -3,7 +3,7 @@
   "containerId": "CLI-Bubblewrap-Network-Proxy-Hostname",
   "containment": "bubblewrap",
   "process": {
-    "commandLine": "bash -c 'set -u; if ! getent hosts \"{{PROXY_HOST}}\" >/dev/null; then echo PIN_MISSING; exit 1; fi; echo PIN_PRESENT_OK; if ! curl -fsSL --max-time 15 https://api.github.com/zen >/dev/null; then echo PIN_PROXY_UNREACHABLE; exit 1; fi; echo PIN_PROXY_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/1.1.1.1/443\" >/dev/null 2>&1; rc=$?; if [ \"$rc\" = 0 ]; then echo PIN_DIRECT_EGRESS_LEAKED; exit 1; fi; echo PIN_DIRECT_BLOCKED_OK'"
+    "commandLine": "bash -c 'set -u; if ! getent hosts \"{{PROXY_HOST}}\" >/dev/null; then echo PIN_MISSING; exit 1; fi; echo PIN_PRESENT_OK; if ! curl -fsSL --max-time 15 http://mxc-test.invalid/ 2>/dev/null | grep -q MXC_TEST_ORIGIN_OK; then echo PIN_PROXY_UNREACHABLE; exit 1; fi; echo PIN_PROXY_OK; timeout 6 bash -c \"exec 3<>/dev/tcp/10.0.2.2/{{CONTROL_PORT}}\" >/dev/null 2>&1; rc=$?; if [ \"$rc\" = 0 ]; then echo PIN_DIRECT_EGRESS_LEAKED; exit 1; fi; echo PIN_DIRECT_BLOCKED_OK'"
   },
   "network": {
     "defaultPolicy": "allow",

@@ -227,7 +227,7 @@ Egress peer and port fields (used in `egress.allow[]` / `egress.deny[]`; not sho
 |---|---|---|
 | `to[].cidr` | IPv4 / IPv6 CIDR, or 0.0.0.0/0 / ::/0 for any | Single CIDR string (CNI/Kubernetes style), replacing separate address + prefix length. |
 | `to[].except` | list of CIDRs, optional | Exclusions within the peer's CIDR (Kubernetes `ipBlock.except` style). Expressible on Windows process containers (WFP) and the Linux backends (iptables) as additional deny rules; not supported on Seatbelt (no destination filtering). |
-| `ports[].protocol` | tcp / udp / icmp / any | `any` matches all protocols. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
+| `ports[].protocol` | tcp / udp / icmp / any | `any` matches at minimum TCP, UDP, and ICMPv4/6; a backend may match more. Enforced on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 | `ports[].port` | uint16, optional | Destination port. Omit `ports` to match all ports/protocols. |
 | `ports[].endPort` | uint16, optional | End of a port range (Kubernetes `endPort` style); requires numeric port. Supported on Windows process containers (WFP) and the Linux backends (iptables); not supported on Seatbelt. |
 
@@ -237,6 +237,14 @@ is rejected rather than broadened into a wildcard.
 
 `icmp` expands by destination address family. A rule containing IPv4 and IPv6 peers produces both ICMPv4 and ICMPv6
 filters; a rule without `to` also produces both.
+
+`any` is a floor, not an exhaustive protocol list. Every backend that enforces
+port rules matches at minimum TCP, UDP, and ICMPv4/6; some match considerably
+more — Windows process containers cover a much wider set of IP protocols. The
+exact set is a backend property, so consult the backend's implementation doc
+when a policy depends on a protocol outside that floor. Pairing `any` with a
+`port` narrows the match to the protocols that carry port numbers, since a
+port-scoped filter cannot name a portless protocol such as ICMP.
 
 Ingress has no CIDR peers or port rules. `ingress.default` and
 `ingress.hostLoopback` are the complete GA ingress surface.

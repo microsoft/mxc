@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use mxc_config_contract::dev::OneShotRequest;
+use mxc_config_contract::published::v0_8_0_alpha::Request;
 
 pub(crate) fn assert_valid(json: &str) {
-    serde_json::from_str::<OneShotRequest>(json).unwrap();
+    serde_json::from_str::<Request>(json).unwrap();
 }
 
 pub(crate) fn assert_invalid(json: &str) {
@@ -33,7 +33,7 @@ fn assert_invalid_with_context(json: &str, context: &str) {
     }
 
     assert!(
-        serde_json::from_str::<OneShotRequest>(json).is_err(),
+        serde_json::from_str::<Request>(json).is_err(),
         "{context} was accepted"
     );
 }
