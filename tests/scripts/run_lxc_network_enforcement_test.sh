@@ -98,29 +98,26 @@ assert_no_forward_reference() {
 # ---------------------------------------------------------------------------
 # A CI-controlled peer, standing in for the destination both cases probe.
 #
-# The chain hooks FORWARD, so it only ever sees traffic the host routes on the
-# container's behalf.  A listener on the host or on the bridge gateway arrives
-# through INPUT instead, answers with no firewall installed at all, and so
-# cannot stand in for an allowed destination.  The peer lives in its own
-# network namespace behind a veth, reachable only through the forwarded path.
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on.
 #
-# Both cases aim at this one address, which is what makes the pair meaningful:
-# the deny case now shows a destination that is demonstrably reachable becoming
-# unreachable under policy, rather than merely failing to reach something.
+# Both cases must aim at this one address: the deny case shows a destination
+# that is demonstrably reachable becoming unreachable under policy, rather than
+# merely failing to reach something.
 PEER_NETNS="mxc-enforce-peer"
 PEER_HOST_VETH="mxcenh0"
 PEER_VETH="mxcenp0"
-# A dedicated slice of RFC 5737 TEST-NET-3, distinct from the ranges the
-# ga_egress and proxy_hostname peers claim.  The host routes by longest
-# matching prefix, so two peers sharing a range let whichever suite ran last
-# capture the other's traffic.
+# An RFC 5737 test range.  The host routes by longest matching prefix, and two
+# peers sharing a range let whichever suite ran last capture the other's
+# traffic.
 PEER_HOST_IP="198.51.100.1"
 PEER_IP="198.51.100.2"
 PEER_PREFIX="29"
 PEER_PORT="443"
-# The allow fixture names a host rather than an address, so the resolution path
-# stays under test; pinning the name here is what keeps that path off public
-# DNS.  lxc-exec resolves it on the host when it builds the rule.
+# lxc-exec resolves this name on the host when it builds the rule, so the pin
+# below goes in the host's /etc/hosts and not the container's.
 PEER_HOSTNAME="allowed.mxc.test"
 
 PEER_LISTENER_PID=""
@@ -131,8 +128,8 @@ teardown_peer() {
     fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
-    # Restore /etc/hosts byte for byte rather than filtering it, so a failure
-    # here cannot quietly drop an unrelated entry the box needs.
+    # Restoring the whole file, rather than filtering out the added line,
+    # cannot drop an unrelated entry the box needs.
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" > /etc/hosts
         rm -f "$HOSTS_BACKUP"
@@ -163,9 +160,8 @@ HOSTS_BACKUP="$(mktemp)"
 cat /etc/hosts > "$HOSTS_BACKUP"
 printf '%s %s\n' "$PEER_IP" "$PEER_HOSTNAME" >> /etc/hosts
 
-# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
-# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
-# only an ACCEPT in the container's FORWARD chain permits.
+# The firewall matches the port and not the payload, so plain HTTP on tcp/443
+# is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
     >/dev/null 2>&1 &
 PEER_LISTENER_PID=$!
@@ -173,9 +169,8 @@ sleep 1
 kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
     || fail "the peer listener did not start on $PEER_IP:$PEER_PORT."
 
-# Alive is not the same as reachable: confirm the listener answers across the
-# veth, so a peer that never bound is reported as harness breakage rather than
-# mistaken for the firewall blocking the allow case.
+# Alive is not reachable.  A peer that never bound has to fail here as harness
+# breakage, rather than later as the firewall blocking the allow case.
 python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
 import socket, sys
 s = socket.socket()
@@ -190,7 +185,7 @@ finally:
 PY
 
 # Drift guard: both fixtures must aim at this peer, or the run would probe a
-# stale address and prove nothing.  Fail loudly if script and fixture disagree.
+# stale address and prove nothing.
 for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."

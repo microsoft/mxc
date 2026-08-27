@@ -37,26 +37,23 @@ command -v python3 >/dev/null 2>&1 || skip "python3 is not installed; the peer n
 # ---------------------------------------------------------------------------
 # A CI-controlled peer, standing in for the allowed destination.
 #
-# The chain hooks FORWARD, so it only ever sees traffic the host routes on the
-# container's behalf.  A listener on the host or on the bridge gateway arrives
-# through INPUT instead, answers with no firewall installed at all, and so
-# cannot stand in for an allowed destination.  The peer lives in its own
-# network namespace behind a veth, reachable only through the forwarded path.
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on.
 PEER_NETNS="mxc-nettest-peer"
 PEER_HOST_VETH="mxcnth0"
 PEER_VETH="mxcntp0"
-# A dedicated slice of RFC 5737 TEST-NET-3, distinct from the ranges the other
-# peer-backed suites claim.  The host routes by longest matching prefix, so two
+# An RFC 5737 test range.  The host routes by longest matching prefix, and two
 # peers sharing a range let whichever suite ran last capture the other's
 # traffic.
 PEER_HOST_IP="198.51.100.17"
 PEER_IP="198.51.100.18"
 PEER_PREFIX="29"
 PEER_PORT="443"
-# The fixture names hosts rather than addresses, so the resolution path stays
-# under test; pinning both names here is what keeps that path off public DNS.
-# lxc-exec resolves them on the host when it builds the rules.  The blocked
-# name needs an address only so that it resolves: nothing ever contacts it.
+# lxc-exec resolves these names on the host when it builds the rules, so the
+# pin below goes in the host's /etc/hosts and not the container's.  The blocked
+# name needs an address only so that it resolves; nothing contacts it.
 PEER_HOSTNAME="allowed.nettest.mxc.test"
 BLOCKED_HOSTNAME="blocked.nettest.mxc.test"
 BLOCKED_IP="198.51.100.19"
@@ -69,8 +66,8 @@ teardown_peer() {
     fi
     ip netns del "$PEER_NETNS" >/dev/null 2>&1 || true
     ip link del "$PEER_HOST_VETH" >/dev/null 2>&1 || true
-    # Restore /etc/hosts byte for byte rather than filtering it, so a failure
-    # here cannot quietly drop an unrelated entry the box needs.
+    # Restoring the whole file, rather than filtering out the two added lines,
+    # cannot drop an unrelated entry the box needs.
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" > /etc/hosts
         rm -f "$HOSTS_BACKUP"
@@ -102,9 +99,8 @@ cat /etc/hosts > "$HOSTS_BACKUP"
 printf '%s %s\n' "$PEER_IP" "$PEER_HOSTNAME" >> /etc/hosts
 printf '%s %s\n' "$BLOCKED_IP" "$BLOCKED_HOSTNAME" >> /etc/hosts
 
-# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
-# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
-# only an ACCEPT in the container's FORWARD chain permits.
+# The firewall matches the port and not the payload, so plain HTTP on tcp/443
+# is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
     >/dev/null 2>&1 &
 PEER_LISTENER_PID=$!
@@ -112,9 +108,8 @@ sleep 1
 kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
     || fail "the peer listener did not start on $PEER_IP:$PEER_PORT."
 
-# Alive is not the same as reachable: confirm the listener answers across the
-# veth, so a peer that never bound is reported as harness breakage rather than
-# mistaken for the firewall blocking an allowed destination.
+# Alive is not reachable.  A peer that never bound has to fail here as harness
+# breakage, rather than later as the firewall blocking an allowed destination.
 python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
 import socket, sys
 s = socket.socket()

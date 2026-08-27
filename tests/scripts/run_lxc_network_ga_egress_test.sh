@@ -5,8 +5,7 @@
 # name the right chain, and still filter nothing.
 #
 # The tcp/443 cases probe a CI-controlled peer this script stands up in its own
-# routed namespace rather than a public host, so remote-service health can never
-# turn the positive path red.
+# routed namespace.  No remote service can turn the positive path red.
 #
 # A directional posture carries no port 53 exemption, unlike the legacy chain,
 # which is what the two DNS cases pin.
@@ -129,21 +128,16 @@ assert_allowed() {
 # ---------------------------------------------------------------------------
 # A CI-controlled peer for the positive path.
 #
-# The allow case has to prove the chain admits an allowed destination, which
-# only means something if the destination is one the chain actually governs.
-# The chain hooks FORWARD (-i <veth> / --physdev-in <veth>), so it sees only
-# traffic the host routes for the container.  A listener on the host or on the
-# bridge gateway is delivered locally through INPUT, never reaches the chain,
-# and would answer even with no firewall installed, so it cannot stand in for
-# an allowed destination.  The peer therefore lives in its own network
-# namespace, routed to over a dedicated veth, reachable only through the
-# container's forwarded path.
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on (-i <veth> / --physdev-in <veth>).
 PEER_NETNS="mxc-ga-egress-peer"
 PEER_HOST_VETH="mxcgah0"
 PEER_VETH="mxcgap0"
-# A different RFC 5737 range from the proxy-hostname peer's 192.0.2.0/24.  The
-# host routes by longest matching prefix, so two peers sharing a range let
-# whichever suite ran last capture the other's traffic.
+# An RFC 5737 test range.  The host routes by longest matching prefix, and two
+# peers sharing a range let whichever suite ran last capture the other's
+# traffic.
 PEER_HOST_IP="203.0.113.1"
 PEER_IP="203.0.113.2"
 PEER_CIDR="203.0.113.0/24"
@@ -178,9 +172,8 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the egress peer back to the container."
 
-# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
-# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
-# only an ACCEPT in the container's FORWARD chain permits.
+# The firewall matches the port and not the payload, so plain HTTP on tcp/443
+# is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
     >/dev/null 2>&1 &
 PEER_LISTENER_PID=$!
@@ -188,10 +181,8 @@ sleep 1
 kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
     || fail "the egress peer listener did not start on $PEER_IP:$PEER_PORT."
 
-# Alive is not the same as reachable: confirm the listener answers across the
-# veth, so a peer that never bound is reported as harness breakage rather than
-# mistaken for the firewall blocking the allow case.  Mirrors the reachability
-# gate in run_lxc_network_proxy_hostname_test.sh.
+# Alive is not reachable.  A peer that never bound has to fail here as harness
+# breakage, rather than later as the firewall blocking the allow case.
 python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the egress peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
 import socket, sys
 s = socket.socket()
@@ -206,7 +197,7 @@ finally:
 PY
 
 # Drift guard: the tcp/443 fixtures must target this peer, or the run would
-# probe a stale address and prove nothing.  Fail loudly if the two disagree.
+# probe a stale address and prove nothing.
 for cfg in "$DENY_CONFIG" "$ALLOW_CONFIG" "$WRONG_PORT_CONFIG"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
@@ -218,9 +209,6 @@ done
 
 echo "Running LXC schema 0.8 egress enforcement test..."
 
-# An egress-only config is the shape a backend claiming only the two egress
-# bits would reject outright, which makes any verdict here a test of the
-# support declaration.
 run_case "deny case: egress.default deny, no rules" "$DENY_CONFIG"
 assert_blocked "egress succeeded under egress.default deny with no allow rules. The chain is not filtering this container's traffic."
 

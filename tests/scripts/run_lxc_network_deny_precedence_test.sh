@@ -98,20 +98,18 @@ assert_no_forward_reference() {
 # ---------------------------------------------------------------------------
 # A CI-controlled peer, standing in for the destination both runs probe.
 #
-# The chain hooks FORWARD, so it only ever sees traffic the host routes on the
-# container's behalf.  A listener on the host or on the bridge gateway arrives
-# through INPUT instead, answers with no firewall installed at all, and so
-# cannot stand in for a reachable destination.  The peer lives in its own
-# network namespace behind a veth, reachable only through the forwarded path.
+# A listener on the host or on the bridge gateway is delivered through INPUT
+# and answers with no firewall in the path.  The peer lives in its own network
+# namespace behind a veth, reached only through the FORWARD hook the chain
+# filters on.
 #
-# Both runs aim here, which is what lets the control run do its job: it shows
-# this exact address is reachable when only the allow list names it, so the
-# overlap run's blocked verdict can only be the deny entry winning.
+# Both runs must aim here: the control run shows this exact address is
+# reachable when only the allow list names it, which leaves the deny entry as
+# the only thing that can account for the overlap run's blocked verdict.
 PEER_NETNS="mxc-denyprec-peer"
 PEER_HOST_VETH="mxcdph0"
 PEER_VETH="mxcdpp0"
-# A dedicated slice of RFC 5737 TEST-NET-3, distinct from the ranges the other
-# peer-backed suites claim.  The host routes by longest matching prefix, so two
+# An RFC 5737 test range.  The host routes by longest matching prefix, and two
 # peers sharing a range let whichever suite ran last capture the other's
 # traffic.
 PEER_HOST_IP="198.51.100.9"
@@ -148,9 +146,8 @@ ip netns exec "$PEER_NETNS" ip link set lo up \
 ip netns exec "$PEER_NETNS" ip route add default via "$PEER_HOST_IP" \
     || fail "could not route the peer back to the container."
 
-# A plain HTTP listener on tcp/443.  The firewall matches the port, not the
-# payload, so no TLS is needed: a reply proves the SYN reached the peer, which
-# only an ACCEPT in the container's FORWARD chain permits.
+# The firewall matches the port and not the payload, so plain HTTP on tcp/443
+# is enough.  A reply proves the SYN reached the peer.
 ip netns exec "$PEER_NETNS" python3 -m http.server "$PEER_PORT" --bind "$PEER_IP" \
     >/dev/null 2>&1 &
 PEER_LISTENER_PID=$!
@@ -158,9 +155,8 @@ sleep 1
 kill -0 "$PEER_LISTENER_PID" >/dev/null 2>&1 \
     || fail "the peer listener did not start on $PEER_IP:$PEER_PORT."
 
-# Alive is not the same as reachable: confirm the listener answers across the
-# veth, so a peer that never bound is reported as harness breakage rather than
-# mistaken for the control run being blocked.
+# Alive is not reachable.  A peer that never bound has to fail here as harness
+# breakage, rather than later as the control run being blocked.
 python3 - "$PEER_IP" "$PEER_PORT" <<'PY' || fail "the peer is unreachable across the veth at $PEER_IP:$PEER_PORT."
 import socket, sys
 s = socket.socket()
@@ -175,7 +171,7 @@ finally:
 PY
 
 # Drift guard: both fixtures must aim at this peer, or the run would probe a
-# stale address and prove nothing.  Fail loudly if script and fixture disagree.
+# stale address and prove nothing.
 for cfg in "$OVERLAP_CONFIG" "$CONTROL_CONFIG"; do
     grep -Fq "$PEER_IP" "$cfg" \
         || fail "fixture ${cfg##*/} no longer targets the peer $PEER_IP; script and fixture drifted."
