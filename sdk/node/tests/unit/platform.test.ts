@@ -388,6 +388,39 @@ describe('isolation_session availability gate', () => {
   });
 });
 
+describe('hyperlight availability gate', () => {
+  beforeEach(() => {
+    _resetPlatformSupportCache();
+  });
+
+  afterEach(() => {
+    _setProbeRunner(null);
+    _resetPlatformSupportCache();
+  });
+
+  it('includes hyperlight when the probe reports it available', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { hyperlightAvailable: true } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      support.availableMethods.includes('hyperlight'),
+      `expected hyperlight present, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+
+  it('omits hyperlight when the probe reports it unavailable', { skip: !isWindows }, () => {
+    _setProbeRunner(() =>
+      JSON.stringify({ tier: 'base-container', probes: { hyperlightAvailable: false } }),
+    );
+    const support = getPlatformSupport();
+    assert.ok(
+      !support.availableMethods.includes('hyperlight'),
+      `expected hyperlight absent, got: ${support.availableMethods.join(',')}`,
+    );
+  });
+});
+
 // The Bubblewrap probe gates on version, not just presence: `--clearenv`
 // (emitted unconditionally by the Rust argument builder) only exists in
 // bwrap 0.5.0+. Mirrors the Rust tests in
