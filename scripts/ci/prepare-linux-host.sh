@@ -207,6 +207,10 @@ enable_bridge_netfilter() {
 }
 
 chmod +x "$binary_directory/lxc-exec"
+
+# Runs for every backend: this is host inventory, not a backend prerequisite.
+bash "$(dirname "$0")/assert-workload-interpreters.sh"
+
 case "$backend" in
     bubblewrap)
         install_bubblewrap

@@ -195,6 +195,15 @@ jobs:
           echo "Waiting $seconds second(s) before starting tests."
           sleep "$seconds"
 
+      - name: Prepare backend prerequisites
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/ci/prepare-macos-host.sh \
+            '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
+            tee "$RUNNER_TEMP/mxc-ci.log"
+
       - name: Run backend tests
         timeout-minutes: 60
         shell: bash
@@ -203,7 +212,7 @@ jobs:
           chmod +x artifacts/bin/mxc-exec-mac artifacts/bin/unix-test-proxy
           bash scripts/ci/run_backend_validation_tests.sh \
             '${{ matrix.backend }}' "$GITHUB_WORKSPACE/artifacts/bin" 2>&1 |
-            tee "$RUNNER_TEMP/mxc-ci.log"
+            tee -a "$RUNNER_TEMP/mxc-ci.log"
 
       - name: Upload logs
         if: always()

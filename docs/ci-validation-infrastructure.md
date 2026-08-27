@@ -31,6 +31,8 @@ the individual local test scripts are documented in
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
 | `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
 | `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
+| `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
+| `scripts/ci/assert-workload-interpreters.sh` | Shared Linux/macOS workload-interpreter inventory check. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
@@ -44,7 +46,7 @@ Validation.Tests.Scheduled.yml
             └─ resolve  →  resolve-validation-test-matrix.mjs --plan <plan>
                  ├─ windows job (matrix) → download artifact → prepare-windows-host.ps1 → run_backend_validation_tests.ps1
                  ├─ linux   job (matrix) → download artifact → prepare-linux-host.sh   → run_backend_validation_tests.sh
-                 └─ macos   job (matrix) → download artifact →                            run_backend_validation_tests.sh
+                 └─ macos   job (matrix) → download artifact → prepare-macos-host.sh  → run_backend_validation_tests.sh
 ```
 
 An entry point **must** build the artifacts before calling the matrix job — the
@@ -72,7 +74,7 @@ Build artifacts are kept for 1 day — they exist only to feed these jobs.
 | `resolve` | `ubuntu-latest` | Runs the resolver, emits one matrix per OS family plus `has_<family>` flags so an empty family is skipped rather than failing on an empty matrix. |
 | `windows` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-windows-host.ps1 -Backend <backend id>` → `run_backend_validation_tests.ps1 -Backend <backend id>`. |
 | `linux` | `[self-hosted, 1ES.Pool=<pool>, JobId=mxc-e2e-…]` | Download artifact → `prepare-linux-host.sh <backend id>` → `run_backend_validation_tests.sh <backend id>` (under `sudo` for LXC). |
-| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. No host-prep step. |
+| `macos` | GitHub-hosted `${{ matrix.runner }}` | Download artifact → `prepare-macos-host.sh <backend id>` → `chmod +x` → `run_backend_validation_tests.sh <backend id>`. |
 
 Per-job display name: `<platform id>, <architecture>, <backend>` (macOS omits
 the architecture). Job timeout 180 min; host prep 15 min; the test step 45 min
@@ -136,6 +138,15 @@ at the T3 fallback) is a worthwhile future improvement.
 `process-t3` runs its two suites back to back and reports them together: a
 failure in the primitives suite does not skip the workloads suite, so one job
 run shows both results instead of costing a second run to triage.
+
+The dispatcher passes `T3-Workloads.ps1` its `-GrantDriveRoot` switch. The
+pwsh- and git-driven workloads resolve the whole ancestor chain of their working
+directory at startup, so granting only the scratch leaf leaves them failing
+before they reach the behaviour under test. Granting the drive root covers the
+chain, but at T3 a policy path becomes an inheritable ACE, so it rewrites ACLs
+across the system drive on every run and again on teardown — acceptable on a
+disposable runner, which is why the switch is off by default and only CI opts
+in. Temporary until pwsh 7.7 leaves preview.
 
 An unwired backend fails loudly on purpose: adding it to a trigger produces a
 red job ("write the tests or remove it"), never a green no-op. The dispatchers'
@@ -230,8 +241,7 @@ every entry.
 `prepare-windows-host.ps1`:
 
 - `process-t3` — runs `wxc-host-prep.exe prepare-system-drive` and
-  `prepare-null-device --no-sacl`, then calls the shared workload-interpreter
-  check ([below](#workload-interpreters)).
+  `prepare-null-device --no-sacl`.
 - `microvm` — asserts the NanVix payload is in the artifact, adds a Defender
   exclusion for the binary directory, and requires the Windows Hypervisor
   Platform feature *and* a running hypervisor.
@@ -258,37 +268,51 @@ message instead of surfacing later as an opaque backend error.
 - `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
-macOS has no preparation step.
+`prepare-macos-host.sh`:
+
+- `seatbelt` — asserts `mxc-exec-mac` shipped. The sandbox is part of the OS, so
+  there is nothing to install; the script exists so macOS has the same shape as
+  the other two and a future prerequisite has an obvious home.
+
+Every one of the three scripts also runs the workload-interpreter check
+([below](#workload-interpreters)) before it dispatches on the backend id.
 
 ### Workload interpreters
 
 Some suites do not just exercise MXC's primitives — they run *real programs*
 (`pwsh`, `git`, `node`, `python`, `cmd`) inside the sandbox and assert on what
-those programs produce. `Assert-WorkloadInterpreters` in
-`prepare-windows-host.ps1` verifies that host-side inventory up front, so a
-missing tool is reported once as a preparation result rather than repeatedly as
-a confusing mid-suite failure.
+those programs produce. Each preparation script verifies that host-side
+inventory up front, so a missing tool is reported once as a preparation result
+rather than repeatedly as a confusing mid-suite failure.
 
-The check is **suite-agnostic by design**. It describes what a Windows
+The check is **suite-agnostic by design**, and runs for *every* backend rather
+than only the ones whose suites happen to need it today. It describes what a
 validation *host* is expected to provide, not what any one suite consumes, so
 any current or future suite that shells out to these programs is served by the
 same list. `T3-Workloads.ps1` is simply the first caller; wiring up the next one
 needs no change here.
 
-Its inventory lives in a single table, each entry carrying:
+There are two implementations, because the two host families share no shell:
+`Assert-WorkloadInterpreters` in `prepare-windows-host.ps1`, and
+`assert-workload-interpreters.sh`, which Linux and macOS both invoke. The Unix
+script is written to bash 3.2 — no associative arrays — because that is what
+macOS still ships.
 
-- `Candidates` — the command names to try, in order. Resolution mirrors what the
-  suites themselves do: `python` is tried before `python3`, and a match under
-  `WindowsApps` is ignored because that is a Microsoft Store alias stub rather
-  than a real interpreter.
-- `Required` — whether an absence fails the job or only warns. Today only
-  `pwsh` is required; its absence means a mis-imaged pool. `git`, `node`, and
-  `python` warn, because suites are expected to report their dependent cases as
-  skipped rather than failing.
-- `Remedy` — the image-level fix, quoted in whichever message is emitted. The
-  tools are **verified, never installed**, for the same reason the optional
-  features are: provisioning a toolchain mid-run would mask the image drift the
-  check exists to surface.
+Each inventory entry carries:
+
+- the command names to try, in order. Resolution mirrors what the suites
+  themselves do: on Windows `python` is tried before `python3` and a match under
+  `WindowsApps` is ignored (that is a Microsoft Store alias stub, not a real
+  interpreter), while on Unix `python3` is tried first.
+- whether an absence fails the job or only warns. On Windows only `pwsh` is
+  required; its absence means a mis-imaged pool. Everything else warns, because
+  suites are expected to report their dependent cases as skipped rather than
+  failing. Nothing is required on Unix yet — no Unix suite drives these
+  interpreters — so that check currently runs purely as host inventory.
+- the image-level fix, quoted in whichever message is emitted. The tools are
+  **verified, never installed**, for the same reason the optional features are:
+  provisioning a toolchain mid-run would mask the image drift the check exists
+  to surface.
 
 Because a warning is deliberately not a failure, an absent optional interpreter
 silently shrinks coverage while the job still shows green. GitHub's pass/fail
@@ -356,8 +380,8 @@ test runner is allocated.
    suite. Until a suite exists, leave the explicit throw / `exit 2` so
    accidental activation fails loudly.
 3. **Host prep:** add a branch to `prepare-windows-host.ps1` (`ValidateSet` +
-   `switch`) or `prepare-linux-host.sh` (`usage` + `case`). Skip only if there
-   is genuinely nothing to install or assert.
+   `switch`), `prepare-linux-host.sh`, or `prepare-macos-host.sh` (`usage` +
+   `case`). Skip only if there is genuinely nothing to install or assert.
 4. **Artifact:** make sure everything the suite needs is in the
    `Upload binaries` list of the relevant `Build.*.Job.yml`, and that the build
    enables the backend's cargo feature.

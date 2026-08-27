@@ -145,8 +145,6 @@ function Initialize-ProcessContainerHost {
     if ($LASTEXITCODE -ne 0) {
         Exit-WithError "wxc-host-prep prepare-null-device failed with exit code $LASTEXITCODE"
     }
-
-    Assert-WorkloadInterpreters
 }
 
 # Verify the interpreters test suites drive inside the sandbox, following
@@ -353,6 +351,9 @@ if (-not (Test-Path $BinaryDirectory)) {
 $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
 
 Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory"
+
+# Runs for every backend: this is host inventory, not a backend prerequisite.
+Assert-WorkloadInterpreters
 
 switch ($Backend) {
     'process-t3' { Initialize-ProcessContainerHost }

@@ -87,9 +87,14 @@ workflows) before calling the matrix job.
   GitHub-hosted `runner` instead of a 1ES `pool`.
 
 **Host preparation** happens in the matrix job before the tests, keyed by the
-matrix `backend` id: `scripts/ci/prepare-windows-host.ps1` and
-`scripts/ci/prepare-linux-host.sh`. A backend with no prerequisites is an
-explicit no-op, so the step runs unconditionally for every entry.
+matrix `backend` id: `scripts/ci/prepare-windows-host.ps1`,
+`scripts/ci/prepare-linux-host.sh`, and `scripts/ci/prepare-macos-host.sh`. A
+backend with no prerequisites is an explicit no-op, so the step runs
+unconditionally for every entry. Independent of the backend id, all three also
+verify the host's workload interpreters (`pwsh`, `git`, `node`, `python`) —
+Windows in `Assert-WorkloadInterpreters`, Linux and macOS via the shared
+bash-3.2-compatible `scripts/ci/assert-workload-interpreters.sh`. Interpreters
+are verified, never installed.
 
 **Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
 (Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map

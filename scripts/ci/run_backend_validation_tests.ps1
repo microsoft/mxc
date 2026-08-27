@@ -142,8 +142,12 @@ function Invoke-T3WorkloadTests {
     # -Wxc is required: the script's default points at a debug build that does
     # not exist in a CI artifact. -KeepArtifacts preserves the per-workload
     # logs and configs on a clean run so a passing job still uploads them.
+    # -GrantDriveRoot lets the pwsh/git workloads resolve their working
+    # directory's ancestor chain; it rewrites ACLs across the system drive,
+    # which is why the script leaves it off by default and only a disposable
+    # CI runner opts in. Temporary until pwsh 7.7 leaves preview.
     $global:LASTEXITCODE = 0
-    & $script -Wxc $wxc -KeepArtifacts | Out-Null
+    & $script -Wxc $wxc -KeepArtifacts -GrantDriveRoot | Out-Null
     return $LASTEXITCODE
 }
 
