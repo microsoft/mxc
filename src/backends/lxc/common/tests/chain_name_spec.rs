@@ -6,7 +6,9 @@
 //! Written against the published contract only. Nothing here may depend on how
 //! `chain_name_for` computes its result.
 
-use lxc_common::network_iptables::{chain_name_for, NetworkIptablesManager, CHAIN_NAME_MAX_LEN};
+use lxc_common::network_iptables::{
+    chain_name_for, EgressHookPoint, NetworkIptablesManager, CHAIN_NAME_MAX_LEN,
+};
 use std::collections::{HashMap, HashSet};
 
 fn multibyte_inputs() -> Vec<String> {
@@ -331,7 +333,7 @@ fn slugless_output_is_prefix_plus_sixteen_char_base32_hash() {
 fn manager_chain_name_matches_free_function() {
     for input in representative_inputs() {
         assert_eq!(
-            NetworkIptablesManager::new(&input).chain_name(),
+            NetworkIptablesManager::new(&input, EgressHookPoint::ContainerNetns(4242)).chain_name(),
             chain_name_for(&input),
             "manager disagrees with free function for {input:?}"
         );

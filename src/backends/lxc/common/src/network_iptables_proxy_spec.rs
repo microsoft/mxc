@@ -40,8 +40,7 @@ fn apply_and_collect(
     Result<bool, String>,
 ) {
     let fake = super::test_firewall::install();
-    let mut manager = NetworkIptablesManager::new(container);
-    manager.set_veth_interface("veth-proxy0");
+    let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
     let mut logger = Logger::new(Mode::Buffer);
     let _ = fake.forget_issued();
 

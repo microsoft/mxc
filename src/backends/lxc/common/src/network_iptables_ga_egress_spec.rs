@@ -626,8 +626,7 @@ fn appended_ipv4_chain_rules(
     uses_directional_schema: bool,
 ) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
-    let mut manager = NetworkIptablesManager::new(container);
-    manager.set_veth_interface("veth-dns0");
+    let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
     manager.set_directional_schema(uses_directional_schema);
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
