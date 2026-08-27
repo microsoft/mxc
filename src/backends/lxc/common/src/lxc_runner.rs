@@ -224,6 +224,10 @@ impl LxcScriptRunner {
             }
         }
 
+        let uses_directional_schema =
+            wxc_common::supports_directional_network(&request.schema_version);
+        let plan = plan_network(&request.policy, uses_directional_schema);
+
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
         let mut container_created = false;
@@ -250,10 +254,6 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
-        let plan = plan_network(&request.policy, uses_directional_schema);
-
         // LXC reads the network section only as the container starts; the
         // firewall decision below is too late.
         if plan.omits_interface() {
@@ -275,19 +275,35 @@ impl LxcScriptRunner {
             );
         }
 
-        // Ensure the container is running so that the veth interface exists
-        if !container.is_running() {
-            let _ = writeln!(logger, "Starting LXC container...");
-            if let Err(e) = container.start() {
+        // Everything above only wrote to the config file, and LXC reads that
+        // file as the container starts.  A container an earlier run left
+        // running is still on that run's topology, so stop it and let the
+        // start below apply this run's.
+        if container.is_running() {
+            let _ = writeln!(
+                logger,
+                "Container already running; stopping it so this run's network policy applies."
+            );
+            if let Err(e) = container.stop() {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
                 }
-                return ScriptResponse::error(&format!("Failed to start container: {}", e));
+                return ScriptResponse::error(&format!(
+                    "Failed to stop a container left running by an earlier run: {}. \
+                     Its network policy is the earlier run's, so the script was not run.",
+                    e
+                ));
             }
-            let _ = writeln!(logger, "Container started successfully.");
-        } else {
-            let _ = writeln!(logger, "Container already running.");
         }
+
+        let _ = writeln!(logger, "Starting LXC container...");
+        if let Err(e) = container.start() {
+            if self.destroy_on_exit || container_created {
+                let _ = container.destroy();
+            }
+            return ScriptResponse::error(&format!("Failed to start container: {}", e));
+        }
+        let _ = writeln!(logger, "Container started successfully.");
 
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 
