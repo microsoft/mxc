@@ -104,6 +104,16 @@ run_rejected "a directional section before 0.8 is refused" \
     "require schema version 0.8 or later" \
     "DIRECTIONAL_PRE_0_8_SHOULD_NOT_RUN"
 
+# The per-peer block budget. `except` is the amplifier: 20 dispersed /32
+# exclusions look small but split 0.0.0.0/0 past the 256-block ceiling, because
+# each one carves its own full-depth path down the prefix tree. Rules must be
+# refused up front rather than part-way through a run with a partial policy
+# already installed.
+run_rejected "an egress peer that over-expands its block budget is refused" \
+    "bubblewrap_network_egress_budget_rejected.json" \
+    "expands into more than 256 address blocks" \
+    "EGRESS_BUDGET_SHOULD_NOT_RUN"
+
 # ---------------------------------------------------------------------------
 # 2. Enforcement
 # ---------------------------------------------------------------------------

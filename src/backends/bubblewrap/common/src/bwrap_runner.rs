@@ -730,8 +730,9 @@ impl SandboxProcess for BubblewrapSandboxProcess {
         } else {
             // Inherit mode: bwrap shares the executor's group (no
             // `process_group(0)`), so a group-kill would hit the executor.
-            // bwrap is pid 1 of the sandbox pid namespace, so killing the root
-            // alone tears the whole namespace (every descendant) down.
+            // Killing bwrap alone suffices because `--die-with-parent` makes
+            // the sandbox die with it — bwrap is *not* pid 1 of the namespace
+            // (it forks), so without that flag descendants would survive.
             self.inner.child.kill()
         }
     }
@@ -751,8 +752,8 @@ impl SandboxProcess for BubblewrapSandboxProcess {
             Err(WaitError::Timeout) => {
                 // Tree-kill so descendants die too and release any stdout/stderr
                 // pipe write-ends (else the drain threads below could block).
-                // `kill()` group-kills in Pipes mode, and in Inherit mode kills
-                // bwrap (pid 1 of the namespace), which tears the sandbox down.
+                // `kill()` group-kills in Pipes mode; in Inherit mode it kills
+                // bwrap, which `--die-with-parent` turns into a full teardown.
                 let _ = self.kill();
                 let _ = self.inner.child.wait();
                 Err(std::io::Error::new(

@@ -3,16 +3,13 @@
 
 //! Bubblewrap (Linux) executor **characterization** tests.
 //!
-//! These lock in the *current* run-to-completion behavior of the `lxc-exec`
-//! Bubblewrap path before the unified `SandboxBackend`/`Runner` refactor lands.
-//! They assert what the code does **today**.
+//! These lock in the run-to-completion behavior of the `lxc-exec` Bubblewrap
+//! path. They assert what the code does **today**.
 //!
-//! Unlike Seatbelt, Bubblewrap already `--clearenv`s unconditionally and runs
-//! the child with `stdin` closed, so the env/stdin contracts pinned here are
-//! ones the refactor should *preserve*. (The stdin/`SIGTTIN` regression that the
-//! refactor introduces is only observable under a real PTY, which the
-//! `.output()`-based harness cannot provide — that needs a separate PTY harness
-//! and is tracked as a follow-up.)
+//! Bubblewrap `--clearenv`s unconditionally, so the env contract pinned here is
+//! deliberate rather than incidental. The harness captures via `.output()` and
+//! so cannot provide a real PTY; the stdin/`SIGTTIN` behavior that needs one is
+//! tracked separately.
 //!
 //! They run in the existing Linux CI job (`cargo test`) **only when `bwrap` is
 //! installed** — `has_bwrap()` skips them cleanly otherwise. Each test also
@@ -20,6 +17,7 @@
 #![cfg(target_os = "linux")]
 
 use serde_json::json;
+use std::time::{Duration, Instant};
 use wxc_e2e_tests::{has_bwrap, has_platform_exec, run_platform_config_value};
 
 const SCHEMA_VERSION: &str = "0.7.0-alpha";
@@ -140,23 +138,27 @@ fn bubblewrap_honors_explicit_process_cwd() {
 }
 
 /// Characterizes that a `process.timeout` shorter than the workload is
-/// enforced and surfaces as a non-zero exit.
+/// enforced, and that it takes a backgrounded descendant down with it.
 ///
-/// NOTE: on current `main`, the Bubblewrap run-to-completion timeout kills only
-/// the `bwrap` parent (`child.kill()`), so a forked descendant can survive,
-/// keep the stdout pipe open, and have its post-timeout output captured (the
-/// call can even block until the descendant exits). That tree-kill behavior is
-/// something the unified `Runner` refactor changes, so this test deliberately
-/// does NOT assert the absence of post-timeout output or a wall-clock bound —
-/// only that the timeout fires and fails the run.
+/// The descendant is the load-bearing case: `bwrap` forks, so pid 1 of the
+/// sandbox namespace is not the process the executor spawned. Killing that
+/// handle tears the sandbox down only because `--die-with-parent` is set —
+/// without it the descendant outlives the timeout, keeps writing to the
+/// inherited stdout, and runs on after teardown has dropped its network
+/// enforcement.
 #[test]
 fn bubblewrap_timeout_is_enforced() {
     if !ready() {
         return;
     }
-    let mut cfg = config("timeout", "echo CHAR_BEFORE; /bin/sleep 5; echo CHAR_AFTER");
+    let mut cfg = config(
+        "timeout",
+        "echo CHAR_BEFORE; (/bin/sleep 8; echo CHAR_AFTER) & wait",
+    );
     cfg["process"]["timeout"] = json!(1500);
+    let started = Instant::now();
     let result = run_platform_config_value("bwrap timeout", &cfg, &[], None);
+    let elapsed = started.elapsed();
     let out = result.combined_output();
     assert!(
         out.contains("CHAR_BEFORE"),
@@ -166,5 +168,14 @@ fn bubblewrap_timeout_is_enforced() {
         result.code,
         Some(0),
         "a timed-out run should exit non-zero. Output:\n{out}"
+    );
+    assert!(
+        !out.contains("CHAR_AFTER"),
+        "the descendant outlived the timeout and wrote post-timeout output. \
+         Output:\n{out}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "a 1500ms timeout should not wait out the 8s descendant; took {elapsed:?}"
     );
 }
