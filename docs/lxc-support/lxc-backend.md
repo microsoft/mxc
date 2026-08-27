@@ -109,9 +109,9 @@ Filesystem policies are enforced via bind mounts in the container configuration:
 
 ## Network Policy
 
-Network policy has two independent halves: outbound (egress) filtering on the host, described first, and inbound (ingress) filtering inside the container, described under [Inbound (ingress) policy](#inbound-ingress-policy).
+Network policy has two independent halves, and both are enforced inside the container's own network namespace: outbound (egress) filtering, described first, and inbound (ingress) filtering, described under [Inbound (ingress) policy](#inbound-ingress-policy).
 
-Outbound policies are enforced with parallel `iptables` and `ip6tables` chains scoped to the container's virtual ethernet (veth) interface:
+Outbound policies are enforced with parallel `iptables` and `ip6tables` chains in the container's network namespace:
 
 | Policy | Implementation |
 |--------|---------------|
@@ -207,47 +207,29 @@ Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6t
 | Classification | Condition | Behavior |
 |----------------|-----------|----------|
 | `Available` | The `ip6tables` probe succeeds | Programs the parallel `ip6tables` chain alongside the IPv4 chain |
-| `KernelIpv6Disabled` | The probe fails **and** the host has no active IPv6 | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
-| `UnusableButIpv6Active` | The probe fails **and** the host has active IPv6 | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
+| `KernelIpv6Disabled` | The probe fails **and** the namespace has no active IPv6 | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
+| `UnusableButIpv6Active` | The probe fails **and** the namespace has active IPv6 | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
 
-Host IPv6 activity is read from `/proc/net/if_inet6`: a non-loopback interface with an IPv6 address counts as active, while loopback-only `::1` on `lo` (present even on IPv4-only hosts) does not. If that file cannot be read at all — as opposed to being absent, which means IPv6 is disabled — the state is treated as *unknown* rather than as a confirmed "IPv6 is off", so an unreadable IPv6 state fails closed instead of leaving IPv6 unfiltered.
+Both the probe and the IPv6 reading are scoped to the namespace the rules land in, because a host with IPv6 switched off says nothing about the container being filtered — reading the host there would skip the v6 chain while the rules went into a container that had IPv6, leaving it unfiltered. Activity is read from that namespace's `if_inet6`, and its *existence* is the signal rather than its contents: a container whose IPv6 address has not arrived yet presents the same address-less file as one with IPv6 switched off, and the kernel never creates the file at all when IPv6 is disabled at boot. If the file cannot be read for any other reason the state is *unknown* rather than a confirmed "IPv6 is off", so an unreadable state fails closed.
 
-The chains are hooked into `FORWARD` for container egress with **up to two
-rules per family**, because the input interface `FORWARD` sees depends on how
-the veth is attached:
+The chain is hooked into the `OUTPUT` chain of the container's **own network
+namespace**, not the host's `FORWARD` chain. Every command is issued through
+`nsenter -t <init-pid> -n`, so the container's init PID is mandatory; when a
+policy needs a firewall and MXC cannot discover that PID, the run is aborted
+rather than started with egress silently unenforced.
 
-| Attachment | Rule that matches |
-|------------|-------------------|
-| veth routed directly by the host | `-i <veth>` |
-| veth attached to a bridge (the default LXC topology) | `-m physdev --physdev-in <veth>` |
+Host `FORWARD` cannot serve here. A container on the default bridge reaches the
+outside world through the bridge's own IP, so the host routes the packet and it
+arrives in `FORWARD` with the bridge as its input interface, never the
+container's veth. Rules scoped to that veth match nothing. Filtering at the
+source — inside the namespace the traffic originates in — removes the question
+of how the veth is attached, and needs no `br_netfilter`, no topology change,
+and no address management.
 
-The two are mutually exclusive for any given packet, so nothing is counted
-twice. Installing only `-i <veth>` is what previously let a fully populated
-deny-all chain sit in the ruleset filtering nothing on the default bridged
-topology.
+This is the enforcement point the 0.8.0 networking contract specifies, and it
+is where inbound filtering already lives.
 
-The `physdev` rule is required only on a bridged veth. On a directly routed
-veth a host whose kernel lacks the `physdev` match logs a warning and
-continues with the interface rule alone, which is the rule that matches there;
-on a bridged veth the same failure is fatal, because `physdev` is the only
-rule that could ever match.
-
-A bridged veth additionally requires `br_netfilter` to be delivering bridged
-packets to iptables. With `/proc/sys/net/bridge/bridge-nf-call-iptables` absent
-or `0`, both hook rules install cleanly and neither ever fires. MXC reads that
-file and **fails firewall setup** rather than reporting success for a chain
-that could never be reached. When the IPv6 chain is programmed,
-`/proc/sys/net/bridge/bridge-nf-call-ip6tables` is checked separately and to
-the same standard.
-
-If MXC cannot discover the container veth at all, firewall setup **fails** and
-the partially created chains are rolled back. An unhooked chain is never
-traversed, so reporting success would hand the caller a deny-all chain that
-filters nothing — strictly worse than no firewall, because it looks enforced.
-Installing the rules host-wide instead is not an option either: unscoped, they
-would apply to every container and to the host's own traffic.
-
-Egress firewall state is torn down automatically with best-effort removal of the `FORWARD` hooks and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` does not currently keep the egress chains alive. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains.
+Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` does not currently keep the egress chains alive. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
 
 ### Inbound (ingress) policy
 
@@ -265,13 +247,15 @@ requests a firewall enforcement mode. Under 0.8.0 it is always installed.
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 
-IPv6 is classified with the same three-way probe as egress, but against the *container* namespace rather than the host, and from a different signal. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
+IPv6 is classified with the same three-way probe as egress, against the *container* namespace and from the same signal. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
 
-The signal differs because a container is not a long-running host. Egress reads the *contents* of `/proc/net/if_inet6` and treats loopback-only as inactive, which is a fair reading for a host that has been up for a while. A container has not been: `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off. Inbound therefore keys on that file's *existence*, which is stable — the kernel never creates `/proc/<pid>/net/if_inet6` when IPv6 is disabled at boot. A present but address-less file counts as active, so an unusable `ip6tables` fails the run closed instead of installing IPv4-only enforcement that an IPv6 address arriving moments later would slip past. The trade is deliberate and one-directional: this can abort a run that the egress rule would have let proceed, never the reverse.
+The signal is the file's *existence* rather than its contents, because a container is not a long-running host. `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off. Existence is stable — the kernel never creates `/proc/<pid>/net/if_inet6` when IPv6 is disabled at boot — so a present but address-less file counts as active, and an unusable `ip6tables` fails the run closed instead of installing IPv4-only enforcement that an IPv6 address arriving moments later would slip past. The trade is deliberate and one-directional: this can abort a run that a contents-based reading would have let proceed, never the reverse.
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
-Inbound default-deny is not a containment boundary against the sandboxed workload. Because the chain lives in the container's own network namespace, the workload can reach it: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chain lives in, where it can flush or delete it. The egress chains are not exposed this way: they sit on the host and hook into `FORWARD` by the container's host-side veth, out of the workload's reach. The asymmetry follows from where each chain is installed. Inbound default-deny therefore closes off external reachability — including for services the workload itself starts — for any workload that does not deliberately tear it down, and does not survive one that does. Making inbound enforcement tamper-proof is tracked in issue #854.
+Default-deny is not a containment boundary against the sandboxed workload, in either direction. Because both chains live in the container's own network namespace, the workload can reach them: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chains live in, where it can flush or delete them. Default-deny therefore holds for any workload that does not deliberately tear it down, and does not survive one that does. Making enforcement tamper-proof is tracked in issue #854.
+
+Egress used to be described as exempt from this, on the grounds that its chains sat on the host out of the workload's reach. They did — and on the default bridged topology they also filtered nothing, which is why enforcement moved into the namespace. The exemption was never worth what it cost.
 
 Unlike egress, the inbound chain honors the lifecycle's `preservePolicy`: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
@@ -283,12 +267,14 @@ injected so a cooperating client uses it. The env vars are the routing hint;
 the firewall is the enforcement, so an application that ignores them cannot
 reach the internet directly.
 
-The chain is hooked into `FORWARD`, so what it governs is traffic the host
-*routes* on the container's behalf. Traffic addressed to the bridge gateway
+The chain is hooked into the container's own `OUTPUT`, so it governs everything
+the container sends, wherever it is addressed. Traffic to the bridge gateway
 itself — where LXC's `dnsmasq` listens, and where a host-local proxy would run
-— is delivered locally and traverses `INPUT`, which this chain does not hook.
-Closing that path needs an INPUT hook and is tracked separately, so "reaches
-nothing" is accurate for forwarded egress and not for host-local destinations.
+— is covered like any other destination, because it leaves the container
+through the same chain. That closes a gap the earlier host-side hook could not:
+`FORWARD` saw only what the host *routed* on the container's behalf, and
+host-local destinations were delivered through `INPUT` instead, which it never
+hooked.
 
 Only the `{ "url": "http://proxy.example:8080" }` form is accepted. The LXC
 container has its own network namespace, so `{ "localhost": <port> }` names the
