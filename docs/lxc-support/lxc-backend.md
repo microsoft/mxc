@@ -203,14 +203,6 @@ address. That is the GA decision:
 first-class policy surface and that queries fail when the rules do not allow the
 resolver's IP.
 
-**The bridge resolver is not exempt either.** While egress was filtered on
-the host, a container's query to its own gateway was delivered locally and no
-rule ever saw it. The chain now sits in the container's namespace and governs
-that query like any other destination. A directional posture that does not
-allow the resolver's address blocks name resolution through it. The legacy
-0.7 host-list path still carries an unconditional port 53 accept and is
-unaffected.
-
 Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6tables -S` and classifies the result three ways:
 
 | Classification | Condition | Behavior |
@@ -265,8 +257,6 @@ The signal is the file's *existence* rather than its contents, because a contain
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
 Default-deny is not a containment boundary against the sandboxed workload, in either direction. Because both chains live in the container's own network namespace, the workload can reach them: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chains live in, where it can flush or delete them. Default-deny therefore holds for any workload that does not deliberately tear it down, and does not survive one that does. Making enforcement tamper-proof is tracked in issue #854.
-
-Egress used to be described as exempt from this, on the grounds that its chains sat on the host out of the workload's reach. They did — and on the default bridged topology they also filtered nothing, which is why enforcement moved into the namespace. The exemption was never worth what it cost.
 
 The inbound chain honors the lifecycle's `preservePolicy` as the egress chains do: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
