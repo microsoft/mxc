@@ -20,9 +20,9 @@ use wxc_common::models::{
 
 /// The network topology this run gives the container.
 ///
-/// The two schemas describe a policy in different terms, and each reaches its
-/// own variants: `Isolated` is stated only by 0.8, `Unfiltered` and
-/// `ProxyWithoutEnforcement` only by 0.7.
+/// The two schemas describe a policy in different terms and meet here. Either
+/// one can state a posture that permits nothing and so reach `Isolated`;
+/// `Unfiltered` and `ProxyWithoutEnforcement` are stated only by 0.7.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NetworkPlan {
     /// Loopback only, with no veth to filter.
@@ -105,14 +105,27 @@ fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
     }
 }
 
-/// 0.7 names an enforcement mode, and only some modes install rules.
+/// 0.7 names an enforcement mode, and only some modes install rules.  A mode
+/// that installs none still has to answer a policy that permits nothing.
 fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
     if NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode) {
         return NetworkPlan::Filtered;
     }
 
+    // A proxy is a peer, so naming one is not granting nothing: the container
+    // has to reach it.
     if policy.network_proxy.is_enabled() {
         return NetworkPlan::ProxyWithoutEnforcement;
+    }
+
+    // Blocking outbound while naming no reachable host and no local network
+    // permits nothing at all. No rule is installed to withhold it here, so the
+    // absence of an interface is what withholds it.
+    if matches!(policy.default_network_policy, NetworkPolicy::Block)
+        && policy.allowed_hosts.is_empty()
+        && !policy.allow_local_network
+    {
+        return NetworkPlan::Isolated;
     }
 
     NetworkPlan::Unfiltered
@@ -124,7 +137,15 @@ fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
 /// and a proxy has to be reachable, even where the declared mode installs
 /// nothing.
 pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
-    plan_network(policy).installs_firewall()
+    let plan = plan_network(policy);
+
+    // Nothing to resolve and nothing to reach when the container is given no
+    // interface, whatever else the policy happens to name.
+    if plan.omits_interface() {
+        return false;
+    }
+
+    plan.installs_firewall()
         || !policy.allowed_hosts.is_empty()
         || !policy.blocked_hosts.is_empty()
         || policy.network_proxy.is_enabled()
@@ -4201,6 +4222,26 @@ mod tests {
         );
     }
 
+    // The 0.7 keys can say "permit nothing" just as the 0.8 keys can, and the
+    // answer to that has to be the same either way: no interface at all.
+    #[test]
+    fn a_legacy_policy_that_permits_nothing_is_given_no_interface() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+            network_mode_specified: true,
+            default_network_policy: NetworkPolicy::Block,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            plan_network(&policy),
+            NetworkPlan::Isolated,
+            "a policy that blocks outbound, allows no local network, and names no \
+             proxy permits nothing, so the container is given no interface rather \
+             than an unfiltered one"
+        );
+    }
+
     #[test]
     fn every_enforcement_mode_takes_the_contractual_firewall_gate() {
         for (mode, uses_firewall) in enforcement_modes_with_firewall_contract() {
@@ -4279,10 +4320,13 @@ mod tests {
     }
 
     // Resolving a host name and reaching a proxy both need the interface up,
-    // whatever the mode decides about installing rules.
+    // whatever the mode decides about installing rules. The policy has to
+    // permit something for either to arise: nothing is reachable to begin with
+    // under a posture that blocks outbound and grants no host.
     #[test]
     fn a_legacy_policy_that_installs_nothing_can_still_need_the_network() {
         let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
+        policy.default_network_policy = NetworkPolicy::Allow;
         policy.blocked_hosts = vec!["example.com".to_string()];
 
         assert!(!plan_network(&policy).installs_firewall());
