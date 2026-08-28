@@ -274,45 +274,19 @@ impl LxcScriptRunner {
             }
         }
 
-        if plan.omits_interface() {
-            // `up` keeps 127.0.0.1 available to a workload that binds it.
-            for (key, value) in [("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")] {
-                if let Err(e) = container.set_config_item(key, value) {
-                    if self.destroy_on_exit || container_created {
-                        let _ = container.destroy();
-                    }
-                    return ScriptResponse::error(&format!(
-                        "Failed to remove the container network interface: {}",
-                        e
-                    ));
-                }
-            }
+        let network_overrides: &[(&str, &str)] = if plan.omits_interface() {
             let _ = writeln!(
                 logger,
                 "Policy permits no network; starting the container with no interface."
             );
-        } else if !container_created {
-            // An earlier run over this container id may have appended an
-            // override removing the interface, and that outlives the run that
-            // wrote it.  Delete it so the interface the container was created
-            // with takes effect again.
-            if let Err(e) = container.remove_config_item("lxc.net.0.type", "empty") {
-                if self.destroy_on_exit {
-                    let _ = container.destroy();
-                }
-                return ScriptResponse::error(&format!(
-                    "Failed to restore the container network interface: {}",
-                    e
-                ));
-            }
-            let _ = writeln!(
-                logger,
-                "Restoring the container network interface left removed by an earlier run."
-            );
-        }
+            // `up` keeps 127.0.0.1 available to a workload that binds it.
+            &[("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")]
+        } else {
+            &[]
+        };
 
         let _ = writeln!(logger, "Starting LXC container...");
-        if let Err(e) = container.start() {
+        if let Err(e) = container.start(network_overrides) {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }

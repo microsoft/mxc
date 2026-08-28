@@ -279,49 +279,18 @@ impl LxcContainer {
             })
     }
 
-    /// Delete every `key = value` entry from the container's config file.
+    /// Start the container, applying `defines` to this start alone.
     ///
-    /// The inverse of [`set_config_item`](Self::set_config_item), which
-    /// appends. Removing the appended override leaves the entry the container
-    /// was created with as the last one LXC reads, so the create-time value
-    /// takes effect again without this code having to know what it was.
-    pub fn remove_config_item(&self, key: &str, value: &str) -> Result<(), String> {
-        let config_path = self.config_file_path();
-        let contents = match std::fs::read_to_string(&config_path) {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => {
-                return Err(format!(
-                    "Failed to read config item {} = {}: {} (config file: {})",
-                    key, value, e, config_path
-                ))
-            }
-        };
-
-        let kept: Vec<&str> = contents
-            .lines()
-            .filter(|line| {
-                let Some((line_key, line_value)) = line.split_once('=') else {
-                    return true;
-                };
-                line_key.trim() != key || line_value.trim() != value
-            })
-            .collect();
-
-        let mut rewritten = kept.join("\n");
-        rewritten.push('\n');
-
-        std::fs::write(&config_path, rewritten).map_err(|e| {
-            format!(
-                "Failed to remove config item {} = {}: {} (config file: {})",
-                key, value, e, config_path
-            )
-        })
-    }
-
-    /// Start the container.
-    pub fn start(&self) -> Result<(), String> {
-        Self::run_status(self.lxc_command("lxc-start"), "lxc-start")
+    /// Each pair becomes an `lxc-start -s KEY=VAL` argument. LXC reads those
+    /// in place of the container config's own values without writing to that
+    /// file, so a value chosen for one run does not reach the next run over
+    /// the same container id.
+    pub fn start(&self, defines: &[(&str, &str)]) -> Result<(), String> {
+        let mut cmd = self.lxc_command("lxc-start");
+        for (key, value) in defines {
+            cmd.arg("-s").arg(format!("{}={}", key, value));
+        }
+        Self::run_status(cmd, "lxc-start")
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
