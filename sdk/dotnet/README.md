@@ -179,6 +179,12 @@ Per-invocation opt-in:
 
 These switches do not bypass persisted consent or administrative policy.
 
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the [telemetry data inventory](../../docs/telemetry/telemetry.md#data-inventory).
+
 ```csharp
 using Microsoft.Mxc.Sdk;
 

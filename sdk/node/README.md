@@ -453,6 +453,12 @@ overrides `config.telemetry`; omitting it preserves the config value. This
 stable switch does not require `options.experimental` and cannot bypass consent
 or administrative policy.
 
+When a telemetry-enabled Windows ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose artifact, telemetry can include its
+sanitized technical signatures. It does not include commands, credentials,
+complete file paths, usernames, sandbox output, raw ETL, or general logger
+text. See the [telemetry data inventory](https://github.com/microsoft/mxc/blob/main/docs/telemetry/telemetry.md#data-inventory).
+
 The SDK does not ship a consent UI. It passes the versioned canonical resource
 from the native layer to your presenter. Render its supplied fields verbatim
 and return a typed decision. Follow the

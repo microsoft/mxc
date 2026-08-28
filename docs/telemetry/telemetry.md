@@ -83,9 +83,9 @@ shared Part C custom event fields:
 ## Events
 
 The provider-qualified uploaded event identities are
-`Microsoft.MXC/MXC.Execution` and `Microsoft.MXC/MXC.Error`. `Microsoft.MXC`
-is the TraceLogging provider name; `MXC.Execution` and `MXC.Error` are the
-event names.
+`Microsoft.MXC/MXC.Execution`, `Microsoft.MXC/MXC.Error`, and
+`Microsoft.MXC/MXC.Verbose`. `Microsoft.MXC` is the TraceLogging provider
+name.
 
 ### MXC.Execution
 
@@ -127,6 +127,39 @@ Emitted on execution errors.
 > usernames, or credentials, so `MXC.Error` deliberately carries only the
 > bounded `error_type` category and the numeric `exit_code` — never the
 > message string itself.
+
+### MXC.Verbose
+
+Emitted when a telemetry-enabled ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose logging artifact. MXC reads the
+versioned `*.verbose.json` sibling, validates it as a
+`VerboseLoggingDocument`, and reserializes it as compact JSON. The event never
+contains the actionable denials file, raw ETL, commands, sandbox output, or
+general logger text.
+
+One verbose document may require multiple ETW events. Every `mxc.content`
+value is an independently parseable compact JSON array of complete verbose
+signature objects; MXC never splits a JSON object or UTF-8 code point.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mxc.sandbox_kind` | string | Caller-requested containment kind |
+| `mxc.backend` | string | Concrete containment backend |
+| `mxc.phase` | string | Lifecycle phase; empty for current one-shot capture |
+| `mxc.document_id` | string | Random identifier shared only by chunks of one verbose artifact |
+| `mxc.document_version` | uint32 | `VerboseLoggingDocument` schema version |
+| `mxc.chunk_index` | uint32 | Zero-based chunk index |
+| `mxc.chunk_count` | uint32 | Total number of chunks |
+| `mxc.document_bytes` | uint64 | Canonical compact document byte count |
+| `mxc.document_sha256` | string | SHA-256 of the canonical compact document |
+| `mxc.content` | string | Valid compact JSON array of complete verbose signatures |
+| `mxc.summary` | string | Valid compact JSON verbose-document summary |
+
+Consumers group by the existing app-session identifier plus
+`mxc.document_id`, order by `mxc.chunk_index`, parse and concatenate the
+`mxc.content` arrays, then rebuild `{version, signatures, summary}`. The byte
+count and SHA-256 allow consumers to reject incomplete or corrupted
+reconstructions.
 
 
 ### Crash telemetry (panic hook)
@@ -240,7 +273,7 @@ cargo test -p wxc_e2e_tests --test e2e_telemetry_etw -- --ignored
 
 ## Privacy review status
 
-The version 1 `en-US` consent wording is approved for release review. The
+The version 2 `en-US` consent wording requires privacy/release review. The
 canonical title, body, action labels, and privacy link are documented in
 [Telemetry consent design](telemetry-consent-design.md#canonical-consent-resource)
 and must be rendered verbatim by every EXE and SDK presenter.
@@ -260,15 +293,17 @@ MXC's optional diagnostic events contain:
   random per-session app identifier
 - An MXC-internal lifecycle correlation identifier. SDK callers neither supply
   nor receive it.
+- Sanitized Learning Mode verbose signatures when `captureDenials` produces a
+  verbose artifact: provider/event identifiers, PID, closed outcome reason,
+  access/resource classifications, bounded redacted properties, occurrence
+  counts, and truncation state.
 
-MXC does not emit commands, file paths, credentials, customer content, or
-free-form error text. The consent notice's phrase “other customer content”
-covers any such values that a host or sandbox may process but MXC does not
-include in these events.
+MXC does not emit commands, credentials, complete file paths, usernames,
+sandbox output, raw ETL, actionable denial documents, general logger text, or
+free-form error text.
 
 ### Review status
 
-The consent wording and canonical resource are approved for release review.
-The broader data inventory, retention, access, regional processing, deletion,
-and localization/accessibility decisions remain pending explicit privacy
-review.
+The version 2 consent wording, verbose event inventory, WinExt
+classification, retention, access, regional processing, deletion, and
+localization/accessibility decisions require explicit privacy review.

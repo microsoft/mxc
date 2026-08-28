@@ -30,7 +30,10 @@ use crate::mxc_error::{MxcError, MxcErrorCode};
 use crate::state_aware_dispatch::DispatchOutcome;
 
 pub use consent::ConsentState;
-pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
+pub use events::{
+    log_error, log_execution, log_verbose, ExecutionEvent, FailureReason, TelemetryContext,
+    VerboseEvent,
+};
 pub use policy::PolicyState;
 
 /// Reported exit code for a Rust panic or abort.
@@ -412,6 +415,18 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
         emit(&auth);
     }
     shutdown();
+}
+
+/// Emit one verbose-document chunk under a fresh live authorization decision.
+///
+/// Returns `false` when collection is no longer authorized, allowing a caller
+/// to stop emitting the remaining chunks immediately.
+pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> bool {
+    let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
+        return false;
+    };
+    log_verbose(event);
+    true
 }
 
 /// Record the containment backend for this process so best-effort emit paths
@@ -1126,6 +1141,37 @@ mod tests {
         assert_eq!(events::test_sink::take_executions().len(), 1);
         assert_eq!(events::test_sink::take_errors().len(), 1);
 
+        reset_for_test();
+    }
+
+    #[test]
+    fn verbose_chunks_recheck_live_authorization() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|active| active.set(true));
+        let event = VerboseEvent {
+            backend: "processcontainer",
+            sandbox_kind: "process",
+            phase: "",
+            correlation_vector: "",
+            document_id: "0123456789abcdef0123456789abcdef",
+            document_version: 2,
+            chunk_index: 0,
+            chunk_count: 1,
+            document_bytes: 64,
+            document_sha256: "abc",
+            content: "[]",
+            summary: r#"{"totalOccurrences":0}"#,
+        };
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(false)));
+        assert!(!emit_verbose(true, &event));
+        assert!(events::test_sink::take_verbose().is_empty());
+
+        TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
+        assert!(emit_verbose(true, &event));
+        assert_eq!(events::test_sink::take_verbose().len(), 1);
         reset_for_test();
     }
 

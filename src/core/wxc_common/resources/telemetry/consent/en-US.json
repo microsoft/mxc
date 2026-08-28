@@ -1,5 +1,5 @@
 {
-  "resourceVersion": 1,
+  "resourceVersion": 2,
   "locale": "en-US",
   "messages": {
     "title": {
@@ -8,7 +8,7 @@
     },
     "body": {
       "id": "telemetry-consent-body",
-      "text": "Help improve MXC by sharing optional diagnostic data with Microsoft.\nIf enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.\nYou can change your choice at any time."
+      "text": "Help improve MXC by sharing optional diagnostic data with Microsoft.\nIf enabled, MXC sends diagnostic information about product usage, performance, and reliability. When Learning Mode capture is used, this can include sanitized technical details about resource-access events, such as provider and event identifiers, process IDs, access classifications, and bounded redacted properties. MXC does not send your commands, credentials, complete file paths, usernames, or sandbox output.\nYou can change your choice at any time."
     },
     "affirmativeLabel": {
       "id": "telemetry-consent-affirmative-label",

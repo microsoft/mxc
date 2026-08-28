@@ -1596,7 +1596,10 @@ mod tests {
             env.set_policy_value(3);
 
             let outcome = request_consent(Some("en-US"), |prompt| {
-                assert_eq!(prompt.resource_version, 1);
+                assert_eq!(
+                    prompt.resource_version,
+                    crate::telemetry::consent_prompt::CONSENT_RESOURCE_VERSION
+                );
                 assert_eq!(prompt.locale, "en-US");
                 Ok(ConsentDecision::Yes)
             })
@@ -1615,7 +1618,10 @@ mod tests {
             env.set_policy_value(3);
 
             let outcome = block_on(request_consent_async(Some("en-US"), |prompt| {
-                assert_eq!(prompt.resource_version, 1);
+                assert_eq!(
+                    prompt.resource_version,
+                    crate::telemetry::consent_prompt::CONSENT_RESOURCE_VERSION
+                );
                 assert_eq!(prompt.locale, "en-US");
                 async { Ok(ConsentDecision::Yes) }
             }))
