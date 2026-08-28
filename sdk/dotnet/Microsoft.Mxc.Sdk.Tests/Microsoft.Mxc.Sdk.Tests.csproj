@@ -23,7 +23,10 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="..\golden\*.json" Link="golden\%(Filename)%(Extension)" />
+    <!-- Hand-authored cross-language policy fixtures, shared with the Rust FFI
+         tests (src/ffi/mxc_ffi). They live outside this SDK because both
+         languages assert against them; see tests/policy/README.md. -->
+    <EmbeddedResource Include="..\..\..\tests\policy\*.json" Link="policy\%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

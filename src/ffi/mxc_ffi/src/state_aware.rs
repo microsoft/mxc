@@ -690,8 +690,8 @@ mod tests {
     #[test]
     fn managed_state_aware_goldens_are_accepted_by_native_contract() {
         for fixture in [
-            include_str!("../../../../sdk/dotnet/golden/state-aware-wslc-provision.json"),
-            include_str!("../../../../sdk/dotnet/golden/state-aware-wslc-exec.json"),
+            include_str!("../../../../tests/policy/state-aware-wslc-provision.json"),
+            include_str!("../../../../tests/policy/state-aware-wslc-exec.json"),
         ] {
             if let Err(error) = run_state_aware_json(fixture, true, true) {
                 assert_eq!(

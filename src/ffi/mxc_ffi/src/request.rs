@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn managed_full_request_goldens_are_accepted_by_native_contract() {
         let process_container =
-            include_str!("../../../../sdk/dotnet/golden/request-process-container.json");
+            include_str!("../../../../tests/policy/request-process-container.json");
         let process_spec: RequestSpec =
             serde_json::from_str(process_container).expect("process-container golden parses");
         assert_eq!(process_spec.command, "echo parity");
@@ -334,7 +334,7 @@ mod tests {
             .expect("process-container golden builds a public SDK request");
 
         let directional_network =
-            include_str!("../../../../sdk/dotnet/golden/request-directional-network.json");
+            include_str!("../../../../tests/policy/request-directional-network.json");
         let network_spec: RequestSpec =
             serde_json::from_str(directional_network).expect("directional-network golden parses");
         assert_eq!(network_spec.command, "echo network");
@@ -365,7 +365,7 @@ mod tests {
         build_request_from_json(directional_network)
             .expect("directional-network golden builds a public SDK request");
 
-        let wslc = include_str!("../../../../sdk/dotnet/golden/request-wslc.json");
+        let wslc = include_str!("../../../../tests/policy/request-wslc.json");
         let wslc_spec: RequestSpec = serde_json::from_str(wslc).expect("WSLC golden parses");
         assert_eq!(wslc_spec.command, "printf parity");
         assert!(wslc_spec.experimental);
