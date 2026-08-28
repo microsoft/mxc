@@ -52,7 +52,7 @@ pub fn emit_verbose_telemetry(
     for (index, content) in prepared.chunks.iter().enumerate() {
         let chunk_index = u32::try_from(index)
             .map_err(|_| "verbose artifact chunk index exceeded u32".to_string())?;
-        if !telemetry::emit_verbose(
+        match telemetry::emit_verbose(
             true,
             &VerboseEvent {
                 backend,
@@ -69,7 +69,13 @@ pub fn emit_verbose_telemetry(
                 summary: &prepared.summary,
             },
         ) {
-            break;
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(status) => {
+                return Err(format!(
+                    "ETW rejected a verbose telemetry chunk with status {status}"
+                ));
+            }
         }
     }
     Ok(())
