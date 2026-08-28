@@ -224,9 +224,6 @@ impl LxcScriptRunner {
             }
         }
 
-        let uses_directional_keys = uses_directional_keys(&request.policy);
-        let plan = plan_network(&request.policy);
-
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
         let mut container_created = false;
@@ -273,6 +270,8 @@ impl LxcScriptRunner {
             }
         }
 
+        let plan = plan_network(&request.policy);
+
         let network = if plan.omits_interface() {
             let _ = writeln!(
                 logger,
@@ -312,8 +311,6 @@ impl LxcScriptRunner {
             }
         }
 
-        let use_firewall = plan.installs_firewall();
-
         // Both chains this backend installs live inside the container's own
         // network namespace -- egress hooks its OUTPUT, inbound hooks its
         // INPUT -- so neither can be programmed before the init PID names the
@@ -329,7 +326,7 @@ impl LxcScriptRunner {
                     signal_cleanup::set_active_pid(pid);
                 }
             }
-            None if use_firewall => {
+            None if plan.installs_firewall() => {
                 // The run asked for a firewall but we could not find the
                 // container netns to enforce it in. Running anyway would
                 // silently disable every rule the caller asked for, so abort.
@@ -353,6 +350,8 @@ impl LxcScriptRunner {
             Some(pid) => EgressHookPoint::ContainerNetns(pid),
             None => EgressHookPoint::Unhooked,
         };
+
+        let uses_directional_keys = uses_directional_keys(&request.policy);
         let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
         fw_manager.set_preserve_policy(!self.cleanup_policy);
         fw_manager.set_uses_directional_keys(uses_directional_keys);
