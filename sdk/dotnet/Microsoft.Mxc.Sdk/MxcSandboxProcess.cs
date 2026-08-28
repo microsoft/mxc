@@ -482,11 +482,13 @@ public sealed class MxcSandboxProcess : ISandboxProcess
                 return WaitBlocking();
             }
 
-            // try_wait only reports exited / still-running, never a timeout, and
-            // spawn starts no native watchdog, so the managed side owns the
-            // policy deadline. Handing straight to the native blocking wait does
-            // not work: mxc_sandbox_wait takes no deadline and applies the
-            // spawn-time timeout as a duration from the call
+            // On the spawn path try_wait reports only exited / still-running and
+            // no native watchdog runs, so the managed side owns the policy
+            // deadline. (A lifecycle exec differs: its native waiter does report
+            // a timeout, which the branch above replays.) Either way, handing
+            // straight to the native blocking wait does not work:
+            // mxc_sandbox_wait takes no deadline and applies the spawn-time
+            // timeout as a duration from the call
             // (WaitForSingleObject(h, timeout_ms) on Windows, Instant::now() + d
             // on Unix), so it would grant a second full budget — up to 2x the
             // policy timeout, with _controlLock held the whole time.
