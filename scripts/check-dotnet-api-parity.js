@@ -130,14 +130,12 @@ function attributedDeclarations(body, marker, declarationPattern) {
   while (cursor < body.length) {
     cursor = skipWhitespace(body, cursor);
     const attributesStart = cursor;
-    let hasAttributes = false;
     while (body.startsWith(marker, cursor)) {
       const end = attributeEnd(body, cursor, marker);
       if (end === -1) {
         cursor = body.length;
         break;
       }
-      hasAttributes = true;
       cursor = skipWhitespace(body, end);
     }
     if (cursor >= body.length) break;
@@ -150,7 +148,10 @@ function attributedDeclarations(body, marker, declarationPattern) {
         name: match[1],
       });
       cursor = declarationPattern.lastIndex;
-    } else if (!hasAttributes) {
+    } else {
+      // Advance unconditionally, including when attributes were just consumed
+      // (a non-public attributed member reaches here). Every path through this
+      // loop must move the cursor, or the gate would spin instead of failing.
       cursor++;
     }
   }
