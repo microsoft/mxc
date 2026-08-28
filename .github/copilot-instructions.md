@@ -96,7 +96,20 @@ verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
 `winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
 Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
 duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
-platform's list can diverge. These are verified, never installed.
+platform's list can diverge. macOS verifies only; Linux first runs
+`install_workload_interpreters`, which installs whatever the stock distribution
+image lacks (distribution repositories, plus Microsoft's feed for `pwsh`/`az`
+and GitHub's for `gh`). That pass is best-effort and can never fail the job —
+the inventory that follows reports the outcome. Its package-manager access goes
+through `resolve_package_manager` and `install_packages`, the same helpers the
+backend prerequisite installers use, so a new distribution family is one arm in
+`install_packages` rather than a branch in every installer. Windows provisions
+one entry, also best-effort and also ahead of the inventory: `Repair-Winget`
+re-registers the App Installer package (`Add-AppxPackage -RegisterByFamilyName`)
+when `winget` resolves on `PATH` but fails to run, the symptom of a package the
+image shipped but never registered for the account the job runs as. It decides
+by invoking `winget --version`, not by resolving the command, since a resolvable
+alias is the broken case.
 
 **Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
 (Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map

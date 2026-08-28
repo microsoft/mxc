@@ -25,18 +25,69 @@ apt_update() {
     fi
 }
 
+# Resolves the host's package manager once, so supporting a new distribution
+# family is a case in install_packages rather than another branch in every
+# installer below.
+package_manager=""
+resolve_package_manager() {
+    if [[ -n "$package_manager" ]]; then
+        return 0
+    fi
+
+    local candidate
+    for candidate in apt-get dnf yum microdnf; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            package_manager="$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# install_packages <package>...
+# Installs from the feeds the host already has configured, and returns the
+# package manager's own status so each caller decides what a failure means: a
+# missing backend prerequisite is fatal, a missing workload interpreter is not.
+install_packages() {
+    case "$package_manager" in
+        apt-get)
+            # sudo resets the environment, so the frontend setting has to be
+            # applied on the far side of it rather than exported here.
+            sudo env DEBIAN_FRONTEND=noninteractive \
+                apt-get install -y --no-install-recommends "$@"
+            ;;
+        dnf | yum | microdnf)
+            sudo "$package_manager" install -y "$@"
+            ;;
+        *)
+            echo "Unsupported package manager: '$package_manager'." >&2
+            return 1
+            ;;
+    esac
+}
+
+# Returns 0 when any of the comma-separated candidates is on PATH.
+have_command() {
+    local candidate
+    local IFS=','
+    for candidate in $1; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Red Hat ships no third-party content, so epel-release is not in RHEL's own
 # repos; the documented install is the release RPM straight from Fedora. 
 install_epel() {
-    local package_manager="$1"
-
     if command -v subscription-manager >/dev/null 2>&1; then
         sudo subscription-manager repos \
             --enable "codeready-builder-for-rhel-10-$(arch)-rpms" ||
             echo "WARNING: could not enable the CRB repository; EPEL packages that depend on it may fail to install." >&2
     fi
 
-    sudo "$package_manager" install -y \
+    install_packages \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-10.noarch.rpm
 }
 
@@ -51,20 +102,20 @@ install_bubblewrap() {
         command -v ip >/dev/null 2>&1; then
         return
     fi
-    if command -v apt-get >/dev/null 2>&1; then
-        apt_update
-        sudo apt-get install -y --no-install-recommends \
-            bubblewrap slirp4netns util-linux iptables iproute2
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y bubblewrap slirp4netns util-linux iptables iproute
-    elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y bubblewrap slirp4netns util-linux iptables iproute
-    elif command -v microdnf >/dev/null 2>&1; then
-        sudo microdnf install -y bubblewrap slirp4netns util-linux iptables iproute
-    else
+
+    if ! resolve_package_manager; then
         echo "No supported package manager found to install Bubblewrap prerequisites." >&2
         exit 1
     fi
+
+    local packages=(bubblewrap slirp4netns util-linux iptables)
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+        packages+=(iproute2)
+    else
+        packages+=(iproute)
+    fi
+    install_packages "${packages[@]}"
 }
 
 # The ingress chain matches on connection state, which iptables can only
@@ -88,27 +139,25 @@ install_lxc() {
     if command -v lxc-start >/dev/null 2>&1; then
         return
     fi
-    if command -v apt-get >/dev/null 2>&1; then
-        apt_update
-        # Debian dropped lxc-utils; Ubuntu still ships it.
-        local packages=(lxc dnsmasq-base iptables bridge-utils)
-        if apt-cache show lxc-utils >/dev/null 2>&1; then
-            packages+=(lxc-utils)
-        fi
-        sudo apt-get install -y --no-install-recommends "${packages[@]}"
-    elif command -v dnf >/dev/null 2>&1; then
-        install_epel dnf
-        sudo dnf install -y lxc lxc-templates dnsmasq iptables
-    elif command -v yum >/dev/null 2>&1; then
-        install_epel yum
-        sudo yum install -y lxc lxc-templates dnsmasq iptables
-    elif command -v microdnf >/dev/null 2>&1; then
-        install_epel microdnf
-        sudo microdnf install -y lxc lxc-templates dnsmasq iptables
-    else
+
+    if ! resolve_package_manager; then
         echo "No supported package manager found to install LXC." >&2
         exit 1
     fi
+
+    local packages
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+        packages=(lxc dnsmasq-base iptables bridge-utils)
+        # Debian dropped lxc-utils; Ubuntu still ships it.
+        if apt-cache show lxc-utils >/dev/null 2>&1; then
+            packages+=(lxc-utils)
+        fi
+    else
+        install_epel
+        packages=(lxc lxc-templates dnsmasq iptables)
+    fi
+    install_packages "${packages[@]}"
 }
 
 # Start the LXC bridge and wait until it can actually serve containers.
@@ -206,9 +255,192 @@ enable_bridge_netfilter() {
     done
 }
 
-# Verifies the interpreters test suites drive inside the sandbox, following the
-# same verify-never-install rule as the rest of host preparation: a missing one
-# is an image problem, not something a job can fix mid-run.
+# PowerShell, the Azure CLI, and the GitHub CLI are in no distribution's own
+# repositories, so each comes from its vendor's feed. A feed is added at most
+# once and a failure is remembered, so the second tool wanting a broken feed
+# does not retry it.
+microsoft_feed_state=""
+add_microsoft_feed() {
+    case "$microsoft_feed_state" in
+        added) return 0 ;;
+        failed) return 1 ;;
+    esac
+    microsoft_feed_state="failed"
+
+    local id="" version_id=""
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="${ID:-}"
+        version_id="${VERSION_ID:-}"
+    fi
+    if [[ -z "$id" || -z "$version_id" ]]; then
+        echo "WARNING: could not read the distribution from /etc/os-release; skipping the Microsoft package feed." >&2
+        return 1
+    fi
+
+    if [[ "$package_manager" == "apt-get" ]]; then
+        local package="/tmp/packages-microsoft-prod.deb"
+        if ! curl -fsSL \
+            "https://packages.microsoft.com/config/${id}/${version_id}/packages-microsoft-prod.deb" \
+            -o "$package"; then
+            echo "WARNING: no Microsoft package feed published for ${id} ${version_id}." >&2
+            return 1
+        fi
+        if ! sudo dpkg -i "$package"; then
+            rm -f "$package"
+            echo "WARNING: could not install the Microsoft package feed." >&2
+            return 1
+        fi
+        rm -f "$package"
+        apt_update
+    else
+        # The RPM feed is keyed on the major version alone.
+        if ! install_packages \
+            "https://packages.microsoft.com/config/rhel/${version_id%%.*}/packages-microsoft-prod.rpm"; then
+            echo "WARNING: could not install the Microsoft package feed." >&2
+            return 1
+        fi
+    fi
+
+    microsoft_feed_state="added"
+}
+
+add_github_feed() {
+    if [[ "$package_manager" == "apt-get" ]]; then
+        local keyring="/usr/share/keyrings/githubcli-archive-keyring.gpg"
+        if ! curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg |
+            sudo dd of="$keyring" status=none; then
+            echo "WARNING: could not download the GitHub CLI signing key." >&2
+            return 1
+        fi
+        if ! sudo chmod go+r "$keyring"; then
+            echo "WARNING: could not make the GitHub CLI signing key readable." >&2
+            return 1
+        fi
+        if ! echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://cli.github.com/packages stable main" |
+            sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null; then
+            echo "WARNING: could not write the GitHub CLI package source." >&2
+            return 1
+        fi
+        apt_update
+        return 0
+    fi
+
+    # config-manager is a separate package on some releases and is what adds the
+    # feed, so it is requested before it is used.
+    install_packages "dnf-command(config-manager)" >/dev/null 2>&1 || true
+    if ! sudo "$package_manager" config-manager \
+        --add-repo https://cli.github.com/packages/rpm/gh-cli.repo; then
+        echo "WARNING: could not add the GitHub CLI package feed." >&2
+        return 1
+    fi
+}
+
+# Installs the workload interpreters the image did not already provide.
+#
+# Host preparation verifies rather than installs wherever it can, because a
+# missing backend prerequisite means the image is wrong for the job. The
+# workload interpreters are the exception: they are ordinary developer tools the
+# package manager can supply in one transaction, which is cheaper than losing a
+# suite's coverage to a tool the image happened not to bake.
+#
+# Every step here is best effort and none of them fails the job. What the host
+# actually ended up with is reported by assert_workload_interpreters below.
+install_workload_interpreters() {
+    if ! resolve_package_manager; then
+        echo "WARNING: no supported package manager on this host; skipping workload interpreter installation." >&2
+        return 0
+    fi
+
+    # name|command candidates|apt package(s)|rpm package(s)
+    # npx has no package of its own; it arrives with npm. pwsh, az, and gh need
+    # a vendor feed and are handled separately below.
+    local packaged=(
+        "git|git|git|git"
+        "openssl|openssl|openssl|openssl"
+        "node|node|nodejs|nodejs"
+        "npm|npm|npm|npm"
+        "python|python3,python|python3|python3"
+        "pip|pip3,pip|python3-pip|python3-pip"
+        "dotnet|dotnet|dotnet-sdk-8.0|dotnet-sdk-8.0"
+    )
+
+    local entry name candidates apt_packages rpm_packages
+    local wanted=()
+    for entry in "${packaged[@]}"; do
+        IFS='|' read -r name candidates apt_packages rpm_packages <<<"$entry"
+        if have_command "$candidates"; then
+            continue
+        fi
+        # Deliberately unquoted: an entry may name more than one package.
+        if [[ "$package_manager" == "apt-get" ]]; then
+            wanted+=($apt_packages)
+        else
+            wanted+=($rpm_packages)
+        fi
+    done
+
+    local need_pwsh="false" need_az="false" need_gh="false"
+    have_command pwsh || need_pwsh="true"
+    have_command az || need_az="true"
+    have_command gh || need_gh="true"
+
+    if [[ ${#wanted[@]} -eq 0 && "$need_pwsh" == "false" &&
+        "$need_az" == "false" && "$need_gh" == "false" ]]; then
+        echo "All workload interpreters are already present; nothing to install."
+        return 0
+    fi
+
+    if [[ "$package_manager" == "apt-get" ]]; then
+        apt_update
+    fi
+
+    if [[ "$need_pwsh" == "true" || "$need_az" == "true" || "$need_gh" == "true" ]]; then
+        # Both feeds are fetched over HTTPS and verified against a signing key,
+        # so these have to be present before either can be added.
+        install_packages ca-certificates curl gnupg ||
+            echo "WARNING: could not install the prerequisites for adding vendor package feeds." >&2
+    fi
+
+    if [[ "$need_pwsh" == "true" || "$need_az" == "true" ]]; then
+        if add_microsoft_feed; then
+            if [[ "$need_pwsh" == "true" ]]; then
+                wanted+=(powershell)
+            fi
+            if [[ "$need_az" == "true" ]]; then
+                wanted+=(azure-cli)
+            fi
+        fi
+    fi
+
+    if [[ "$need_gh" == "true" ]] && add_github_feed; then
+        wanted+=(gh)
+    fi
+
+    if [[ ${#wanted[@]} -eq 0 ]]; then
+        return 0
+    fi
+
+    echo "Installing workload interpreters: ${wanted[*]}"
+    if install_packages "${wanted[@]}"; then
+        return 0
+    fi
+
+    # A single unavailable package fails the whole transaction, so retry them
+    # one at a time rather than leaving the host with none of them.
+    echo "WARNING: the combined install failed; retrying each package on its own." >&2
+    local package
+    for package in "${wanted[@]}"; do
+        install_packages "$package" ||
+            echo "WARNING: could not install package '$package'." >&2
+    done
+}
+
+# Verifies the interpreters test suites drive inside the sandbox. This runs
+# after install_workload_interpreters and reports what the host ended up with,
+# so a tool that could not be installed stays visible instead of silently
+# absent.
 #
 # The check is suite-agnostic: it describes what a validation host is expected
 # to provide, not what any one suite consumes, so a future suite that shells out
@@ -262,7 +494,8 @@ assert_workload_interpreters() {
 
 chmod +x "$binary_directory/lxc-exec"
 
-# Runs for every backend: this is host inventory, not a backend prerequisite.
+# Run for every backend: this is host inventory, not a backend prerequisite.
+install_workload_interpreters
 assert_workload_interpreters
 
 case "$backend" in

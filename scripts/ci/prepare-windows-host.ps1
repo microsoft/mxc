@@ -204,6 +204,87 @@ function Assert-WorkloadInterpreters {
     }
 }
 
+# Returns whether winget can actually run, which is not the same as being on
+# PATH: an unregistered App Installer leaves an alias that resolves and then
+# fails to launch. The explicit alias path is a second candidate because
+# PowerShell caches command lookups, so a repair inside this process is not
+# guaranteed to be visible through Get-Command.
+function Test-WingetOperational {
+    $candidates = @()
+    $command = Get-Command winget -ErrorAction SilentlyContinue
+    if ($command) { $candidates += $command.Source }
+    $candidates += Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\winget.exe'
+
+    foreach ($candidate in $candidates) {
+        if (-not $candidate) { continue }
+        try {
+            $version = & $candidate --version 2>&1
+            if ($LASTEXITCODE -eq 0 -and $version) {
+                Write-Host "winget is operational ($($version | Select-Object -First 1)) at $candidate"
+                return $true
+            }
+        } catch {
+            # A broken alias throws rather than returning an exit code.
+        }
+    }
+    return $false
+}
+
+# winget ships as an AppExecutionAlias belonging to the App Installer package.
+# CI images routinely carry the package while leaving it unregistered for the
+# account the job runs as, which produces an alias that resolves on PATH but
+# fails with "The file cannot be accessed by the system". Registering the
+# package already on the image is the documented repair and downloads nothing.
+#
+# This is the one exception to the verify-never-install rule above, and only
+# barely: it installs nothing, it re-registers what the image already shipped.
+# It is best effort — winget is optional, so nothing here fails the job.
+function Repair-Winget {
+    if (Test-WingetOperational) {
+        return
+    }
+
+    Write-Host "winget did not run; checking whether the App Installer package is present."
+
+    $package = $null
+    try {
+        $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+            Select-Object -First 1
+    } catch {
+        # PowerShell 7 builds without the native Appx binary module have to
+        # reach these cmdlets through Windows PowerShell.
+        try {
+            Import-Module Appx -UseWindowsPowerShell -ErrorAction Stop -WarningAction SilentlyContinue
+            $package = Get-AppxPackage -Name Microsoft.DesktopAppInstaller -ErrorAction Stop |
+                Select-Object -First 1
+        } catch {
+            Write-Host "::warning::Could not query Appx packages, so winget cannot be repaired: $($_.Exception.Message)"
+            return
+        }
+    }
+
+    if (-not $package) {
+        Write-Host "::warning::winget is unavailable and the App Installer package is absent; install it in the image."
+        return
+    }
+
+    Write-Host "App Installer $($package.Version) is present (status $($package.Status)); registering it for the current user."
+    try {
+        # PackageFamilyName is Microsoft.DesktopAppInstaller_8wekyb3d8bbwe, read
+        # off the package rather than hard-coded.
+        Add-AppxPackage -RegisterByFamilyName -MainPackage $package.PackageFamilyName -ErrorAction Stop
+    } catch {
+        Write-Host "::warning::Could not register the App Installer package: $($_.Exception.Message)"
+        return
+    }
+
+    if (Test-WingetOperational) {
+        Write-Host "winget is operational after registering App Installer."
+    } else {
+        Write-Host "::warning::winget is still not operational after registering App Installer."
+    }
+}
+
 function Initialize-MicroVmHost {
     # Staged next to wxc-exec.exe by the --features microvm build, so their
     # absence means a broken artifact rather than a host problem. Snapshots are
@@ -371,7 +452,9 @@ $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
 
 Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory"
 
-# Runs for every backend: this is host inventory, not a backend prerequisite.
+# Run for every backend: this is host inventory, not a backend prerequisite.
+# The winget repair comes first so the inventory reports the repaired state.
+Repair-Winget
 Assert-WorkloadInterpreters
 
 switch ($Backend) {

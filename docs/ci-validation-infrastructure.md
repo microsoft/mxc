@@ -29,8 +29,8 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
-| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions. |
-| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware). |
+| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair. |
+| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter install pass. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
@@ -264,6 +264,11 @@ Windows optional features are **verified, never enabled**: turning one on needs 
 reboot the job cannot take, so a mis-imaged pool fails here with a pointed
 message instead of surfacing later as an opaque backend error.
 
+The script does provision one thing, for every backend rather than a particular
+one: `Repair-Winget` re-registers the App Installer package when `winget` is on
+`PATH` but cannot run
+([below](#verified-everywhere-installed-on-linux-repaired-on-windows)).
+
 `prepare-linux-host.sh`:
 
 - `bubblewrap` — installs `bwrap`, `slirp4netns`, `util-linux`, and `iptables`
@@ -276,22 +281,33 @@ message instead of surfacing later as an opaque backend error.
 - `microvm` — asserts the NanVix payload exists.
 - `hyperlight` — no-op.
 
+Every install above goes through two shared helpers rather than its own
+package-manager chain: `resolve_package_manager` picks the first of `apt-get`,
+`dnf`, `yum`, or `microdnf` on the host and caches it, and `install_packages`
+holds the single `case` that knows how each one is invoked. Supporting a new
+distribution family is therefore one new arm in `install_packages`, not another
+branch in every installer. `install_packages` returns the package manager's own
+status rather than acting on it, which is what lets a backend prerequisite treat
+a failure as fatal while a workload interpreter only warns.
+
 `prepare-macos-host.sh`:
 
 - `seatbelt` — asserts `mxc-exec-mac` shipped. The sandbox is part of the OS, so
   there is nothing to install; the script exists so macOS has the same shape as
   the other two and a future prerequisite has an obvious home.
 
-Every one of the three scripts also runs the workload-interpreter check
+Every one of the three scripts also takes the workload-interpreter inventory
 ([below](#workload-interpreters)) before it dispatches on the backend id.
 
 ### Workload interpreters
 
 Some suites do not just exercise MXC's primitives — they run *real programs*
 inside the sandbox and assert on what those programs produce. Each preparation
-script verifies that host-side inventory up front, so a missing tool is reported
+script takes that host-side inventory up front, so a missing tool is reported
 once as a preparation result rather than repeatedly as a confusing mid-suite
-failure.
+failure. On Linux the inventory is preceded by an install pass, and on Windows
+by a narrow `winget` repair
+([below](#verified-everywhere-installed-on-linux-repaired-on-windows)).
 
 The list is `pwsh`, `git`, `node`, `npm`, `npx`, `python`, `pip`, `dotnet`, `az`,
 `gh`, and `openssl` on every OS, plus `nuget`, `winapp` (the Windows App
@@ -328,16 +344,65 @@ Each inventory entry carries:
   suites are expected to report their dependent cases as skipped rather than
   failing. Nothing is required on Unix yet — no Unix suite drives these
   interpreters — so that check currently runs purely as host inventory.
-- the image-level fix, quoted in whichever message is emitted. The tools are
-  **verified, never installed**, for the same reason the optional features are:
-  provisioning a toolchain mid-run would mask the image drift the check exists
-  to surface.
+- the image-level fix, quoted in whichever message is emitted.
 
 Because a warning is deliberately not a failure, an absent optional interpreter
 silently shrinks coverage while the job still shows green. GitHub's pass/fail
 icon cannot express "passed, but with less coverage than yesterday" — a future
 test-analysis portal is intended to surface skip counts so that erosion is
 visible.
+
+#### Verified everywhere, installed on Linux, repaired on Windows
+
+On Windows and macOS the tools are, with one exception, **verified, never
+installed**, for the same reason the optional features are: provisioning a
+toolchain mid-run would mask the image drift the check exists to surface.
+Neither platform needs it anyway — Windows runs on a 1ES image whose contents we
+control, and the GitHub-hosted macOS runners already ship all twelve.
+
+The Windows exception is `winget`, which `Repair-Winget` provisions immediately
+before the inventory. It is the narrowest form of install there is: it downloads
+nothing and adds nothing to the image, it only re-registers for the running
+account a package the image already shipped. That is worth doing because the
+failure it fixes is not image drift at all — App Installer is routinely present
+but unregistered for the account the job runs as, which leaves an
+`AppExecutionAlias` that resolves on `PATH` and then fails with "The file cannot
+be accessed by the system". Reporting a tool the image *does* carry as missing
+would surface nothing anyone could act on.
+
+The repair is written to be indistinguishable from a no-op when it is not
+needed. It decides by *running* `winget --version` rather than by resolving the
+command, because a resolvable alias is precisely the broken case; an operational
+host returns before touching Appx at all. Like the Linux install pass, nothing
+it does can fail the job — an absent package, an unreachable `Appx` module, and
+a failed registration all warn and fall through to the inventory, which then
+reports `winget` in the usual way.
+
+Linux is the exception. `prepare-linux-host.sh` runs
+`install_workload_interpreters` immediately before taking the inventory,
+installing whatever the image did not already provide. The Linux pools run stock
+distribution images that MXC does not bake, so there is no curated image to
+drift *from*; refusing to install would not surface a provisioning mistake, it
+would only cost coverage. Most of the list comes from the distribution's own
+repositories, `pwsh` and `az` from Microsoft's feed and `gh` from GitHub's since
+no distribution carries them, and `npx` from nowhere at all — it arrives with
+`npm`.
+
+Two properties make that safe to run on every job:
+
+- **Nothing it does can fail the job.** Every step warns and continues, and a
+  host with no recognized package manager is skipped outright. The inventory
+  immediately afterwards is what reports the outcome, so a tool that could not
+  be installed stays visible instead of becoming a silent absence.
+- **A failed batch degrades to individual installs.** apt and dnf abort the
+  *entire* transaction over a single unavailable package, so one name missing on
+  one distribution would otherwise cost that host every other interpreter as
+  well. After a batch failure each package is retried on its own.
+
+A host that already has everything short-circuits before touching the package
+manager, so the common case costs one `command -v` per entry. Vendor feeds are
+added at most once and a failure is remembered, so the second tool wanting a
+broken feed does not retry it.
 
 ## Log collection
 
@@ -420,7 +485,10 @@ passing a distinguishing argument later without touching the matrix.
 3. For a Windows prerelease image set `"prerelease": true` and use a neutral
    `windows-prerelease-<name>` id — the id appears in public job names.
 4. For a new Linux distro, check that `prepare-linux-host.sh` handles its
-   package manager and service layout.
+   package manager and service layout. A new package-manager family needs one
+   arm in `install_packages` and one entry in `resolve_package_manager`; a
+   family whose package *names* differ also needs its column in the tables in
+   `install_lxc`, `install_bubblewrap`, and `install_workload_interpreters`.
 5. Add it to a plan's `triggers`, then resolve locally.
 
 ### Wire an unwired backend to a suite
