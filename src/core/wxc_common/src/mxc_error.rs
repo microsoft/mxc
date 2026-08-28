@@ -60,16 +60,16 @@ impl std::fmt::Display for MxcErrorCode {
 /// Structured detail for a failure that originated in an underlying platform
 /// API.
 ///
-/// Grouping these is what carries the envelope invariant: `native_code` and
-/// `remediation` live beside `operation` rather than as independent optionals,
-/// so a failure that names a status without naming the call it came from is
-/// not something the normal construction path can produce. Build one with
-/// [`ApiFailure::new`], which requires the operation up front, and add the
-/// optional parts with the `with_*` builders. (The fields are `pub` for
-/// destructuring, so a hand-rolled literal *can* still put an empty string in
-/// `operation` — the type makes the invariant the easy path, not an enforced
-/// one.) `MxcError` holds this boxed, so adding detail costs one pointer
-/// rather than widening every `Result<_, MxcError>` in the codebase.
+/// Grouping carries the envelope invariant: `native_code` lives beside
+/// `operation` rather than as an independent optional, so a status that does
+/// not name the call it came from is not something the normal construction
+/// path can produce. Build one with [`ApiFailure::new`], which requires the
+/// operation up front, and add the status with
+/// [`ApiFailure::with_native_code`]. (The fields are `pub` for destructuring,
+/// so a hand-rolled literal *can* still put an empty string in `operation` —
+/// the type makes the invariant the easy path, not an enforced one.)
+/// `MxcError` holds this boxed, so adding detail costs one pointer rather than
+/// widening every `Result<_, MxcError>` in the codebase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiFailure {
     /// The API call that failed, namespaced by its interface — e.g.
@@ -78,27 +78,19 @@ pub struct ApiFailure {
     pub operation: String,
     /// The underlying platform status as a string, e.g. `0x80070490`.
     pub native_code: Option<String>,
-    /// The API's actionable "how to fix it" hint, when it supplies one.
-    pub remediation: Option<String>,
 }
 
 impl ApiFailure {
-    /// A failure that names its operation but carries no status or hint.
+    /// A failure that names its operation but carries no status.
     pub fn new(operation: impl Into<String>) -> Self {
         Self {
             operation: operation.into(),
             native_code: None,
-            remediation: None,
         }
     }
 
     pub fn with_native_code(mut self, native_code: impl Into<String>) -> Self {
         self.native_code = Some(native_code.into());
-        self
-    }
-
-    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
-        self.remediation = Some(remediation.into());
         self
     }
 }
@@ -107,24 +99,25 @@ impl ApiFailure {
 ///
 /// Constructed via `MxcError::new(code, message)` or one of the per-code
 /// convenience constructors (e.g. `MxcError::stale_id("...")`); attach
-/// structured failure information with `with_details` or `with_api_failure`.
+/// structured failure information with `with_details`, `with_api_failure` or
+/// `with_remediation`.
 ///
 /// # Structured failure fields
 ///
-/// An [`ApiFailure`] describes a failure that originated in an underlying
-/// platform API. It is deliberately backend-neutral: `operation` names the
-/// API call that failed, `native_code` carries the platform status as a
-/// string (an HRESULT on Windows, an errno or equivalent elsewhere), and
-/// `remediation` carries an actionable hint when the API supplies one. On the
-/// wire these are flat siblings of `code` and `message`.
+/// An [`ApiFailure`] describes the platform call behind a failure: `operation`
+/// names the call that failed and `native_code` carries its status as a string
+/// (an HRESULT on Windows, an errno or equivalent elsewhere). It is present
+/// only while such a call was in flight, so a failure MXC raises itself — a
+/// malformed request, a policy rejection, an internal failure — leaves it
+/// unset.
 ///
-/// A failure MXC raises itself — a malformed request, a policy rejection, or
-/// an internal failure with no API call in flight — leaves it unset and so
-/// carries only `code` and `message`.
+/// `remediation` is independent of it: any failure can carry an actionable
+/// hint. On the wire all of these are flat siblings of `code` and `message`.
 ///
-/// A new *backend-neutral* concept earns a field on `ApiFailure`;
-/// *backend-specific* structured data belongs in `details`, which stays open
-/// for that purpose.
+/// A new *backend-neutral* concept earns a field on [`ApiFailure`] when it
+/// describes the platform call and on `MxcError` when it describes the
+/// failure; *backend-specific* structured data belongs in `details`, which
+/// stays open for that purpose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct MxcError {
@@ -133,6 +126,8 @@ pub struct MxcError {
     pub details: Option<Value>,
     /// Present only when an underlying API operation was in flight.
     pub api_failure: Option<Box<ApiFailure>>,
+    /// An actionable "how to fix it" hint, when the failure has one.
+    pub remediation: Option<String>,
 }
 
 /// Renders `code: message`, then the API detail in brackets when present —
@@ -166,6 +161,7 @@ impl MxcError {
             message: message.into(),
             details: None,
             api_failure: None,
+            remediation: None,
         }
     }
 
@@ -177,6 +173,12 @@ impl MxcError {
     /// Attaches the structured detail of an underlying API failure.
     pub fn with_api_failure(mut self, failure: ApiFailure) -> Self {
         self.api_failure = Some(Box::new(failure));
+        self
+    }
+
+    /// Attaches an actionable hint for the caller.
+    pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
+        self.remediation = Some(remediation.into());
         self
     }
 
@@ -193,14 +195,6 @@ impl MxcError {
             .and_then(|f| f.native_code.as_deref())
     }
 
-    /// The API's remediation hint, when it supplied one. Never present
-    /// without [`MxcError::operation`].
-    pub fn remediation(&self) -> Option<&str> {
-        self.api_failure
-            .as_ref()
-            .and_then(|f| f.remediation.as_deref())
-    }
-
     pub fn to_envelope(&self) -> ErrorEnvelope {
         ErrorEnvelope {
             code: self.code,
@@ -208,7 +202,7 @@ impl MxcError {
             details: self.details.clone(),
             operation: self.operation().map(str::to_string),
             native_code: self.native_code().map(str::to_string),
-            remediation: self.remediation().map(str::to_string),
+            remediation: self.remediation.clone(),
         }
     }
 }
@@ -484,9 +478,7 @@ mod tests {
     // ── Structured failure fields ────────────────────────────────────────
 
     fn full_api_failure() -> ApiFailure {
-        ApiFailure::new("IsoSessionOps.AddUserAsync")
-            .with_native_code("0x80070490")
-            .with_remediation("Re-provision the sandbox.")
+        ApiFailure::new("IsoSessionOps.AddUserAsync").with_native_code("0x80070490")
     }
 
     #[test]
@@ -494,26 +486,44 @@ mod tests {
         let err = MxcError::backend_error("boom");
         assert_eq!(err.operation(), None);
         assert_eq!(err.native_code(), None);
-        assert_eq!(err.remediation(), None);
+        assert_eq!(err.remediation, None);
     }
 
     #[test]
     fn structured_builders_set_their_fields() {
-        let err = MxcError::backend_error("boom").with_api_failure(full_api_failure());
+        let err = MxcError::backend_error("boom")
+            .with_api_failure(full_api_failure())
+            .with_remediation("Re-provision the sandbox.");
         assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
         assert_eq!(err.native_code(), Some("0x80070490"));
-        assert_eq!(err.remediation(), Some("Re-provision the sandbox."));
+        assert_eq!(
+            err.remediation.as_deref(),
+            Some("Re-provision the sandbox.")
+        );
     }
 
-    /// `native_code` and `remediation` live inside `ApiFailure`, so the normal
-    /// construction path cannot set them without an `operation`.
+    /// `native_code` lives inside `ApiFailure`, so the normal construction path
+    /// cannot set it without an `operation`.
     #[test]
-    fn structured_detail_always_carries_an_operation() {
+    fn a_native_code_always_carries_an_operation() {
         let err = MxcError::backend_error("boom")
             .with_api_failure(ApiFailure::new("IsoSessionOps.AddUserAsync"));
         assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
         assert_eq!(err.native_code(), None);
-        assert_eq!(err.remediation(), None);
+    }
+
+    /// `remediation` sits on the error rather than on `ApiFailure`, so a
+    /// failure MXC raises itself can tell the caller what to do about it.
+    #[test]
+    fn a_remediation_needs_no_api_call() {
+        let err = MxcError::policy_validation("the network cannot be filtered")
+            .with_remediation("Acknowledge the unrestricted network, or use another backend.");
+        assert_eq!(err.operation(), None);
+        assert_eq!(err.native_code(), None);
+        assert_eq!(
+            err.remediation.as_deref(),
+            Some("Acknowledge the unrestricted network, or use another backend.")
+        );
     }
 
     // ── Display keeps the diagnostic detail a logger would otherwise lose ─
@@ -570,6 +580,7 @@ mod tests {
     fn to_envelope_copies_structured_fields_through() {
         let env = MxcError::backend_error("boom")
             .with_api_failure(full_api_failure())
+            .with_remediation("Re-provision the sandbox.")
             .to_envelope();
         assert_eq!(env.operation.as_deref(), Some("IsoSessionOps.AddUserAsync"));
         assert_eq!(env.native_code.as_deref(), Some("0x80070490"));
@@ -601,10 +612,9 @@ mod tests {
     fn structured_envelope_serialises_all_fields() {
         let env = MxcError::stale_id("agent user not found")
             .with_api_failure(
-                ApiFailure::new("IsoSessionOps.StopSessionAsync")
-                    .with_native_code("0x80070490")
-                    .with_remediation("Re-provision the sandbox."),
+                ApiFailure::new("IsoSessionOps.StopSessionAsync").with_native_code("0x80070490"),
             )
+            .with_remediation("Re-provision the sandbox.")
             .to_envelope();
         let json = serde_json::to_value(&env).unwrap();
         assert_eq!(
@@ -615,6 +625,26 @@ mod tests {
                 "operation": "IsoSessionOps.StopSessionAsync",
                 "nativeCode": "0x80070490",
                 "remediation": "Re-provision the sandbox.",
+            })
+        );
+    }
+
+    /// The wire has always allowed a remediation without an operation; this is
+    /// the shape MXC's own refusals now reach it with.
+    #[test]
+    fn a_remediation_reaches_the_envelope_without_an_operation() {
+        let json = serde_json::to_value(
+            MxcError::policy_validation("filesystem policy is not supported")
+                .with_remediation("Remove the filesystem section.")
+                .to_envelope(),
+        )
+        .unwrap();
+        assert_eq!(
+            json,
+            json!({
+                "code": "policy_validation",
+                "message": "filesystem policy is not supported",
+                "remediation": "Remove the filesystem section.",
             })
         );
     }
@@ -637,8 +667,8 @@ mod tests {
         );
     }
 
-    /// An MXC-side rejection has no API call in flight, so it carries neither
-    /// `operation` nor its refinements — see the invariant on `MxcError`.
+    /// An MXC-side rejection has no API call in flight, so it carries no
+    /// `operation` and no status; here it also has no hint to offer.
     #[test]
     fn mxc_side_rejection_carries_no_structured_fields() {
         let json = serde_json::to_value(MxcError::policy_validation("bad").to_envelope()).unwrap();

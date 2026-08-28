@@ -148,10 +148,11 @@ impl IsoApiFailure {
         if let Some(hresult) = self.code {
             failure = failure.with_native_code(format_native_code(hresult));
         }
+        let mut error = MxcError::new(code, self.message).with_api_failure(failure);
         if let Some(remediation) = self.remediation {
-            failure = failure.with_remediation(remediation);
+            error = error.with_remediation(remediation);
         }
-        MxcError::new(code, self.message).with_api_failure(failure)
+        error
     }
 }
 
@@ -636,7 +637,10 @@ mod tests {
         );
         assert_eq!(mapped.operation(), Some("IsoSessionOps.StopSessionAsync"));
         assert_eq!(mapped.native_code(), None);
-        assert_eq!(mapped.remediation(), Some("Re-provision the sandbox."));
+        assert_eq!(
+            mapped.remediation.as_deref(),
+            Some("Re-provision the sandbox.")
+        );
     }
 
     /// Even an `ERROR_NOT_FOUND`-shaped failure cannot promote here: the code
@@ -669,7 +673,10 @@ mod tests {
         assert_eq!(mapped.message, "agent user not found");
         assert_eq!(mapped.operation(), Some("IsoSessionOps.StopSessionAsync"));
         assert_eq!(mapped.native_code(), Some("0x80070490"));
-        assert_eq!(mapped.remediation(), Some("Re-provision the sandbox."));
+        assert_eq!(
+            mapped.remediation.as_deref(),
+            Some("Re-provision the sandbox.")
+        );
     }
 
     #[test]
@@ -679,7 +686,7 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
         assert_eq!(mapped.operation(), Some("IsoSessionOps.AddUserAsync2"));
         assert_eq!(mapped.native_code(), Some("0x800706ba"));
-        assert_eq!(mapped.remediation(), None);
+        assert_eq!(mapped.remediation.as_deref(), None);
         assert!(mapped.message.starts_with("call failed: "));
     }
 
@@ -709,7 +716,7 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
         assert_eq!(mapped.operation(), None);
         assert_eq!(mapped.native_code(), None);
-        assert_eq!(mapped.remediation(), None);
+        assert_eq!(mapped.remediation.as_deref(), None);
     }
 
     #[test]
@@ -718,11 +725,11 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::PolicyValidation);
         assert_eq!(mapped.operation(), None);
         assert_eq!(mapped.native_code(), None);
-        assert_eq!(mapped.remediation(), None);
+        assert_eq!(mapped.remediation.as_deref(), None);
     }
 
-    /// Every variant of this type describes a failure with an API call in
-    /// flight, so each carries an `operation`.
+    /// A status describes the call that produced it, so it never reaches the
+    /// wire without the operation it belongs to.
     #[test]
     fn every_variant_upholds_the_field_invariant() {
         let com = windows_core::Error::from_hresult(windows_core::HRESULT(0x80004005_u32 as i32));
@@ -745,12 +752,6 @@ mod tests {
                 assert!(
                     mapped.operation().is_some(),
                     "nativeCode without operation: {label}"
-                );
-            }
-            if mapped.remediation().is_some() {
-                assert!(
-                    mapped.operation().is_some(),
-                    "remediation without operation: {label}"
                 );
             }
         }
