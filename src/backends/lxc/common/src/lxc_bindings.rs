@@ -141,6 +141,38 @@ fn build_attach_args_with_env_control(
     args
 }
 
+/// What network a container has for one run.
+///
+/// LXC fixes a container's interfaces when it starts. MXC states the choice
+/// on each `lxc-start` and leaves the container's config file alone, which is
+/// what lets the next run over the same container id state a different one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartNetwork {
+    /// The container's own config file decides its interfaces.
+    FromContainerConfig,
+    /// The container starts with no interface at all.
+    NoInterface,
+}
+
+impl StartNetwork {
+    /// Build the `lxc-start` arguments that state this choice.
+    ///
+    /// `-s KEY=VAL` is lxc-start's `--define`: it assigns a config variable
+    /// for this run alone and never writes the container's config file.
+    fn to_start_args(self) -> Vec<String> {
+        match self {
+            StartNetwork::FromContainerConfig => Vec::new(),
+            // `up` keeps 127.0.0.1 available to a workload that binds it.
+            StartNetwork::NoInterface => vec![
+                "-s".to_string(),
+                "lxc.net.0.type=empty".to_string(),
+                "-s".to_string(),
+                "lxc.net.0.flags=up".to_string(),
+            ],
+        }
+    }
+}
+
 /// Safe wrapper around an LXC container.
 pub struct LxcContainer {
     name: String,
@@ -187,7 +219,7 @@ impl LxcContainer {
 
     /// Run a prepared `lxc-*` command, mapping spawn / non-zero-exit failures
     /// to a `String` error tagged with the tool name.
-    fn run_status(mut cmd: std::process::Command, tool: &str) -> Result<(), String> {
+    fn run_tool(mut cmd: std::process::Command, tool: &str) -> Result<(), String> {
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
@@ -251,7 +283,7 @@ impl LxcContainer {
             .arg(release)
             .arg("-a")
             .arg(Self::current_arch());
-        Self::run_status(cmd, "lxc-create")
+        Self::run_tool(cmd, "lxc-create")
     }
 
     /// Set a configuration item on the container.
@@ -279,24 +311,11 @@ impl LxcContainer {
             })
     }
 
-    /// Start the container under `run_config`, which holds for this start alone.
-    ///
-    /// Each pair becomes an `lxc-start -s KEY=VAL` argument. LXC takes the
-    /// value from there and never writes it to the container's config file.
-    /// The next run over the same container id states its own, with nothing
-    /// left behind to undo.
-    pub fn start(&self, run_config: &[(&str, &str)]) -> Result<(), String> {
-        Self::run_status(self.start_command(run_config), "lxc-start")
-    }
-
-    /// The command [`Self::start`] runs, built apart from running it. A test
-    /// can then read the flags with no LXC host.
-    fn start_command(&self, run_config: &[(&str, &str)]) -> std::process::Command {
+    /// Start the container with `network`.
+    pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
-        for (key, value) in run_config {
-            cmd.arg("-s").arg(format!("{}={}", key, value));
-        }
-        cmd
+        cmd.args(network.to_start_args());
+        Self::run_tool(cmd, "lxc-start")
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
@@ -432,7 +451,7 @@ impl LxcContainer {
     /// every caller is abandoning or restarting the run rather than keeping
     /// what is inside.
     pub fn stop(&self) -> Result<(), String> {
-        Self::run_status(self.stop_command(), "lxc-stop")
+        Self::run_tool(self.stop_command(), "lxc-stop")
     }
 
     /// The command [`Self::stop`] runs, built apart from running it. A test
@@ -455,7 +474,7 @@ impl LxcContainer {
     pub fn destroy(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
         cmd.arg("-f");
-        Self::run_status(cmd, "lxc-destroy")
+        Self::run_tool(cmd, "lxc-destroy")
     }
 
     /// Get the path to the container's config file.
@@ -508,44 +527,30 @@ mod tests {
         );
     }
 
-    // Passing the topology as -s leaves the container's stored config
-    // untouched, which is what lets the next run over the same container id
-    // choose a different one.
     #[test]
-    fn start_states_the_config_for_one_run_instead_of_storing_it() {
-        let container = LxcContainer::new("mxc-start-test", Some("/var/lib/lxc"));
+    fn a_run_with_no_interface_states_that_to_lxc_start() {
+        let args = StartNetwork::NoInterface.to_start_args();
 
-        let plain: Vec<String> = container
-            .start_command(&[])
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert!(
-            plain.iter().any(|a| a == "mxc-start-test"),
-            "the command must address this container, got {plain:?}"
-        );
-        assert!(
-            !plain.iter().any(|a| a == "-s"),
-            "a run that states no config must pass no -s, got {plain:?}"
-        );
-
-        let configured: Vec<String> = container
-            .start_command(&[("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")])
-            .get_args()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
         assert_eq!(
-            configured.iter().filter(|a| *a == "-s").count(),
+            args.iter().filter(|a| *a == "-s").count(),
             2,
-            "each config item needs its own -s, got {configured:?}"
+            "each config item needs its own -s, got {args:?}"
         );
         assert!(
-            configured.iter().any(|a| a == "lxc.net.0.type=empty"),
-            "each config item must reach lxc-start as KEY=VAL, got {configured:?}"
+            args.contains(&"lxc.net.0.type=empty".to_string()),
+            "the container must be given no interface, got {args:?}"
         );
         assert!(
-            configured.iter().any(|a| a == "lxc.net.0.flags=up"),
-            "each config item must reach lxc-start as KEY=VAL, got {configured:?}"
+            args.contains(&"lxc.net.0.flags=up".to_string()),
+            "loopback must stay up for a workload that binds 127.0.0.1, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_keeps_the_container_config_states_nothing() {
+        assert!(
+            StartNetwork::FromContainerConfig.to_start_args().is_empty(),
+            "the container's own config must be left to decide its interfaces"
         );
     }
 

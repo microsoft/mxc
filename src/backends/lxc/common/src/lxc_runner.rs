@@ -15,7 +15,7 @@ use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use crate::filesystem_mounts;
-use crate::lxc_bindings::LxcContainer;
+use crate::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
     needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
@@ -274,19 +274,18 @@ impl LxcScriptRunner {
             }
         }
 
-        let network_config: &[(&str, &str)] = if plan.omits_interface() {
+        let network = if plan.omits_interface() {
             let _ = writeln!(
                 logger,
                 "Policy permits no network; starting the container with no interface."
             );
-            // `up` keeps 127.0.0.1 available to a workload that binds it.
-            &[("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")]
+            StartNetwork::NoInterface
         } else {
-            &[]
+            StartNetwork::FromContainerConfig
         };
 
         let _ = writeln!(logger, "Starting LXC container...");
-        if let Err(e) = container.start(network_config) {
+        if let Err(e) = container.start(network) {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
