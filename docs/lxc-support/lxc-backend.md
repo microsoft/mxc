@@ -203,10 +203,10 @@ address. That is the GA decision:
 first-class policy surface and that queries fail when the rules do not allow the
 resolver's IP.
 
-**The bridge resolver is no longer outside that.** While egress was filtered on
+**The bridge resolver is not exempt either.** While egress was filtered on
 the host, a container's query to its own gateway was delivered locally and no
 rule ever saw it. The chain now sits in the container's namespace and governs
-that query like any other destination, so a directional posture that does not
+that query like any other destination. A directional posture that does not
 allow the resolver's address blocks name resolution through it. The legacy
 0.7 host-list path still carries an unconditional port 53 accept and is
 unaffected.
