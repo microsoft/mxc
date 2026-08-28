@@ -84,7 +84,7 @@ shared Part C custom event fields:
 
 The provider-qualified uploaded event identities are
 `Microsoft.MXC/MXC.Execution`, `Microsoft.MXC/MXC.Error`, and
-`Microsoft.MXC/MXC.Verbose`. `Microsoft.MXC` is the TraceLogging provider
+`Microsoft.MXC/MXC.VerboseDenials`. `Microsoft.MXC` is the TraceLogging provider
 name.
 
 ### MXC.Execution
@@ -128,7 +128,7 @@ Emitted on execution errors.
 > bounded `error_type` category and the numeric `exit_code` — never the
 > message string itself.
 
-### MXC.Verbose
+### MXC.VerboseDenials
 
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the

@@ -231,7 +231,7 @@ Successful non-dry-run audits require capture metadata, actionable denials JSON,
 
 ## Telemetry
 
-MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution`, `MXC.Error`, and the sanitized Learning Mode artifact event `MXC.Verbose`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
+MXC supports optional TraceLogging ETW telemetry for execution observability. When enabled, structured events (`MXC.Execution`, `MXC.Error`, and the sanitized Learning Mode artifact event `MXC.VerboseDenials`) are emitted by the `Microsoft.MXC` provider to the local ETW subsystem via the Rust [`tracelogging`](https://crates.io/crates/tracelogging) crate. Every event includes common fields (Version, Channel, IsDebugging, `UTCReplace_AppSessionGuid`) as Part C custom event data.
 
 Telemetry requires:
 1. Top-level `"telemetry": { "enabled": true }` in the JSON config
@@ -275,7 +275,7 @@ consent is not applicable.
 
 #### What official builds send
 
-Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution`, `MXC.Error`, and `MXC.Verbose` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
+Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route the `MXC.Execution`, `MXC.Error`, and `MXC.VerboseDenials` events from the `Microsoft.MXC` provider to Microsoft through the UTC pipeline when telemetry is enabled. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
 No PII is collected. Events contain only execution metrics (duration, backend
 type, exit code) and a bounded error category (`error_type`). Free-form error

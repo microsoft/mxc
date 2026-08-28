@@ -332,7 +332,7 @@ metadata; callers derive it from the actionable output path using the naming rul
 above.
 
 When stable telemetry is enabled and authorized, MXC may validate, compact, and
-send this redacted verbose document through `Microsoft.MXC/MXC.Verbose`. Each
+send this redacted verbose document through `Microsoft.MXC/MXC.VerboseDenials`. Each
 event contains a valid JSON array of complete signatures and document
 reconstruction metadata. MXC does not send the actionable denials file or raw
 ETL through telemetry. See [MXC telemetry](../telemetry/telemetry.md).

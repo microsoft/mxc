@@ -146,7 +146,7 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
     test_sink::record_error(ctx, error_type, exit_code);
 }
 
-/// Log one `MXC.Verbose` ETW event.
+/// Log one `MXC.VerboseDenials` ETW event.
 pub fn log_verbose(event: &VerboseEvent<'_>) -> u32 {
     let status = mxc_telemetry::log_verbose(
         event.backend,
@@ -203,7 +203,7 @@ pub(super) mod test_sink {
         pub correlation_vector: String,
     }
 
-    /// Owned copy of an `MXC.Verbose` record as captured for a test.
+    /// Owned copy of an `MXC.VerboseDenials` record as captured for a test.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedVerbose {
         pub backend: String,
@@ -258,7 +258,7 @@ pub(super) mod test_sink {
         std::mem::take(&mut *ERRORS.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// Drain and return the captured `MXC.Verbose` records.
+    /// Drain and return the captured `MXC.VerboseDenials` records.
     pub fn take_verbose() -> Vec<CapturedVerbose> {
         std::mem::take(&mut *VERBOSE.lock().unwrap_or_else(|e| e.into_inner()))
     }

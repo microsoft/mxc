@@ -314,7 +314,7 @@ mod provider {
 
         tracelogging::write_event!(
             MXC_PROVIDER,
-            "MXC.Verbose",
+            "MXC.VerboseDenials",
             level(Informational),
             keyword(MICROSOFT_KEYWORD_MEASURES),
             u16("PartA_PrivacyProduct", &PRIVACY_PRODUCT_MXC),
@@ -437,7 +437,7 @@ mod tests {
             "error event identity changed"
         );
         assert!(
-            provider_source.contains("\"MXC.Verbose\","),
+            provider_source.contains("\"MXC.VerboseDenials\","),
             "verbose event identity changed"
         );
         let error_section = provider_source

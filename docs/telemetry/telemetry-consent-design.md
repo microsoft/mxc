@@ -195,7 +195,7 @@ The public ETW event identities remain:
 
 - `MXC.Execution`
 - `MXC.Error`
-- `MXC.Verbose`
+- `MXC.VerboseDenials`
 
 Collectors may continue filtering those names; consent stabilization does not
 rename the provider or events.
