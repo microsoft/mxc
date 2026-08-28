@@ -254,9 +254,9 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        // A config write does not reach a running container's file, and LXC
-        // applies the network section only as the container starts.  Stop
-        // first, so this run's topology is the one that takes effect.
+        // An override reaches only the start it is passed to, and LXC reads the
+        // network section only at start.  A container an earlier run left
+        // running is still on that run's topology.
         if container.is_running() {
             let _ = writeln!(
                 logger,
