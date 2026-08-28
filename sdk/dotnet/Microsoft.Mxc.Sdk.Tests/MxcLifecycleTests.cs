@@ -134,6 +134,37 @@ public class MxcLifecycleTests
         Assert.Equal(ErrorCode.MalformedId, ex.Code);
     }
 
+    [Fact]
+    public void StopSandbox_EmptyPrefix_ThrowsMalformedId()
+    {
+        // ":payload" clears the ctor's null/empty check and has a colon, but an
+        // empty prefix is structural rather than an unregistered backend. The
+        // native parse_sandbox_id_prefix pins the same split.
+        var id = new SandboxId(":payload");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
+        Assert.Equal(ErrorCode.MalformedId, ex.Code);
+    }
+
+    [Fact]
+    public void StopSandbox_DefaultId_ThrowsMalformedId()
+    {
+        // default(SandboxId) is legal and leaves Value null; it must surface a
+        // typed error rather than a NullReferenceException.
+        var ex = Assert.Throws<MxcException>(
+            () => MxcLifecycle.StopSandbox(default));
+        Assert.Equal(ErrorCode.MalformedId, ex.Code);
+    }
+
+    [Fact]
+    public void StopSandbox_UnknownPrefix_ThrowsUnsupportedContainment()
+    {
+        // A non-empty prefix is well-formed, so it stays UnsupportedContainment
+        // and does not get folded into MalformedId by the guard above.
+        var id = new SandboxId("nope:payload");
+        var ex = Assert.Throws<MxcException>(() => MxcLifecycle.StopSandbox(id));
+        Assert.Equal(ErrorCode.UnsupportedContainment, ex.Code);
+    }
+
     [Theory]
     [InlineData(null, true)]
     [InlineData(StateAwareNetworkDefault.Allow, null)]

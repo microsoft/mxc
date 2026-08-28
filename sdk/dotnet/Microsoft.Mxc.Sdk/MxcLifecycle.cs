@@ -440,15 +440,21 @@ public static class MxcLifecycle
 
     private static StateAwareContainment ContainmentForId(SandboxId id)
     {
-        var separator = id.Value.IndexOf(':');
-        if (separator < 0)
+        // Mirrors the native `parse_sandbox_id_prefix`, which folds a missing
+        // `:` and an empty prefix into one MalformedId: both are structural,
+        // not an unregistered backend. `default(SandboxId)` leaves Value null
+        // and is handled here too, so it reports a typed error rather than
+        // faulting on the IndexOf.
+        var value = id.Value;
+        var separator = value is null ? -1 : value.IndexOf(':', StringComparison.Ordinal);
+        if (separator <= 0)
         {
             throw new MxcException(
                 ErrorCode.MalformedId,
-                $"sandbox id '{id.Value}' has no backend prefix");
+                $"sandbox id '{id}' is missing the '<prefix>:...' form");
         }
 
-        return id.Value[..separator] switch
+        return value![..separator] switch
         {
             "iso" => StateAwareContainment.IsolationSession,
             "wsb" => StateAwareContainment.WindowsSandbox,
