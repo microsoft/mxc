@@ -61,7 +61,7 @@ mod tests {
     #[test]
     fn one_shot_request_adapts_to_one_shot() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "process": {
                 "commandLine": "echo hello"
             }
@@ -71,7 +71,7 @@ mod tests {
             panic!("expected one-shot request");
         };
 
-        assert_eq!(adapted.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.version, Some("0.9.0-alpha".to_string()));
         assert!(adapted.process.is_some());
 
         let process = adapted.process.unwrap();
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn provision_request_adapts_to_state_aware() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
             "experimental": {
@@ -98,7 +98,7 @@ mod tests {
             panic!("expected state-aware request");
         };
 
-        assert_eq!(adapted.config.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Provision)));
         assert_eq!(
             adapted.experimental_raw,
@@ -112,7 +112,7 @@ mod tests {
     #[test]
     fn start_request_adapts_to_state_aware() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "start",
             "sandboxId": "sandbox-id",
             "experimental": {
@@ -126,7 +126,7 @@ mod tests {
             panic!("expected state-aware request");
         };
 
-        assert_eq!(adapted.config.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Start)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
         assert_eq!(
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn exec_request_adapts_to_state_aware() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "exec",
             "sandboxId": "sandbox-id",
             "process": {
@@ -158,7 +158,7 @@ mod tests {
             panic!("expected state-aware request");
         };
 
-        assert_eq!(adapted.config.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Exec)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
         assert!(adapted.config.process.is_some());
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn stop_request_adapts_to_state_aware() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "stop",
             "sandboxId": "sandbox-id",
             "experimental": {
@@ -195,7 +195,7 @@ mod tests {
             panic!("expected state-aware request");
         };
 
-        assert_eq!(adapted.config.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(adapted.config.phase, Some(wire::Phase::Stop)));
         assert_eq!(adapted.config.sandbox_id, Some("sandbox-id".to_string()));
         assert_eq!(
@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn deprovision_request_adapts_to_state_aware() {
         let json = r#"{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "deprovision",
             "sandboxId": "sandbox-id",
             "experimental": {
@@ -224,7 +224,7 @@ mod tests {
             panic!("expected state-aware request");
         };
 
-        assert_eq!(adapted.config.version, Some("0.8.0-alpha".to_string()));
+        assert_eq!(adapted.config.version, Some("0.9.0-alpha".to_string()));
         assert!(matches!(
             adapted.config.phase,
             Some(wire::Phase::Deprovision)

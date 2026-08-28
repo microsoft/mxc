@@ -12,7 +12,7 @@
 //
 //   node scripts/check-dotnet-bindings-codegen.js
 
-const { readFileSync, existsSync, rmSync } = require("fs");
+const { readFileSync, existsSync, readdirSync, rmSync, statSync } = require("fs");
 const { join } = require("path");
 const { execFileSync } = require("child_process");
 const { scanBuildRs } = require("./versioning/lib/build-rs-inputs");
@@ -27,22 +27,35 @@ const generated = join(
   "NativeMethods.g.cs"
 );
 
-// A smoke-test subset of the extern entry points the C# SDK P/Invokes — not the
-// whole set, which is larger. The compiler is the real backstop: csbindgen emits
-// a binding only for a fn carrying `#[no_mangle]` or `#[export_name]`, and takes
-// the `EntryPoint` from whichever of the two determines the export. So renaming
-// a fn, removing it, or dropping that attribute makes the generated method
-// change or disappear, and the hand-written call sites stop compiling.
-//
-// Keep in sync with the `#[no_mangle] extern "C"` fns in src/ffi/mxc_ffi/src/.
+function listFiles(directory) {
+  return readdirSync(directory).flatMap((name) => {
+    const path = join(directory, name);
+    if (statSync(path).isDirectory()) {
+      return ["bin", "obj", "runtimes"].includes(name) ? [] : listFiles(path);
+    }
+    return [path];
+  });
+}
+
+// Derive the required set from every hand-written managed call site. This
+// avoids a curated smoke-test list drifting behind a newly consumed native
+// entry point. The generated file is excluded because it is the output under
+// test.
+const managedSource = join(repoRoot, "sdk", "dotnet", "Microsoft.Mxc.Sdk");
 const REQUIRED_ENTRY_POINTS = [
-  "mxc_run",
-  "mxc_run_result_free",
-  "mxc_error_detail_free",
-  "mxc_string_free",
-  "mxc_version",
-  "mxc_state_aware_exec_attached",
-];
+  ...new Set(
+    listFiles(managedSource)
+      .filter((path) => path.endsWith(".cs") && path !== generated)
+      .flatMap((path) => [
+        ...readFileSync(path, "utf8").matchAll(/NativeMethods\.(mxc_\w+)/g),
+      ])
+      .map((match) => match[1])
+  ),
+].sort();
+if (REQUIRED_ENTRY_POINTS.length === 0) {
+  console.error("ERROR: found no NativeMethods.mxc_* call sites in the C# SDK");
+  process.exit(1);
+}
 
 // Remove any stale copy so we prove codegen actually (re)produces it.
 if (existsSync(generated)) {
@@ -136,6 +149,6 @@ if (notDeclared.length > 0) {
 }
 
 console.log(
-  `C# bindings codegen OK: generated with ${REQUIRED_ENTRY_POINTS.length} expected entry points; ` +
+  `C# bindings codegen OK: generated every one of ${REQUIRED_ENTRY_POINTS.length} managed entry points; ` +
     `${csbindgenInputs.length} csbindgen source(s) all declared as rerun-if-changed`
 );

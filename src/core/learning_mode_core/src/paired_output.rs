@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Transactional staging for the canonical and verbose logging output pair.
+//! Transactional staging for the actionable and verbose logging output pair.
 
 use sha2::{Digest, Sha256};
 use std::io::{Read, Seek, Write};
@@ -13,18 +13,18 @@ struct OutputPairLock {
 }
 
 impl OutputPairLock {
-    fn acquire(operation: &str, canonical_path: &Path) -> std::io::Result<Self> {
-        let file_name = canonical_path
+    fn acquire(operation: &str, actionable_path: &Path) -> std::io::Result<Self> {
+        let file_name = actionable_path
             .file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| {
                 std::io::Error::other(format!(
-                    "{operation} canonical output path has no usable file name: {}",
-                    canonical_path.display()
+                    "{operation} actionable output path has no usable file name: {}",
+                    actionable_path.display()
                 ))
             })?;
         let lock_name = format!(".{file_name}.pair.lock");
-        let lock_path = canonical_path
+        let lock_path = actionable_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(lock_name);
@@ -131,36 +131,36 @@ impl RelocationOutcome {
     }
 }
 
-/// Stages, flushes, and promotes a canonical output and its verbose logging sibling.
+/// Stages, flushes, and promotes an actionable output and its verbose logging sibling.
 ///
 /// Both documents are serialized before either final path is changed. Replace
 /// mode retains the previous files until both new files are promoted, allowing
 /// a failed promotion to restore the complete previous pair.
 pub fn write_paired_output_files(
     operation: &str,
-    canonical_path: &Path,
+    actionable_path: &Path,
     verbose_logging_path: &Path,
     policy: ExistingOutputPolicy,
-    write_canonical: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+    write_actionable: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
     write_verbose_logging: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let _pair_lock = match policy {
         ExistingOutputPolicy::CreateNew => None,
-        ExistingOutputPolicy::Replace => Some(OutputPairLock::acquire(operation, canonical_path)?),
+        ExistingOutputPolicy::Replace => Some(OutputPairLock::acquire(operation, actionable_path)?),
     };
     match policy {
         ExistingOutputPolicy::CreateNew => {
-            ensure_output_absent(operation, canonical_path, "canonical")?;
+            ensure_output_absent(operation, actionable_path, "actionable")?;
             ensure_output_absent(operation, verbose_logging_path, "verbose logging")?;
         }
         ExistingOutputPolicy::Replace => {
-            ensure_output_replaceable(operation, canonical_path, "canonical")?;
+            ensure_output_replaceable(operation, actionable_path, "actionable")?;
             ensure_output_replaceable(operation, verbose_logging_path, "verbose logging")?;
         }
     }
 
-    let canonical_temp =
-        stage_output_file(operation, canonical_path, "canonical", write_canonical)?;
+    let actionable_temp =
+        stage_output_file(operation, actionable_path, "actionable", write_actionable)?;
     let verbose_logging_temp = stage_output_file(
         operation,
         verbose_logging_path,
@@ -168,8 +168,8 @@ pub fn write_paired_output_files(
         write_verbose_logging,
     )?;
 
-    let canonical_backup = if policy == ExistingOutputPolicy::Replace {
-        backup_existing_output(operation, canonical_path, "canonical")?
+    let actionable_backup = if policy == ExistingOutputPolicy::Replace {
+        backup_existing_output(operation, actionable_path, "actionable")?
     } else {
         None
     };
@@ -179,7 +179,7 @@ pub fn write_paired_output_files(
             Err(error) => {
                 return Err(combine_error_with_rollback(
                     error,
-                    restore_output(canonical_path, canonical_backup.as_deref(), None),
+                    restore_output(actionable_path, actionable_backup.as_deref(), None),
                 ))
             }
         }
@@ -198,8 +198,8 @@ pub fn write_paired_output_files(
             return Err(combine_error_with_rollback(
                 error,
                 restore_output_pair(
-                    canonical_path,
-                    canonical_backup.as_deref(),
+                    actionable_path,
+                    actionable_backup.as_deref(),
                     None,
                     verbose_logging_path,
                     verbose_logging_backup.as_deref(),
@@ -208,15 +208,15 @@ pub fn write_paired_output_files(
             ))
         }
     };
-    let canonical_promoted =
-        match promote_output_file(operation, canonical_temp, canonical_path, "canonical") {
+    let actionable_promoted =
+        match promote_output_file(operation, actionable_temp, actionable_path, "actionable") {
             Ok(promoted) => promoted,
             Err(error) => {
                 return Err(combine_error_with_rollback(
                     error,
                     restore_output_pair(
-                        canonical_path,
-                        canonical_backup.as_deref(),
+                        actionable_path,
+                        actionable_backup.as_deref(),
                         None,
                         verbose_logging_path,
                         verbose_logging_backup.as_deref(),
@@ -226,14 +226,14 @@ pub fn write_paired_output_files(
             }
         };
 
-    drop((canonical_promoted, verbose_logging_promoted));
+    drop((actionable_promoted, verbose_logging_promoted));
     remove_backups(
-        canonical_backup.as_deref(),
+        actionable_backup.as_deref(),
         verbose_logging_backup.as_deref(),
     )
 }
 
-/// Copies an existing canonical/verbose logging pair to new no-clobber destinations,
+/// Copies an existing actionable/verbose logging pair to new no-clobber destinations,
 /// then removes only source files whose identity and contents still match the
 /// files that were copied.
 ///
@@ -249,17 +249,17 @@ pub fn write_paired_output_files(
 /// warnings in [`RelocationOutcome`] after destination commit.
 pub fn relocate_paired_output_files(
     operation: &str,
-    canonical_source_path: &Path,
+    actionable_source_path: &Path,
     verbose_logging_source_path: &Path,
-    canonical_destination_path: &Path,
+    actionable_destination_path: &Path,
     verbose_logging_destination_path: &Path,
 ) -> std::io::Result<RelocationOutcome> {
-    if canonical_source_path == canonical_destination_path
+    if actionable_source_path == actionable_destination_path
         && verbose_logging_source_path == verbose_logging_destination_path
     {
         return Ok(RelocationOutcome::default());
     }
-    if canonical_source_path == canonical_destination_path
+    if actionable_source_path == actionable_destination_path
         || verbose_logging_source_path == verbose_logging_destination_path
     {
         return Err(std::io::Error::other(format!(
@@ -267,19 +267,19 @@ pub fn relocate_paired_output_files(
         )));
     }
 
-    let mut canonical_source = std::fs::File::open(canonical_source_path)?;
-    let canonical_identity = PromotedOutput::from_file(canonical_source.try_clone()?)?;
+    let mut actionable_source = std::fs::File::open(actionable_source_path)?;
+    let actionable_identity = PromotedOutput::from_file(actionable_source.try_clone()?)?;
     let mut verbose_logging_source = std::fs::File::open(verbose_logging_source_path)?;
     let verbose_logging_identity = PromotedOutput::from_file(verbose_logging_source.try_clone()?)?;
 
     write_paired_output_files(
         operation,
-        canonical_destination_path,
+        actionable_destination_path,
         verbose_logging_destination_path,
         ExistingOutputPolicy::CreateNew,
         |writer| {
-            canonical_source.rewind()?;
-            std::io::copy(&mut canonical_source, writer).map(|_| ())
+            actionable_source.rewind()?;
+            std::io::copy(&mut actionable_source, writer).map(|_| ())
         },
         |writer| {
             verbose_logging_source.rewind()?;
@@ -287,22 +287,22 @@ pub fn relocate_paired_output_files(
         },
     )?;
 
-    drop((canonical_source, verbose_logging_source));
+    drop((actionable_source, verbose_logging_source));
     let verbose_logging_cleanup = remove_promoted_output_if_owned(
         verbose_logging_source_path,
         verbose_logging_identity,
         None,
     )
     .and_then(cleanup_result);
-    let canonical_cleanup =
-        remove_promoted_output_if_owned(canonical_source_path, canonical_identity, None)
+    let actionable_cleanup =
+        remove_promoted_output_if_owned(actionable_source_path, actionable_identity, None)
             .and_then(cleanup_result);
     let mut outcome = RelocationOutcome::default();
     if let Err(error) = verbose_logging_cleanup {
         outcome.record_cleanup_error("verbose logging", verbose_logging_source_path, error);
     }
-    if let Err(error) = canonical_cleanup {
-        outcome.record_cleanup_error("canonical", canonical_source_path, error);
+    if let Err(error) = actionable_cleanup {
+        outcome.record_cleanup_error("actionable", actionable_source_path, error);
     }
     Ok(outcome)
 }
@@ -531,9 +531,9 @@ fn vacant_sibling_path(operation: &str, final_path: &Path, kind: &str) -> std::i
 }
 
 fn restore_output_pair(
-    canonical_path: &Path,
-    canonical_backup: Option<&Path>,
-    canonical_promoted: Option<PromotedOutput>,
+    actionable_path: &Path,
+    actionable_backup: Option<&Path>,
+    actionable_promoted: Option<PromotedOutput>,
     verbose_logging_path: &Path,
     verbose_logging_backup: Option<&Path>,
     verbose_logging_promoted: Option<PromotedOutput>,
@@ -543,13 +543,13 @@ fn restore_output_pair(
         verbose_logging_backup,
         verbose_logging_promoted,
     );
-    let canonical_result = restore_output(canonical_path, canonical_backup, canonical_promoted);
-    match (verbose_logging_result, canonical_result) {
+    let actionable_result = restore_output(actionable_path, actionable_backup, actionable_promoted);
+    match (verbose_logging_result, actionable_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(first), Err(second)) => Err(std::io::Error::other(format!(
             "{first}; additionally failed to restore {}: {second}",
-            canonical_path.display()
+            actionable_path.display()
         ))),
     }
 }
@@ -705,13 +705,13 @@ fn persist_existing_file_noclobber(source_path: &Path, final_path: &Path) -> std
 }
 
 fn remove_backups(
-    canonical_backup: Option<&Path>,
+    actionable_backup: Option<&Path>,
     verbose_logging_backup: Option<&Path>,
 ) -> std::io::Result<()> {
-    let canonical_result = canonical_backup.map_or(Ok(()), |path| {
+    let actionable_result = actionable_backup.map_or(Ok(()), |path| {
         remove_if_present(path).map_err(|error| {
             std::io::Error::other(format!(
-                "failed to remove canonical backup {}: {error}",
+                "failed to remove actionable backup {}: {error}",
                 path.display()
             ))
         })
@@ -724,7 +724,7 @@ fn remove_backups(
             ))
         })
     });
-    match (canonical_result, verbose_logging_result) {
+    match (actionable_result, verbose_logging_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(first), Err(second)) => Err(std::io::Error::other(format!(
@@ -760,23 +760,23 @@ mod tests {
     #[test]
     fn replace_rejects_non_file_output_before_promoting_sibling() {
         let directory = tempfile::tempdir().unwrap();
-        let canonical_path = directory.path().join("denials.json");
+        let actionable_path = directory.path().join("denials.json");
         let verbose_logging_path = directory.path().join("denials.verbose.json");
-        std::fs::create_dir(&canonical_path).unwrap();
+        std::fs::create_dir(&actionable_path).unwrap();
 
         let error = write_paired_output_files(
             "test",
-            &canonical_path,
+            &actionable_path,
             &verbose_logging_path,
             ExistingOutputPolicy::Replace,
-            |writer| writer.write_all(b"canonical"),
+            |writer| writer.write_all(b"actionable"),
             |writer| writer.write_all(b"verbose"),
         )
         .unwrap_err();
 
         assert!(error
             .to_string()
-            .contains("cannot replace non-file canonical"));
+            .contains("cannot replace non-file actionable"));
         assert!(!verbose_logging_path.exists());
     }
 
@@ -791,36 +791,36 @@ mod tests {
             &shared_path,
             &shared_path,
             ExistingOutputPolicy::Replace,
-            |writer| writer.write_all(b"canonical"),
+            |writer| writer.write_all(b"actionable"),
             |writer| writer.write_all(b"verbose"),
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("failed to promote canonical"));
+        assert!(error.to_string().contains("failed to promote actionable"));
         assert_eq!(std::fs::read(shared_path).unwrap(), b"previous");
     }
 
     #[test]
     fn relocation_rolls_back_failed_second_promotion_and_keeps_sources() {
         let directory = tempfile::tempdir().unwrap();
-        let canonical_source = directory.path().join("source-denials.json");
+        let actionable_source = directory.path().join("source-denials.json");
         let verbose_logging_source = directory.path().join("source-denials.verbose.json");
         let shared_destination = directory.path().join("denials.json");
-        std::fs::write(&canonical_source, b"canonical").unwrap();
+        std::fs::write(&actionable_source, b"actionable").unwrap();
         std::fs::write(&verbose_logging_source, b"verbose").unwrap();
 
         let error = relocate_paired_output_files(
             "test relocation",
-            &canonical_source,
+            &actionable_source,
             &verbose_logging_source,
             &shared_destination,
             &shared_destination,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("failed to promote canonical"));
+        assert!(error.to_string().contains("failed to promote actionable"));
         assert!(!shared_destination.exists());
-        assert_eq!(std::fs::read(canonical_source).unwrap(), b"canonical");
+        assert_eq!(std::fs::read(actionable_source).unwrap(), b"actionable");
         assert_eq!(std::fs::read(verbose_logging_source).unwrap(), b"verbose");
     }
 
@@ -934,7 +934,7 @@ mod tests {
         let error = backup_existing_output_with(
             "test",
             &final_path,
-            "canonical",
+            "actionable",
             |source_path, backup_path| {
                 std::fs::remove_file(source_path)?;
                 std::fs::write(source_path, b"concurrent")?;
@@ -982,14 +982,14 @@ mod tests {
     #[test]
     fn backup_cleanup_error_names_the_failed_path() {
         let directory = tempfile::tempdir().unwrap();
-        let canonical_backup = directory.path().join("canonical-backup");
-        std::fs::create_dir(&canonical_backup).unwrap();
+        let actionable_backup = directory.path().join("actionable-backup");
+        std::fs::create_dir(&actionable_backup).unwrap();
 
-        let error = remove_backups(Some(&canonical_backup), None).unwrap_err();
+        let error = remove_backups(Some(&actionable_backup), None).unwrap_err();
 
         assert!(error
             .to_string()
-            .contains(&canonical_backup.display().to_string()));
+            .contains(&actionable_backup.display().to_string()));
     }
 
     #[test]
@@ -1017,28 +1017,28 @@ mod tests {
     #[test]
     fn output_pair_lock_rejects_concurrent_writer() {
         let directory = tempfile::tempdir().unwrap();
-        let canonical_path = directory.path().join("denials.json");
-        let first = OutputPairLock::acquire("test", &canonical_path).unwrap();
+        let actionable_path = directory.path().join("denials.json");
+        let first = OutputPairLock::acquire("test", &actionable_path).unwrap();
 
-        let error = OutputPairLock::acquire("test", &canonical_path).unwrap_err();
+        let error = OutputPairLock::acquire("test", &actionable_path).unwrap_err();
 
         assert!(error.to_string().contains("another process"));
         drop(first);
-        OutputPairLock::acquire("test", &canonical_path).unwrap();
+        OutputPairLock::acquire("test", &actionable_path).unwrap();
     }
 
     #[test]
     fn create_new_pair_does_not_leave_a_lock_artifact() {
         let directory = tempfile::tempdir().unwrap();
-        let canonical_path = directory.path().join("denials.json");
+        let actionable_path = directory.path().join("denials.json");
         let verbose_logging_path = directory.path().join("denials.verbose.json");
 
         write_paired_output_files(
             "test",
-            &canonical_path,
+            &actionable_path,
             &verbose_logging_path,
             ExistingOutputPolicy::CreateNew,
-            |writer| writer.write_all(b"canonical"),
+            |writer| writer.write_all(b"actionable"),
             |writer| writer.write_all(b"verbose"),
         )
         .unwrap();

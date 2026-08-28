@@ -21,7 +21,7 @@
 //! [`DaemonClient::connect`] fast-paths onto a live, ready, protocol-compatible
 //! daemon. Otherwise it takes the cross-process [`TransitionLock`] (so two phase
 //! processes cannot both spawn a daemon), re-checks, spawns
-//! `wxc-wslc-daemon.exe` (co-located with the current executable) if
+//! `wxc-wslc-daemon.exe` (co-located with the loaded MXC native module) if
 //! none exists, and waits for it to publish a `ready` record.
 //!
 //! Windows-only: the daemon and its named-pipe transport are a Windows feature
@@ -488,7 +488,7 @@ fn ready_daemon() -> Result<Option<DaemonRecord>> {
     }
 }
 
-/// Spawn `wxc-wslc-daemon.exe` (co-located with the current executable). It
+/// Spawn `wxc-wslc-daemon.exe` (co-located with the loaded MXC native module). It
 /// publishes its own discovery record; we do not hold a handle to it.
 ///
 /// The WSLc SDK's session/container creation blocks forever without a console,
@@ -562,13 +562,15 @@ fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
-/// Resolve the daemon executable path: `wxc-wslc-daemon.exe` next to the current
-/// executable (the build scripts stage it alongside `wxc-exec.exe`).
+/// Resolve the daemon executable path beside the module containing this code.
+/// This is the executor directory for `wxc-exec.exe` and the NuGet native-asset
+/// directory for `mxc_ffi.dll`.
 fn daemon_exe_path() -> Result<PathBuf> {
-    let current = std::env::current_exe().context("resolve current executable path")?;
-    let dir = current
+    let module = wxc_common::process_util::module_path_for_address(daemon_exe_path as *const ())
+        .map_err(anyhow::Error::msg)?;
+    let dir = module
         .parent()
-        .context("current executable has no parent directory")?;
+        .context("MXC native module has no parent directory")?;
     let name = if cfg!(windows) {
         "wxc-wslc-daemon.exe"
     } else {
@@ -651,13 +653,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_exe_is_resolved_next_to_current_exe() {
+    fn daemon_exe_is_resolved_next_to_containing_module() {
         let path = daemon_exe_path().unwrap();
-        let expected_dir = std::env::current_exe()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .to_path_buf();
+        let expected_dir = wxc_common::process_util::module_path_for_address(
+            daemon_exe_is_resolved_next_to_containing_module as *const (),
+        )
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
         assert_eq!(path.parent().unwrap(), expected_dir);
         assert!(path
             .file_name()

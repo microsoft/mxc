@@ -19,9 +19,13 @@
 //! | `streaming` | Output arrives progressively, not as a burst at exit |
 //! | `resize` | The sandboxed process sees window-size changes live |
 //!
+//! The driver exits with the workload's exit code.
+//!
 //! Any other argument is treated as a literal command line.
 //!
 //! Must run at a real interactive console.
+
+use mxc_sdk::WaitOutcome;
 
 /// Provision mints a real OS account, so an early return or a panic would
 /// otherwise leave one behind on the host.
@@ -77,7 +81,7 @@ const SCENARIOS: &[Scenario] = &[
     },
 ];
 
-fn usage() -> ! {
+fn usage() -> i32 {
     eprintln!("usage: isolation_session_console [interactive|streaming|resize|<command line>]");
     eprintln!();
     for s in SCENARIOS {
@@ -85,15 +89,17 @@ fn usage() -> ! {
     }
     eprintln!();
     eprintln!("Anything else is treated as a literal command line to run in the session.");
-    std::process::exit(2)
+    2
 }
 
-fn main() {
+/// Returns the exit code rather than calling `std::process::exit`, which would
+/// skip the `Teardown` guard.
+fn run() -> i32 {
     let arg = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "interactive".into());
     if arg == "--help" || arg == "-h" {
-        usage();
+        return usage();
     }
 
     let (label, command, guidance) = match SCENARIOS.iter().find(|s| s.name == arg) {
@@ -106,7 +112,7 @@ fn main() {
         .any(|b| b.backend == "isolation_session")
     {
         eprintln!("IsolationSession is not available on this host.");
-        std::process::exit(2);
+        return 2;
     }
 
     let provision = r#"{"phase":"provision","containment":"isolation_session",
@@ -137,7 +143,20 @@ fn main() {
     );
 
     match mxc_sdk::exec_attached(&exec, true) {
-        Ok(outcome) => println!("\n[driver] outcome: {outcome:?}"),
-        Err(e) => println!("\n[driver] exec failed: {e:?}"),
+        Ok(outcome) => {
+            println!("\n[driver] outcome: {outcome:?}");
+            match outcome {
+                WaitOutcome::Exited(code) => code,
+                WaitOutcome::TimedOut => 1,
+            }
+        }
+        Err(e) => {
+            println!("\n[driver] exec failed: {e:?}");
+            1
+        }
     }
+}
+
+fn main() {
+    std::process::exit(run())
 }

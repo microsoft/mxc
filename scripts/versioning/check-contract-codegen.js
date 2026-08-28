@@ -21,9 +21,10 @@ const repoRoot = join(__dirname, "..", "..");
 const cargoRoot = join(repoRoot, "src");
 
 // The fixture corpus lives beside the contract it exercises, in the crate's
-// own module naming (`0.8.0-alpha` -> `v0_8_0_alpha`). Deriving it from the
-// registry keeps the gate version-driven, so registering the next development
-// contract validates its own fixtures rather than the previous contract's.
+// own module naming (`0.9.0-alpha` -> `v0_9_0_alpha`). Deriving it from the
+// registry keeps the gate version-driven, so a publication that advances the
+// development contract validates its own fixtures rather than the previous
+// contract's.
 function fixtureRootFor(contract) {
   const module = `v${contract.version.replace(/[.-]/g, "_")}`;
   return join(

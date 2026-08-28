@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 //! Sensitive-value-redacted, deduplicated diagnostics for Learning Mode events,
-//! including every canonical denial occurrence.
+//! including every actionable denial occurrence.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -14,7 +14,7 @@ pub const MAX_VERBOSE_LOGGING_GROUPS: usize = 4_096;
 /// Maximum compact-JSON bytes retained across distinct serialized signatures.
 ///
 /// This leaves substantial headroom under the guarded WPR analysis protocol's
-/// 64 MiB frame limit for canonical denials and envelope overhead.
+/// 64 MiB frame limit for actionable denials and envelope overhead.
 pub const MAX_VERBOSE_LOGGING_SIGNATURE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Stable category for a known Learning Mode ETW provider.
@@ -27,12 +27,12 @@ pub enum VerboseLoggingProvider {
     PrivacyAuditingPermissiveLearningMode,
 }
 
-/// Closed reason why a decoder outcome was omitted from canonical denials.
+/// Closed reason describing how a decoder outcome was handled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum VerboseLoggingExclusionReason {
-    /// The event produced a valid canonical denial candidate.
-    CanonicalDenial,
+pub enum VerboseLoggingOutcomeReason {
+    /// The event produced a valid actionable denial.
+    Actionable,
     /// The provider is known, but the event ID is not a supported denial schema.
     UnsupportedEventSchema,
     /// The event payload conflicted with its declared TDH schema.
@@ -45,7 +45,7 @@ pub enum VerboseLoggingExclusionReason {
     MissingObjectType,
     /// A required object/resource-name property was absent or empty.
     MissingObjectName,
-    /// The event described an object category the canonical model cannot represent.
+    /// The event described an object category the actionable model cannot represent.
     UnsupportedObjectType,
     /// A resource value could not be converted to a safe user-visible resource.
     UnusableResourcePath,
@@ -55,11 +55,11 @@ pub enum VerboseLoggingExclusionReason {
     NotActionable,
 }
 
-impl VerboseLoggingExclusionReason {
+impl VerboseLoggingOutcomeReason {
     /// Returns whether this outcome represents a valid denial candidate.
     #[must_use]
-    pub fn is_canonical_denial(self) -> bool {
-        self == Self::CanonicalDenial
+    pub fn is_actionable(self) -> bool {
+        self == Self::Actionable
     }
 }
 
@@ -74,7 +74,7 @@ pub struct VerboseLoggingSignature {
     /// Provider-scoped ETW schema identifier.
     pub event_id: u16,
     /// Closed exclusion category.
-    pub reason: VerboseLoggingExclusionReason,
+    pub reason: VerboseLoggingOutcomeReason,
     /// Process identifier from the event header.
     pub pid: u32,
     /// Classified access type when the event produced a denial candidate.
@@ -107,14 +107,14 @@ pub struct VerboseLoggingSummary {
     pub total_occurrences: u64,
     /// Outcomes whose new aggregate key could not be retained at the group bound.
     pub overflow_occurrences: u64,
-    /// Canonical-denial occurrences whose signatures could not be retained.
-    pub canonical_overflow_occurrences: u64,
+    /// Actionable-denial occurrences whose signatures could not be retained.
+    pub actionable_overflow_occurrences: u64,
     /// Whether aggregate keys were omitted at the group bound.
     pub aggregate_groups_truncated: bool,
     /// Whether the ETL processed-event bound prevented complete accounting.
     pub processed_events_truncated: bool,
-    /// Whether the canonical unique-denial bound was reached.
-    pub canonical_denial_limit_reached: bool,
+    /// Whether the actionable unique-denial bound was reached.
+    pub actionable_limit_reached: bool,
 }
 
 impl VerboseLoggingSummary {
@@ -138,8 +138,7 @@ impl VerboseLoggingSummary {
                 );
             }
             Err(_) => {
-                if signature.reason.is_canonical_denial() && self.evict_one_noncanonical_group(None)
-                {
+                if signature.reason.is_actionable() && self.evict_one_nonactionable_group(None) {
                     let index = self
                         .signatures
                         .binary_search_by(|group| group.signature.cmp(&signature))
@@ -152,7 +151,7 @@ impl VerboseLoggingSummary {
                         },
                     );
                 } else {
-                    self.record_overflow(signature.reason.is_canonical_denial());
+                    self.record_overflow(signature.reason.is_actionable());
                     self.total_occurrences = self.total_occurrences.saturating_sub(1);
                 }
             }
@@ -179,10 +178,10 @@ impl VerboseLoggingSummary {
         while self.signatures.len() >= MAX_VERBOSE_LOGGING_GROUPS
             || retained_bytes.saturating_add(serialized_len) > max_bytes
         {
-            if !signature.reason.is_canonical_denial()
-                || !self.evict_one_noncanonical_group(Some(retained_bytes))
+            if !signature.reason.is_actionable()
+                || !self.evict_one_nonactionable_group(Some(retained_bytes))
             {
-                self.record_overflow(signature.reason.is_canonical_denial());
+                self.record_overflow(signature.reason.is_actionable());
                 return;
             }
         }
@@ -203,12 +202,12 @@ impl VerboseLoggingSummary {
     }
 
     /// Counts an outcome whose new signature could not be retained at a bound.
-    pub fn record_overflow(&mut self, canonical: bool) {
+    pub fn record_overflow(&mut self, actionable: bool) {
         self.total_occurrences = self.total_occurrences.saturating_add(1);
         self.overflow_occurrences = self.overflow_occurrences.saturating_add(1);
-        if canonical {
-            self.canonical_overflow_occurrences =
-                self.canonical_overflow_occurrences.saturating_add(1);
+        if actionable {
+            self.actionable_overflow_occurrences =
+                self.actionable_overflow_occurrences.saturating_add(1);
         }
         self.aggregate_groups_truncated = true;
     }
@@ -216,19 +215,19 @@ impl VerboseLoggingSummary {
     /// Moves a retained aggregate into overflow accounting.
     pub(crate) fn move_to_overflow(&mut self, aggregate: VerboseLoggingAggregate) {
         self.overflow_occurrences = self.overflow_occurrences.saturating_add(aggregate.count);
-        if aggregate.signature.reason.is_canonical_denial() {
-            self.canonical_overflow_occurrences = self
-                .canonical_overflow_occurrences
+        if aggregate.signature.reason.is_actionable() {
+            self.actionable_overflow_occurrences = self
+                .actionable_overflow_occurrences
                 .saturating_add(aggregate.count);
         }
         self.aggregate_groups_truncated = true;
     }
 
-    fn evict_one_noncanonical_group(&mut self, retained_bytes: Option<&mut usize>) -> bool {
+    fn evict_one_nonactionable_group(&mut self, retained_bytes: Option<&mut usize>) -> bool {
         let Some(index) = self
             .signatures
             .iter()
-            .rposition(|group| !group.signature.reason.is_canonical_denial())
+            .rposition(|group| !group.signature.reason.is_actionable())
         else {
             return false;
         };
@@ -246,9 +245,9 @@ impl VerboseLoggingSummary {
         self.processed_events_truncated = true;
     }
 
-    /// Marks that otherwise-valid candidates exceeded the canonical result bound.
-    pub fn mark_canonical_denial_limit_reached(&mut self) {
-        self.canonical_denial_limit_reached = true;
+    /// Marks that otherwise-valid candidates exceeded the actionable result bound.
+    pub fn mark_actionable_limit_reached(&mut self) {
+        self.actionable_limit_reached = true;
     }
 
     /// Returns whether this analysis observed no excluded outcomes or truncation.
@@ -257,10 +256,10 @@ impl VerboseLoggingSummary {
         self.signatures.is_empty()
             && self.total_occurrences == 0
             && self.overflow_occurrences == 0
-            && self.canonical_overflow_occurrences == 0
+            && self.actionable_overflow_occurrences == 0
             && !self.aggregate_groups_truncated
             && !self.processed_events_truncated
-            && !self.canonical_denial_limit_reached
+            && !self.actionable_limit_reached
     }
 
     fn serialized_signature_len(signature: &VerboseLoggingSignature) -> usize {
@@ -292,19 +291,19 @@ pub struct VerboseLoggingDocumentSummary {
     pub total_occurrences: u64,
     /// Outcomes collapsed because the group bound was reached.
     pub overflow_occurrences: u64,
-    /// Canonical-denial occurrences collapsed into overflow.
-    pub canonical_overflow_occurrences: u64,
+    /// Actionable-denial occurrences collapsed into overflow.
+    pub actionable_overflow_occurrences: u64,
     /// Whether aggregate keys were omitted.
     pub aggregate_groups_truncated: bool,
     /// Whether the processed-event limit prevented complete accounting.
     pub processed_events_truncated: bool,
-    /// Whether the canonical unique-denial limit was reached.
-    pub canonical_denial_limit_reached: bool,
+    /// Whether the actionable unique-denial limit was reached.
+    pub actionable_limit_reached: bool,
 }
 
 impl VerboseLoggingDocument {
     /// Current verbose logging document schema version.
-    pub const VERSION: u32 = 1;
+    pub const VERSION: u32 = 2;
 
     /// Builds an on-disk document from decoder aggregate state.
     #[must_use]
@@ -315,16 +314,16 @@ impl VerboseLoggingDocument {
             summary: VerboseLoggingDocumentSummary {
                 total_occurrences: summary.total_occurrences,
                 overflow_occurrences: summary.overflow_occurrences,
-                canonical_overflow_occurrences: summary.canonical_overflow_occurrences,
+                actionable_overflow_occurrences: summary.actionable_overflow_occurrences,
                 aggregate_groups_truncated: summary.aggregate_groups_truncated,
                 processed_events_truncated: summary.processed_events_truncated,
-                canonical_denial_limit_reached: summary.canonical_denial_limit_reached,
+                actionable_limit_reached: summary.actionable_limit_reached,
             },
         }
     }
 }
 
-/// Derives the deterministic verbose logging sibling for a canonical denials path.
+/// Derives the deterministic verbose logging sibling for an actionable output path.
 ///
 /// # Errors
 ///
@@ -375,7 +374,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
             event_id: 14,
-            reason: VerboseLoggingExclusionReason::MissingObjectName,
+            reason: VerboseLoggingOutcomeReason::MissingObjectName,
             pid: 42,
             access_type: None,
             resource_type: None,
@@ -410,7 +409,7 @@ mod tests {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
@@ -421,7 +420,7 @@ mod tests {
             provider: VerboseLoggingProvider::PrivacyAuditingPermissiveLearningMode,
             provider_guid: "privacy".to_string(),
             event_id: u16::MAX,
-            reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+            reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
             pid: 1,
             access_type: None,
             resource_type: None,
@@ -434,14 +433,14 @@ mod tests {
     }
 
     #[test]
-    fn canonical_signature_evicts_noncanonical_signature_at_group_bound() {
+    fn actionable_signature_evicts_nonactionable_signature_at_group_bound() {
         let mut summary = VerboseLoggingSummary::default();
         for event_id in 0..MAX_VERBOSE_LOGGING_GROUPS as u16 {
             summary.record(VerboseLoggingSignature {
                 provider: VerboseLoggingProvider::KernelGeneral,
                 provider_guid: "kernel".to_string(),
                 event_id,
-                reason: VerboseLoggingExclusionReason::UnsupportedEventSchema,
+                reason: VerboseLoggingOutcomeReason::UnsupportedEventSchema,
                 pid: 1,
                 access_type: None,
                 resource_type: None,
@@ -452,7 +451,7 @@ mod tests {
             provider: VerboseLoggingProvider::KernelGeneral,
             provider_guid: "kernel".to_string(),
             event_id: u16::MAX,
-            reason: VerboseLoggingExclusionReason::CanonicalDenial,
+            reason: VerboseLoggingOutcomeReason::Actionable,
             pid: 1,
             access_type: Some(crate::AccessType::Read),
             resource_type: Some(crate::ResourceType::File),
@@ -462,9 +461,9 @@ mod tests {
         assert!(summary
             .signatures
             .iter()
-            .any(|group| group.signature.reason == VerboseLoggingExclusionReason::CanonicalDenial));
+            .any(|group| group.signature.reason == VerboseLoggingOutcomeReason::Actionable));
         assert_eq!(summary.overflow_occurrences, 1);
-        assert_eq!(summary.canonical_overflow_occurrences, 0);
+        assert_eq!(summary.actionable_overflow_occurrences, 0);
     }
 
     #[test]
@@ -480,7 +479,7 @@ mod tests {
                     provider: VerboseLoggingProvider::KernelGeneral,
                     provider_guid: "{A68CA8B7-004F-D7B6-A698-07E2DE0F1F5D}".to_string(),
                     event_id: 14,
-                    reason: VerboseLoggingExclusionReason::CanonicalDenial,
+                    reason: VerboseLoggingOutcomeReason::Actionable,
                     pid,
                     access_type: Some(crate::AccessType::Read),
                     resource_type: Some(crate::ResourceType::File),
@@ -506,7 +505,7 @@ mod tests {
     #[test]
     fn document_round_trips() {
         let mut summary = VerboseLoggingSummary::default();
-        summary.mark_canonical_denial_limit_reached();
+        summary.mark_actionable_limit_reached();
         summary.mark_processed_events_truncated();
         let document = VerboseLoggingDocument::new(&summary);
         let mut bytes = Vec::new();
@@ -516,7 +515,30 @@ mod tests {
     }
 
     #[test]
-    fn sibling_path_replaces_the_canonical_extension() {
+    fn document_uses_actionable_vocabulary() {
+        let mut summary = VerboseLoggingSummary::default();
+        summary.record(VerboseLoggingSignature {
+            provider: VerboseLoggingProvider::KernelGeneral,
+            provider_guid: "kernel".to_string(),
+            event_id: 14,
+            reason: VerboseLoggingOutcomeReason::Actionable,
+            pid: 1,
+            access_type: Some(crate::AccessType::Read),
+            resource_type: Some(crate::ResourceType::File),
+            properties: Vec::new(),
+        });
+        summary.actionable_overflow_occurrences = 2;
+        summary.mark_actionable_limit_reached();
+
+        let value = serde_json::to_value(VerboseLoggingDocument::new(&summary)).unwrap();
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["signatures"][0]["signature"]["reason"], "actionable");
+        assert_eq!(value["summary"]["actionableOverflowOccurrences"], 2);
+        assert_eq!(value["summary"]["actionableLimitReached"], true);
+    }
+
+    #[test]
+    fn sibling_path_replaces_the_actionable_extension() {
         assert_eq!(
             verbose_logging_sibling_path(Path::new(r"C:\out\denials.123.json")).unwrap(),
             PathBuf::from(r"C:\out\denials.123.verbose.json")

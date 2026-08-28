@@ -15,12 +15,18 @@ the `wslc` feature (`build.bat --with-wslc`).
 
 ## Why a daemon
 
-The WSLc SDK (`wslcsdk.dll`, 2.9.3) has **no cross-process re-attach**: every operation
+The WSLc SDK (`wslcsdk.dll`, 2.9.9) has **no cross-process session re-attach**: every operation
 (`WslcCreateContainer`, `WslcStartContainer`, `WslcCreateContainerProcess`, image pull, stop /
 delete) requires a live in-process `WslcSession` / `WslcContainer` handle, and there is no
-`WslcOpenSession` / `WslcOpenContainerById`. State-aware runs each phase as a **separate**
+`WslcOpenSession`. State-aware runs each phase as a **separate**
 `wxc-exec` invocation, so handles minted during `provision` cannot be reused by a later `exec`
 or `deprovision` in a different process.
+
+> SDK 2.9.9 added `WslcOpenContainer` (open an existing container by name, full ID, or unique ID
+> prefix). That is a *container*-level primitive and still requires a live session handle in the
+> calling process, so it does not by itself remove the need for the daemon. Whether a fresh
+> per-phase session plus `WslcOpenContainer` could replace the warm-handle model has not been
+> evaluated; the daemon remains the supported design.
 
 To keep the session (VM) and container **warm** across phases, WSLc uses a **persistent per-user
 daemon** (`wxc-wslc-daemon.exe`, crate `wxc_wslc_daemon` at `src/backends/wslc/daemon/`) that owns

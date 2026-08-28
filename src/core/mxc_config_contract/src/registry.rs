@@ -86,11 +86,19 @@ pub const CONTRACTS: &[ContractDescriptor] = &[
     },
     ContractDescriptor {
         version: ContractVersion::V0_8_0Alpha,
+        status: ContractStatus::Published,
+        schema_id:
+            "https://github.com/microsoft/mxc/schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+        schema_path: "schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+        typescript_path: None,
+    },
+    ContractDescriptor {
+        version: ContractVersion::V0_9_0Alpha,
         status: ContractStatus::Development,
         schema_id:
-            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.8.0-alpha.json",
-        schema_path: "schemas/dev/mxc-config.schema.0.8.0-alpha.json",
-        typescript_path: Some("sdk/node/src/generated/v0_8_0_alpha/wire.ts"),
+            "https://github.com/microsoft/mxc/schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+        schema_path: "schemas/dev/mxc-config.schema.0.9.0-alpha.json",
+        typescript_path: Some("sdk/node/src/generated/v0_9_0_alpha/wire.ts"),
     },
 ];
 
@@ -100,6 +108,7 @@ pub const fn descriptor(version: ContractVersion) -> ContractDescriptor {
         ContractVersion::V0_6_0Alpha => CONTRACTS[0],
         ContractVersion::V0_7_0Alpha => CONTRACTS[1],
         ContractVersion::V0_8_0Alpha => CONTRACTS[2],
+        ContractVersion::V0_9_0Alpha => CONTRACTS[3],
     }
 }
 
@@ -125,10 +134,11 @@ mod tests {
     #[test]
     fn test_supported_versions() {
         let versions = supported_versions();
-        assert_eq!(versions.len(), 3);
+        assert_eq!(versions.len(), 4);
         assert!(versions.contains(&ContractVersion::V0_6_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_7_0Alpha));
         assert!(versions.contains(&ContractVersion::V0_8_0Alpha));
+        assert!(versions.contains(&ContractVersion::V0_9_0Alpha));
     }
 
     #[test]
@@ -150,13 +160,13 @@ mod tests {
 
     #[test]
     fn development_artifacts_use_exact_version_paths() {
-        let descriptor = descriptor(ContractVersion::V0_8_0Alpha);
+        let descriptor = descriptor(ContractVersion::V0_9_0Alpha);
 
         assert_eq!(descriptor.status().as_str(), "development");
-        assert!(descriptor.schema_id().contains("0.8.0-alpha"));
-        assert!(descriptor.schema_path().contains("0.8.0-alpha"));
+        assert!(descriptor.schema_id().contains("0.9.0-alpha"));
+        assert!(descriptor.schema_path().contains("0.9.0-alpha"));
         assert!(descriptor
             .typescript_path()
-            .is_some_and(|path| path.contains("v0_8_0_alpha")));
+            .is_some_and(|path| path.contains("v0_9_0_alpha")));
     }
 }

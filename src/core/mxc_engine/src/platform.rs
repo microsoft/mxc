@@ -12,15 +12,19 @@
 //! `dispatch.rs`, so both the public SDK and the executor binaries can share a
 //! single implementation.
 
+use serde::Serialize;
+
 /// Whether the host can enforce Bubblewrap proxy-only egress.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub enum ProxyEnforcement {
     Supported,
     Unsupported,
 }
 
 /// Bubblewrap host network capability, with the reason when it is unsupported.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BubblewrapNetworkSupport {
     pub proxy_enforcement: ProxyEnforcement,
     pub warnings: Vec<String>,
@@ -28,7 +32,8 @@ pub struct BubblewrapNetworkSupport {
 
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlatformSupport {
     /// Whether MXC is supported on the current host.
     pub is_supported: bool,
@@ -39,6 +44,7 @@ pub struct PlatformSupport {
     pub available_methods: Vec<String>,
     /// Bubblewrap host network capability. `None` off Linux, and when
     /// `bubblewrap` itself is unavailable.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub bubblewrap_network: Option<BubblewrapNetworkSupport>,
 }
 

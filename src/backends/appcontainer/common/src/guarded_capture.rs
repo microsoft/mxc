@@ -42,7 +42,7 @@ pub const RETAIN_ETL_UNSUPPORTED_MSG: &str =
 /// is reported as the method's `Err`, never as a value here. `trace_retention`
 /// independently reports whether the sealed ETL was transferred to the
 /// requested destination — a retention failure that occurs *after* a successful
-/// analysis is carried as data so the canonical denials JSON can still be
+/// analysis is carried as data so the actionable denials JSON can still be
 /// published while the retention failure is surfaced separately.
 #[derive(Debug)]
 pub struct AnalyzedTrace {
@@ -179,7 +179,7 @@ pub struct GuardedCaptureFinalization {
     /// Structured output metadata to store on the sandbox process, if any.
     pub metadata: Option<SandboxOutputMetadata>,
     /// Teardown status to thread through the runner's `wait()`. `Ok(())` iff the
-    /// canonical denials JSON was written and no retention was requested (or
+    /// actionable denials JSON was written and no retention was requested (or
     /// retention succeeded); a retention-only failure after a successful
     /// analysis returns `Err` while still publishing the JSON via `metadata`
     /// (mirroring the native capture path).
@@ -197,7 +197,7 @@ pub enum GuardedStop<'a> {
     AnalyzeAndRetain { destination: &'a Path },
 }
 
-/// Stops a guarded WPR capture and turns its outcome into the canonical denials
+/// Stops a guarded WPR capture and turns its outcome into the actionable denials
 /// JSON plus structured metadata, in one shared place for both legacy-tier
 /// runners.
 ///
@@ -206,7 +206,7 @@ pub enum GuardedStop<'a> {
 ///   `result: Ok`.
 /// - Analysis success, retention success ⇒ JSON written with `etlPath` set,
 ///   `result: Ok`.
-/// - Analysis success, retention failure ⇒ JSON written (canonical success,
+/// - Analysis success, retention failure ⇒ JSON written (actionable success,
 ///   `etlPath = None`) AND `capture_denials_error` describing the retention
 ///   failure with an empty ETL path (nothing was persisted); `result: Err`.
 /// - Analysis + retention success but the JSON write fails ⇒ `etlPath` is
@@ -281,7 +281,7 @@ fn finalize_analysis(
                     result: Ok(()),
                 }
             }
-            // Retention requested but the transfer failed: publish the canonical
+            // Retention requested but the transfer failed: publish the actionable
             // JSON success (etlPath stays None — nothing persisted) and surface
             // the retention failure with an empty ETL path.
             Some((_, Err(retention_error))) => {
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn finalize_trace_failure_after_analysis_publishes_json_and_surfaces_retention() {
-        // The core analysis-success/trace-failure contract: the canonical
+        // The core analysis-success/trace-failure contract: the actionable
         // denials JSON is published (etlPath = None, nothing persisted) AND the
         // retention failure is surfaced through capture_denials_error with an
         // empty ETL path.
@@ -604,7 +604,7 @@ mod tests {
         // Retention failure is reported through the teardown status...
         let error = finalization.result.unwrap_err();
         assert!(error.contains("too large to transfer"), "got: {error}");
-        // ...while the canonical denials JSON is still published.
+        // ...while the actionable denials JSON is still published.
         assert!(output_path.is_file());
         let metadata = finalization.metadata.unwrap();
         let capture = metadata.capture_denials.unwrap();

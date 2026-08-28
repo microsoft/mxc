@@ -34,17 +34,21 @@
 //! cannot run, the inbound deny is unenforceable for that family, so the run
 //! fails closed rather than silently leaving IPv6 open.
 //!
-//! **Permissive path is not yet implemented.** `allowLocalNetwork: true` asks
-//! for the sandboxed process to bind, listen, and accept incoming connections
-//! (see `ContainerPolicy::allow_local_network`). The policy carries no way to
-//! narrow that to particular ports or sources, so the only rule available today
-//! is an unscoped `--state NEW -j ACCEPT` accepting inbound from every
-//! interface and source, LAN and WAN included. Rather than install that
-//! silently, [`IngressManager::apply_firewall_rules`] returns a
-//! not-yet-implemented error. Narrowing it needs a `loopbackPorts` policy field
-//! and an MXC-owned host-loopback forwarder, tracked as AB#63505947. The
-//! internal rule *builder* still supports both toggle values so the decision
-//! table is testable.
+//! **Permissive path is not yet implemented.** Three settings ask for the
+//! sandboxed process to bind, listen, and accept incoming connections:
+//! `allowLocalNetwork: true`, its 0.8 successor
+//! `network.ingress.default: "allow"`, and
+//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8 and has no 0.7
+//! equivalent. LXC has a single inbound chain and the policy carries no way to
+//! narrow an accept to particular ports, sources, or interfaces, so the only
+//! rule available today is an unscoped
+//! `--state NEW -j ACCEPT` accepting inbound from every interface and source, LAN
+//! and WAN included. Rather than install that silently,
+//! [`IngressManager::apply_firewall_rules`] returns a not-yet-implemented error
+//! naming the field the operator wrote. Scoping the host-loopback field on its own
+//! additionally needs a `loopbackPorts` policy field and an MXC-owned forwarder,
+//! tracked as AB#63505947. The internal rule *builder* still supports both toggle
+//! values so the decision table is testable.
 //!
 //! **Why the container netns.** A packet destined to a container socket
 //! traverses the *container's* `INPUT` chain, inside the container's network
@@ -561,12 +565,13 @@ impl IngressManager {
         // is mandatory), so there is no inert path that could safely emit it.
         if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_schema) {
             return Err(format!(
-                "{field} (permissive host-loopback inbound) is not yet implemented for the \
-                 LXC firewall path. Scoping inbound to host loopback requires a loopbackPorts \
-                 policy field and an MXC-owned host-loopback forwarder that do not exist yet; \
-                 the only rule available today would accept new inbound connections from every \
-                 interface and source (LAN and WAN), which is broader than requested. Refusing \
-                 rather than installing an over-broad accept."
+                "{field} asks for permissive inbound, which is not yet implemented for \
+                 the LXC firewall path. LXC has a single inbound chain and the policy \
+                 carries no way to scope an accept to particular ports, sources, or \
+                 interfaces; the only rule available today would accept new inbound \
+                 connections from every interface and source (LAN and WAN), which is \
+                 broader than requested. Refusing rather than installing an over-broad \
+                 accept."
             ));
         }
 
@@ -2102,6 +2107,36 @@ mod tests {
             assert!(
                 !mgr.v4_chain_created && !mgr.v6_chain_created && !mgr.v4_hooked && !mgr.v6_hooked,
                 "no per-resource ownership flag may be set after a refusal (pid={pid})"
+            );
+        }
+    }
+
+    /// `network.ingress.default` and `allowLocalNetwork` govern LAN/private-network
+    /// inbound; `network.ingress.hostLoopback` is the separate host-loopback control
+    /// (`docs/sandbox-policy/0.8.0/policy.md`). A refusal that blames host loopback
+    /// sends the operator to a field they did not write.
+    #[test]
+    fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
+        let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
+
+        for (policy, uses_directional_schema, field) in [
+            (
+                directional_ingress(NetworkAction::Allow, NetworkAction::Deny),
+                true,
+                "network.ingress.default",
+            ),
+            (permissive_firewall_policy(), false, "allowLocalNetwork"),
+        ] {
+            let mut mgr = IngressManager::new("lan-inbound", 42, uses_directional_schema);
+            let msg = mgr
+                .apply_firewall_rules(&policy, &mut logger)
+                .expect_err("permissive inbound must still be refused");
+
+            assert!(msg.contains(field), "the refusal must name {field}: {msg}");
+            assert!(
+                !msg.to_lowercase().contains("loopback"),
+                "{field} does not govern host loopback, so the refusal must not \
+                 explain itself in host-loopback terms: {msg}"
             );
         }
     }

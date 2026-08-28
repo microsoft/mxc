@@ -4,7 +4,7 @@
 use super::super::{contract, provision_into_wire, wire};
 
 const MINIMAL_ISOLATION_SESSION_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "isolation_session",
     "network": {
@@ -16,7 +16,7 @@ const MINIMAL_ISOLATION_SESSION_REQUEST_JSON: &str = r#"{
 const ISOLATION_SESSION_ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "$schema": "https://example.com/provision.schema.json",
     "_comment": "This is a comment",
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "isolation_session",
     "network": {
@@ -36,7 +36,7 @@ const ISOLATION_SESSION_ALL_FIELDS_REQUEST_JSON: &str = r#"{
 }"#;
 
 const MINIMAL_WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "windows_sandbox"
 }"#;
@@ -44,7 +44,7 @@ const MINIMAL_WINDOWS_SANDBOX_REQUEST_JSON: &str = r#"{
 const WINDOWS_SANDBOX_ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "$schema": "https://example.com/provision.schema.json",
     "_comment": "This is a comment",
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "windows_sandbox",
     "filesystem": {
@@ -60,7 +60,7 @@ const WINDOWS_SANDBOX_ALL_FIELDS_REQUEST_JSON: &str = r#"{
 }"#;
 
 const MINIMAL_WSLC_REQUEST_JSON: &str = r#"{
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "wslc"
 }"#;
@@ -68,7 +68,7 @@ const MINIMAL_WSLC_REQUEST_JSON: &str = r#"{
 const WSLC_ALL_FIELDS_REQUEST_JSON: &str = r#"{
     "$schema": "https://example.com/provision.schema.json",
     "_comment": "This is a comment",
-    "version": "0.8.0-alpha",
+    "version": "0.9.0-alpha",
     "phase": "provision",
     "containment": "wslc",
     "filesystem": {
@@ -111,7 +111,7 @@ pub(super) fn adapt(json: &str) -> wire::MxcConfig {
 fn isolation_session_request_with_fields(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "network": {{
@@ -126,7 +126,7 @@ fn isolation_session_request_with_fields(fields: &str) -> String {
 fn windows_sandbox_request_with_fields(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "windows_sandbox",
             {fields}
@@ -137,7 +137,7 @@ fn windows_sandbox_request_with_fields(fields: &str) -> String {
 fn wslc_request_with_fields(fields: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "wslc",
             {fields}
@@ -153,7 +153,7 @@ fn minimal_isolation_session_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(
         wire.containment,
@@ -198,7 +198,7 @@ fn isolation_session_request_maps_expected_wire_fields() {
         wire.comment.as_ref(),
         Some(&serde_json::json!("This is a comment"))
     );
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(
         wire.containment,
@@ -252,7 +252,7 @@ fn minimal_windows_sandbox_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(
         wire.containment,
@@ -288,7 +288,7 @@ fn windows_sandbox_request_maps_expected_wire_fields() {
         wire.comment.as_ref(),
         Some(&serde_json::json!("This is a comment"))
     );
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(
         wire.containment,
@@ -342,7 +342,7 @@ fn minimal_wslc_request_maps_expected_wire_fields() {
 
     assert!(wire.schema.is_none());
     assert!(wire.comment.is_none());
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(wire.containment, Some(wire::Containment::Wslc)));
 
@@ -375,7 +375,7 @@ fn wslc_request_maps_expected_wire_fields() {
         wire.comment.as_ref(),
         Some(&serde_json::json!("This is a comment"))
     );
-    assert_eq!(wire.version, Some("0.8.0-alpha".to_string()));
+    assert_eq!(wire.version, Some("0.9.0-alpha".to_string()));
     assert!(matches!(wire.phase, Some(wire::Phase::Provision)));
     assert!(matches!(wire.containment, Some(wire::Containment::Wslc)));
 

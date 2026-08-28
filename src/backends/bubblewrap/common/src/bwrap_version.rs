@@ -35,6 +35,7 @@ const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// |--------------|-----------------------|
 /// | `--bind`, `--ro-bind`, `--dev`, `--proc`, `--tmpfs`, `--symlink`, `--chdir`, `--setenv`, `--unshare-*` | 0.1.0 |
 /// | `--ro-bind-try` (deny-by-default baseline mounts) | 0.3.1 |
+/// | `--die-with-parent` (descendants die with the sandbox) | 0.4.0 |
 /// | `--clearenv` (minimal sandbox environment) | **0.5.0** |
 ///
 /// `--clearenv` is therefore the flag that sets the floor. If the argument

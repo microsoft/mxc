@@ -11,7 +11,7 @@ pub(super) struct ContainmentCase {
 pub(super) fn request_with_containment(containment: &str) -> String {
     format!(
         r#"{{
-            "version": "0.8.0-alpha",
+            "version": "0.9.0-alpha",
             "containment": "{containment}",
             "process": {{"commandLine": "echo hello"}}
         }}"#

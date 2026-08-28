@@ -20,7 +20,7 @@ namespace Microsoft.Mxc.Sdk.Tests;
 public class MxcLifecycleE2ETests
 {
     // Opt-in gate shared with the streaming E2E tests: a host that can really run
-    // a sandbox sets MXC_E2E_HOST_PREPPED=1. Elsewhere these return early.
+    // a sandbox sets MXC_E2E_HOST_PREPPED=1. Elsewhere these skip.
     private static bool HostRunsIsolationSession =>
         Environment.GetEnvironmentVariable("MXC_E2E_HOST_PREPPED") == "1"
         && OperatingSystem.IsWindows();
@@ -80,13 +80,14 @@ public class MxcLifecycleE2ETests
     {
         var provisioned = MxcLifecycle.ProvisionSandbox(
             StateAwareContainment.IsolationSession,
-            new ProvisionSandboxOptions
-            {
-                Network = new StateAwareNetworkPolicy
+            new IsolationSessionProvisionOptions(
+                new StateAwareNetworkPolicy
                 {
                     DefaultPolicy = StateAwareNetworkDefault.Allow,
                     AllowLocalNetwork = true,
-                },
+                })
+            {
+                AppId = null,
             });
 
         // Nothing asserts the id's shape: it is contractually opaque, and the
@@ -94,18 +95,16 @@ public class MxcLifecycleE2ETests
         var teardown = new Teardown(provisioned.SandboxId);
         try
         {
-            var metadataJson = provisioned.MetadataJson;
-            Assert.False(string.IsNullOrEmpty(metadataJson), "provision surfaced no metadata");
-
-            using var doc = JsonDocument.Parse(metadataJson!);
-            var agentUserName = doc.RootElement.GetProperty("agentUserName").GetString();
+            var metadata = provisioned.IsolationSessionMetadata;
+            Assert.NotNull(metadata);
+            var agentUserName = metadata.AgentUserName;
             Assert.False(
                 string.IsNullOrEmpty(agentUserName),
-                $"provision metadata carried no agentUserName: {metadataJson}");
-            var workspace = doc.RootElement.GetProperty("ephemeralWorkspacePath").GetString();
+                $"provision metadata carried no agentUserName: {provisioned.MetadataJson}");
+            var workspace = metadata.EphemeralWorkspacePath;
             Assert.False(
                 string.IsNullOrEmpty(workspace),
-                $"provision metadata carried no ephemeralWorkspacePath: {metadataJson}");
+                $"provision metadata carried no ephemeralWorkspacePath: {provisioned.MetadataJson}");
 
             MxcLifecycle.StartSandbox(provisioned.SandboxId);
             return new Started(provisioned.SandboxId, agentUserName!, workspace!, teardown);
@@ -138,15 +137,15 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Exec_RunsAsTheAgentUserFromTheProvisionMetadata()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
         {
-            var run = await MxcLifecycle.ExecInSandboxAsync(started.Id, $"{Cmd} /c whoami");
+            var run = await MxcLifecycle.ExecInSandboxAsync(
+            started.Id,
+            $"{Cmd} /c whoami",
+            TestContext.Current.CancellationToken);
 
             Assert.Equal(0, run.ExitCode);
             Assert.Equal(started.AgentUserName.ToLowerInvariant(), AccountOf(run.Stdout));
@@ -158,10 +157,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Exec_PropagatesANonZeroExitCode()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -174,6 +170,26 @@ public class MxcLifecycleE2ETests
         }
     }
 
+    /// <summary>A lifecycle exec timeout must be reported by the streaming
+    /// process wrapper just like a one-shot policy timeout.</summary>
+    [Fact]
+    public void Exec_ReportsConfiguredTimeout()
+    {
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
+
+        var started = ProvisionAndStart();
+        using (started.Teardown)
+        {
+            using var proc = MxcLifecycle.ExecInSandbox(
+                started.Id,
+                $"{Cmd} /c ping -n 6 127.0.0.1 >nul",
+                new StateAwareExecOptions { TimeoutMs = 100 });
+            var result = proc.Wait();
+
+            Assert.True(result.TimedOut);
+        }
+    }
+
     /// <summary>
     /// Stop and deprovision must be reachable through this binding, and a
     /// deprovisioned id must not still be usable.
@@ -181,10 +197,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public void Deprovision_RetiresTheSandboxId()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -203,10 +216,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Lifecycle_RunsEndToEnd()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
@@ -223,10 +233,7 @@ public class MxcLifecycleE2ETests
     [Fact]
     public async Task Workspace_IsSharedWithTheAgent_AndRemovedOnDeprovision()
     {
-        if (!HostRunsIsolationSession)
-        {
-            return; // skipped: no isolation-session host available
-        }
+        Assert.SkipUnless(HostRunsIsolationSession, "no isolation-session host available");
 
         var started = ProvisionAndStart();
         using (started.Teardown)
