@@ -361,6 +361,13 @@ into untrusted code. This is unconditional.
   `readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
   `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
 
+> ⚠️ **`$HOME` is unset inside the sandbox unless you set it.** Policy paths
+> still accept `~` (expanded against the *host's* `$HOME` when the config is
+> parsed), but a script running inside the sandbox cannot use `~` — the shell
+> expands it to an empty string. `getpwuid()` doesn't help either, since
+> directory services aren't reachable. Pass `"HOME=…"` in `process.env` if your
+> command needs it.
+
 ## Working directory
 
 `process.cwd`, if omitted, resolves to the first of: `readwritePaths[0]` →
