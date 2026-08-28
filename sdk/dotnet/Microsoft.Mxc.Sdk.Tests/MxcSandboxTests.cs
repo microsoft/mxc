@@ -627,7 +627,7 @@ public class MxcSandboxTests
     }
 
     [Fact]
-    public void SandboxPolicy_ReadsButDoesNotRewriteLegacyCaptureDenials()
+    public void SandboxPolicy_RoundTripsLegacyCaptureDenials()
     {
         const string json =
             """{"version":"0.8.0-alpha","captureDenials":{"mode":"block"}}""";
@@ -640,10 +640,14 @@ public class MxcSandboxTests
             });
 
         Assert.NotNull(GetLegacyCaptureDenials(policy!));
-        Assert.DoesNotContain(
-            "captureDenials",
-            MxcSandbox.SerializePolicy(policy!),
-            StringComparison.Ordinal);
+
+        // The property stays serializable so that legacy policy JSON survives a
+        // round trip. The request path strips it separately, so the native
+        // layer still only sees `containment.captureDenials`.
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializePolicy(policy!));
+        Assert.Equal(
+            "block",
+            doc.RootElement.GetProperty("captureDenials").GetProperty("mode").GetString());
     }
 
     [Fact]
@@ -786,17 +790,40 @@ public class MxcSandboxTests
     [Fact]
     public void SandboxPolicy_CaptureDenialsIsObsoleteWithMigrationGuidance()
     {
-#pragma warning disable CS0618 // Verifies the obsolete migration contract.
+#pragma warning disable MXC0001 // Verifies the obsolete migration contract.
         var property = typeof(SandboxPolicy).GetProperty(nameof(SandboxPolicy.CaptureDenials));
-#pragma warning restore CS0618
+#pragma warning restore MXC0001
         var obsolete = property?.GetCustomAttributes(typeof(ObsoleteAttribute), inherit: false)
             .Cast<ObsoleteAttribute>()
             .SingleOrDefault();
 
         Assert.NotNull(obsolete);
         Assert.Equal(
-            "Set ProcessContainerContainment.CaptureDenials instead.",
+            "Set ProcessContainerContainment.CaptureDenials instead. Removed in 1.0.",
             obsolete.Message);
+        Assert.Equal("MXC0001", obsolete.DiagnosticId);
+    }
+
+    [Fact]
+    public void SerializeRequest_StripsLegacyCaptureDenialsFromThePolicy()
+    {
+        // The policy property is serializable so legacy JSON round-trips, so the
+        // request path must be what keeps it off the wire — the native contract
+        // rejects `policy.captureDenials`.
+        var request = new SandboxRequest(
+            CreateLegacyCaptureDenialsPolicy(new CaptureDenialsPolicy()),
+            "echo hi");
+
+        using var doc = JsonDocument.Parse(MxcSandbox.SerializeRequest(request));
+        var root = doc.RootElement;
+
+        Assert.False(root.GetProperty("policy").TryGetProperty("captureDenials", out _));
+        Assert.Equal(
+            "block",
+            root.GetProperty("containment")
+                .GetProperty("captureDenials")
+                .GetProperty("mode")
+                .GetString());
     }
 
     private static SandboxPolicy CreateLegacyCaptureDenialsPolicy(
@@ -804,16 +831,16 @@ public class MxcSandboxTests
         string version = "0.8.0-alpha")
     {
         var policy = new SandboxPolicy { Version = version };
-#pragma warning disable CS0618 // Exercises compatibility migration.
+#pragma warning disable MXC0001 // Exercises compatibility migration.
         policy.CaptureDenials = captureDenials;
-#pragma warning restore CS0618
+#pragma warning restore MXC0001
         return policy;
     }
 
     private static CaptureDenialsPolicy? GetLegacyCaptureDenials(SandboxPolicy policy)
     {
-#pragma warning disable CS0618 // Verifies compatibility deserialization.
+#pragma warning disable MXC0001 // Verifies compatibility deserialization.
         return policy.CaptureDenials;
-#pragma warning restore CS0618
+#pragma warning restore MXC0001
     }
 }

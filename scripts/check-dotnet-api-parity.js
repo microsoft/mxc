@@ -205,10 +205,23 @@ function managedJsonFields(source, className) {
     });
 }
 
-function compareStructFields(label, rustSource, rustName, managedSource, managedName) {
+// `legacyManagedOnly` lists managed JSON fields that intentionally have no Rust
+// counterpart because they are deprecated compatibility aliases. They must stay
+// serializable so legacy JSON round-trips, but the managed request path strips
+// them before the native layer sees them.
+function compareStructFields(
+  label,
+  rustSource,
+  rustName,
+  managedSource,
+  managedName,
+  legacyManagedOnly = []
+) {
   compare(
     `${label} fields`,
-    managedJsonFields(managedSource, managedName),
+    managedJsonFields(managedSource, managedName).filter(
+      (field) => !legacyManagedOnly.includes(field)
+    ),
     rustStructFields(rustSource, rustName)
   );
 }
@@ -293,8 +306,17 @@ compareStructFields(
   "WslcPortMapping"
 );
 
-for (const [label, rustSource, rustName, managedName] of [
-  ["sandbox policy", rustPolicy, "SandboxPolicy", "SandboxPolicy"],
+for (const [
+  label,
+  rustSource,
+  rustName,
+  managedName,
+  legacyManagedOnly,
+] of [
+  // `captureDenials` is an obsolete managed-only alias (MXC0001, removed in
+  // 1.0). Rust only accepts it under `containment.captureDenials`, and
+  // MxcSandbox.PrepareRequest strips it from the policy before serialization.
+  ["sandbox policy", rustPolicy, "SandboxPolicy", "SandboxPolicy", ["captureDenials"]],
   ["filesystem policy", rustPolicy, "FilesystemSection", "FilesystemPolicy"],
   ["UI policy", rustPolicy, "UiSection", "UiPolicy"],
   ["network policy", rustNetworkPolicy, "NetworkSection", "NetworkPolicy"],
@@ -305,7 +327,14 @@ for (const [label, rustSource, rustName, managedName] of [
   ["network ingress", rustNetworkPolicy, "NetworkIngressSection", "NetworkIngressPolicy"],
   ["network runtime config", rustNetworkPolicy, "RuntimeConfigSection", "NetworkRuntimeConfig"],
 ]) {
-  compareStructFields(label, rustSource, rustName, managedPolicy, managedName);
+  compareStructFields(
+    label,
+    rustSource,
+    rustName,
+    managedPolicy,
+    managedName,
+    legacyManagedOnly
+  );
 }
 const managedOneShot = [
   ...managedRequest.matchAll(

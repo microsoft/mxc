@@ -178,6 +178,13 @@ the SDK automatically moves the obsolete value when a request uses the default
 `ArgumentException` when the request selects another backend or when both
 locations contain different settings; denial capture is never silently ignored.
 
+The obsoletion reports diagnostic ID `MXC0001`, so it can be suppressed on its
+own (`#pragma warning disable MXC0001`, or `<NoWarn>MXC0001</NoWarn>`) without
+silencing every other obsolete-API warning. The property is scheduled for
+removal in 1.0. It remains serializable, so legacy policy JSON survives a
+round trip; the request path strips it, so the native layer only ever receives
+the canonical `containment.captureDenials` location.
+
 ### Streaming output cancellation
 
 After taking `StandardOutput` or `StandardError`, request the matching

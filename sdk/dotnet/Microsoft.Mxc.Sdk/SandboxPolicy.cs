@@ -12,8 +12,6 @@ namespace Microsoft.Mxc.Sdk;
 /// </summary>
 public sealed class SandboxPolicy
 {
-    private CaptureDenialsPolicy? _captureDenials;
-
     /// <summary>Policy/schema version (e.g. <c>"0.7.0-alpha"</c>). Required.</summary>
     [JsonPropertyName("version")]
     public string Version { get; set; } = string.Empty;
@@ -41,23 +39,19 @@ public sealed class SandboxPolicy
     /// Request-based execution migrates this value to ProcessContainer
     /// containment. It rejects incompatible containment and conflicting
     /// <see cref="ProcessContainerContainment.CaptureDenials"/> values.
+    /// <para>
+    /// This property stays serializable so legacy policy JSON round-trips
+    /// without silently losing the value. It is stripped from the clone sent
+    /// natively once it has been migrated onto the containment, so the native
+    /// layer never sees the deprecated shape.
+    /// </para>
     /// </remarks>
-    [Obsolete("Set ProcessContainerContainment.CaptureDenials instead.")]
-    [JsonIgnore]
-    public CaptureDenialsPolicy? CaptureDenials
-    {
-        get => _captureDenials;
-        set => _captureDenials = value;
-    }
-
-    [JsonInclude]
+    [Obsolete(
+        "Set ProcessContainerContainment.CaptureDenials instead. Removed in 1.0.",
+        DiagnosticId = "MXC0001",
+        UrlFormat = "https://github.com/microsoft/mxc/blob/main/sdk/dotnet/README.md#{0}")]
     [JsonPropertyName("captureDenials")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    internal CaptureDenialsPolicy? CaptureDenialsForDeserialization
-    {
-        get => null;
-        set => _captureDenials = value;
-    }
+    public CaptureDenialsPolicy? CaptureDenials { get; set; }
 
     /// <summary>Execution timeout in milliseconds (<c>null</c> = no timeout).</summary>
     [JsonPropertyName("timeoutMs")]

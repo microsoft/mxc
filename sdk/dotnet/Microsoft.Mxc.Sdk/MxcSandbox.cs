@@ -250,9 +250,9 @@ public static class MxcSandbox
 
     private static SandboxRequest PrepareRequest(SandboxRequest request)
     {
-#pragma warning disable CS0618 // Compatibility migration for the obsolete policy field.
+#pragma warning disable MXC0001 // Compatibility migration for the obsolete policy field.
         var legacyCaptureDenials = request.Policy.CaptureDenials;
-#pragma warning restore CS0618
+#pragma warning restore MXC0001
         if (legacyCaptureDenials is null)
         {
             return request;
@@ -309,6 +309,9 @@ public static class MxcSandbox
         };
     }
 
+    // Keep in sync with SandboxPolicy's properties: every property except the
+    // obsolete CaptureDenials must be copied, or it is silently dropped from
+    // any request that carries the legacy field.
     private static SandboxPolicy ClonePolicyWithoutCaptureDenials(SandboxPolicy policy) =>
         new()
         {
