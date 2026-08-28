@@ -795,7 +795,7 @@ impl EgressPlan {
         // Either section present means the directional shape. The parser fills
         // both in together, but losing the host-loopback drop is silent, so
         // this does not depend on that invariant.
-        if request.policy.network_egress.is_none() && request.policy.network_ingress.is_none() {
+        if !crate::bwrap_command::is_directional(&request.policy) {
             return Self::for_policy(request);
         }
 

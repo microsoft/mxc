@@ -11,7 +11,8 @@ use std::collections::HashSet;
 
 use wxc_common::filesystem_resolve::FsIntent;
 use wxc_common::models::{
-    ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy, ProxyAddress,
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
+    ProxyAddress,
 };
 use wxc_common::proxy_env::{is_managed_proxy_key, PROXY_SET_KEYS};
 
@@ -149,6 +150,20 @@ fn uses_private_network_contract(request: &ExecutionRequest) -> bool {
     schema_enforces_network_strictly(&request.schema_version)
 }
 
+/// Whether the policy carries the 0.8 directional shape.
+///
+/// Either section is enough: the parser fills both together, but checking only
+/// one would route an ingress-only policy into the legacy path, where its
+/// directional intent is silently discarded. Shared by every site that splits
+/// directional from legacy so the fail-closed reading cannot drift apart.
+///
+/// Distinct from `wxc_common::validator::directional_posture_supplied`, which
+/// also folds in `network_mode_specified` and the proxy; the two are not
+/// interchangeable.
+pub(crate) fn is_directional(policy: &ContainerPolicy) -> bool {
+    policy.network_egress.is_some() || policy.network_ingress.is_some()
+}
+
 impl ResolvedNetworkMode {
     /// Classify the internal request using the proxy's resolved runtime state.
     pub(crate) fn from_request(request: &ExecutionRequest, proxy_active: bool) -> Self {
@@ -166,11 +181,8 @@ impl ResolvedNetworkMode {
         // read a policy that never said either as `Isolated` and take the
         // sandbox offline with the requested rules programmed nowhere.
         //
-        // Either section makes it directional, matching `EgressPlan::for_request`.
-        // Keying on `egress` alone sent an ingress-only request to the legacy
-        // arm, where a leftover `defaultPolicy='allow'` resolves to `Shared` and
-        // programs no chain -- discarding both the ingress denial and the
-        // host-loopback drop. A missing egress defaults to deny, failing closed.
+        // Either section makes it directional (see `is_directional`); a missing
+        // egress defaults to deny, failing closed.
         //
         // Directional never selects `Shared`: the host namespace has no inbound
         // primitive, and `network_ingress` has no `_specified` twin, so a
@@ -179,7 +191,7 @@ impl ResolvedNetworkMode {
         // "allow all outbound" policy with it. The private namespace honors
         // both directions, so an open egress posture becomes an accept-all
         // chain rather than an unfiltered namespace.
-        if request.policy.network_egress.is_some() || request.policy.network_ingress.is_some() {
+        if is_directional(&request.policy) {
             // Off the 0.8 contract there is no private namespace to program.
             // Report the unfiltered truth and let `validate` refuse it rather
             // than pretending the posture was applied.
@@ -442,12 +454,8 @@ pub fn external_proxy_host_rules_rejection(request: &ExecutionRequest) -> Option
     // would refuse every directional runtime proxy -- the one posture the
     // parser already constrains to `egress.default='deny'` with no direct
     // rules, which *is* proxy-only egress and carries no host lists that could
-    // be silently dropped. Either directional section makes it non-legacy,
-    // matching `EgressPlan::for_request` and `ResolvedNetworkMode::from_request`;
-    // keying on `egress` alone refused an ingress-only request as though the
-    // defaulted `Block` had been asked for.
-    let legacy_shape =
-        request.policy.network_egress.is_none() && request.policy.network_ingress.is_none();
+    // be silently dropped.
+    let legacy_shape = !is_directional(&request.policy);
     let conflicts = has_host_rules
         || (legacy_shape && request.policy.default_network_policy == NetworkPolicy::Block);
 
@@ -1386,6 +1394,39 @@ mod tests {
             "the host namespace programs no chain, so the deny posture would be lost"
         );
         assert!(mode.uses_private_netns(), "{mode:?}");
+    }
+
+    /// The predicate is now shared by three call sites, so pin it directly:
+    /// a per-site test would let one drift without failing the others.
+    #[test]
+    fn either_directional_section_alone_marks_the_policy_directional() {
+        use wxc_common::models::{NetworkEgressPolicy, NetworkIngressPolicy};
+
+        let cases = [
+            (None, None, false),
+            (Some(NetworkEgressPolicy::default()), None, true),
+            (None, Some(NetworkIngressPolicy::default()), true),
+            (
+                Some(NetworkEgressPolicy::default()),
+                Some(NetworkIngressPolicy::default()),
+                true,
+            ),
+        ];
+
+        for (egress, ingress, expected) in cases {
+            let policy = ContainerPolicy {
+                network_egress: egress.clone(),
+                network_ingress: ingress.clone(),
+                ..Default::default()
+            };
+            assert_eq!(
+                is_directional(&policy),
+                expected,
+                "egress={:?} ingress={:?}",
+                egress.is_some(),
+                ingress.is_some()
+            );
+        }
     }
 
     /// Build a directional request: no legacy network field is touched, which
