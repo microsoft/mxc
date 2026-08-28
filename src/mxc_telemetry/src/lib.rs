@@ -304,10 +304,10 @@ mod provider {
         document_sha256: &str,
         content: &str,
         summary: &str,
-    ) {
+    ) -> u32 {
         let state = match STATE.get() {
             Some(s) => s,
-            None => return,
+            None => return 0,
         };
 
         let is_debug_build = cfg!(debug_assertions);
@@ -341,7 +341,7 @@ mod provider {
             str8("mxc.document_sha256", document_sha256),
             str8("mxc.content", content),
             str8("mxc.summary", summary),
-        );
+        )
     }
 }
 
@@ -401,7 +401,8 @@ mod provider {
         _document_sha256: &str,
         _content: &str,
         _summary: &str,
-    ) {
+    ) -> u32 {
+        0
     }
 }
 

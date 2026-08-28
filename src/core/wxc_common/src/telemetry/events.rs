@@ -147,8 +147,8 @@ pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code
 }
 
 /// Log one `MXC.Verbose` ETW event.
-pub fn log_verbose(event: &VerboseEvent<'_>) {
-    mxc_telemetry::log_verbose(
+pub fn log_verbose(event: &VerboseEvent<'_>) -> u32 {
+    let status = mxc_telemetry::log_verbose(
         event.backend,
         event.sandbox_kind,
         event.phase,
@@ -165,6 +165,8 @@ pub fn log_verbose(event: &VerboseEvent<'_>) {
 
     #[cfg(test)]
     test_sink::record_verbose(event);
+
+    status
 }
 
 /// In-memory capture sink for the two ETW emit calls, so tests can assert the

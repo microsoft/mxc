@@ -421,12 +421,14 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
 ///
 /// Returns `false` when collection is no longer authorized, allowing a caller
 /// to stop emitting the remaining chunks immediately.
-pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> bool {
+pub fn emit_verbose(active: bool, event: &VerboseEvent<'_>) -> Result<bool, u32> {
     let Some(_auth) = EmissionAuthorization::for_invocation(active) else {
-        return false;
+        return Ok(false);
     };
-    log_verbose(event);
-    true
+    match log_verbose(event) {
+        0 => Ok(true),
+        status => Err(status),
+    }
 }
 
 /// Record the containment backend for this process so best-effort emit paths
@@ -1166,11 +1168,11 @@ mod tests {
         };
 
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(false)));
-        assert!(!emit_verbose(true, &event));
+        assert!(!emit_verbose(true, &event).unwrap());
         assert!(events::test_sink::take_verbose().is_empty());
 
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
-        assert!(emit_verbose(true, &event));
+        assert!(emit_verbose(true, &event).unwrap());
         assert_eq!(events::test_sink::take_verbose().len(), 1);
         reset_for_test();
     }
