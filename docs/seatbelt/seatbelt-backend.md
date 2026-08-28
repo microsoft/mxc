@@ -12,7 +12,6 @@ framework behind the App Sandbox that every Mac App Store app uses.
 | **Schema** | `0.8.0-alpha` recommended. `0.7.0-alpha` is the minimum and still supported. |
 | **Requires** | macOS 15 (Sequoia) or later. No root, no daemon, no install. |
 | **Isolation** | Process tree (no named container, no lifecycle, nothing to clean up) |
-| **Startup** | ~10 ms |
 | **Enforced by** | The macOS kernel, via a generated profile |
 
 MXC translates your JSON policy into a Seatbelt profile and applies it with
