@@ -35,6 +35,15 @@ const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// cannot consume the whole readiness budget and leave no retry behind it.
 const NETWORK_PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Succeeds once the container's resolver configuration names a server.
+///
+/// The readiness probe's answer when the policy names no host to look up. A
+/// configured server can still be unreachable, which a lookup would catch and
+/// this does not; it is the strongest signal available without reaching for a
+/// name outside the policy.
+const RESOLVER_CONFIGURED_CHECK: &str =
+    "grep -q '^[[:space:]]*nameserver[[:space:]]' /etc/resolv.conf 2>/dev/null";
+
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
@@ -93,10 +102,24 @@ impl LxcScriptRunner {
     }
 
     /// The command the readiness probe runs inside the container.
-    fn build_network_probe_command(_hostname: Option<&str>) -> String {
-        // Lists the interface addresses the container holds and succeeds once
-        // one of them is an IPv4 or IPv6 address outside the loopback scope.
-        "ip addr show scope global 2>/dev/null | grep -q inet".to_string()
+    ///
+    /// With a hostname, it looks that name up using whichever resolver client
+    /// the image ships. An image carrying neither client falls back to the
+    /// resolver configuration, which is a weaker answer than a lookup and a
+    /// better one than a run that could never start.
+    fn build_network_probe_command(hostname: Option<&str>) -> String {
+        match hostname {
+            Some(host) => format!(
+                "if command -v nslookup >/dev/null 2>&1; then \
+                 nslookup {host} >/dev/null 2>&1; \
+                 elif command -v getent >/dev/null 2>&1; then \
+                 getent hosts {host} >/dev/null 2>&1; \
+                 else {resolver}; fi",
+                host = host,
+                resolver = RESOLVER_CONFIGURED_CHECK
+            ),
+            None => RESOLVER_CONFIGURED_CHECK.to_string(),
+        }
     }
 
     /// Poll the container until `attempt` reports its network usable, or until
@@ -152,8 +175,9 @@ impl LxcScriptRunner {
         }
 
         Some(ScriptResponse::error(&format!(
-            "Container network did not initialize within {:.0}s; \
-             check that lxc-net/dnsmasq is running and able to assign an IP.",
+            "Container network did not initialize within {:.0}s; the container's resolver \
+             never came up. Check that lxc-net/dnsmasq is running and able to assign an IP \
+             and answer DNS.",
             timeout.as_secs_f64()
         )))
     }
@@ -1125,6 +1149,45 @@ mod tests {
         assert!(
             command.contains("api.example.com"),
             "the probe must ask for the host the workload is allowed to reach, got: {command}"
+        );
+    }
+
+    // The command is handed to /bin/sh inside a privileged lxc-attach, and
+    // allowed_hosts is caller-supplied text.
+    #[test]
+    fn a_host_carrying_shell_syntax_is_never_embedded_in_the_probe() {
+        let policy = policy_allowing("api.example.com; rm -rf /");
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+        );
+
+        assert_eq!(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+            None,
+            "a host carrying shell syntax must not be selected for the probe"
+        );
+        assert!(
+            !command.contains("rm -rf"),
+            "caller text reached the probe command: {command}"
+        );
+    }
+
+    // An address has no name to look up, and a policy stating only addresses
+    // must still get a readiness check rather than an unresolvable one.
+    #[test]
+    fn a_policy_naming_only_addresses_falls_back_to_the_resolver_configuration() {
+        let policy = policy_allowing("10.0.3.1");
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+        );
+
+        assert!(
+            command.contains("/etc/resolv.conf"),
+            "the fallback must inspect the container's resolver configuration, got: {command}"
+        );
+        assert!(
+            !command.contains("10.0.3.1"),
+            "an address is not a name to look up, got: {command}"
         );
     }
 

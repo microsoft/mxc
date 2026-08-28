@@ -1164,12 +1164,13 @@ impl IngressManager {
     /// That classifier inspects the file's *contents* — an address list — and
     /// reports `Inactive` when nothing but `lo` is present.  For a long-lived
     /// host that is a fair reading.  For a container it is a fail-open race:
-    /// `wait_for_network` returns on the first address of *any* family and its
-    /// return value is discarded, so a container whose IPv6 address has not
-    /// arrived yet presents exactly the same address-less file as one with IPv6
-    /// switched off.  Reading that as `Inactive` lets an unusable `ip6tables`
-    /// take the IPv4-only path, leaving the IPv6 address that arrives a moment
-    /// later unfiltered inbound — the fail-open this module exists to close.
+    /// `wait_for_network` establishes readiness from inside the guest and waits
+    /// on no particular address family, so a container whose IPv6 address has
+    /// not arrived yet presents exactly the same address-less file as one with
+    /// IPv6 switched off.  Reading that as `Inactive` lets an unusable
+    /// `ip6tables` take the IPv4-only path, leaving the IPv6 address that
+    /// arrives a moment later unfiltered inbound — the fail-open this module
+    /// exists to close.
     ///
     /// Existence is the stable signal; contents are the volatile one.  The
     /// kernel never creates `if_inet6` when IPv6 is disabled at boot (see
