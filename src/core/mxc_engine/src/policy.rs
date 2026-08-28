@@ -678,6 +678,17 @@ impl SandboxRequest {
         self
     }
 
+    /// Allow (or deny) the Seatbelt-sandboxed (macOS) child access to system
+    /// sleep/wake notifications and power assertions. Creates a default
+    /// Seatbelt config if the request carries none.
+    pub fn set_seatbelt_system_power_access(&mut self, allow: bool) -> &mut Self {
+        self.inner
+            .seatbelt
+            .get_or_insert_default()
+            .system_power_access = allow;
+        self
+    }
+
     /// Enable (or disable) experimental features for this request — the
     /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
     /// executor's `--experimental` flag.
@@ -1295,7 +1306,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn seatbelt_extra_mach_lookups_and_keychain_round_trip() {
+    fn seatbelt_options_round_trip() {
         let policy = SandboxPolicy {
             version: "0.7.0-alpha".to_string(),
             filesystem: None,
@@ -1310,6 +1321,7 @@ mod tests {
         union.push("com.example.service".to_string());
         request.set_seatbelt_extra_mach_lookups(union.clone());
         request.set_seatbelt_keychain_access(true);
+        request.set_seatbelt_system_power_access(true);
 
         assert_eq!(request.seatbelt_extra_mach_lookups(), union.as_slice());
         let cfg = request
@@ -1318,6 +1330,7 @@ mod tests {
             .as_ref()
             .expect("seatbelt config on macOS");
         assert!(cfg.keychain_access);
+        assert!(cfg.system_power_access);
         assert!(cfg
             .extra_mach_lookups
             .contains(&"com.example.service".to_string()));

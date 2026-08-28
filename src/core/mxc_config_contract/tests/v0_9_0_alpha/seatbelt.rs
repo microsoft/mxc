@@ -12,6 +12,7 @@ fn accepts_complete_seatbelt_object() {
             "launchMethod": "exec",
             "nestedPty": false,
             "keychainAccess": false,
+            "systemPowerAccess": false,
             "extraMachLookups": ["com.apple.securityd", "com.apple.coreservices.launchservicesd"]
         },
         "process": {"commandLine": "echo"}
@@ -156,6 +157,23 @@ fn rejects_non_boolean_keychain_access_values() {
                 "version": "0.9.0-alpha",
                 "seatbelt": {{
                     "keychainAccess": {keychain_access}
+                }},
+                "process": {{"commandLine": "echo"}}
+            }}"#
+        );
+
+        assert_invalid(&json);
+    }
+}
+
+#[test]
+fn rejects_non_boolean_system_power_access_values() {
+    for system_power_access in ["0", "1", "\"string\"", "[]", "{}"] {
+        let json = format!(
+            r#"{{
+                "version": "0.9.0-alpha",
+                "seatbelt": {{
+                    "systemPowerAccess": {system_power_access}
                 }},
                 "process": {{"commandLine": "echo"}}
             }}"#

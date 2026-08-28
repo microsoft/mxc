@@ -611,6 +611,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         launch_method,
         nested_pty,
         keychain_access,
+        system_power_access,
         extra_mach_lookups,
     } = sb;
     SeatbeltConfig {
@@ -619,6 +620,7 @@ fn make_seatbelt_config(sb: wire::Seatbelt) -> SeatbeltConfig {
         launch_method: launch_method.map(Into::into).unwrap_or_default(),
         nested_pty: nested_pty.unwrap_or(true),
         keychain_access: keychain_access.unwrap_or(false),
+        system_power_access: system_power_access.unwrap_or(false),
         extra_mach_lookups: extra_mach_lookups.unwrap_or_default(),
     }
 }
@@ -6243,11 +6245,12 @@ mod tests {
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(cfg.nested_pty);
         assert!(!cfg.keychain_access);
+        assert!(!cfg.system_power_access);
     }
 
     #[test]
-    fn seatbelt_nested_pty_and_keychain_access_pass_through() {
-        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true}}"#;
+    fn seatbelt_options_pass_through() {
+        let json = r#"{"process": {"commandLine": "echo hi"}, "containment": "seatbelt", "seatbelt": {"nestedPty": false, "keychainAccess": true, "systemPowerAccess": true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
 
@@ -6255,6 +6258,7 @@ mod tests {
         let cfg = req.seatbelt.expect("seatbelt should be populated");
         assert!(!cfg.nested_pty);
         assert!(cfg.keychain_access);
+        assert!(cfg.system_power_access);
     }
 
     #[test]

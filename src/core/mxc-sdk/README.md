@@ -388,6 +388,20 @@ default):
 `Containment` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
 Constructing the listed variants is unaffected.
 
+Seatbelt system power access is off by default. Enable it when a workload must
+prevent sleep or receive sleep/wake notifications:
+
+```rust,no_run
+# use mxc_sdk::{build_request, SandboxPolicy};
+# let policy = SandboxPolicy {
+#     version: "0.9.0-alpha".to_string(),
+#     filesystem: None, network: None, ui: None, timeout_ms: None,
+# };
+let mut request = build_request(&policy, None)?;
+request.set_seatbelt_system_power_access(true);
+# Ok::<(), mxc_sdk::Error>(())
+```
+
 `Containment::IsolationSession` names that backend, but no entry point taking a
 `Containment` serves it: `run` and `spawn_sandbox` both return
 [`ErrorCode::UnsupportedContainment`]. Reach it through the state-aware

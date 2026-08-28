@@ -10,6 +10,7 @@
     "launchMethod": "open",
     "nestedPty": false,
     "keychainAccess": true,
+    "systemPowerAccess": true,
     "extraMachLookups": [
       "com.apple.SecurityServer",
       "com.apple.coreservices.launchservicesd"

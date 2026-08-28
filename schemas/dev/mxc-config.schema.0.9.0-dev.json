@@ -956,6 +956,13 @@
             "string",
             "null"
           ]
+        },
+        "systemPowerAccess": {
+          "description": "Allow system sleep/wake notifications and power assertions.",
+          "type": [
+            "boolean",
+            "null"
+          ]
         }
       },
       "type": "object"

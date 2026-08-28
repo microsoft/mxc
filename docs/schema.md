@@ -205,7 +205,8 @@ cannot mix both formats in one request.
             "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
             "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
             "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
-            "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+            "keychainAccess": false,       // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+            "systemPowerAccess": false      // Allow sleep/wake notifications and power assertions
         },
         "telemetry": {                // Telemetry (Windows only)
             "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate

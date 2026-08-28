@@ -519,6 +519,13 @@ export interface SeatbeltConfig {
    */
   keychainAccess?: boolean;
   /**
+   * Allow system sleep/wake notifications and power assertions. Adds
+   * access to the RootDomain IOKit user client and the macOS power
+   * management services. Requires schema `0.9.0-alpha` or later and
+   * defaults to `false`.
+   */
+  systemPowerAccess?: boolean;
+  /**
    * Additional Mach service global-names to allow `mach-lookup` for.
    * Escape hatch for callers that need a specific system service the
    * baseline doesn't cover (e.g. opt-in agent integrations). Each entry

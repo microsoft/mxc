@@ -79,6 +79,7 @@ pub fn build_profile_with_proxy(
     write_network_rules(&mut out, request, proxy_address);
     write_nested_pty_rules(&mut out, request);
     write_keychain_rules(&mut out, request)?;
+    write_system_power_rules(&mut out, request);
     write_extra_seatbelt_rules(&mut out, request);
     write_ui_rules(&mut out, request);
 
@@ -539,6 +540,26 @@ fn write_keychain_rules(out: &mut String, request: &ExecutionRequest) -> Result<
     let _ = writeln!(out, "    (subpath {})", quote_scheme(&user_keychains));
     out.push_str("    (subpath \"/private/var/folders\"))\n");
     Ok(())
+}
+
+/// Emit the narrow Seatbelt capability needed for system power notifications
+/// and assertions. Off by default because opening `RootDomainUserClient` also
+/// exposes host power-management operations beyond notification registration.
+fn write_system_power_rules(out: &mut String, request: &ExecutionRequest) {
+    let enabled = request
+        .seatbelt
+        .as_ref()
+        .is_some_and(|c| c.system_power_access);
+    if !enabled {
+        return;
+    }
+
+    out.push_str(";; --- systemPowerAccess: sleep/wake notifications and assertions ---\n");
+    out.push_str("(allow mach-lookup\n");
+    out.push_str("    (global-name \"com.apple.PowerManagement.control\")\n");
+    out.push_str("    (global-name \"com.apple.iokit.powerdxpc\"))\n");
+    out.push_str("(allow iokit-open\n");
+    out.push_str("    (iokit-user-client-class \"RootDomainUserClient\"))\n");
 }
 
 /// Emit caller-provided `extraMachLookups` rules: additional Mach service
@@ -1568,6 +1589,31 @@ mod tests {
         assert!(!p.contains("com.apple.lsd"));
         assert!(!p.contains("/Library/Keychains"));
         assert!(!p.contains("/private/var/db/mds"));
+    }
+
+    #[test]
+    fn system_power_access_default_off_omits_power_services() {
+        let r = req();
+        let p = build_profile(&r).unwrap();
+        assert!(!p.contains("systemPowerAccess"));
+        assert!(!p.contains("com.apple.PowerManagement.control"));
+        assert!(!p.contains("com.apple.iokit.powerdxpc"));
+        assert!(!p.contains("RootDomainUserClient"));
+    }
+
+    #[test]
+    fn system_power_access_true_allows_power_services() {
+        let mut r = req();
+        r.seatbelt = Some(SeatbeltConfig {
+            system_power_access: true,
+            ..Default::default()
+        });
+        let p = build_profile(&r).unwrap();
+        assert!(p.contains("systemPowerAccess"));
+        assert!(p.contains("(global-name \"com.apple.PowerManagement.control\")"));
+        assert!(p.contains("(global-name \"com.apple.iokit.powerdxpc\")"));
+        assert!(p.contains("(iokit-user-client-class \"RootDomainUserClient\")"));
+        assert!(!p.contains("(allow iokit-open)\n"));
     }
 
     // Keychain rules expand `~/Library/Keychains` from $HOME at build

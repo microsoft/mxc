@@ -467,6 +467,10 @@ export interface Seatbelt {
    * Replace the generated profile entirely (advanced/testing escape hatch).
    */
   profileOverride?: string | null;
+  /**
+   * Allow system sleep/wake notifications and power assertions.
+   */
+  systemPowerAccess?: boolean | null;
 }
 
 /**
