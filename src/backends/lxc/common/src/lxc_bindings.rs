@@ -286,11 +286,17 @@ impl LxcContainer {
     /// file, so a value chosen for one run does not reach the next run over
     /// the same container id.
     pub fn start(&self, defines: &[(&str, &str)]) -> Result<(), String> {
+        Self::run_status(self.start_command(defines), "lxc-start")
+    }
+
+    /// The argv [`Self::start`] runs, built apart from running it so a test can
+    /// read the flags without an LXC host.
+    fn start_command(&self, defines: &[(&str, &str)]) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-start");
         for (key, value) in defines {
             cmd.arg("-s").arg(format!("{}={}", key, value));
         }
-        Self::run_status(cmd, "lxc-start")
+        cmd
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
@@ -499,6 +505,47 @@ mod tests {
             args.iter().any(|a| a == "-k"),
             "stop must kill the container: a clean shutdown waits 60 seconds for an \
              init that may never answer, got {args:?}"
+        );
+    }
+
+    // Passing the topology as -s leaves the container's stored config
+    // untouched, which is what lets the next run over the same container id
+    // choose a different one.
+    #[test]
+    fn start_passes_overrides_per_run_instead_of_storing_them() {
+        let container = LxcContainer::new("mxc-start-test", Some("/var/lib/lxc"));
+
+        let plain: Vec<String> = container
+            .start_command(&[])
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            plain.iter().any(|a| a == "mxc-start-test"),
+            "the command must address this container, got {plain:?}"
+        );
+        assert!(
+            !plain.iter().any(|a| a == "-s"),
+            "a run that overrides nothing must define nothing, got {plain:?}"
+        );
+
+        let overridden: Vec<String> = container
+            .start_command(&[("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")])
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            overridden.iter().filter(|a| *a == "-s").count(),
+            2,
+            "each override needs its own -s, got {overridden:?}"
+        );
+        assert!(
+            overridden.iter().any(|a| a == "lxc.net.0.type=empty"),
+            "an override must reach lxc-start as KEY=VAL, got {overridden:?}"
+        );
+        assert!(
+            overridden.iter().any(|a| a == "lxc.net.0.flags=up"),
+            "an override must reach lxc-start as KEY=VAL, got {overridden:?}"
         );
     }
 
