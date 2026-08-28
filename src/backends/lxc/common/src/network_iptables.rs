@@ -439,10 +439,6 @@ pub struct NetworkIptablesManager {
     /// Where this manager's chain is hooked, and therefore whether the
     /// commands that build it enter a network namespace first.
     hook_point: EgressHookPoint,
-    /// True when the request declared the directional (0.8) network schema.
-    /// Defaults to the legacy schema, so a caller that never sets it keeps the
-    /// 0.7 behavior.
-    uses_directional_keys: bool,
     /// Chains and OUTPUT hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
@@ -566,7 +562,6 @@ impl NetworkIptablesManager {
             rules_applied: false,
             preserve_policy: false,
             hook_point,
-            uses_directional_keys: false,
             created: CreatedResources::default(),
             proxy_pin: None,
         }
@@ -591,11 +586,6 @@ impl NetworkIptablesManager {
     /// dropped.
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
-    }
-
-    /// Record which network schema the request declared.
-    pub fn set_uses_directional_keys(&mut self, uses_directional_keys: bool) {
-        self.uses_directional_keys = uses_directional_keys;
     }
 
     /// The hosts-file pin a proxied container must be given before it runs, or
@@ -1905,7 +1895,7 @@ impl NetworkIptablesManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_keys = self.uses_directional_keys;
+        let uses_directional_keys = uses_directional_keys(policy);
         let plan = plan_network(policy);
         if !plan.installs_firewall() {
             if plan == NetworkPlan::ProxyWithoutEnforcement {

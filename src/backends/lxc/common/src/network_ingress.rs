@@ -64,7 +64,8 @@ use wxc_common::logger::Logger;
 use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkIngressPolicy};
 
 use crate::network_iptables::{
-    ingress_chain_name_for, plan_network, HostIpv6State, Ip6tablesStatus, NetworkIptablesManager,
+    ingress_chain_name_for, plan_network, uses_directional_keys, HostIpv6State, Ip6tablesStatus,
+    NetworkIptablesManager,
 };
 
 /// IP family an inbound chain is being built for.
@@ -183,11 +184,6 @@ pub struct IngressManager {
     /// not only by the runner's explicit teardown call, because `Drop` fires on
     /// every path out of the run and would otherwise silently undo the request.
     preserve_policy: bool,
-    /// True when the request declared the directional (0.8) network schema.
-    /// Required at construction: unlike the egress manager there is no legacy
-    /// caller to default for, and a run that forgot to state it would silently
-    /// enforce the wrong schema.
-    uses_directional_keys: bool,
 }
 
 /// The outcome of a single `iptables`/`ip6tables` invocation, structured so the
@@ -415,7 +411,7 @@ impl IngressManager {
     ///
     /// The PID is required: the chain is enforced inside the container's own
     /// netns, so there is no way to install or probe it without one.
-    pub fn new(container_name: &str, netns_pid: u32, uses_directional_keys: bool) -> Self {
+    pub fn new(container_name: &str, netns_pid: u32) -> Self {
         Self {
             chain_name: ingress_chain_name_for(container_name),
             netns_pid,
@@ -424,7 +420,6 @@ impl IngressManager {
             v4_hooked: false,
             v6_hooked: false,
             preserve_policy: false,
-            uses_directional_keys,
         }
     }
 
@@ -551,7 +546,7 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_keys = self.uses_directional_keys;
+        let uses_directional_keys = uses_directional_keys(policy);
         if !plan_network(policy).installs_firewall() {
             logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
@@ -1093,9 +1088,7 @@ impl IngressManager {
     /// cleanup where we do not know what a dead run installed. Used by
     /// [`Self::force_cleanup`].
     fn for_full_reset(container_name: &str, netns_pid: u32) -> Self {
-        // Teardown removes whatever is there; no rule is built, so the schema
-        // this manager reports is never read.
-        let mut mgr = Self::new(container_name, netns_pid, false);
+        let mut mgr = Self::new(container_name, netns_pid);
         mgr.v4_chain_created = true;
         mgr.v6_chain_created = true;
         mgr.v4_hooked = true;
@@ -1310,7 +1303,7 @@ mod tests {
             }
 
             let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-            let mut manager = IngressManager::new("log-field-test", 1, directional);
+            let mut manager = IngressManager::new("log-field-test", 1);
             let _ = manager.apply_firewall_rules(&policy, &mut logger);
             let logged = logger.get_buffer().to_string();
 
@@ -2007,7 +2000,7 @@ mod tests {
     #[test]
     fn ingress_chain_name_is_distinct_from_egress() {
         let name = "my-container";
-        let ingress = IngressManager::new(name, 4242, false);
+        let ingress = IngressManager::new(name, 4242);
         let egress = crate::network_iptables::chain_name_for(name);
         assert_ne!(
             ingress.chain_name(),
@@ -2043,7 +2036,7 @@ mod tests {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
         // The PID value is irrelevant: the refusal precedes every use of it.
         for pid in [1u32, 42u32, 999_999u32] {
-            let mut mgr = IngressManager::new("permissive-container", pid, false);
+            let mut mgr = IngressManager::new("permissive-container", pid);
             let result = mgr.apply_firewall_rules(&permissive_firewall_policy(), &mut logger);
             assert!(
                 result.is_err(),
@@ -2074,15 +2067,14 @@ mod tests {
     fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
-        for (policy, uses_directional_keys, field) in [
+        for (policy, field) in [
             (
                 directional_ingress(NetworkAction::Allow, NetworkAction::Deny),
-                true,
                 "network.ingress.default",
             ),
-            (permissive_firewall_policy(), false, "allowLocalNetwork"),
+            (permissive_firewall_policy(), "allowLocalNetwork"),
         ] {
-            let mut mgr = IngressManager::new("lan-inbound", 42, uses_directional_keys);
+            let mut mgr = IngressManager::new("lan-inbound", 42);
             let msg = mgr
                 .apply_firewall_rules(&policy, &mut logger)
                 .expect_err("permissive inbound must still be refused");
@@ -2103,7 +2095,7 @@ mod tests {
     #[test]
     fn every_emitted_command_is_nsenter_prefixed() {
         let pid = 31337u32;
-        let mgr = IngressManager::new("argv-container", pid, false);
+        let mgr = IngressManager::new("argv-container", pid);
         let cases: &[&[&str]] = &[
             &["-N", "MXC-t"],
             &["-A", "MXC-t", "-i", "lo", "-j", "ACCEPT"],
@@ -2144,7 +2136,7 @@ mod tests {
     #[test]
     fn teardown_commands_are_nsenter_prefixed_and_chain_scoped() {
         let pid = 4242u32;
-        let mut mgr = IngressManager::new("teardown-container", pid, false);
+        let mut mgr = IngressManager::new("teardown-container", pid);
         // Simulate a full dual-stack install: both families created and hooked.
         mgr.v4_chain_created = true;
         mgr.v6_chain_created = true;
@@ -2197,7 +2189,7 @@ mod tests {
     /// which would reach the real `nsenter`.
     #[test]
     fn drop_honors_preserve_policy() {
-        let mut mgr = IngressManager::new("preserve-container", 4242, false);
+        let mut mgr = IngressManager::new("preserve-container", 4242);
 
         // Nothing installed: never any cleanup to do, either way.
         assert!(
@@ -2244,7 +2236,7 @@ mod tests {
     fn force_cleanup_removes_all_resources_via_nsenter() {
         let pid = 9001u32;
         let container = "force-cleanup-container";
-        let chain = IngressManager::new(container, pid, false)
+        let chain = IngressManager::new(container, pid)
             .chain_name()
             .to_string();
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
@@ -2370,7 +2362,7 @@ mod tests {
         let pid = 4242u32;
         let container = "install-order-container";
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new(container, pid, false);
+        let mut mgr = IngressManager::new(container, pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2441,7 +2433,7 @@ mod tests {
         let pid = 55u32;
         let container = "reset-repeat-container";
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new(container, pid, false);
+        let mut mgr = IngressManager::new(container, pid);
 
         let mut d_seen = 0;
         let mut runner = FakeRunner {
@@ -2504,7 +2496,7 @@ mod tests {
     fn partial_body_failure_plans_flush_delete_no_unhook() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("partial-container", pid, false);
+        let mut mgr = IngressManager::new("partial-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2570,7 +2562,7 @@ mod tests {
     fn reset_spawn_failure_aborts_before_create_with_no_ownership() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("reset-spawn-fail-container", pid, false);
+        let mut mgr = IngressManager::new("reset-spawn-fail-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),
@@ -2617,7 +2609,7 @@ mod tests {
     fn reset_unhook_exhaustion_aborts_before_create() {
         let pid = 7u32;
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
-        let mut mgr = IngressManager::new("reset-exhaustion-container", pid, false);
+        let mut mgr = IngressManager::new("reset-exhaustion-container", pid);
         let rules = IngressManager::build_ingress_rules(
             mgr.chain_name(),
             &policy_with(false, NetworkPolicy::Block),

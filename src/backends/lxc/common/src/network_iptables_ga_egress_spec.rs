@@ -623,11 +623,9 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
 fn appended_ipv4_chain_rules(
     container: &str,
     policy: &ContainerPolicy,
-    uses_directional_keys: bool,
 ) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
-    manager.set_uses_directional_keys(uses_directional_keys);
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
 
@@ -693,7 +691,7 @@ fn a_directional_deny_default_chain_does_not_open_dns() {
         vec![rule(vec![peer("192.0.2.0/24", &[])], Vec::new())],
         vec![],
     );
-    let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy, true);
+    let rules = appended_ipv4_chain_rules("ga-dns-deny", &policy);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -707,7 +705,7 @@ fn a_directional_deny_default_chain_does_not_open_dns() {
 #[test]
 fn a_directional_allow_default_chain_does_not_open_dns() {
     let policy = directional_policy(NetworkAction::Allow, vec![], vec![]);
-    let rules = appended_ipv4_chain_rules("ga-dns-allow", &policy, true);
+    let rules = appended_ipv4_chain_rules("ga-dns-allow", &policy);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -727,7 +725,7 @@ fn a_directional_policy_reaches_a_resolver_it_allows() {
         )],
         vec![],
     );
-    let rules = appended_ipv4_chain_rules("ga-dns-allowed", &policy, true);
+    let rules = appended_ipv4_chain_rules("ga-dns-allowed", &policy);
 
     assert!(
         rules.iter().any(|emitted| {
@@ -752,7 +750,7 @@ fn a_directional_deny_naming_a_resolver_is_not_preceded_by_a_dns_accept() {
             vec![port(NetworkProtocol::Udp, Some(53), None)],
         )],
     );
-    let rules = appended_ipv4_chain_rules("ga-dns-denied", &policy, true);
+    let rules = appended_ipv4_chain_rules("ga-dns-denied", &policy);
 
     assert!(
         !opens_dns_unconditionally(&rules),
@@ -778,7 +776,7 @@ fn a_legacy_policy_still_opens_dns() {
         network_enforcement_mode: NetworkEnforcementMode::Firewall,
         ..Default::default()
     };
-    let rules = appended_ipv4_chain_rules("legacy-dns", &policy, false);
+    let rules = appended_ipv4_chain_rules("legacy-dns", &policy);
 
     assert!(
         opens_dns_unconditionally(&rules),
@@ -793,7 +791,7 @@ fn a_parsed_legacy_request_keeps_the_dns_exemption() {
             "process": {"commandLine": "echo hi"},
             "network": {"defaultPolicy": "block", "enforcementMode": "firewall"}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy, false);
+    let rules = appended_ipv4_chain_rules("parsed-legacy", &policy);
 
     assert!(
         opens_dns_unconditionally(&rules),
@@ -809,7 +807,7 @@ fn a_parsed_directional_request_drops_the_dns_exemption() {
             "network": {"egress": {"default": "deny",
                                    "allow": [{"to": [{"cidr": "192.0.2.0/24"}]}]}}}"#,
     );
-    let rules = appended_ipv4_chain_rules("parsed-directional", &policy, true);
+    let rules = appended_ipv4_chain_rules("parsed-directional", &policy);
 
     assert!(
         !opens_dns_unconditionally(&rules),

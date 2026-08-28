@@ -18,7 +18,7 @@ use crate::filesystem_mounts;
 use crate::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
-    needs_network, plan_network, uses_directional_keys, EgressHookPoint, NetworkIptablesManager,
+    needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
 };
 use crate::signal_cleanup;
 
@@ -351,10 +351,8 @@ impl LxcScriptRunner {
             None => EgressHookPoint::Unhooked,
         };
 
-        let uses_directional_keys = uses_directional_keys(&request.policy);
         let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
         fw_manager.set_preserve_policy(!self.cleanup_policy);
-        fw_manager.set_uses_directional_keys(uses_directional_keys);
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
@@ -377,7 +375,7 @@ impl LxcScriptRunner {
         let mut ingress_manager: Option<IngressManager> = None;
 
         if let Some(pid) = netns_pid {
-            let mut mgr = IngressManager::new(&container_name, pid, uses_directional_keys);
+            let mut mgr = IngressManager::new(&container_name, pid);
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {
