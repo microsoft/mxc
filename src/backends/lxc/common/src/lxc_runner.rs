@@ -240,7 +240,19 @@ impl LxcScriptRunner {
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 
         if needs_network {
-            Self::wait_for_network(&container_name, Duration::from_secs(10), logger);
+            // Fail closed: proceeding without an IP silently breaks DNS and produces
+            // flaky failures. Alpine DHCP leases can arrive at ~9s, so allow 30s.
+            let timeout = Duration::from_secs(30);
+            if !Self::wait_for_network(&container_name, timeout, logger) {
+                if self.destroy_on_exit || container_created {
+                    let _ = container.destroy();
+                }
+                return ScriptResponse::error(&format!(
+                    "Container network did not initialize within {:.0}s; \
+                     check that lxc-net/dnsmasq is running and able to assign an IP.",
+                    timeout.as_secs_f64()
+                ));
+            }
         }
 
         // Configure network rules
