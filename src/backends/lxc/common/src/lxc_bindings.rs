@@ -279,21 +279,21 @@ impl LxcContainer {
             })
     }
 
-    /// Start the container, applying `config_overrides` to this start alone.
+    /// Start the container under `run_config`, which holds for this start alone.
     ///
-    /// Each pair becomes an `lxc-start -s KEY=VAL` argument. LXC reads those
-    /// in place of the container config's own values without writing to that
-    /// file, so a value chosen for one run does not reach the next run over
-    /// the same container id.
-    pub fn start(&self, config_overrides: &[(&str, &str)]) -> Result<(), String> {
-        Self::run_status(self.start_command(config_overrides), "lxc-start")
+    /// Each pair becomes an `lxc-start -s KEY=VAL` argument. LXC takes the
+    /// value from there and never writes it to the container's config file.
+    /// The next run over the same container id states its own, with nothing
+    /// left behind to undo.
+    pub fn start(&self, run_config: &[(&str, &str)]) -> Result<(), String> {
+        Self::run_status(self.start_command(run_config), "lxc-start")
     }
 
-    /// The argv [`Self::start`] runs, built apart from running it so a test can
-    /// read the flags without an LXC host.
-    fn start_command(&self, config_overrides: &[(&str, &str)]) -> std::process::Command {
+    /// The command [`Self::start`] runs, built apart from running it. A test
+    /// can then read the flags with no LXC host.
+    fn start_command(&self, run_config: &[(&str, &str)]) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-start");
-        for (key, value) in config_overrides {
+        for (key, value) in run_config {
             cmd.arg("-s").arg(format!("{}={}", key, value));
         }
         cmd
@@ -435,8 +435,8 @@ impl LxcContainer {
         Self::run_status(self.stop_command(), "lxc-stop")
     }
 
-    /// The argv [`Self::stop`] runs, built apart from running it so a test can
-    /// read the flags without an LXC host.
+    /// The command [`Self::stop`] runs, built apart from running it. A test
+    /// can then read the flags with no LXC host.
     fn stop_command(&self) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-stop");
         // -k kills the container instead of requesting a clean shutdown.
@@ -512,7 +512,7 @@ mod tests {
     // untouched, which is what lets the next run over the same container id
     // choose a different one.
     #[test]
-    fn start_passes_overrides_per_run_instead_of_storing_them() {
+    fn start_states_the_config_for_one_run_instead_of_storing_it() {
         let container = LxcContainer::new("mxc-start-test", Some("/var/lib/lxc"));
 
         let plain: Vec<String> = container
@@ -526,26 +526,26 @@ mod tests {
         );
         assert!(
             !plain.iter().any(|a| a == "-s"),
-            "a run that overrides nothing must pass no -s, got {plain:?}"
+            "a run that states no config must pass no -s, got {plain:?}"
         );
 
-        let overridden: Vec<String> = container
+        let configured: Vec<String> = container
             .start_command(&[("lxc.net.0.type", "empty"), ("lxc.net.0.flags", "up")])
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert_eq!(
-            overridden.iter().filter(|a| *a == "-s").count(),
+            configured.iter().filter(|a| *a == "-s").count(),
             2,
-            "each override needs its own -s, got {overridden:?}"
+            "each config item needs its own -s, got {configured:?}"
         );
         assert!(
-            overridden.iter().any(|a| a == "lxc.net.0.type=empty"),
-            "an override must reach lxc-start as KEY=VAL, got {overridden:?}"
+            configured.iter().any(|a| a == "lxc.net.0.type=empty"),
+            "each config item must reach lxc-start as KEY=VAL, got {configured:?}"
         );
         assert!(
-            overridden.iter().any(|a| a == "lxc.net.0.flags=up"),
-            "an override must reach lxc-start as KEY=VAL, got {overridden:?}"
+            configured.iter().any(|a| a == "lxc.net.0.flags=up"),
+            "each config item must reach lxc-start as KEY=VAL, got {configured:?}"
         );
     }
 

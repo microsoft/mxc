@@ -254,8 +254,8 @@ impl LxcScriptRunner {
             return ScriptResponse::error(&format!("Failed to configure filesystem: {}", e));
         }
 
-        // An override reaches only the start it is passed to, and LXC reads the
-        // network section only at start.  A container an earlier run left
+        // A run's config reaches only the start it is passed to, and LXC reads
+        // the network section only at start.  A container an earlier run left
         // running is still on that run's topology.
         if container.is_running() {
             let _ = writeln!(
@@ -274,7 +274,7 @@ impl LxcScriptRunner {
             }
         }
 
-        let network_overrides: &[(&str, &str)] = if plan.omits_interface() {
+        let network_config: &[(&str, &str)] = if plan.omits_interface() {
             let _ = writeln!(
                 logger,
                 "Policy permits no network; starting the container with no interface."
@@ -286,7 +286,7 @@ impl LxcScriptRunner {
         };
 
         let _ = writeln!(logger, "Starting LXC container...");
-        if let Err(e) = container.start(network_overrides) {
+        if let Err(e) = container.start(network_config) {
             if self.destroy_on_exit || container_created {
                 let _ = container.destroy();
             }
