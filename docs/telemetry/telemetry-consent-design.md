@@ -30,7 +30,7 @@ native UI, but may not substitute wording.
 
 Current resource:
 
-- Resource version: `1`
+- Resource version: `2`
 - Locale: `en-US`
 - Mandatory fallback: `en-US`
 - Privacy link: <https://go.microsoft.com/fwlink/?linkid=521839>
@@ -45,7 +45,7 @@ Help improve Microsoft eXecution Container (MXC)
 
 ```text
 Help improve MXC by sharing optional diagnostic data with Microsoft.
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability. When Learning Mode capture is used, this can include sanitized technical details about resource-access events, such as provider and event identifiers, process IDs, access classifications, and bounded redacted properties. MXC does not send your commands, credentials, complete file paths, usernames, or sandbox output.
 You can change your choice at any time.
 ```
 
@@ -195,6 +195,7 @@ The public ETW event identities remain:
 
 - `MXC.Execution`
 - `MXC.Error`
+- `MXC.Verbose`
 
 Collectors may continue filtering those names; consent stabilization does not
 rename the provider or events.

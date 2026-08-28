@@ -331,6 +331,12 @@ is intentionally absent from stderr pointers and Rust, Node, C#, and FFI output
 metadata; callers derive it from the actionable output path using the naming rule
 above.
 
+When stable telemetry is enabled and authorized, MXC may validate, compact, and
+send this redacted verbose document through `Microsoft.MXC/MXC.Verbose`. Each
+event contains a valid JSON array of complete signatures and document
+reconstruction metadata. MXC does not send the actionable denials file or raw
+ETL through telemetry. See [MXC telemetry](../telemetry/telemetry.md).
+
 **Locating the file.** Set `captureDenials.outputPath` to name the file
 explicitly (its parent directory must already exist). MXC inserts a unique
 per-run identifier (process id plus random suffix) into the file stem

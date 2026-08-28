@@ -190,7 +190,7 @@ fn seed_consent(local_app_data: &Path, state: &str) {
     std::fs::create_dir_all(&dir).expect("failed to create consent directory");
     let record = format!(
         r#"{{"schemaVersion":2,"consent":"{state}","source":"telemetry-etw-e2e",
-"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":1,
+"promptedMxcVersion":"0.0.0-e2e","promptResourceVersion":2,
 "promptLocale":"en-US","updatedAtEpoch":0}}"#
     );
     std::fs::write(dir.join("telemetry-consent.json"), record.replace('\n', ""))

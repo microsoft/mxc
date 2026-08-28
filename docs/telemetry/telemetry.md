@@ -18,7 +18,8 @@ C++ shim, WIL, or FFI is required.
 │  wxc_common::telemetry                               │
 │  (Rust — config resolution, sanitisation, types)     │
 │                                                      │
-│  init() / log_execution() / log_error() / shutdown() │
+│  init() / log_execution() / log_error() /             │
+│  log_verbose() / shutdown()                            │
 └───────────────┬──────────────────────────────────────┘
                 │  Direct Rust function calls
                 ▼
@@ -113,9 +114,12 @@ targets for this work.
 
 ### ETW privacy and collection contract
 
-- Events contain bounded enums, opaque MXC identities, numeric status fields,
-  and schema field paths only. They do not contain command lines, environment
-  values, raw paths, UPNs, tokens, or free-form error text.
+- Execution, error, and M-ETW requirement events contain bounded enums, opaque
+  MXC identities, numeric status fields, and schema field paths only.
+  `MXC.Verbose` is separately limited to the sanitized, typed inventory below.
+- Events do not contain command lines, environment values, complete file paths,
+  UPNs, tokens, sandbox output, raw ETL, actionable denial documents, general
+  logger text, or free-form error text.
 - `MXC.PolicyHash` uses the same effective container identity as the runner
   (`CLI` when no container ID was supplied), then applies the standard identity
   redaction. Valid opaque IDs are preserved; UPN-shaped or otherwise unsafe
@@ -140,6 +144,11 @@ targets for this work.
   Windows ETW requirements are met.
 
 ## Events
+
+The provider-qualified event identities include
+`Microsoft.MXC/MXC.Execution`, `Microsoft.MXC/MXC.Error`, and
+`Microsoft.MXC/MXC.Verbose`. `Microsoft.MXC` is the TraceLogging provider
+name. The M-ETW requirement events listed above share that provider.
 
 ### MXC.Execution
 
@@ -183,6 +192,69 @@ Emitted on execution errors.
 > usernames, or credentials, so `MXC.Error` deliberately carries only bounded
 > attribution fields, the `error_type` category, and the numeric `exit_code` —
 > never the message string itself.
+
+### MXC.Verbose
+
+Emitted when a telemetry-enabled ProcessContainer run successfully produces a
+Learning Mode `captureDenials` verbose logging artifact. MXC reads the
+versioned `*.verbose.json` sibling, validates it as a
+`VerboseLoggingDocument`, and reserializes it as compact JSON. The event never
+contains the actionable denials file, raw ETL, commands, sandbox output, or
+general logger text.
+
+One verbose document may require multiple ETW events. Every `mxc.content`
+value is an independently parseable compact JSON array of complete verbose
+signature objects; MXC never splits a JSON object or UTF-8 code point.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `mxc.sandbox_kind` | string | Caller-requested containment kind |
+| `mxc.backend` | string | Concrete containment backend |
+| `mxc.phase` | string | Lifecycle phase; empty for current one-shot capture |
+| `__TlgCV__` | string | Lifecycle correlation vector; empty for current one-shot capture |
+| `mxc.document_id` | string | Random identifier shared only by chunks of one verbose artifact |
+| `mxc.document_version` | uint32 | `VerboseLoggingDocument` schema version |
+| `mxc.chunk_index` | uint32 | Zero-based chunk index |
+| `mxc.chunk_count` | uint32 | Total number of chunks |
+| `mxc.document_bytes` | uint64 | Canonical compact document byte count |
+| `mxc.document_sha256` | string | SHA-256 of the canonical compact document |
+| `mxc.content` | string | Valid compact JSON array of complete verbose signatures |
+| `mxc.summary` | string | Valid compact JSON verbose-document summary |
+
+Consumers group by the existing app-session identifier plus
+`mxc.document_id`, order by `mxc.chunk_index`, parse and concatenate the
+`mxc.content` arrays, then rebuild `{version, signatures, summary}`. The byte
+count and SHA-256 allow consumers to reject incomplete or corrupted
+reconstructions.
+
+### Data inventory
+
+MXC's optional diagnostic events contain:
+
+- MXC version and channel
+- Whether the build has debug assertions enabled (`IsDebugging`)
+- Caller-requested sandbox kind and the concrete backend selected on the host
+- Run outcome, exit code, duration, bounded failure category, and lifecycle
+  phase
+- `UTCReplace_AppSessionGuid`, which asks the telemetry pipeline to supply a
+  random per-session app identifier
+- An MXC-internal random lifecycle correlation vector
+- Sanitized Learning Mode verbose signatures when `captureDenials` produces a
+  verbose artifact: provider/event identifiers, PID, closed outcome reason,
+  access/resource classifications, bounded redacted properties, occurrence
+  counts, and truncation state
+
+MXC does not emit commands, credentials, complete file paths, usernames,
+sandbox output, raw ETL, actionable denial documents, general logger text, or
+free-form error text.
+
+### Privacy review status
+
+The version 2 consent wording, verbose-event inventory, current WinExt
+classification, retention, access, regional processing, deletion, and
+localization/accessibility decisions require explicit privacy/release review.
+The canonical wording and presenter contract are documented in
+[Telemetry consent design](telemetry-consent-design.md).
 
 ### Correlating a lifecycle
 

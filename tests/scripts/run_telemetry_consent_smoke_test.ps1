@@ -187,7 +187,7 @@ try {
             consent = $seed
             source = 'smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 1
+            promptResourceVersion = 2
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }

@@ -40,6 +40,8 @@ mod probe;
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 mod run;
 mod state_aware;
+#[cfg(target_os = "windows")]
+mod verbose_telemetry;
 
 pub use error::{Error, ErrorCode};
 #[cfg(all(target_os = "windows", feature = "isolation_session"))]
@@ -59,6 +61,8 @@ pub use run::{log_policy_hash, resolve_runner, run, ResolvedRunner};
 pub use state_aware::{
     exec_state_aware_attached, exec_state_aware_json, run_state_aware, run_state_aware_json,
 };
+#[cfg(target_os = "windows")]
+pub use verbose_telemetry::emit_verbose_telemetry;
 
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ContainmentBackend, FailurePhase, ScriptResponse};
@@ -241,9 +245,15 @@ impl TelemetryProcess {
         if !self.active {
             return;
         }
+        let output_metadata = result
+            .as_ref()
+            .ok()
+            .and_then(|_| self.inner.output_metadata().cloned())
+            .map(Box::new);
         let response = match result {
             Ok(exit_code) => ScriptResponse {
                 exit_code: *exit_code,
+                output_metadata,
                 ..Default::default()
             },
             Err(error) if error.kind() == std::io::ErrorKind::TimedOut => ScriptResponse {
@@ -261,13 +271,18 @@ impl TelemetryProcess {
             TelemetryMode::OneShot {
                 containment,
                 requested_sandbox_kind,
-            } => telemetry::emit_sdk_completion_with_kind(
-                true,
-                containment,
-                *requested_sandbox_kind,
-                &response,
-                self.started.elapsed(),
-            ),
+            } => {
+                #[cfg(target_os = "windows")]
+                let _ =
+                    emit_verbose_telemetry(true, containment, *requested_sandbox_kind, &response);
+                telemetry::emit_sdk_completion_with_kind(
+                    true,
+                    containment,
+                    *requested_sandbox_kind,
+                    &response,
+                    self.started.elapsed(),
+                )
+            }
             TelemetryMode::StateAware {
                 backend,
                 phase,
@@ -405,7 +420,12 @@ impl Drop for TelemetryProcess {
             return;
         }
         match observe_before_drop(self.inner.as_mut()) {
-            DropDisposition::Exited(exit_code) => self.emit(&Ok(exit_code)),
+            DropDisposition::Exited(exit_code) => {
+                // Finalize backend-owned output metadata after the nonblocking
+                // observation, while preserving the already-observed exit code.
+                let _ = self.inner.wait();
+                self.emit(&Ok(exit_code));
+            }
             DropDisposition::TimedOut => self.emit(&Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "sandbox execution timed out",
@@ -439,8 +459,13 @@ impl SandboxProcess for TelemetryProcess {
     fn try_wait(&mut self) -> std::io::Result<Option<i32>> {
         let result = self.inner.try_wait();
         match &result {
-            // Exit observed: emit the terminal event now.
-            Ok(Some(exit_code)) => self.emit(&Ok(*exit_code)),
+            // Finalize backend-owned output metadata after observing exit,
+            // while preserving the nonblocking poll's terminal result.
+            Ok(Some(exit_code)) => {
+                let exit_code = *exit_code;
+                let _ = self.inner.wait();
+                self.emit(&Ok(exit_code));
+            }
             // Still running: leave the invariant to a later `wait` / `kill` / `Drop`.
             Ok(None) => {}
             // Backends use TimedOut only for a settled terminal timeout.
@@ -573,6 +598,8 @@ mod telemetry_process_tests {
         try_wait_result: TryWaitResult,
         wait_result: std::io::Result<i32>,
         kill_fails: bool,
+        finalized: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        metadata_read_before_finalization: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     }
 
     impl SandboxProcess for StubProcess {
@@ -613,10 +640,24 @@ mod telemetry_process_tests {
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
+            if let Some(finalized) = &self.finalized {
+                finalized.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             self.wait_result
                 .as_ref()
                 .copied()
                 .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
+        }
+
+        fn output_metadata(&self) -> Option<&wxc_common::models::SandboxOutputMetadata> {
+            if let (Some(finalized), Some(read_before_finalization)) =
+                (&self.finalized, &self.metadata_read_before_finalization)
+            {
+                if !finalized.load(std::sync::atomic::Ordering::SeqCst) {
+                    read_before_finalization.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+            None
         }
     }
 
@@ -633,6 +674,8 @@ mod telemetry_process_tests {
                 try_wait_result,
                 wait_result: Ok(0),
                 kill_fails,
+                finalized: None,
+                metadata_read_before_finalization: None,
             }),
             active: true,
             mode: TelemetryMode::StateAware {
@@ -710,6 +753,8 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Exited(7),
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
         };
         assert_eq!(observe_before_drop(&mut exited), DropDisposition::Exited(7));
 
@@ -717,6 +762,8 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Running,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
         };
         assert_eq!(
             observe_before_drop(&mut running),
@@ -727,6 +774,8 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::Failed,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
         };
         assert_eq!(observe_before_drop(&mut failed), DropDisposition::Abandoned);
 
@@ -734,6 +783,8 @@ mod telemetry_process_tests {
             try_wait_result: TryWaitResult::TimedOut,
             wait_result: Ok(0),
             kill_fails: false,
+            finalized: None,
+            metadata_read_before_finalization: None,
         };
         assert_eq!(
             observe_before_drop(&mut timed_out),
@@ -748,6 +799,35 @@ mod telemetry_process_tests {
         assert!(process.kill().is_err());
         assert!(process.active);
         assert_eq!(process.wait().unwrap(), 0);
+        assert!(!process.active);
+    }
+
+    #[test]
+    fn terminal_poll_finalizes_before_reading_output_metadata() {
+        let finalized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let metadata_read_before_finalization =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut process = TelemetryProcess {
+            inner: Box::new(StubProcess {
+                try_wait_result: TryWaitResult::Exited(7),
+                wait_result: Ok(7),
+                kill_fails: false,
+                finalized: Some(finalized.clone()),
+                metadata_read_before_finalization: Some(metadata_read_before_finalization.clone()),
+            }),
+            active: true,
+            mode: TelemetryMode::StateAware {
+                backend: "test".to_string(),
+                phase: "exec".to_string(),
+                correlation_vector: String::new(),
+                requested_sandbox_kind: None,
+            },
+            started: std::time::Instant::now(),
+        };
+
+        assert_eq!(process.try_wait().unwrap(), Some(7));
+        assert!(finalized.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!metadata_read_before_finalization.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!process.active);
     }
 }
