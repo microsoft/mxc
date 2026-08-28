@@ -415,7 +415,13 @@ public class MxcSandboxProcessTests
         sw.Stop();
 
         Assert.True(result.TimedOut, "Wait should report the policy timeout");
-        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"Wait took {sw.Elapsed}");
+
+        // Bounded at 1.5x the policy timeout. The old 20x bound could not
+        // distinguish correct enforcement from handing off to a native wait that
+        // restarts the budget, which costs ~2x. Legitimate overshoot is one poll
+        // interval (50ms cap) plus the kill and reap.
+        var budget = TimeSpan.FromMilliseconds(policy.TimeoutMs.Value * 1.5);
+        Assert.True(sw.Elapsed < budget, $"Wait took {sw.Elapsed}, budget {budget}");
     }
 
     [Fact]

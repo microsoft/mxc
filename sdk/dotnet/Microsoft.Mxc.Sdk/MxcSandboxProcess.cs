@@ -483,14 +483,17 @@ public sealed class MxcSandboxProcess : ISandboxProcess
             }
 
             // try_wait only reports exited / still-running, never a timeout, and
-            // spawn starts no native watchdog — so once the policy deadline passes
-            // we hand off to the native blocking wait, which enforces the same
-            // deadline by killing the tree and reporting the timeout distinctly.
-            // We are already at/past the deadline, so it returns promptly.
+            // spawn starts no native watchdog, so the managed side owns the
+            // policy deadline. Handing straight to the native blocking wait does
+            // not work: mxc_sandbox_wait takes no deadline and applies the
+            // spawn-time timeout as a duration from the call
+            // (WaitForSingleObject(h, timeout_ms) on Windows, Instant::now() + d
+            // on Unix), so it would grant a second full budget — up to 2x the
+            // policy timeout, with _controlLock held the whole time.
             if (_timeoutMs is { } timeoutMs &&
                 Stopwatch.GetElapsedTime(_startTimestamp).TotalMilliseconds >= timeoutMs)
             {
-                return WaitBlocking();
+                return WaitAfterDeadline();
             }
 
             cancellationToken.WaitHandle.WaitOne(poll);
@@ -499,9 +502,30 @@ public sealed class MxcSandboxProcess : ISandboxProcess
         }
     }
 
-    // Called only after try_wait reports exit or the managed deadline expires.
-    // It holds the control lock across the native wait and must not be public:
-    // callers need Wait/WaitAsync so concurrent Kill and Dispose stay responsive.
+    // The policy deadline has expired. Terminate the tree ourselves so the
+    // native wait reaps an already-dead process immediately instead of starting
+    // a fresh timeout_ms countdown, then report the timeout that the native call
+    // can no longer observe (it sees a killed process, not an expired budget).
+    private SandboxWaitResult WaitAfterDeadline()
+    {
+        // A child that exited in the window between the poll above and here ran
+        // to completion, so surface its real status rather than a timeout.
+        if (TryGetTerminalStatus(out _, out _))
+        {
+            return WaitBlocking();
+        }
+
+        // Safe to call after an exit that races this check: every backend
+        // no-ops a kill once the child has been reaped.
+        Kill();
+        var result = WaitBlocking();
+        return new SandboxWaitResult { ExitCode = result.ExitCode, TimedOut = true };
+    }
+
+    // Called only after try_wait reports exit or the managed deadline expired
+    // and the tree was killed. It holds the control lock across the native wait
+    // and must not be public: callers need Wait/WaitAsync so concurrent Kill and
+    // Dispose stay responsive.
     private SandboxWaitResult WaitBlocking()
     {
         EnsureDrainUntaken();
