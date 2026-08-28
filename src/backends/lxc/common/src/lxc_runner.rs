@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use wxc_common::logger::Logger;
-use wxc_common::models::{ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse};
+use wxc_common::models::{
+    ContainerPolicy, ExecutionRequest, LifecycleConfig, LxcConfig, ScriptResponse,
+};
 use wxc_common::script_runner::ScriptRunner;
 use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
@@ -28,6 +30,10 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 /// Ceiling for the two `/etc/hosts` rewrites, which are a handful of shell
 /// builtins and must never inherit the script's own timeout budget.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling for one readiness attach. Bounds a single attempt that hangs so it
+/// cannot consume the whole readiness budget and leave no retry behind it.
+const NETWORK_PROBE_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
@@ -56,33 +62,62 @@ impl LxcScriptRunner {
         }
     }
 
-    /// Wait for the container's network stack to initialize.
-    /// Polls `lxc-info` until the container has an IP address or the timeout is reached.
-    fn wait_for_network(container_name: &str, timeout: Duration, logger: &mut Logger) -> bool {
+    /// The name the readiness probe asks the container to resolve.
+    ///
+    /// The first allowed host that is a DNS name and carries nothing a shell
+    /// could act on. A policy that allows only addresses, or whose names
+    /// cannot be embedded safely, yields `None` and the probe falls back to
+    /// the container's resolver configuration.
+    ///
+    /// The proxy hostname is deliberately not a candidate: this runner pins it
+    /// into the container's `/etc/hosts` rather than leaving it to DNS.
+    fn readiness_probe_hostname(policy: &ContainerPolicy) -> Option<&str> {
+        policy
+            .allowed_hosts
+            .iter()
+            .map(String::as_str)
+            .find(|host| Self::is_probeable_hostname(host))
+    }
+
+    /// Whether `host` is a DNS name the probe command can carry verbatim.
+    ///
+    /// Letters, digits, dots, and hyphens only, which excludes every character
+    /// a shell treats as syntax as well as the addresses and CIDRs that have
+    /// no name to look up.
+    fn is_probeable_hostname(host: &str) -> bool {
+        !host.is_empty()
+            && host.chars().any(|c| c.is_ascii_alphabetic())
+            && host
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    }
+
+    /// The command the readiness probe runs inside the container.
+    fn build_network_probe_command(_hostname: Option<&str>) -> String {
+        // Lists the interface addresses the container holds and succeeds once
+        // one of them is an IPv4 or IPv6 address outside the loopback scope.
+        "ip addr show scope global 2>/dev/null | grep -q inet".to_string()
+    }
+
+    /// Poll the container until `attempt` reports its network usable, or until
+    /// `timeout` expires.
+    fn wait_for_network<A>(mut attempt: A, timeout: Duration, logger: &mut Logger) -> bool
+    where
+        A: FnMut() -> bool,
+    {
         let start = Instant::now();
         let poll_interval = Duration::from_millis(500);
 
         let _ = writeln!(logger, "Waiting for container network to initialize...");
 
         while start.elapsed() < timeout {
-            let output = std::process::Command::new("lxc-info")
-                .arg("-n")
-                .arg(container_name)
-                .arg("-iH")
-                .output();
-
-            if let Ok(out) = output {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let ip = stdout.trim();
-                if !ip.is_empty() {
-                    let _ = writeln!(
-                        logger,
-                        "Container network ready (IP: {}, waited {:.1}s)",
-                        ip,
-                        start.elapsed().as_secs_f64()
-                    );
-                    return true;
-                }
+            if attempt() {
+                let _ = writeln!(
+                    logger,
+                    "Container network ready (waited {:.1}s)",
+                    start.elapsed().as_secs_f64()
+                );
+                return true;
             }
 
             thread::sleep(poll_interval);
@@ -98,7 +133,6 @@ impl LxcScriptRunner {
 
     fn enforce_network_readiness<P, D>(
         &self,
-        container_name: &str,
         container_created: bool,
         timeout: Duration,
         logger: &mut Logger,
@@ -106,10 +140,10 @@ impl LxcScriptRunner {
         mut destroy_container: D,
     ) -> Option<ScriptResponse>
     where
-        P: FnOnce(&str, Duration, &mut Logger) -> bool,
+        P: FnOnce(Duration, &mut Logger) -> bool,
         D: FnMut(),
     {
-        if readiness_probe(container_name, timeout, logger) {
+        if readiness_probe(timeout, logger) {
             return None;
         }
 
@@ -268,15 +302,34 @@ impl LxcScriptRunner {
         let needs_network = needs_network(&request.policy, uses_directional_schema);
 
         if needs_network {
-            // Fail closed: proceeding without an IP silently breaks DNS and produces
-            // flaky failures. Alpine DHCP leases can arrive at ~9s, so allow 30s.
+            // Fail closed: proceeding before the container's network works
+            // silently breaks DNS and produces flaky failures. Alpine DHCP
+            // leases can arrive at ~9s, so allow 30s.
             let timeout = Duration::from_secs(30);
+            let probe_command =
+                Self::build_network_probe_command(Self::readiness_probe_hostname(&request.policy));
             if let Some(response) = self.enforce_network_readiness(
-                &container_name,
                 container_created,
                 timeout,
                 logger,
-                Self::wait_for_network,
+                |timeout, logger| {
+                    Self::wait_for_network(
+                        || {
+                            matches!(
+                                container.attach_run(
+                                    &probe_command,
+                                    "/",
+                                    &[],
+                                    true,
+                                    Some(NETWORK_PROBE_ATTEMPT_TIMEOUT),
+                                ),
+                                Ok((0, _, _))
+                            )
+                        },
+                        timeout,
+                        logger,
+                    )
+                },
                 || {
                     let _ = container.destroy();
                 },
@@ -985,15 +1038,94 @@ mod tests {
         let mut destroyed = false;
         let response = runner
             .enforce_network_readiness(
-                "mxc-network-test",
                 container_created,
                 Duration::from_secs(1),
                 &mut logger,
-                |_name, _timeout, _logger| false,
+                |_timeout, _logger| false,
                 || destroyed = true,
             )
             .expect("a failing readiness probe should return an error response");
         (response, destroyed)
+    }
+
+    /// A stand-in for the container's shell.
+    ///
+    /// Answers the probe command by the capability that command exercises:
+    /// a command that only inspects interface addresses needs `has_address`,
+    /// and one that looks a name up or reads the resolver configuration needs
+    /// `resolver_works`.
+    fn guest_answers(command: &str, has_address: bool, resolver_works: bool) -> bool {
+        let needs_resolver = command.contains("nslookup")
+            || command.contains("getent")
+            || command.contains("resolv.conf");
+
+        if needs_resolver {
+            resolver_works
+        } else {
+            has_address
+        }
+    }
+
+    fn policy_allowing(host: &str) -> ContainerPolicy {
+        ContainerPolicy {
+            allowed_hosts: vec![host.to_string()],
+            ..ContainerPolicy::default()
+        }
+    }
+
+    fn readiness_against_guest(
+        policy: &ContainerPolicy,
+        has_address: bool,
+        resolver_works: bool,
+    ) -> bool {
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(policy),
+        );
+        let mut logger = Logger::new(Mode::Buffer);
+        LxcScriptRunner::wait_for_network(
+            || guest_answers(&command, has_address, resolver_works),
+            Duration::from_millis(1),
+            &mut logger,
+        )
+    }
+
+    // The measured defect: with a static address injected, `lxc-info -iH`
+    // answers at 81ms while nothing resolves for another 9.4 seconds, and the
+    // workload starts against an empty /etc/resolv.conf.
+    #[test]
+    fn a_container_with_an_address_but_no_resolver_is_not_ready() {
+        let policy = policy_allowing("api.example.com");
+
+        assert!(
+            !readiness_against_guest(&policy, true, false),
+            "a container whose resolver does not work yet must not be reported ready; an \
+             address alone is what let the workload start against an empty /etc/resolv.conf"
+        );
+    }
+
+    // Anti-vacuity: without this a probe that never reports ready would pass
+    // the test above while making every LXC run fail closed.
+    #[test]
+    fn a_container_whose_resolver_works_is_ready() {
+        let policy = policy_allowing("api.example.com");
+
+        assert!(
+            readiness_against_guest(&policy, true, true),
+            "a container that can resolve names must be reported ready"
+        );
+    }
+
+    #[test]
+    fn the_readiness_probe_resolves_a_host_the_policy_allows() {
+        let policy = policy_allowing("api.example.com");
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+        );
+
+        assert!(
+            command.contains("api.example.com"),
+            "the probe must ask for the host the workload is allowed to reach, got: {command}"
+        );
     }
 
     /// What the 0.8 parser produces for a config stating only `network.egress`:
