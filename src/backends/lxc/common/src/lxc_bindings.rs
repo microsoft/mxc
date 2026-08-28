@@ -527,20 +527,11 @@ mod tests {
 
     #[test]
     fn a_run_with_no_interface_states_that_to_lxc_start() {
-        let args = StartNetwork::NoInterface.to_start_args();
-
         assert_eq!(
-            args.iter().filter(|a| **a == "-s").count(),
-            2,
-            "each config item needs its own -s, got {args:?}"
-        );
-        assert!(
-            args.contains(&"lxc.net.0.type=empty"),
-            "the container must be given no interface, got {args:?}"
-        );
-        assert!(
-            args.contains(&"lxc.net.0.flags=up"),
-            "loopback must stay up for a workload that binds 127.0.0.1, got {args:?}"
+            StartNetwork::NoInterface.to_start_args(),
+            ["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"],
+            "lxc-start reads each config item from the -s that precedes it, \
+             and loopback stays up for a workload that binds 127.0.0.1"
         );
     }
 
