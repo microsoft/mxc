@@ -2236,9 +2236,7 @@ mod tests {
     fn force_cleanup_removes_all_resources_via_nsenter() {
         let pid = 9001u32;
         let container = "force-cleanup-container";
-        let chain = IngressManager::new(container, pid)
-            .chain_name()
-            .to_string();
+        let chain = IngressManager::new(container, pid).chain_name().to_string();
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
         let mut runner = FakeRunner {

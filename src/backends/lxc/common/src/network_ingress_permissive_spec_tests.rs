@@ -159,9 +159,7 @@ fn permissive_inbound_in_both_mode_is_refused_not_installed() {
 #[test]
 fn permissive_inbound_refusal_does_not_set_rules_applied() {
     let policy = firewall_policy(true);
-    let mut mgr = IngressManager::new(
-        "test-container-refused-state",
-        UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new("test-container-refused-state", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);
@@ -191,9 +189,7 @@ fn permissive_inbound_refusal_does_not_set_rules_applied() {
 #[test]
 fn default_deny_with_netns_is_not_the_permissive_refusal() {
     let policy = firewall_policy(false);
-    let mut mgr = IngressManager::new(
-        "test-container-deny-with-netns",
-        UNOCCUPIABLE_NETNS_PID);
+    let mut mgr = IngressManager::new("test-container-deny-with-netns", UNOCCUPIABLE_NETNS_PID);
     let mut logger = make_logger();
 
     let result = mgr.apply_firewall_rules(&policy, &mut logger);

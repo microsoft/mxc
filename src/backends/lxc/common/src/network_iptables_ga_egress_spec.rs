@@ -620,10 +620,7 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
     );
 }
 
-fn appended_ipv4_chain_rules(
-    container: &str,
-    policy: &ContainerPolicy,
-) -> Vec<Vec<String>> {
+fn appended_ipv4_chain_rules(container: &str, policy: &ContainerPolicy) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
