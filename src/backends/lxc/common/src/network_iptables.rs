@@ -4256,6 +4256,81 @@ mod tests {
         assert!(needs_network(&policy, false));
     }
 
+    // `run_internal` reads these two predicates at separate points: the plan
+    // decides whether the container gets an interface, and `needs_network`
+    // decides whether a missing address aborts the run.  A container with no
+    // interface never receives an address, and a policy answering yes to both
+    // would be destroyed instead of running its script.
+    #[test]
+    fn a_plan_that_omits_the_interface_never_demands_an_address() {
+        let egress_options = [None, Some(NetworkAction::Deny), Some(NetworkAction::Allow)];
+        let ingress_options = [
+            None,
+            Some((NetworkAction::Deny, NetworkAction::Deny)),
+            Some((NetworkAction::Deny, NetworkAction::Allow)),
+            Some((NetworkAction::Allow, NetworkAction::Deny)),
+            Some((NetworkAction::Allow, NetworkAction::Allow)),
+        ];
+        let mut omitted = 0;
+
+        for directional in [false, true] {
+            for egress in egress_options {
+                for ingress in ingress_options {
+                    for bits in 0u8..32 {
+                        let policy = ContainerPolicy {
+                            network_proxy: ProxyConfig {
+                                builtin_test_server: bits & 1 != 0,
+                                ..Default::default()
+                            },
+                            allowed_hosts: if bits & 2 != 0 {
+                                vec!["allowed.example".to_string()]
+                            } else {
+                                Vec::new()
+                            },
+                            blocked_hosts: if bits & 4 != 0 {
+                                vec!["blocked.example".to_string()]
+                            } else {
+                                Vec::new()
+                            },
+                            default_network_policy: if bits & 8 != 0 {
+                                NetworkPolicy::Block
+                            } else {
+                                NetworkPolicy::Allow
+                            },
+                            allow_local_network: bits & 16 != 0,
+                            network_egress: egress.map(|default| NetworkEgressPolicy {
+                                default,
+                                ..Default::default()
+                            }),
+                            network_ingress: ingress.map(|(default, host_loopback)| {
+                                wxc_common::models::NetworkIngressPolicy {
+                                    default,
+                                    host_loopback,
+                                }
+                            }),
+                            ..Default::default()
+                        };
+
+                        if plan_network(&policy, directional).omits_interface() {
+                            omitted += 1;
+                            assert!(
+                                !needs_network(&policy, directional),
+                                "no interface means no address, yet this policy would treat a \
+                                 missing address as fatal: directional={directional}, \
+                                 egress={egress:?}, ingress={ingress:?}, bits={bits:05b}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            omitted > 0,
+            "the sweep never produced a no-interface plan and proved nothing"
+        );
+    }
+
     // The JSON parser rejects proxy-under-capabilities, but it is not the only
     // way in: `LxcScriptRunner::execute` and `mxc_engine::run` take an
     // already-built `ExecutionRequest`. Skipping here would report success for
