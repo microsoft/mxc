@@ -141,24 +141,18 @@ fn build_attach_args_with_env_control(
     args
 }
 
-/// What network a container has for one run.
-///
-/// LXC fixes a container's interfaces when it starts. MXC states the choice
-/// on each `lxc-start` and leaves the container's config file alone, which is
-/// what lets the next run over the same container id state a different one.
+/// enum to tell LXC to block all network, or
+/// configure the network based on the configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartNetwork {
-    /// The container's own config file decides its interfaces.
+    /// Use the network portion from the configuration file.
     FromContainerConfig,
-    /// The container starts with no interface at all.
+    /// Block all network calls (The configuration does "not" have an interface)
     NoInterface,
 }
 
 impl StartNetwork {
-    /// Build the `lxc-start` arguments that state this choice.
-    ///
-    /// `-s KEY=VAL` is lxc-start's `--define`: it assigns a config variable
-    /// for this run alone and never writes the container's config file.
+    /// add -s to the tool command for network.
     fn to_start_args(self) -> &'static [&'static str] {
         match self {
             StartNetwork::FromContainerConfig => &[],
@@ -442,12 +436,7 @@ impl LxcContainer {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
 
-    /// Stop the container, killing it rather than asking it to exit.
-    ///
-    /// A clean shutdown sends SIGPWR and then waits up to 60 seconds for a
-    /// reply.  systemd as PID 1 in an unprivileged userns never answers, and
-    /// every caller is abandoning or restarting the run rather than keeping
-    /// what is inside.
+    /// Stop the container by killing it, not by asking it to exit.
     pub fn stop(&self) -> Result<(), String> {
         Self::run_tool(self.stop_command())
     }
@@ -456,21 +445,20 @@ impl LxcContainer {
     /// can then read the flags with no LXC host.
     fn stop_command(&self) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-stop");
-        // -k kills the container instead of requesting a clean shutdown.
+
+        // -k kills the container outright.  Asking it to exit instead waits 60
+        // seconds for a SIGPWR reply that systemd as PID 1 in an unprivileged
+        // userns never sends.
         cmd.arg("-k");
         cmd
     }
 
-    /// Destroy the container (removes rootfs and config).
-    ///
-    /// `lxc-destroy -f` already force-stops a running container; we used to
-    /// call `lxc-stop` first, but plain `lxc-stop` waits up to 60 s for a
-    /// graceful shutdown — fatal for distros with systemd as PID 1 in
-    /// unprivileged userns where init never cleanly responds to SIGPWR.
-    /// Forcing the stop via destroy keeps this fast for both alpine and
-    /// ubuntu-class images.
+    /// Destroy the container, removing its rootfs and config.
     pub fn destroy(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
+
+        // -f force-stops a running container rather than waiting for it to
+        // shut down on its own.
         cmd.arg("-f");
         Self::run_tool(cmd)
     }
