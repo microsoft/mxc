@@ -35,22 +35,3 @@ fn experimental_windows_sandbox_is_introduced_in_v09() {
         }"#,
     );
 }
-
-#[test]
-fn experimental_wslc_is_introduced_in_v09() {
-    assert_v09_introduces(
-        r#""experimental": {
-            "wslc": {
-                "targetOs": "linux",
-                "image": "ubuntu",
-                "cpuCount": 2,
-                "memoryMb": 4096,
-                "gpu": false,
-                "storagePath": "C:\\mxc",
-                "portMappings": [
-                    {"windowsPort": 8080, "containerPort": 80, "protocol": "tcp"}
-                ]
-            }
-        }"#,
-    );
-}

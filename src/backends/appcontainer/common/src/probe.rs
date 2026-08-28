@@ -70,6 +70,11 @@ pub struct ProbeFacts {
     /// the isolation-session backend; `wxc-exec --probe` overrides it when
     /// that backend is compiled in.
     pub isolation_session_available: bool,
+    /// Whether the host can actually run WSLc (WSL2 present and the WSLc
+    /// runtime loadable). Always `false` here — `appcontainer_common` has no
+    /// dependency on the WSLc backend; `wxc-exec --probe` overrides it when
+    /// that backend is compiled in.
+    pub wslc_available: bool,
     /// Platform-agnostic UI restrictions this host can enforce.
     pub ui_capabilities: UiCapabilitySupport,
 }
@@ -132,6 +137,7 @@ pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
         base_container_supports_deny_paths:
             crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
         isolation_session_available: false,
+        wslc_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
     match fallback_detector::detect(policy, /* prefer_base_container */ true) {
@@ -208,6 +214,7 @@ mod tests {
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
                 isolation_session_available: true,
+                wslc_available: true,
                 ui_capabilities: all_ui_capabilities(),
             },
             error: None,
@@ -221,6 +228,7 @@ mod tests {
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
         assert_eq!(v["probes"]["isolationSessionAvailable"], true);
+        assert_eq!(v["probes"]["wslcAvailable"], true);
         assert_eq!(v["probes"]["uiCapabilities"]["canBlockClipboardRead"], true);
         assert_eq!(
             v["probes"]["uiCapabilities"]["canBlockInputInjection"],
@@ -245,6 +253,7 @@ mod tests {
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
                 isolation_session_available: false,
+                wslc_available: false,
                 ui_capabilities: UiCapabilitySupport {
                     can_block_input_injection: false,
                     can_block_input_method_changes: false,
@@ -334,6 +343,21 @@ mod tests {
         assert!(
             probes.contains_key("isolationSessionAvailable"),
             "isolationSessionAvailable must always be present, got: {v}"
+        );
+    }
+
+    #[test]
+    fn probe_always_emits_wslc_available() {
+        // Twin of the isolation-session gate above: WSLc is a promoted
+        // (non-experimental) backend, so the SDK's availability check is the
+        // only thing standing between a caller and a `wslc` containment
+        // request. The field must always serialize, even when false.
+        let out = run_probe(&ContainerPolicy::default());
+        let v = serde_json::to_value(&out).expect("to_value");
+        let probes = v["probes"].as_object().expect("probes object");
+        assert!(
+            probes.contains_key("wslcAvailable"),
+            "wslcAvailable must always be present, got: {v}"
         );
     }
 }

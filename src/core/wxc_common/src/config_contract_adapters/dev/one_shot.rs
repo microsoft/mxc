@@ -229,8 +229,8 @@ fn convert_wslc_port_mapping(value: contract::PortMapping) -> wire::PortMapping 
     }
 }
 
-fn convert_wslc(value: contract::OneShotWslc) -> wire::Wslc {
-    let contract::OneShotWslc {
+fn convert_wslc(value: contract::Wslc) -> wire::Wslc {
+    let contract::Wslc {
         target_os,
         image,
         image_tar_path,
@@ -262,13 +262,12 @@ fn convert_experimental(value: contract::OneShotExperimental) -> wire::Experimen
     let contract::OneShotExperimental {
         test,
         windows_sandbox,
-        wslc,
         telemetry,
     } = value;
     wire::Experimental {
         test: test.into_option().map(convert_test),
         windows_sandbox: windows_sandbox.into_option().map(convert_windows_sandbox),
-        wslc: wslc.into_option().map(convert_wslc),
+        wslc: None,
         isolation_session: None,
         seatbelt: None,
         telemetry: telemetry.into_option().map(convert_telemetry),
@@ -291,6 +290,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         process_container,
         ui,
         seatbelt,
+        wslc,
         runtime_config,
         experimental,
     } = request;
@@ -315,6 +315,7 @@ pub(super) fn into_wire(request: contract::OneShotRequest) -> wire::MxcConfig {
         runtime_config: runtime_config.into_option().map(convert_runtime_config),
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
+        wslc: wslc.into_option().map(convert_wslc),
         experimental: experimental.into_option().map(convert_experimental),
     }
 }

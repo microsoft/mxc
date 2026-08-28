@@ -887,10 +887,6 @@
         "windows_sandbox": {
           "$ref": "#/definitions/OneShotWindowsSandbox",
           "description": "Optional one-shot Windows Sandbox compatibility settings."
-        },
-        "wslc": {
-          "$ref": "#/definitions/OneShotWslc",
-          "description": "Optional one-shot WSLC backend settings."
         }
       },
       "type": "object"
@@ -987,6 +983,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "The exact contract version marker."
+        },
+        "wslc": {
+          "$ref": "#/definitions/Wslc",
+          "description": "Optional Windows WSL container configuration."
         }
       },
       "required": [
@@ -1014,52 +1014,6 @@
           "maximum": 4294967295,
           "minimum": 0.0,
           "type": "integer"
-        }
-      },
-      "type": "object"
-    },
-    "OneShotWslc": {
-      "additionalProperties": false,
-      "description": "One-shot WSLC backend settings.",
-      "properties": {
-        "cpuCount": {
-          "description": "Requested virtual CPU count.",
-          "maximum": 4294967295,
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "gpu": {
-          "description": "Whether GPU passthrough is enabled.",
-          "type": "boolean"
-        },
-        "image": {
-          "description": "Container image reference.",
-          "type": "string"
-        },
-        "imageTarPath": {
-          "description": "Path to a local image tarball to import.",
-          "type": "string"
-        },
-        "memoryMb": {
-          "description": "Requested memory limit in megabytes.",
-          "maximum": 18446744073709551615,
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "portMappings": {
-          "description": "Optional host-to-container TCP port mappings.",
-          "items": {
-            "$ref": "#/definitions/PortMapping"
-          },
-          "type": "array"
-        },
-        "storagePath": {
-          "description": "Optional storage path override.",
-          "type": "string"
-        },
-        "targetOs": {
-          "description": "Target operating system inside the container.",
-          "type": "string"
         }
       },
       "type": "object"
@@ -1568,6 +1522,52 @@
       ],
       "type": "object"
     },
+    "Wslc": {
+      "additionalProperties": false,
+      "description": "Windows WSL container backend settings.",
+      "properties": {
+        "cpuCount": {
+          "description": "Requested virtual CPU count.",
+          "maximum": 4294967295,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "gpu": {
+          "description": "Whether GPU passthrough is enabled.",
+          "type": "boolean"
+        },
+        "image": {
+          "description": "Container image reference.",
+          "type": "string"
+        },
+        "imageTarPath": {
+          "description": "Path to a local image tarball to import.",
+          "type": "string"
+        },
+        "memoryMb": {
+          "description": "Requested memory limit in megabytes.",
+          "maximum": 18446744073709551615,
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "portMappings": {
+          "description": "Optional host-to-container TCP port mappings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "storagePath": {
+          "description": "Optional storage path override.",
+          "type": "string"
+        },
+        "targetOs": {
+          "description": "Target operating system inside the container.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "WslcContainment": {
       "enum": [
         "wslc"
@@ -1596,10 +1596,6 @@
         "telemetry": {
           "$ref": "#/definitions/Telemetry",
           "description": "Optional telemetry override."
-        },
-        "wslc": {
-          "$ref": "#/definitions/StateAwareWslc",
-          "description": "Optional WSLC backend settings."
         }
       },
       "type": "object"
@@ -1638,6 +1634,10 @@
         "version": {
           "$ref": "#/definitions/Version",
           "description": "Exact development contract version."
+        },
+        "wslc": {
+          "$ref": "#/definitions/StateAwareWslc",
+          "description": "Optional WSLC backend settings fixed at provision time."
         }
       },
       "required": [

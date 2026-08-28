@@ -6,14 +6,14 @@
     "commandLine": "cat /mnt/c/wslcro/test.txt && echo 'Read succeeded' && echo 'write test' > /mnt/c/wslcro/readonly_write_test.txt && echo 'Write succeeded (unexpected)' || echo 'Write blocked (expected for readonly)'"
   },
   "filesystem": {
-    "readonlyPaths": ["C:\\wslcro"]
+    "readonlyPaths": [
+      "C:\\wslcro"
+    ]
   },
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

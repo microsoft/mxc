@@ -20,7 +20,7 @@
 //!
 //! # Layering
 //! These are the daemon's **own internal** config structs, deliberately
-//! separate from the public `experimental.wslc.*` wire schema. The state-aware
+//! separate from the public `wslc.*` wire schema. The state-aware
 //! backend (a later PR) is the translator between the public wire model and
 //! this protocol; keeping them decoupled lets the daemon + IPC ship and be
 //! fully tested without touching the wire schema or its CI gates.

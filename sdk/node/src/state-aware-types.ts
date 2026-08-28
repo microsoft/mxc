@@ -178,12 +178,12 @@ export interface WslcProvisionConfig {
   /**
    * Container image reference (e.g. `alpine:latest`). Defaults to
    * `alpine:latest` when omitted. Nested under
-   * `experimental.wslc.provision.image` on the wire.
+   * `wslc.provision.image` on the wire.
    */
   image?: string;
   /**
    * Path to a local image tarball to import instead of pulling. Nested under
-   * `experimental.wslc.provision.imageTarPath` on the wire.
+   * `wslc.provision.imageTarPath` on the wire.
    */
   imageTarPath?: string;
 }

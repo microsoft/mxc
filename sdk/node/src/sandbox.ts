@@ -107,7 +107,7 @@ function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
 /**
  * Builds the WSLC (WSL Container) portion of a ContainerConfig.
  * WSLC runs Linux containers on Windows via the WSL Container SDK.
- * Config goes under `experimental.wslc` since WSLC is experimental.
+ * Config goes in the top-level `wslc` section.
  */
 function buildWslcContainerConfig(
     config: ContainerConfig,
@@ -117,10 +117,8 @@ function buildWslcContainerConfig(
     config.containment = 'wslc';
     config.containerId = containerId;
 
-    config.experimental = {
-        wslc: {
-            image: 'alpine:latest',
-        },
+    config.wslc = {
+        image: 'alpine:latest',
     };
 
     // WSLC uses its own networking mode (None/Bridged) derived from

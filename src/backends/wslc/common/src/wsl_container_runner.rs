@@ -686,7 +686,7 @@ impl ScriptRunner for WSLContainerRunner {
         if request.policy.allow_local_network {
             return Err(WslcError::Rejected(
                 "WSLc: network.allowLocalNetwork=true is not supported. Expose specific \
-                 ports with experimental.wslc portMappings instead."
+                 ports with wslc.portMappings instead."
                     .to_string(),
             )
             .into_response());
@@ -961,7 +961,7 @@ impl WSLContainerRunner {
             // setup script `scripts\setup-wslc.ps1` (or `wxc-exec.exe
             // --setup-wslc --image <name>`) pre-pulls images into the same
             // WSLC storage_path the runner uses. When the config overrides
-            // `experimental.wslc.storagePath`, include it in the suggested
+            // `wslc.storagePath`, include it in the suggested
             // commands so the operator's first copy-paste lands the image in
             // the cache the next run will actually read.
             let (storage_arg_wxc, storage_arg_ps) = match &self.config.storage_path {
@@ -2470,7 +2470,7 @@ mod tests {
     }
 
     /// The two surfaces refuse `allowLocalNetwork` with deliberately different
-    /// remedies: one-shot has `experimental.wslc.portMappings` to point at,
+    /// remedies: one-shot has `wslc.portMappings` to point at,
     /// state-aware has no port-mapping primitive at all. Unifying the messages
     /// — the obvious tidy-up — would send state-aware users after a dead end.
     /// Both must classify as `policy_validation`, which is the phase, not the

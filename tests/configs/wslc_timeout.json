@@ -9,9 +9,7 @@
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

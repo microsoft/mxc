@@ -4,13 +4,13 @@
     "containment": "wslc",
     "network": {
         "defaultPolicy": "allow",
-        "allowedHosts": ["example.com"]
+        "allowedHosts": [
+            "example.com"
+        ]
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest"
         }
     }
 }

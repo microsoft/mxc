@@ -86,13 +86,13 @@ const WSLC_ALL_FIELDS_REQUEST_JSON: &str = r#"{
             "url": "http://example.com/proxy"
         }
     },
+    "wslc": {
+        "provision": {
+            "image": "someImage",
+            "imageTarPath": "someImageTarPath"
+        }
+    },
     "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "someImage",
-                "imageTarPath": "someImageTarPath"
-            }
-        },
         "telemetry": {
             "enabled": false
         }
@@ -416,7 +416,7 @@ fn wslc_request_maps_expected_wire_fields() {
 
     let experimental = wire.experimental.expect("experimental should be populated");
 
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    let wslc = wire.wslc.expect("wslc should be populated");
     let provision = wslc.provision.expect("provision should be populated");
     assert_eq!(provision.image.as_deref(), Some("someImage"));
     assert_eq!(
@@ -441,6 +441,7 @@ fn wslc_request_maps_expected_wire_fields() {
     assert!(experimental.isolation_session.is_none());
     assert!(experimental.windows_sandbox.is_none());
     assert!(experimental.seatbelt.is_none());
+    assert!(experimental.wslc.is_none());
 
     assert!(wire.sandbox_id.is_none());
     assert!(wire.correlation_vector.is_none());
@@ -549,16 +550,12 @@ fn empty_wslc_sections_map_to_present_empty_wire_sections() {
         .expect("telemetry should be populated");
     assert!(telemetry.enabled.is_none());
 
-    let wire = adapt(&wslc_request_with_fields(r#""experimental": {"wslc": {}}"#));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    let wire = adapt(&wslc_request_with_fields(r#""wslc": {}"#));
+    let wslc = wire.wslc.expect("wslc should be populated");
     assert!(wslc.provision.is_none());
 
-    let wire = adapt(&wslc_request_with_fields(
-        r#""experimental": {"wslc": {"provision": {}}}"#,
-    ));
-    let experimental = wire.experimental.expect("experimental should be populated");
-    let wslc = experimental.wslc.expect("wslc should be populated");
+    let wire = adapt(&wslc_request_with_fields(r#""wslc": {"provision": {}}"#));
+    let wslc = wire.wslc.expect("wslc should be populated");
     let provision = wslc.provision.expect("provision should be populated");
     assert!(provision.image.is_none());
     assert!(provision.image_tar_path.is_none());
@@ -580,11 +577,10 @@ fn empty_isolation_session_app_id_maps_expected_wire_field() {
 #[test]
 fn empty_wslc_provision_strings_map_expected_wire_fields() {
     let wire = adapt(&wslc_request_with_fields(
-        r#""experimental": {"wslc": {"provision": {"image": "", "imageTarPath": ""}}}"#,
+        r#""wslc": {"provision": {"image": "", "imageTarPath": ""}}"#,
     ));
     let provision = wire
-        .experimental
-        .and_then(|experimental| experimental.wslc)
+        .wslc
         .and_then(|wslc| wslc.provision)
         .expect("provision should be populated");
     assert_eq!(provision.image.as_deref(), Some(""));
@@ -680,8 +676,8 @@ fn empty_wslc_sections_match_current_wire_deserialization() {
         r#""network": {}"#,
         r#""experimental": {}"#,
         r#""experimental": {"telemetry": {}}"#,
-        r#""experimental": {"wslc": {}}"#,
-        r#""experimental": {"wslc": {"provision": {}}}"#,
+        r#""wslc": {}"#,
+        r#""wslc": {"provision": {}}"#,
     ] {
         assert_matches_current_wire_deserialization(&wslc_request_with_fields(fields));
     }
@@ -694,8 +690,7 @@ fn empty_backend_strings_match_current_wire_deserialization() {
     );
     assert_matches_current_wire_deserialization(&isolation_session);
 
-    let wslc = wslc_request_with_fields(
-        r#""experimental": {"wslc": {"provision": {"image": "", "imageTarPath": ""}}}"#,
-    );
+    let wslc =
+        wslc_request_with_fields(r#""wslc": {"provision": {"image": "", "imageTarPath": ""}}"#);
     assert_matches_current_wire_deserialization(&wslc);
 }

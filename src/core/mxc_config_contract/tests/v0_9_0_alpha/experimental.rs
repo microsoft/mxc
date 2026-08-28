@@ -7,5 +7,3 @@ mod root;
 mod test_and_telemetry;
 #[path = "experimental/windows_sandbox.rs"]
 mod windows_sandbox;
-#[path = "experimental/wslc.rs"]
-mod wslc;

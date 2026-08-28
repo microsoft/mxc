@@ -75,7 +75,7 @@ impl ContainmentBackend {
             ContainmentBackend::ProcessContainer => Some("processContainer"),
             ContainmentBackend::Lxc => Some("lxc"),
             ContainmentBackend::WindowsSandbox => Some("experimental.windows_sandbox"),
-            ContainmentBackend::Wslc => Some("experimental.wslc"),
+            ContainmentBackend::Wslc => Some("wslc"),
             ContainmentBackend::Seatbelt => Some("seatbelt"),
             ContainmentBackend::IsolationSession => Some("experimental.isolation_session"),
             ContainmentBackend::Bubblewrap
@@ -927,8 +927,6 @@ pub struct ExperimentalConfig {
     /// Windows Sandbox backend (experimental).
     #[serde(rename = "windows_sandbox")]
     pub windows_sandbox: Option<WindowsSandboxConfig>,
-    /// WSL Container (WSLC SDK) backend (experimental).
-    pub wslc: Option<WslcConfig>,
     /// Telemetry configuration (experimental).
     pub telemetry: Option<TelemetryConfig>,
 }
@@ -964,6 +962,8 @@ pub struct ExecutionRequest {
     pub lxc_config: LxcConfig,
     /// Seatbelt (macOS) backend configuration (used when containment == Seatbelt).
     pub seatbelt: Option<SeatbeltConfig>,
+    /// WSL Container (WSLC SDK) backend configuration (used when containment == Wslc).
+    pub wslc: Option<WslcConfig>,
     /// Whether the --experimental flag was passed.
     pub experimental_enabled: bool,
     /// Whether the --allow-testing-features flag was passed. Gates testing-only,

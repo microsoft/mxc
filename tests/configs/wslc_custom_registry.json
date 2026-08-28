@@ -8,9 +8,7 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
-    }
+  "wslc": {
+    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
   }
 }

@@ -188,18 +188,19 @@ cannot mix both formats in one request.
         "release": "3.19"
     },
 
+    "wslc": {                              // WSL Container settings (Windows only)
+        "image": "alpine:latest",          // Container image name
+        "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
+        "cpuCount": 4,                     // CPU count for WSLC session
+        "memoryMb": 2048,                  // Memory in MB for WSLC session
+        "gpu": false,                      // GPU passthrough
+        "storagePath": "C:\\wslc-storage", // Image store path
+        "portMappings": [                  // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
+            { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
+        ]
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
-        "wslc": {                          // WSL Container settings
-            "image": "alpine:latest",      // Container image name
-            "imageTarPath": "C:\\images\\alpine.tar",  // Import image from local tar file
-            "cpuCount": 4,                 // CPU count for WSLC session
-            "memoryMb": 2048,              // Memory in MB for WSLC session
-            "gpu": false,                  // GPU passthrough
-            "storagePath": "C:\\wslc-storage",  // Image store path
-            "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
-                { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
-            ]
-        },
         "seatbelt": {                 // macOS sandbox settings (macOS only)
             "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
             "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps

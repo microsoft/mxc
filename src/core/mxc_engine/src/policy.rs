@@ -542,7 +542,7 @@ impl Default for WslcSection {
 }
 
 impl WslcSection {
-    /// The wire-format `experimental.wslc` object. Optional fields are omitted
+    /// The wire-format top-level `wslc` object. Optional fields are omitted
     /// rather than sent as `null` so the parser applies its own defaults.
     fn wire(&self) -> serde_json::Value {
         use serde_json::json;
@@ -971,13 +971,11 @@ fn apply_host_process_backend(
 
 /// Apply the WSL Container backend fields — the Rust port of the SDK's
 /// `buildWslcContainerConfig`. WSLC derives its networking mode (`None` /
-/// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here;
-/// its settings live under `experimental.wslc` because the backend is
-/// experimental.
+/// `Bridged`) from `network.defaultPolicy`, so no enforcement mode is set here.
 fn apply_wslc_backend(config: &mut serde_json::Value, wslc: &WslcSection) {
     use serde_json::json;
     config["containment"] = json!("wslc");
-    config["experimental"] = json!({ "wslc": wslc.wire() });
+    config["wslc"] = wslc.wire();
 }
 
 /// Promote network enforcement to `firewall` when host rules are present and
@@ -1531,7 +1529,7 @@ mod tests {
     #[test]
     fn wslc_containment_maps_config_to_the_request() {
         // Mirrors `createConfigFromPolicy(policy, 'wslc')` plus a tweaked
-        // `experimental.wslc` block: the wire config goes through the shared
+        // top-level `wslc` block: the wire config goes through the shared
         // parser, so the mapped request carries the WSLC settings verbatim.
         let wslc = WslcSection {
             image: "python:3.12".to_string(),
@@ -1547,12 +1545,7 @@ mod tests {
                 .expect("build_request_with_containment");
 
         assert_eq!(request.inner.containment, ContainmentBackend::Wslc);
-        let config = request
-            .inner
-            .experimental
-            .wslc
-            .as_ref()
-            .expect("wslc config");
+        let config = request.inner.wslc.as_ref().expect("wslc config");
         assert_eq!(config.image, "python:3.12");
         assert_eq!(config.cpu_count, Some(2));
         assert_eq!(config.memory_mb, Some(2048));
@@ -1574,12 +1567,7 @@ mod tests {
             None,
         )
         .expect("build_request_with_containment");
-        let config = request
-            .inner
-            .experimental
-            .wslc
-            .as_ref()
-            .expect("wslc config");
+        let config = request.inner.wslc.as_ref().expect("wslc config");
         assert_eq!(config.image, "alpine:latest");
         assert_eq!(config.target_os, "linux");
         assert!(config.port_mappings.is_empty());
@@ -1587,10 +1575,9 @@ mod tests {
     }
 
     #[test]
-    fn wslc_is_not_experimental_enabled_by_default() {
-        // Selecting the backend must not silently flip the experimental gate:
-        // the caller opts in explicitly, exactly like the SDK's
-        // `SandboxSpawnOptions.experimental`.
+    fn wslc_does_not_require_the_experimental_gate() {
+        // WSLc is promoted to the stable surface: selecting it must neither
+        // require nor silently flip the experimental gate.
         let mut request = build_request_with_containment(
             &minimal_policy(),
             &Containment::Wslc(WslcSection::default()),
@@ -1657,7 +1644,7 @@ mod tests {
     fn isolation_session_names_the_backend_and_carries_no_section() {
         // The one-shot surface takes no backend configuration at all, so the
         // wire config must name the backend and add nothing else — unlike
-        // WSLc, which also writes an `experimental.wslc` block.
+        // WSLc, which also writes a top-level `wslc` block.
         let policy = policy_with_network(isolation_session_network());
         let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
             .expect("build_wire_config");
@@ -1694,7 +1681,7 @@ mod tests {
     #[test]
     fn isolation_session_is_not_experimental_enabled_by_default() {
         // Selecting an experimental backend must not silently satisfy the
-        // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
+        // experimental gate.
         let policy = policy_with_network(isolation_session_network());
         let mut request =
             build_request_with_containment(&policy, &Containment::IsolationSession, None)

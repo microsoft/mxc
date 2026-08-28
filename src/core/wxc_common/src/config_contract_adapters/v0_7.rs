@@ -272,6 +272,7 @@ pub(crate) fn into_wire(request: contract::Request) -> wire::MxcConfig {
         runtime_config: None,
         ui: ui.into_option().map(convert_ui),
         seatbelt: seatbelt.into_option().map(convert_seatbelt),
+        wslc: None,
         experimental: None,
     }
 }

@@ -3,17 +3,19 @@
     "phase": "provision",
     "containment": "wslc",
     "filesystem": {
-        "readwritePaths": ["C:\\mxc_wslc_sa_test\\rw"],
-        "readonlyPaths": ["C:\\mxc_wslc_sa_test\\ro"]
+        "readwritePaths": [
+            "C:\\mxc_wslc_sa_test\\rw"
+        ],
+        "readonlyPaths": [
+            "C:\\mxc_wslc_sa_test\\ro"
+        ]
     },
     "network": {
         "defaultPolicy": "block"
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest"
         }
     }
 }

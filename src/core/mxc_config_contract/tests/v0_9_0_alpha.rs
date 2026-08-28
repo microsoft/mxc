@@ -23,3 +23,5 @@ mod request;
 mod seatbelt;
 #[path = "v0_9_0_alpha/state_aware.rs"]
 mod state_aware;
+#[path = "v0_9_0_alpha/wslc.rs"]
+mod wslc;

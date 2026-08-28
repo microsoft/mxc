@@ -139,7 +139,8 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 /**
  * Run the probe binary and merge its results into `support`: the isolation
  * tier, any warnings, portable UI capabilities, and — when the probe reports
- * the isolation-session service available — the `isolation_session` method.
+ * the corresponding runtime available — the `isolation_session` and `wslc`
+ * methods.
  * On any failure (binary missing, timeout, malformed JSON), the function
  * silently leaves those fields unset, so callers see the same contract as
  * pre-probe SDKs.
@@ -165,6 +166,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
         }
         if (facts.isolationSessionAvailable === true) {
           support.availableMethods.push('isolation_session');
+        }
+        if (facts.wslcAvailable === true) {
+          support.availableMethods.push('wslc');
         }
       }
     }

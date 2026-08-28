@@ -99,7 +99,7 @@ struct Cli {
 
     /// Optional WSLC storage path. When omitted the runner default is used
     /// (`%TEMP%\mxc-wslc-sessions`). Pass the same value here that your
-    /// runtime configs set in `experimental.wslc.storagePath`, otherwise
+    /// runtime configs set in `wslc.storagePath`, otherwise
     /// the runner will not find the pulled image. Requires `--setup-wslc`.
     #[arg(long = "storage-path", requires = "setup_wslc")]
     storage_path: Option<String>,
@@ -782,6 +782,16 @@ fn main() {
             output.probes.isolation_session_available = mxc_engine::isolation_session_available();
             output
         };
+        // Same story for WSLc: `appcontainer_common` cannot see that backend
+        // either. WSLc is promoted (non-experimental), so the SDK's
+        // availability check is the only gate on a `wslc` request — an
+        // un-overridden `false` here would make the backend unreachable.
+        #[cfg(target_os = "windows")]
+        let output = {
+            let mut output = output;
+            output.probes.wslc_available = mxc_engine::wslc_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -1413,7 +1423,7 @@ mod tests {
         let mut logger = test_logger();
         logger.enable_file_sink(&log_path).unwrap();
         let error = MxcError::malformed_request(
-            "Invalid configuration at `experimental.wslc.start.portMappings[0].windowsPort`",
+            "Invalid configuration at `wslc.start.portMappings[0].windowsPort`",
         );
 
         log_state_aware_dispatch_error(&mut logger, &error);
@@ -1425,7 +1435,7 @@ mod tests {
         drop(logger);
         let log = std::fs::read_to_string(log_path).unwrap();
         assert_eq!(
-            log.matches("experimental.wslc.start.portMappings[0].windowsPort")
+            log.matches("wslc.start.portMappings[0].windowsPort")
                 .count(),
             1
         );
@@ -1721,6 +1731,7 @@ mod tests {
             sandbox_id: Some("iso:wxc-1234".into()),
             correlation_vector: None,
             experimental_raw: None,
+            stable_raw: None,
             source_text: None,
         };
 

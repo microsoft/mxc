@@ -8,10 +8,8 @@
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest",
-      "imageTarPath": "C:\\workspace\\alpine-docker-save.tar"
-    }
+  "wslc": {
+    "image": "alpine:latest",
+    "imageTarPath": "C:\\workspace\\alpine-docker-save.tar"
   }
 }

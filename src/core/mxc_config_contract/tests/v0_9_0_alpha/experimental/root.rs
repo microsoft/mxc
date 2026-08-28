@@ -72,9 +72,12 @@ fn rejects_moved_experimental_seatbelt_sections() {
 }
 
 #[test]
-fn rejects_state_aware_experimental_sections() {
+fn rejects_moved_experimental_wslc_section() {
+    // `wslc` was promoted to the top-level stable surface. The closed
+    // experimental block must no longer accept it under any shape.
     for field in [
-        r#""isolation_session": {"provision": {}}"#,
+        r#""wslc": {}"#,
+        r#""wslc": {"image": "alpine:latest"}"#,
         r#""wslc": {"provision": {}}"#,
     ] {
         let json = format!(
@@ -87,4 +90,15 @@ fn rejects_state_aware_experimental_sections() {
 
         assert_invalid(&json);
     }
+}
+
+#[test]
+fn rejects_state_aware_experimental_sections() {
+    let json = r#"{
+        "version": "0.9.0-alpha",
+        "process": {"commandLine": "echo"},
+        "experimental": {"isolation_session": {"provision": {}}}
+    }"#;
+
+    assert_invalid(json);
 }

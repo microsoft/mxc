@@ -100,13 +100,13 @@ const CASES: &[StateAwareCase] = &[
                 "allowedHosts": ["packages.example"],
                 "allowLocalNetwork": false
             },
+            "wslc": {
+                "provision": {
+                    "image": "ubuntu:24.04",
+                    "imageTarPath": "C:\\images\\ubuntu.tar"
+                }
+            },
             "experimental": {
-                "wslc": {
-                    "provision": {
-                        "image": "ubuntu:24.04",
-                        "imageTarPath": "C:\\images\\ubuntu.tar"
-                    }
-                },
                 "telemetry": {"enabled": true}
             }
         }"#,

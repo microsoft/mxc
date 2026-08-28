@@ -222,9 +222,7 @@ fn spawn_process_container(
     ))
 }
 
-/// Spawn the WSL Container backend. Experimental, so it refuses to run unless
-/// the request opted in (`SandboxRequest::set_experimental(true)`) — the
-/// library-side equivalent of the executor's `--experimental` flag.
+/// Spawn the WSL Container backend.
 #[cfg(all(target_os = "windows", feature = "wslc"))]
 fn spawn_wslc(
     request: &ExecutionRequest,
@@ -232,13 +230,7 @@ fn spawn_wslc(
 ) -> Result<Box<dyn SandboxProcess>, MxcError> {
     use wxc_common::sandbox_process::{SandboxBackend, StdioMode};
 
-    if !request.experimental_enabled {
-        return Err(MxcError::malformed_request(
-            "WSLC is an experimental backend; enable experimental features on the \
-             request (SandboxRequest::set_experimental(true)) to use it",
-        ));
-    }
-    let config = request.experimental.wslc.clone().unwrap_or_default();
+    let config = request.wslc.clone().unwrap_or_default();
     let mut runner = wslc_common::WSLContainerRunner::new(&config);
     runner
         .spawn(request, logger, StdioMode::Pipes)
@@ -410,21 +402,5 @@ mod tests {
         };
         assert_eq!(err.code, MxcErrorCode::UnsupportedContainment);
         assert!(err.message.contains("Windows"), "got: {}", err.message);
-    }
-
-    #[cfg(all(target_os = "windows", feature = "wslc"))]
-    #[test]
-    fn streaming_rejects_wslc_without_experimental() {
-        // The experimental gate is fail-closed: selecting WSLC without opting
-        // in must be rejected before any container is created.
-        let mut request = build_request(&minimal_policy(), None).expect("build_request");
-        request.inner.containment = ContainmentBackend::Wslc;
-        let mut logger = Logger::new(Mode::Buffer);
-        let err = match spawn_runner(&request.inner, &mut logger) {
-            Ok(_) => panic!("WSLC must be rejected without experimental features"),
-            Err(e) => e,
-        };
-        assert_eq!(err.code, MxcErrorCode::MalformedRequest);
-        assert!(err.message.contains("experimental"), "got: {}", err.message);
     }
 }

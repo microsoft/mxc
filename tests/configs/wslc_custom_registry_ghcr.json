@@ -8,9 +8,7 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "ghcr.io/linuxserver/baseimage-alpine:3.21"
-    }
+  "wslc": {
+    "image": "ghcr.io/linuxserver/baseimage-alpine:3.21"
   }
 }

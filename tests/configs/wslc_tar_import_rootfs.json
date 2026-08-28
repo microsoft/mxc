@@ -8,10 +8,8 @@
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine-export:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
-    }
+  "wslc": {
+    "image": "alpine-export:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }

@@ -14,8 +14,8 @@ export type AssertTrue<T extends true> = T;
 export type StripIndex<T> = { [K in keyof T as string extends K ? never : K]: T[K] };
 
 /**
- * Recursively drop index signatures (open objects nest: e.g. `experimental.wslc`
- * and the `IsolationSession*` objects), so structural assignment is not tripped
+ * Recursively drop index signatures (open objects nest: e.g. the `experimental`
+ * block and the `IsolationSession*` objects), so structural assignment is not tripped
  * by an emitted `[k: string]: unknown` at any depth. Modifiers (`?`) are
  * preserved because the mapped type is homomorphic over `keyof T`.
  */

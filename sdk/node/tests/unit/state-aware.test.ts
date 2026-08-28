@@ -573,7 +573,7 @@ describe('wslc state-aware lifecycle', () => {
     assert.strictEqual(env.version, '0.8.1-alpha');
   });
 
-  it('lifts filesystem + network and nests image under experimental.wslc.provision', () => {
+  it('lifts filesystem + network and nests image under the top-level wslc.provision', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -589,12 +589,13 @@ describe('wslc state-aware lifecycle', () => {
     assert.deepStrictEqual(env.filesystem, { readwritePaths: ['C:\\ws\\rw'] });
     assert.deepStrictEqual(env.network, { defaultPolicy: 'allow' });
     const wire = JSON.parse(JSON.stringify(env));
-    assert.deepStrictEqual(wire.experimental, {
-      wslc: { provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' } },
+    assert.strictEqual(wire.experimental, undefined);
+    assert.deepStrictEqual(wire.wslc, {
+      provision: { image: 'alpine:latest', imageTarPath: 'C:\\images\\alpine.tar' },
     });
   });
 
-  it('omits the experimental block when provision carries no backend-specific field', () => {
+  it('omits the wslc block when provision carries no backend-specific field', () => {
     const env = buildStateAwareEnvelope({
       phase: 'provision',
       backendKey: 'wslc',
@@ -602,10 +603,11 @@ describe('wslc state-aware lifecycle', () => {
       config: { network: { defaultPolicy: 'block' } },
     });
     assert.strictEqual(env.experimental, undefined);
+    assert.strictEqual(env.wslc, undefined);
     assert.deepStrictEqual(env.network, { defaultPolicy: 'block' });
   });
 
-  it('lifts exec process + cooperative proxy network to top-level with no experimental block', () => {
+  it('lifts exec process + cooperative proxy network to top-level with no wslc block', () => {
     const env = buildStateAwareEnvelope({
       phase: 'exec',
       backendKey: 'wslc',
@@ -618,6 +620,7 @@ describe('wslc state-aware lifecycle', () => {
     assert.deepStrictEqual(env.process, { commandLine: 'echo hi' });
     assert.deepStrictEqual(env.network, { proxy: { url: 'http://127.0.0.1:8888' } });
     assert.strictEqual(env.experimental, undefined);
+    assert.strictEqual(env.wslc, undefined);
   });
 
   describe('round-trip via the typed API', { skip: platformSkip }, () => {

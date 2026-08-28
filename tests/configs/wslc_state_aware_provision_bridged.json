@@ -5,11 +5,9 @@
     "network": {
         "defaultPolicy": "allow"
     },
-    "experimental": {
-        "wslc": {
-            "provision": {
-                "image": "alpine:latest"
-            }
+    "wslc": {
+        "provision": {
+            "image": "alpine:latest"
         }
     }
 }

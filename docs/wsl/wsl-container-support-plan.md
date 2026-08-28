@@ -5,8 +5,9 @@
 This document was written before the experimental features infrastructure and
 the WSLC SDK self-host release. Key changes:
 
-- **WSLC is experimental:** `"containment": "wslc"` requires the `--experimental`
-  CLI flag (same as the sandbox backend).
+- **WSLC is promoted to the stable surface:** `"containment": "wslc"` no longer
+  requires the `--experimental` CLI flag; its settings live in the top-level
+  `wslc` config block. A build with the `wslc` Cargo feature is still required.
 - **Config format updated:** The JSON section is `"wslc"` (not `"container"`),
   command is `"process": { "commandLine": ... }` (not `"script"`), and timeout
   is under `"process": { "timeout": ... }`.
@@ -441,7 +442,7 @@ local Docker daemon is needed — the WSLC SDK handles the pull internally.
 > **Note on storage path:** the setup script and the runner must share
 > the same `storage_path`. The runner default is
 > `%TEMP%\mxc-wslc-sessions`; if your config sets
-> `experimental.wslc.storagePath`, pass the same path to the setup
+> `wslc.storagePath`, pass the same path to the setup
 > script with `-StoragePath`.
 
 ### 3. Import from a local tar file

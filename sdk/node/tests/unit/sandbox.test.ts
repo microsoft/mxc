@@ -448,10 +448,10 @@ describe('buildSandboxPayload', () => {
       assert.strictEqual(payload.process!.commandLine, 'echo hello');
     });
 
-    it('should populate experimental.wslc with default image', () => {
+    it('should populate the top-level wslc section with default image', () => {
       const payload = buildSandboxPayload('echo hello', { version: '0.6.0-alpha' }, undefined, undefined, 'wslc');
-      assert.ok(payload.experimental?.wslc);
-      assert.strictEqual(payload.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(payload.wslc);
+      assert.strictEqual(payload.wslc!.image, 'alpine:latest');
     });
 
     it('should not set processContainer or lxc config', () => {
@@ -1034,11 +1034,11 @@ describe('createConfigFromPolicy', () => {
   });
 
   describe('WSLC', () => {
-    it('should set containment to wslc and populate experimental.wslc', () => {
+    it('should set containment to wslc and populate the top-level wslc section', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       assert.strictEqual(config.containment, 'wslc');
-      assert.ok(config.experimental?.wslc);
-      assert.strictEqual(config.experimental!.wslc!.image, 'alpine:latest');
+      assert.ok(config.wslc);
+      assert.strictEqual(config.wslc!.image, 'alpine:latest');
     });
 
     it('should forward schema 0.8 ProcessContainer peer policy for native rejection', () => {
@@ -1126,21 +1126,15 @@ describe('createConfigFromPolicy', () => {
       assert.strictEqual(config.containerId, 'my-container');
     });
 
-    it('should throw from spawnSandbox when experimental backend is used via config', () => {
+    it('should no longer require experimental mode for a wslc config', () => {
       const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
       config.process!.commandLine = 'echo hello';
+      // WSLc is promoted, so the experimental gate no longer fires. A host
+      // without the WSLc runtime still rejects the request, but on
+      // availability — never on `--experimental`.
       assert.throws(
         () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
-      );
-    });
-
-    it('should throw from spawnSandboxFromConfig when experimental is not set', () => {
-      const config = createConfigFromPolicy({ version: '0.6.0-alpha' }, 'wslc');
-      config.process!.commandLine = 'echo hello';
-      assert.throws(
-        () => spawnSandboxFromConfig(config),
-        { message: /experimental mode/ },
+        (e: Error) => !/experimental mode/.test(e.message),
       );
     });
   });
@@ -1281,10 +1275,20 @@ describe('resolveExecutableAndArgs (containment validation)', { skip: platformSk
     );
   });
 
-  it('should still require experimental mode for experimental backends like wslc', () => {
+  it('should still require experimental mode for experimental backends like windows_sandbox', () => {
+    assert.throws(
+      () => resolveExecutableAndArgs(makeConfig('windows_sandbox'), { executablePath: fakeExe }),
+      { message: /experimental mode/ },
+    );
+  });
+
+  it('should NOT require experimental mode for explicit wslc containment', () => {
+    // WSLc is promoted, so the experimental gate no longer fires for it. On a
+    // host without the WSLc runtime the availability check still rejects the
+    // request — that is a different error, and the point of this test.
     assert.throws(
       () => resolveExecutableAndArgs(makeConfig('wslc'), { executablePath: fakeExe }),
-      { message: /experimental mode/ },
+      (e: Error) => !/experimental mode/.test(e.message),
     );
   });
 

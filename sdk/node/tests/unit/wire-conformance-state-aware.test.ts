@@ -83,7 +83,7 @@ type _Phase = AssertTrue<Equivalent<Phase, WirePhase>>;
 //
 // `filesystem` is a lifted top-level wire field (like `network`): WSLc provision
 // surfaces it publicly but it maps to the envelope's top-level `filesystem`, not
-// under `experimental.wslc.provision`. Listing it here keeps the backend-key set
+// under `wslc.provision`. Listing it here keeps the backend-key set
 // limited to genuinely per-phase wire fields.
 type LiftedPhaseKey = 'version' | 'process' | 'network' | 'filesystem';
 

@@ -71,7 +71,7 @@ try {
     }
 
     Write-Host "Running WSLC denied `..`-through-junction test (expect pre-flight rejection)..."
-    $wxcArgs = @("--experimental")
+    $wxcArgs = @()
     if ($Debug) { $wxcArgs += "--debug" }
     $wxcArgs += $ConfigPath
 

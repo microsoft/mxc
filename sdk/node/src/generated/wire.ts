@@ -96,7 +96,7 @@ export interface Experimental {
    */
   windows_sandbox?: WindowsSandbox | null;
   /**
-   * WSL container backend config.
+   * WSL container backend config (pre-promotion alias). Promoted to the top-level `wslc` section; still parsed here so the parser can reject it with a migration message instead of silently ignoring it.
    */
   wslc?: Wslc | null;
   [k: string]: unknown;
@@ -331,7 +331,7 @@ export interface NetworkRule {
 export type Phase = "provision" | "start" | "exec" | "stop" | "deprovision";
 
 /**
- * A single host → container port forward. Reachable only under the permissive `experimental` surface, so unknown fields are tolerated (forward-compat).
+ * A single host → container port forward.
  */
 export interface PortMapping {
   /**
@@ -346,7 +346,6 @@ export interface PortMapping {
    * Host (Windows) port.
    */
   windowsPort: number;
-  [k: string]: unknown;
 }
 
 /**
@@ -567,7 +566,7 @@ export interface Wslc {
    */
   portMappings?: PortMapping[] | null;
   /**
-   * State-aware provision-phase configuration (`experimental.wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
+   * State-aware provision-phase configuration (`wslc.provision`). Carries the container-creation knobs for the state-aware lifecycle; the flat sibling fields above remain the one-shot surface. Absent on one-shot configs and non-provision phases.
    */
   provision?: WslcProvisionPhase | null;
   /**
@@ -578,11 +577,10 @@ export interface Wslc {
    * OS inside the WSL container.
    */
   targetOs?: string | null;
-  [k: string]: unknown;
 }
 
 /**
- * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `experimental.wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
+ * Per-phase WSLc **provision** configuration (state-aware lifecycle), nested under `wslc.provision`. Carries only what the amortized daemon session honors: the container image (or a local tarball to import).
  * 
  * Filesystem mounts and network mode derive from the top-level `policy` section (readwrite / readonly paths, network), not from here. The one-shot-only sizing knobs (`cpuCount` / `memoryMb` / `gpu` / `storagePath` / `portMappings`) are deliberately absent: the daemon shares a single session across sandboxes and does not apply per-sandbox sizing. start / exec / stop / deprovision carry no backend-specific config (the exec command flows through the top-level `process` section), so they have no phase struct.
  */
@@ -595,7 +593,6 @@ export interface WslcProvisionPhase {
    * Path to a local image tarball to import instead of pulling.
    */
   imageTarPath?: string | null;
-  [k: string]: unknown;
 }
 
 /**
@@ -678,5 +675,9 @@ export interface MXCConfiguration {
    * MXC config schema version (semver), e.g. `"0.9.0-alpha"`.
    */
   version?: string | null;
+  /**
+   * WSL container backend settings (Windows). Used when containment is `wslc`.
+   */
+  wslc?: Wslc | null;
 }
 

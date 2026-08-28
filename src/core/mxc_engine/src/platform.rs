@@ -106,8 +106,13 @@ pub fn platform_support() -> PlatformSupport {
 /// Whether this host can run the WSL Container backend, probing the WSLC
 /// runtime the same way the runner's preflight does. Always `false` when the
 /// backend isn't compiled in, so the caller needs no `cfg` of its own.
+///
+/// Exposed from the engine so `wxc` reaches the WSLc backend through
+/// `mxc_engine` rather than depending on `wslc_common` directly. It is the
+/// same probe [`platform_support`] consults, so the CLI `--probe` surface and
+/// the Rust SDK surface can never disagree about this host.
 #[cfg(target_os = "windows")]
-fn wslc_available() -> bool {
+pub fn wslc_available() -> bool {
     #[cfg(feature = "wslc")]
     {
         wslc_common::is_available()

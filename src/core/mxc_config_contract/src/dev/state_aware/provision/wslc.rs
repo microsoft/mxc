@@ -39,9 +39,6 @@ pub struct StateAwareWslc {
 #[cfg_attr(feature = "schema-gen", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WslcProvisionExperimental {
-    /// Optional WSLC backend settings.
-    #[serde(default)]
-    pub wslc: OptionalField<StateAwareWslc>,
     /// Optional telemetry override.
     #[serde(default)]
     pub telemetry: OptionalField<Telemetry>,
@@ -70,6 +67,9 @@ pub struct WslcProvisionRequest {
     /// Optional network policy fixed at provision time.
     #[serde(default)]
     pub network: OptionalField<Network>,
+    /// Optional WSLC backend settings fixed at provision time.
+    #[serde(default)]
+    pub wslc: OptionalField<StateAwareWslc>,
     /// Optional closed experimental settings.
     #[serde(default)]
     pub experimental: OptionalField<WslcProvisionExperimental>,

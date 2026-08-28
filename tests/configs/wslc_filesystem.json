@@ -7,16 +7,16 @@
     "cwd": "C:\\wslcfs"
   },
   "filesystem": {
-    "readwritePaths": ["C:\\wslcfs"]
+    "readwritePaths": [
+      "C:\\wslcfs"
+    ]
   },
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest",
-      "cpuCount": 2,
-      "memoryMb": 1024
-    }
+  "wslc": {
+    "image": "alpine:latest",
+    "cpuCount": 2,
+    "memoryMb": 1024
   }
 }

@@ -4,14 +4,15 @@
   "containment": "wslc",
   "process": {
     "commandLine": "echo MY_VAR=$MY_VAR && echo GREETING=$GREETING",
-    "env": ["MY_VAR=hello_from_host", "GREETING=world"]
+    "env": [
+      "MY_VAR=hello_from_host",
+      "GREETING=world"
+    ]
   },
   "network": {
     "defaultPolicy": "block"
   },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }

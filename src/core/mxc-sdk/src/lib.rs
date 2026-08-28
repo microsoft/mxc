@@ -50,9 +50,9 @@
 //! | Explicit ProcessContainer configuration | Windows | [`Containment::ProcessContainer`] |
 //! | WSLC (WSL Container) | Windows | [`Containment::Wslc`] |
 //!
-//! WSLC is **experimental**: build with the crate's `wslc` feature, and call
-//! [`SandboxRequest::set_experimental(true)`](SandboxRequest::set_experimental)
-//! on the request. Its container has no stdin (the WSLC SDK exposes no
+//! WSLC is opt-in at **build** time only: compile this crate with its `wslc`
+//! feature. It carries no `--experimental` gate — the section is part of the
+//! stable config surface. Its container has no stdin (the WSLC SDK exposes no
 //! process-input API), so [`Sandbox::take_stdin`] returns `None` for it.
 //!
 //! Backends with no [`Containment`] variant return an [`Error`] with
@@ -94,7 +94,7 @@
 //! // Run a command inside a WSL container (Windows, --features wslc).
 //! let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 //! let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
-//! request.set_script("python3 -c 'print(42)'").set_experimental(true);
+//! request.set_script("python3 -c 'print(42)'");
 //! let output = run(request)?;
 //! # Ok::<(), mxc_sdk::Error>(())
 //! ```
@@ -205,9 +205,10 @@ pub fn run(request: SandboxRequest) -> Result<Output, Error> {
 /// failures) come back as an [`Error`] with the matching [`ErrorCode`].
 ///
 /// `experimental` is the in-process equivalent of the executor's
-/// `--experimental` flag. The experimental backends — WindowsSandbox,
-/// IsolationSession and WSLc — are refused with
+/// `--experimental` flag. The experimental backends — WindowsSandbox and
+/// IsolationSession — are refused with
 /// [`ErrorCode::BackendUnavailable`] unless it is set, before any work is done.
+/// WSLc is promoted and needs no opt-in.
 /// It is an API parameter rather than a field in the request JSON so that a
 /// config cannot grant itself experimental access.
 pub fn run_state_aware_json(

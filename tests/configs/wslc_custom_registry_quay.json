@@ -8,9 +8,7 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "image": "quay.io/fedora/fedora-minimal:latest"
-    }
+  "wslc": {
+    "image": "quay.io/fedora/fedora-minimal:latest"
   }
 }

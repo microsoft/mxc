@@ -7,9 +7,7 @@ fn wslc_request(fields: &str) -> String {
     format!(
         r#"{{
             "version": "0.9.0-alpha",
-            "experimental": {{
-                "wslc": {{{fields}}}
-            }},
+            "wslc": {{{fields}}},
             "process": {{"commandLine": "echo"}}
         }}"#
     )
@@ -89,48 +87,44 @@ fn rejects_duplicate_wslc_fields() {
 
     assert_invalid_cases(
         [
+            ("wslc", version_and_process, r#""wslc": {}, "wslc": {}"#),
             (
-                "experimental.wslc",
+                "wslc.targetOs",
                 version_and_process,
-                r#""experimental": {"wslc": {}, "wslc": {}}"#,
+                r#""wslc": {"targetOs": "linux", "targetOs": "other"}"#,
             ),
             (
-                "experimental.wslc.targetOs",
+                "wslc.image",
                 version_and_process,
-                r#""experimental": {"wslc": {"targetOs": "linux", "targetOs": "other"}}"#,
+                r#""wslc": {"image": "first", "image": "second"}"#,
             ),
             (
-                "experimental.wslc.image",
+                "wslc.imageTarPath",
                 version_and_process,
-                r#""experimental": {"wslc": {"image": "first", "image": "second"}}"#,
+                r#""wslc": {"imageTarPath": "first", "imageTarPath": "second"}"#,
             ),
             (
-                "experimental.wslc.imageTarPath",
+                "wslc.cpuCount",
                 version_and_process,
-                r#""experimental": {"wslc": {"imageTarPath": "first", "imageTarPath": "second"}}"#,
+                r#""wslc": {"cpuCount": 1, "cpuCount": 2}"#,
             ),
             (
-                "experimental.wslc.cpuCount",
+                "wslc.memoryMb",
                 version_and_process,
-                r#""experimental": {"wslc": {"cpuCount": 1, "cpuCount": 2}}"#,
+                r#""wslc": {"memoryMb": 1024, "memoryMb": 2048}"#,
             ),
             (
-                "experimental.wslc.memoryMb",
+                "wslc.gpu",
                 version_and_process,
-                r#""experimental": {"wslc": {"memoryMb": 1024, "memoryMb": 2048}}"#,
+                r#""wslc": {"gpu": true, "gpu": false}"#,
             ),
             (
-                "experimental.wslc.gpu",
+                "wslc.storagePath",
                 version_and_process,
-                r#""experimental": {"wslc": {"gpu": true, "gpu": false}}"#,
-            ),
-            (
-                "experimental.wslc.storagePath",
-                version_and_process,
-                r#""experimental": {"wslc": {"storagePath": "first", "storagePath": "second"}}"#,
+                r#""wslc": {"storagePath": "first", "storagePath": "second"}"#,
             ),
         ],
-        "duplicate experimental field",
+        "duplicate nested field",
     );
 }
 
@@ -239,26 +233,26 @@ fn rejects_duplicate_wslc_port_mapping_fields() {
     assert_invalid_cases(
         [
             (
-                "experimental.wslc.portMappings",
+                "wslc.portMappings",
                 version_and_process,
-                r#""experimental": {"wslc": {"portMappings": [], "portMappings": []}}"#,
+                r#""wslc": {"portMappings": [], "portMappings": []}"#,
             ),
             (
-                "experimental.wslc.portMappings[].windowsPort",
+                "wslc.portMappings[].windowsPort",
                 version_and_process,
-                r#""experimental": {"wslc": {"portMappings": [{"windowsPort": 8080, "windowsPort": 8081, "containerPort": 80}]}}"#,
+                r#""wslc": {"portMappings": [{"windowsPort": 8080, "windowsPort": 8081, "containerPort": 80}]}"#,
             ),
             (
-                "experimental.wslc.portMappings[].containerPort",
+                "wslc.portMappings[].containerPort",
                 version_and_process,
-                r#""experimental": {"wslc": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "containerPort": 81}]}}"#,
+                r#""wslc": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "containerPort": 81}]}"#,
             ),
             (
-                "experimental.wslc.portMappings[].protocol",
+                "wslc.portMappings[].protocol",
                 version_and_process,
-                r#""experimental": {"wslc": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp", "protocol": "tcp"}]}}"#,
+                r#""wslc": {"portMappings": [{"windowsPort": 8080, "containerPort": 80, "protocol": "tcp", "protocol": "tcp"}]}"#,
             ),
         ],
-        "duplicate experimental field",
+        "duplicate nested field",
     );
 }

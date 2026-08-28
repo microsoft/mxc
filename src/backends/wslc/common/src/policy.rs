@@ -206,7 +206,7 @@ pub(crate) fn reject_unsupported_enforcement_mode(
 }
 
 /// Reject inbound local networking at provision. The one-shot surface refuses
-/// the same value but points at `experimental.wslc.portMappings`; the
+/// the same value but points at `wslc.portMappings`; the
 /// state-aware provision phase has no such field, so its message must not offer
 /// that escape hatch. Post-provision phases reject it by presence via
 /// [`reject_post_provision_network_mode`] instead, since the posture is fixed
