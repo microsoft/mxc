@@ -107,7 +107,7 @@ impl ApiFailure {
 /// An [`ApiFailure`] describes the platform call behind a failure: `operation`
 /// names the call that failed and `native_code` carries its status as a string
 /// (an HRESULT on Windows, an errno or equivalent elsewhere). It is present
-/// only while such a call was in flight, so a failure MXC raises itself — a
+/// only when such a call was in flight, so a failure MXC raises itself — a
 /// malformed request, a policy rejection, an internal failure — leaves it
 /// unset.
 ///
@@ -502,10 +502,9 @@ mod tests {
         );
     }
 
-    /// `native_code` lives inside `ApiFailure`, so the normal construction path
-    /// cannot set it without an `operation`.
+    /// An `ApiFailure` may name its operation without carrying a status.
     #[test]
-    fn a_native_code_always_carries_an_operation() {
+    fn an_operation_may_omit_its_native_code() {
         let err = MxcError::backend_error("boom")
             .with_api_failure(ApiFailure::new("IsoSessionOps.AddUserAsync"));
         assert_eq!(err.operation(), Some("IsoSessionOps.AddUserAsync"));
@@ -629,8 +628,7 @@ mod tests {
         );
     }
 
-    /// The wire has always allowed a remediation without an operation; this is
-    /// the shape MXC's own refusals now reach it with.
+    /// An MXC-side refusal reaches the envelope with its hint and no operation.
     #[test]
     fn a_remediation_reaches_the_envelope_without_an_operation() {
         let json = serde_json::to_value(
