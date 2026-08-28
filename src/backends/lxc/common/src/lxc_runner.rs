@@ -101,20 +101,37 @@ impl LxcScriptRunner {
                 .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     }
 
+    /// Succeeds when `/etc/hosts` already carries an entry naming `host`.
+    ///
+    /// Matches the name as a whole field, preceded by the whitespace that
+    /// separates it from the address and followed by whitespace or the end of
+    /// the line. The dots in a hostname act as any-character wildcards here,
+    /// which can only make this fire on a name it need not, never miss one
+    /// that is pinned.
+    fn hosts_file_names(host: &str) -> String {
+        format!("grep -Eqi '[[:space:]]{host}([[:space:]]|$)' /etc/hosts 2>/dev/null")
+    }
+
     /// The command the readiness probe runs inside the container.
     ///
     /// With a hostname, it looks that name up using whichever resolver client
     /// the image ships. An image carrying neither client falls back to the
     /// resolver configuration, which is a weaker answer than a lookup and a
     /// better one than a run that could never start.
+    ///
+    /// A name already in `/etc/hosts` is ruled out first. Every lookup client
+    /// reads that file through NSS before it reaches the network, and an
+    /// answer from it would report a container ready that can reach nothing.
     fn build_network_probe_command(hostname: Option<&str>) -> String {
         match hostname {
             Some(host) => format!(
-                "if command -v nslookup >/dev/null 2>&1; then \
+                "if {pinned}; then {resolver}; \
+                 elif command -v nslookup >/dev/null 2>&1; then \
                  nslookup {host} >/dev/null 2>&1; \
                  elif command -v getent >/dev/null 2>&1; then \
                  getent hosts {host} >/dev/null 2>&1; \
                  else {resolver}; fi",
+                pinned = Self::hosts_file_names(host),
                 host = host,
                 resolver = RESOLVER_CONFIGURED_CHECK
             ),
@@ -124,9 +141,13 @@ impl LxcScriptRunner {
 
     /// Poll the container until `attempt` reports its network usable, or until
     /// `timeout` expires.
+    ///
+    /// Each attempt is handed the budget still left, and both the attempt and
+    /// the pause after it are held inside it, which keeps the total within the
+    /// deadline the caller set.
     fn wait_for_network<A>(mut attempt: A, timeout: Duration, logger: &mut Logger) -> bool
     where
-        A: FnMut() -> bool,
+        A: FnMut(Duration) -> bool,
     {
         let start = Instant::now();
         let poll_interval = Duration::from_millis(500);
@@ -134,7 +155,7 @@ impl LxcScriptRunner {
         let _ = writeln!(logger, "Waiting for container network to initialize...");
 
         while start.elapsed() < timeout {
-            if attempt() {
+            if attempt(timeout.saturating_sub(start.elapsed())) {
                 let _ = writeln!(
                     logger,
                     "Container network ready (waited {:.1}s)",
@@ -143,7 +164,7 @@ impl LxcScriptRunner {
                 return true;
             }
 
-            thread::sleep(poll_interval);
+            thread::sleep(poll_interval.min(timeout.saturating_sub(start.elapsed())));
         }
 
         let _ = writeln!(
@@ -338,14 +359,14 @@ impl LxcScriptRunner {
                 logger,
                 |timeout, logger| {
                     Self::wait_for_network(
-                        || {
+                        |remaining| {
                             matches!(
                                 container.attach_run(
                                     &probe_command,
                                     "/",
                                     &[],
                                     true,
-                                    Some(NETWORK_PROBE_ATTEMPT_TIMEOUT),
+                                    Some(NETWORK_PROBE_ATTEMPT_TIMEOUT.min(remaining)),
                                 ),
                                 Ok((0, _, _))
                             )
@@ -1130,12 +1151,16 @@ mod tests {
 
     /// A stand-in for the container's shell.
     ///
-    /// The probe command is an `if`/`elif`/`else` chain, so which capability
+    /// The probe command is an `if`/`elif`/`else` chain, and which capability
     /// decides the answer depends on which branch this guest's shell reaches.
-    /// A lookup branch is taken only when the image ships that client, and the
-    /// last branch reads a file rather than the network.
+    /// A name already in `/etc/hosts` takes the first branch, which reads the
+    /// resolver configuration instead of trusting a lookup. A lookup branch is
+    /// taken only when the image ships that client, and the last branch reads
+    /// a file rather than the network.
     fn guest_answers(command: &str, guest: Guest) -> bool {
-        if command.contains("nslookup") && guest.ships_nslookup {
+        if command.contains("/etc/hosts") && guest.hosts_file_names_the_target {
+            guest.resolver_names_a_server
+        } else if command.contains("nslookup") && guest.ships_nslookup {
             guest.dns_resolves
         } else if command.contains("getent hosts") && guest.ships_getent {
             guest.dns_resolves || guest.hosts_file_names_the_target
@@ -1157,7 +1182,7 @@ mod tests {
         );
         let mut logger = Logger::new(Mode::Buffer);
         LxcScriptRunner::wait_for_network(
-            || guest_answers(&command, guest),
+            |_| guest_answers(&command, guest),
             Duration::from_millis(1),
             &mut logger,
         )
@@ -1205,7 +1230,8 @@ mod tests {
 
     // The chain must degrade, not shortcut. Ordering the file check ahead of a
     // lookup would leave every other test in this module green while making
-    // the probe answer from a file on every container that has one.
+    // the probe answer from a file on every container that has one. The
+    // resolver check appears twice, and the last occurrence is the fallback.
     #[test]
     fn the_probe_prefers_a_lookup_over_the_resolver_configuration() {
         let policy = policy_allowing("api.example.com");
@@ -1220,7 +1246,7 @@ mod tests {
             .find("getent hosts")
             .expect("the probe must offer a second lookup client");
         let file_check_at = command
-            .find("/etc/resolv.conf")
+            .rfind("/etc/resolv.conf")
             .expect("the probe must keep the resolver-configuration fallback");
 
         assert!(
@@ -1249,22 +1275,46 @@ mod tests {
         );
     }
 
-    // The second weakness: `getent hosts` answers from /etc/hosts through NSS
-    // without touching the network, so on an image without nslookup a name in
-    // that file is enough to report ready.
+    // A lookup client reads /etc/hosts through NSS before it reaches the
+    // network. A name answered from that file proves nothing about whether the
+    // container can reach anything, and must not stand in for a resolved name.
     #[test]
-    fn a_name_in_the_hosts_file_is_enough_when_the_image_has_no_nslookup() {
+    fn a_name_in_the_hosts_file_does_not_stand_in_for_a_resolved_name() {
         let policy = policy_allowing("api.example.com");
 
         assert!(
-            readiness_against_guest(
+            !readiness_against_guest(
                 &policy,
                 Guest::stock()
                     .without_nslookup()
                     .with_the_target_in_its_hosts_file()
             ),
-            "getent reads /etc/hosts before the network, so a name in that file is \
-             reported ready on a container that resolves nothing"
+            "a name answered from /etc/hosts reaches no server, and must not report a \
+             container ready whose resolver does not work"
+        );
+    }
+
+    // The same false answer is available to whichever client the image ships,
+    // and the probe must not depend on which one that is. Checking the file
+    // before any lookup makes the answer independent of the client.
+    #[test]
+    fn the_probe_checks_the_hosts_file_before_it_trusts_a_lookup() {
+        let policy = policy_allowing("api.example.com");
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+        );
+
+        let hosts_check_at = command
+            .find("/etc/hosts")
+            .expect("the probe must check whether the name is pinned in /etc/hosts");
+        let lookup_at = command
+            .find("nslookup")
+            .expect("the probe must offer a name lookup");
+
+        assert!(
+            hosts_check_at < lookup_at,
+            "the probe must rule out a pinned name before trusting a lookup client, got: \
+             {command}"
         );
     }
 
@@ -1279,9 +1329,9 @@ mod tests {
         let start = std::time::Instant::now();
 
         let ready = LxcScriptRunner::wait_for_network(
-            || {
+            |remaining| {
                 started_at.push(start.elapsed());
-                std::thread::sleep(attempt_cost);
+                std::thread::sleep(attempt_cost.min(remaining));
                 false
             },
             budget,
@@ -1302,6 +1352,36 @@ mod tests {
                 "an attempt began at {at:?}, after the {budget:?} budget had already passed"
             );
         }
+    }
+
+    // The budget is a deadline for the whole wait, not for its attempts. An
+    // attempt bounded only by its own ceiling, or a pause of a fixed length
+    // after the last one, runs the wait past the time the caller allowed.
+    #[test]
+    fn the_readiness_wait_returns_within_the_budget_it_was_given() {
+        let budget = Duration::from_millis(200);
+        let attempt_ceiling = Duration::from_millis(150);
+        let mut logger = Logger::new(Mode::Buffer);
+        let start = std::time::Instant::now();
+
+        let ready = LxcScriptRunner::wait_for_network(
+            |remaining| {
+                std::thread::sleep(attempt_ceiling.min(remaining));
+                false
+            },
+            budget,
+            &mut logger,
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            !ready,
+            "an attempt that never succeeds must not report ready"
+        );
+        assert!(
+            elapsed < budget + Duration::from_millis(150),
+            "the wait took {elapsed:?} against a {budget:?} budget"
+        );
     }
 
     #[test]
