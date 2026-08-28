@@ -1,0 +1,41 @@
+{
+  "policy": {
+    "version": "0.8.0-alpha",
+    "network": {
+      "allowOutbound": false,
+      "allowLocalNetwork": false,
+      "allowedHosts": [],
+      "blockedHosts": [],
+      "egress": {
+        "default": "deny",
+        "allow": [
+          {
+            "to": [
+              {
+                "cidr": "10.20.0.0/16",
+                "except": ["10.20.30.0/24"]
+              }
+            ],
+            "ports": [
+              {
+                "protocol": "tcp",
+                "port": 443,
+                "endPort": 444
+              }
+            ]
+          }
+        ]
+      },
+      "ingress": {
+        "default": "deny",
+        "hostLoopback": "deny"
+      }
+    }
+  },
+  "command": "echo network",
+  "containment": {
+    "type": "process"
+  },
+  "environment": {},
+  "experimental": false
+}
