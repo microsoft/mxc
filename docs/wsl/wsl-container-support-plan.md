@@ -26,24 +26,24 @@ MXC (Microsoft eXecution Container) runs untrusted code in sandboxed environment
 
 ## Proposed Solution
 
-Add a **WSL Container runner** directly into the existing `wxc-exec.exe` Rust binary, using the **WSLC SDK** as the container runtime interface. When the JSON config specifies `"containment": "wslc"` and the `--experimental` flag is passed, the binary routes to a new `WSLContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
+Add a **WSL Container runner** directly into the existing `wxc-exec.exe` Rust binary, using the **WSLC SDK** as the container runtime interface. When the JSON config specifies `"containment": "wslc"`, the binary routes to a new `WSLContainerRunner` instead of `AppContainerScriptRunner`. The runner calls WSLC SDK C APIs (via Rust FFI bindings) to manage sessions, containers, and process I/O — eliminating the need to build a custom containerd gRPC client or OCI spec builder. This leverages the existing `ScriptRunner` trait and keeps everything in a single binary.
 
 ## How It Works
 
 ```
 Path A — CLI (direct):
-  User: wxc-exec.exe --experimental --debug config.json
+  User: wxc-exec.exe --debug config.json
     └── Clap parses args → loads JSON config → dispatches to WSLContainerRunner
 
 Path B — SDK (programmatic):
-  App calls: spawnSandbox("python3 my_app.py", policy, { experimental: true })
+  App calls: spawnSandbox("python3 my_app.py", policy)
     ├── Builds JSON config with containment = "wslc"
-    └── Spawns wxc-exec.exe --experimental with the config
+    └── Spawns wxc-exec.exe with the config
 
 Both paths converge here:
   wxc-exec.exe (Rust — single binary, multiple backends)
     ├── Parses JSON config → sees containment = "wslc"
-    ├── Checks --experimental flag → creates WSLContainerRunner
+    ├── Creates WSLContainerRunner
     ├── Calls WSLC SDK via Rust FFI bindings:
     │     WslcGetMissingComponents()                         → preflight check
     │     WslcInitSessionSettings()            → init session settings (with storagePath)
@@ -86,20 +86,14 @@ Both paths converge here:
                                      └── I/O via SDK callbacks
 ```
 
-All backends implement the `ScriptRunner` trait. `main.rs` uses `Box<dyn ScriptRunner>` with a `match` on `request.containment`. Experimental backends (Sandbox, WSLC) require the `--experimental` flag:
+All backends implement the `ScriptRunner` trait. `main.rs` uses `Box<dyn ScriptRunner>` with a `match` on `request.containment`. WSLC is a stable backend and needs no `--experimental` gate; the remaining experimental backends (Sandbox, MicroVM, IsolationSession, Hyperlight) still do:
 
 ```rust
 // main.rs — current dispatch
 let mut runner: Box<dyn ScriptRunner> = match request.containment {
     ContainmentBackend::AppContainer => Box::new(AppContainerScriptRunner::new()),
     // ... other stable backends ...
-    ContainmentBackend::Wslc => {
-        if !request.experimental_enabled {
-            eprintln!("Error: WSLC is an experimental feature. Use --experimental flag.");
-            process::exit(1);
-        }
-        Box::new(WslContainerRunner::new(&request.container_config))
-    }
+    ContainmentBackend::Wslc => Box::new(WslContainerRunner::new(&request.container_config)),
 };
 ```
 
@@ -399,10 +393,8 @@ from the config:
   "containment": "wslc",
   "process": { "commandLine": "echo hello" },
   "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "alpine:latest"
-    }
+  "wslc": {
+    "image": "alpine:latest"
   }
 }
 ```
@@ -423,10 +415,8 @@ future WSLC SDK release.
   "containment": "wslc",
   "process": { "commandLine": "cat /etc/os-release" },
   "network": { "defaultPolicy": "allow" },
-  "experimental": {
-    "wslc": {
-      "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
-    }
+  "wslc": {
+    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0"
   }
 }
 ```
@@ -457,11 +447,9 @@ format is auto-detected.
   "containment": "wslc",
   "process": { "commandLine": "echo 'Hello from tar!'" },
   "network": { "defaultPolicy": "block" },
-  "experimental": {
-    "wslc": {
-      "image": "my-image:latest",
-      "imageTarPath": "C:\\workspace\\alpine.tar"
-    }
+  "wslc": {
+    "image": "my-image:latest",
+    "imageTarPath": "C:\\workspace\\alpine.tar"
   }
 }
 ```
@@ -551,11 +539,11 @@ msiexec /i wsl.2.9.9.0.x64.msi
 # Verify WSLC is available
 wslc container run hello-world
 
-# Run a Linux command via MXC (requires --experimental)
-wxc-exec.exe --experimental --debug wslc-config.json
+# Run a Linux command via MXC (needs a build with the `wslc` Cargo feature)
+wxc-exec.exe --debug wslc-config.json
 
 # Or programmatically via SDK
-spawnSandbox("python3 app.py", policy, { experimental: true })
+spawnSandbox("python3 app.py", policy)
 
 # Existing Windows AppContainer usage is unchanged
 wxc-exec.exe --debug windows-app.json

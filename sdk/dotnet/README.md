@@ -244,7 +244,7 @@ require schema `0.8.0-alpha` or later.
 
 #### WSL Container options
 
-`WslcContainment` selects the experimental WSLC backend and carries its image,
+`WslcContainment` selects the WSLC backend and carries its image,
 resource, storage, GPU, and host-to-container TCP port settings:
 
 ```csharp
@@ -256,7 +256,6 @@ var request = new SandboxRequest(
     },
     "python3 -c 'print(42)'")
 {
-    Experimental = true,
     Containment = new WslcContainment
     {
         Image = "python:3.12",
@@ -274,8 +273,8 @@ var request = new SandboxRequest(
 ```
 
 The image must already be cached unless `ImageTarPath` is supplied. The image
-store wins over the tar when both identify an already-cached image. WSLC is
-experimental, so `Experimental` is required; the native unit must also be built
+store wins over the tar when both identify an already-cached image. WSLC is a
+stable backend and needs no `Experimental` opt-in; the native unit must be built
 with WSLC support or execution returns `BackendUnavailable`.
 
 ### Network proxy

@@ -306,13 +306,11 @@ File:line citations reference paths under `src/backends/<backend>/...` and `src/
 >
 > ```json
 > {
->   "experimental": {
->     "wslc": {
->       "image": "python:3.12",
->       "portMappings": [
->         { "windowsPort": 3000, "containerPort": 3000, "protocol": "tcp" }
->       ]
->     }
+>   "wslc": {
+>     "image": "python:3.12",
+>     "portMappings": [
+>       { "windowsPort": 3000, "containerPort": 3000, "protocol": "tcp" }
+>     ]
 >   }
 > }
 > ```
@@ -552,5 +550,5 @@ Item **LXC Network #24** (nftables backend) is gated on a real user signal — s
 ## Notes
 
 - **Issue tracking**: [open issues](https://github.com/microsoft/mxc/issues?q=is%3Aissue+is%3Aopen). None of the above are filed yet.
-- **Promotion path**: Bubblewrap and WSLC are both still under `experimental` in the schema; see `docs/versioning.md` for the migration mechanics required for each promotion.
+- **Promotion path**: WSLC has been promoted to the stable surface — its settings live in the top-level `wslc` block and no longer require `--experimental`. Bubblewrap is still under `experimental` in the schema; see `docs/versioning.md` for the migration mechanics required for its promotion.
 - **Labels**: re-use `Container-WSLC` and `Area-Executor-LXC`; propose adding `Container-Bubblewrap` (Bwrap #35).
