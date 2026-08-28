@@ -1072,21 +1072,75 @@ mod tests {
         (response, destroyed)
     }
 
+    /// What a container ships and what works inside it.
+    #[derive(Clone, Copy)]
+    struct Guest {
+        ships_nslookup: bool,
+        ships_getent: bool,
+        /// A name lookup reaches a server and comes back answered.
+        dns_resolves: bool,
+        /// `/etc/hosts` carries the name, which `getent hosts` answers from
+        /// through NSS without touching the network.
+        hosts_file_names_the_target: bool,
+        /// `/etc/resolv.conf` names a server, which says nothing about whether
+        /// that server answers.
+        resolver_names_a_server: bool,
+    }
+
+    impl Guest {
+        /// A stock image: both lookup clients present, nothing working yet.
+        fn stock() -> Self {
+            Guest {
+                ships_nslookup: true,
+                ships_getent: true,
+                dns_resolves: false,
+                hosts_file_names_the_target: false,
+                resolver_names_a_server: false,
+            }
+        }
+
+        fn with_working_dns(mut self) -> Self {
+            self.dns_resolves = true;
+            self.resolver_names_a_server = true;
+            self
+        }
+
+        fn with_resolver_pointing_nowhere(mut self) -> Self {
+            self.dns_resolves = false;
+            self.resolver_names_a_server = true;
+            self
+        }
+
+        fn with_the_target_in_its_hosts_file(mut self) -> Self {
+            self.hosts_file_names_the_target = true;
+            self
+        }
+
+        fn without_nslookup(mut self) -> Self {
+            self.ships_nslookup = false;
+            self
+        }
+
+        fn without_lookup_clients(mut self) -> Self {
+            self.ships_nslookup = false;
+            self.ships_getent = false;
+            self
+        }
+    }
+
     /// A stand-in for the container's shell.
     ///
-    /// Answers the probe command by the capability that command exercises:
-    /// a command that only inspects interface addresses needs `has_address`,
-    /// and one that looks a name up or reads the resolver configuration needs
-    /// `resolver_works`.
-    fn guest_answers(command: &str, has_address: bool, resolver_works: bool) -> bool {
-        let needs_resolver = command.contains("nslookup")
-            || command.contains("getent")
-            || command.contains("resolv.conf");
-
-        if needs_resolver {
-            resolver_works
+    /// The probe command is an `if`/`elif`/`else` chain, so which capability
+    /// decides the answer depends on which branch this guest's shell reaches.
+    /// A lookup branch is taken only when the image ships that client, and the
+    /// last branch reads a file rather than the network.
+    fn guest_answers(command: &str, guest: Guest) -> bool {
+        if command.contains("nslookup") && guest.ships_nslookup {
+            guest.dns_resolves
+        } else if command.contains("getent hosts") && guest.ships_getent {
+            guest.dns_resolves || guest.hosts_file_names_the_target
         } else {
-            has_address
+            guest.resolver_names_a_server
         }
     }
 
@@ -1097,17 +1151,13 @@ mod tests {
         }
     }
 
-    fn readiness_against_guest(
-        policy: &ContainerPolicy,
-        has_address: bool,
-        resolver_works: bool,
-    ) -> bool {
+    fn readiness_against_guest(policy: &ContainerPolicy, guest: Guest) -> bool {
         let command = LxcScriptRunner::build_network_probe_command(
             LxcScriptRunner::readiness_probe_hostname(policy),
         );
         let mut logger = Logger::new(Mode::Buffer);
         LxcScriptRunner::wait_for_network(
-            || guest_answers(&command, has_address, resolver_works),
+            || guest_answers(&command, guest),
             Duration::from_millis(1),
             &mut logger,
         )
@@ -1117,11 +1167,11 @@ mod tests {
     // answers at 81ms while nothing resolves for another 9.4 seconds, and the
     // workload starts against an empty /etc/resolv.conf.
     #[test]
-    fn a_container_with_an_address_but_no_resolver_is_not_ready() {
+    fn a_container_whose_resolver_does_not_work_is_not_ready() {
         let policy = policy_allowing("api.example.com");
 
         assert!(
-            !readiness_against_guest(&policy, true, false),
+            !readiness_against_guest(&policy, Guest::stock()),
             "a container whose resolver does not work yet must not be reported ready; an \
              address alone is what let the workload start against an empty /etc/resolv.conf"
         );
@@ -1134,9 +1184,124 @@ mod tests {
         let policy = policy_allowing("api.example.com");
 
         assert!(
-            readiness_against_guest(&policy, true, true),
+            readiness_against_guest(&policy, Guest::stock().with_working_dns()),
             "a container that can resolve names must be reported ready"
         );
+    }
+
+    // A resolver naming a server that never answers is the case the address
+    // poll already got wrong. Reaching the file-reading branch first would
+    // report ready on a container that resolves nothing.
+    #[test]
+    fn a_resolver_pointing_nowhere_is_not_ready_while_a_lookup_client_exists() {
+        let policy = policy_allowing("api.example.com");
+
+        assert!(
+            !readiness_against_guest(&policy, Guest::stock().with_resolver_pointing_nowhere()),
+            "a container whose resolver names an unreachable server must not be reported \
+             ready while the image ships a client that could have asked it"
+        );
+    }
+
+    // The chain must degrade, not shortcut. Ordering the file check ahead of a
+    // lookup would leave every other test in this module green while making
+    // the probe answer from a file on every container that has one.
+    #[test]
+    fn the_probe_prefers_a_lookup_over_the_resolver_configuration() {
+        let policy = policy_allowing("api.example.com");
+        let command = LxcScriptRunner::build_network_probe_command(
+            LxcScriptRunner::readiness_probe_hostname(&policy),
+        );
+
+        let lookup_at = command
+            .find("nslookup")
+            .expect("the probe must offer a name lookup");
+        let getent_at = command
+            .find("getent hosts")
+            .expect("the probe must offer a second lookup client");
+        let file_check_at = command
+            .find("/etc/resolv.conf")
+            .expect("the probe must keep the resolver-configuration fallback");
+
+        assert!(
+            lookup_at < getent_at && getent_at < file_check_at,
+            "the probe must try a lookup before reading the resolver configuration, got: \
+             {command}"
+        );
+    }
+
+    // Pins a known weakness rather than a desired one: on an image carrying
+    // neither lookup client the probe can only read the resolver
+    // configuration, so it reports ready on a container that resolves nothing.
+    #[test]
+    fn an_image_without_a_lookup_client_is_ready_on_configuration_alone() {
+        let policy = policy_allowing("api.example.com");
+
+        assert!(
+            readiness_against_guest(
+                &policy,
+                Guest::stock()
+                    .without_lookup_clients()
+                    .with_resolver_pointing_nowhere()
+            ),
+            "the fallback answers from a file, so an image with no lookup client is \
+             reported ready on configuration alone"
+        );
+    }
+
+    // The second weakness: `getent hosts` answers from /etc/hosts through NSS
+    // without touching the network, so on an image without nslookup a name in
+    // that file is enough to report ready.
+    #[test]
+    fn a_name_in_the_hosts_file_is_enough_when_the_image_has_no_nslookup() {
+        let policy = policy_allowing("api.example.com");
+
+        assert!(
+            readiness_against_guest(
+                &policy,
+                Guest::stock()
+                    .without_nslookup()
+                    .with_the_target_in_its_hosts_file()
+            ),
+            "getent reads /etc/hosts before the network, so a name in that file is \
+             reported ready on a container that resolves nothing"
+        );
+    }
+
+    // The deadline is tested before an attempt, never during one, so a late
+    // attempt is what would push the total past the budget.
+    #[test]
+    fn the_readiness_wait_starts_no_attempt_after_its_budget_has_passed() {
+        let budget = Duration::from_millis(200);
+        let attempt_cost = Duration::from_millis(150);
+        let mut logger = Logger::new(Mode::Buffer);
+        let mut started_at = Vec::new();
+        let start = std::time::Instant::now();
+
+        let ready = LxcScriptRunner::wait_for_network(
+            || {
+                started_at.push(start.elapsed());
+                std::thread::sleep(attempt_cost);
+                false
+            },
+            budget,
+            &mut logger,
+        );
+
+        assert!(
+            !ready,
+            "an attempt that never succeeds must not report ready"
+        );
+        assert!(
+            !started_at.is_empty(),
+            "the wait must make at least one attempt before giving up"
+        );
+        for at in &started_at {
+            assert!(
+                *at < budget,
+                "an attempt began at {at:?}, after the {budget:?} budget had already passed"
+            );
+        }
     }
 
     #[test]
