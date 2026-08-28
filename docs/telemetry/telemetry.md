@@ -147,7 +147,7 @@ targets for this work.
 
 The provider-qualified event identities include
 `Microsoft.MXC/MXC.Execution`, `Microsoft.MXC/MXC.Error`, and
-`Microsoft.MXC/MXC.Verbose`. `Microsoft.MXC` is the TraceLogging provider
+`Microsoft.MXC/MXC.VerboseDenials`. `Microsoft.MXC` is the TraceLogging provider
 name. The M-ETW requirement events listed above share that provider.
 
 ### MXC.Execution
@@ -193,7 +193,7 @@ Emitted on execution errors.
 > attribution fields, the `error_type` category, and the numeric `exit_code` —
 > never the message string itself.
 
-### MXC.Verbose
+### MXC.VerboseDenials
 
 Emitted when a telemetry-enabled ProcessContainer run successfully produces a
 Learning Mode `captureDenials` verbose logging artifact. MXC reads the
