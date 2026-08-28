@@ -52,10 +52,19 @@ impl NetworkPlan {
     }
 }
 
-/// Decide the topology, splitting on the schema first so neither schema's
-/// rules have to reason about the other's.
-pub(crate) fn plan_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> NetworkPlan {
-    if uses_directional_schema {
+/// True when the configuration stated its network posture in the 0.8 keys.
+///
+/// The parser chooses the format from the keys the caller actually sent and
+/// fills these sections only for the directional format, so a 0.8 request
+/// written with 0.7 network fields arrives here with them empty.
+pub(crate) fn uses_directional_keys(policy: &ContainerPolicy) -> bool {
+    policy.network_egress.is_some() || policy.network_ingress.is_some()
+}
+
+/// 0.8.0 configurations files can contain 0.7.0 network fields.
+/// Need to check both sets to determine the networking scenario.
+pub(crate) fn plan_network(policy: &ContainerPolicy) -> NetworkPlan {
+    if uses_directional_keys(policy) {
         plan_directional(policy)
     } else {
         plan_legacy(policy)
@@ -75,10 +84,8 @@ fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
         return NetworkPlan::Filtered;
     }
 
-    // A 0.8 request may state its posture in the legacy fields, and the parser
-    // leaves these sections empty when it does.  Absence means the posture was
-    // stated elsewhere, so fall back to the legacy fields rather than reading
-    // it as a denial.
+    // A policy that states one direction and not the other reads the missing
+    // half from the legacy fields rather than as a denial.
     let egress_permits_nothing = match policy.network_egress.as_ref() {
         Some(egress) => egress.default == NetworkAction::Deny && egress.allow.is_empty(),
         None => matches!(policy.default_network_policy, NetworkPolicy::Block),
@@ -116,8 +123,8 @@ fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
 /// Wider than [`NetworkPlan::installs_firewall`]: host lists resolve names,
 /// and a proxy has to be reachable, even where the declared mode installs
 /// nothing.
-pub(crate) fn needs_network(policy: &ContainerPolicy, uses_directional_schema: bool) -> bool {
-    plan_network(policy, uses_directional_schema).installs_firewall()
+pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
+    plan_network(policy).installs_firewall()
         || !policy.allowed_hosts.is_empty()
         || !policy.blocked_hosts.is_empty()
         || policy.network_proxy.is_enabled()
@@ -414,7 +421,7 @@ pub struct NetworkIptablesManager {
     /// True when the request declared the directional (0.8) network schema.
     /// Defaults to the legacy schema, so a caller that never sets it keeps the
     /// 0.7 behavior.
-    uses_directional_schema: bool,
+    uses_directional_keys: bool,
     /// Chains and OUTPUT hooks this manager successfully created, so teardown
     /// and rollback remove only resources this attempt actually installed.
     created: CreatedResources,
@@ -538,7 +545,7 @@ impl NetworkIptablesManager {
             rules_applied: false,
             preserve_policy: false,
             hook_point,
-            uses_directional_schema: false,
+            uses_directional_keys: false,
             created: CreatedResources::default(),
             proxy_pin: None,
         }
@@ -566,8 +573,8 @@ impl NetworkIptablesManager {
     }
 
     /// Record which network schema the request declared.
-    pub fn set_directional_schema(&mut self, uses_directional_schema: bool) {
-        self.uses_directional_schema = uses_directional_schema;
+    pub fn set_uses_directional_keys(&mut self, uses_directional_keys: bool) {
+        self.uses_directional_keys = uses_directional_keys;
     }
 
     /// The hosts-file pin a proxied container must be given before it runs, or
@@ -1133,10 +1140,10 @@ impl NetworkIptablesManager {
     fn build_policy_rule_args(
         chain_name: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> FirewallRuleArgs {
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
-        Self::build_policy_rules_logged(chain_name, policy, uses_directional_schema, &mut logger)
+        Self::build_policy_rules_logged(chain_name, policy, uses_directional_keys, &mut logger)
             .expect(
                 "test policy should not pair an accepting default with an unresolvable block entry",
             )
@@ -1146,9 +1153,9 @@ impl NetworkIptablesManager {
     /// legacy schema.
     fn stated_egress(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&NetworkEgressPolicy> {
-        if uses_directional_schema {
+        if uses_directional_keys {
             policy.network_egress.as_ref()
         } else {
             None
@@ -1162,9 +1169,9 @@ impl NetworkIptablesManager {
     /// DROP regardless of `network.egress.default`.
     fn effective_default_policy(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> NetworkPolicy {
-        match Self::stated_egress(policy, uses_directional_schema) {
+        match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => match egress.default {
                 NetworkAction::Allow => NetworkPolicy::Allow,
                 NetworkAction::Deny => NetworkPolicy::Block,
@@ -1179,8 +1186,8 @@ impl NetworkIptablesManager {
     /// The two schema shapes are alternatives, never a union: the parser
     /// rejects a config mixing them, and the directional path never writes
     /// the legacy host lists.
-    fn lower_egress(policy: &ContainerPolicy, uses_directional_schema: bool) -> Vec<EgressEntry> {
-        match Self::stated_egress(policy, uses_directional_schema) {
+    fn lower_egress(policy: &ContainerPolicy, uses_directional_keys: bool) -> Vec<EgressEntry> {
+        match Self::stated_egress(policy, uses_directional_keys) {
             Some(egress) => Self::lower_directional_egress(egress),
             None => Self::lower_legacy_hosts(policy),
         }
@@ -1382,14 +1389,14 @@ impl NetworkIptablesManager {
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         logger: &mut Logger,
     ) -> Result<FirewallRuleArgs, String> {
         let default_permits = matches!(policy.default_network_policy, NetworkPolicy::Allow);
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
-        let entries = Self::lower_egress(policy, uses_directional_schema);
+        let entries = Self::lower_egress(policy, uses_directional_keys);
         for entry in &entries {
             let host = entry.destination.as_str();
             let action = entry.action;
@@ -1877,8 +1884,8 @@ impl NetworkIptablesManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_schema = self.uses_directional_schema;
-        let plan = plan_network(policy, uses_directional_schema);
+        let uses_directional_keys = self.uses_directional_keys;
+        let plan = plan_network(policy);
         if !plan.installs_firewall() {
             if plan == NetworkPlan::ProxyWithoutEnforcement {
                 return Err(
@@ -1915,7 +1922,7 @@ impl NetworkIptablesManager {
 
         let outcome = self.apply_firewall_rules_inner(
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             &proxy_endpoints,
             logger,
         );
@@ -1990,14 +1997,14 @@ impl NetworkIptablesManager {
     fn apply_firewall_rules_inner(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
     ) -> Result<CreatedResources, (String, CreatedResources)> {
         let mut created = CreatedResources::default();
         match self.install_firewall_rules(
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             proxy_endpoints,
             logger,
             &mut created,
@@ -2016,7 +2023,7 @@ impl NetworkIptablesManager {
     fn install_firewall_rules(
         &self,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         proxy_endpoints: &[ProxyEndpoint],
         logger: &mut Logger,
         created: &mut CreatedResources,
@@ -2113,7 +2120,7 @@ impl NetworkIptablesManager {
             let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
 
             // Only the legacy schema carries the unconditional port 53 accept.
-            if !uses_directional_schema {
+            if !uses_directional_keys {
                 base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
             }
             self.run_iptables_rule_args(&base_rules, logger)?;
@@ -2131,7 +2138,7 @@ impl NetworkIptablesManager {
             let policy_rules = Self::build_policy_rules_logged(
                 &self.chain_name,
                 policy,
-                uses_directional_schema,
+                uses_directional_keys,
                 logger,
             )?;
             self.run_iptables_rule_args(&policy_rules.ipv4, logger)?;
@@ -2149,7 +2156,7 @@ impl NetworkIptablesManager {
         // Append default policy at end of each chain.
         let default_rule = Self::build_default_policy_rule_arg(
             &self.chain_name,
-            Self::effective_default_policy(policy, uses_directional_schema),
+            Self::effective_default_policy(policy, uses_directional_keys),
             proxy_mode,
         );
         let default_args: Vec<&str> = default_rule.iter().map(String::as_str).collect();
@@ -4166,12 +4173,32 @@ mod tests {
             };
 
             assert_eq!(
-                plan_network(&policy, false).installs_firewall(),
+                plan_network(&policy).installs_firewall(),
                 expected,
                 "{label}: a 0.7 policy is answered by the mode it names, not by the \
                  hosts it happens to list"
             );
         }
+    }
+
+    // The parser picks the network format from the keys the caller sent, not
+    // from the version it declared, so a 0.8 request written with 0.7 network
+    // keys arrives with the directional sections empty. Judging it by the
+    // version sends it down rules that never read `enforcementMode`.
+    #[test]
+    fn a_v08_request_written_with_v07_keys_is_answered_by_the_v07_rules() {
+        let policy = ContainerPolicy {
+            network_enforcement_mode: NetworkEnforcementMode::Capabilities,
+            network_mode_specified: true,
+            default_network_policy: NetworkPolicy::Allow,
+            ..Default::default()
+        };
+
+        assert!(
+            !plan_network(&policy).installs_firewall(),
+            "a request carrying 0.7 network keys is answered by the mode it names, \
+             whatever version it declares"
+        );
     }
 
     #[test]
@@ -4202,17 +4229,23 @@ mod tests {
         };
 
         assert!(
-            plan_network(&policy, true).installs_firewall(),
+            plan_network(&policy).installs_firewall(),
             "a stated 0.8 posture must install the firewall even though enforcementMode \
              is absent from the 0.8 schema and defaults to capabilities"
         );
     }
 
+    // The parser fills both directional sections for a 0.8 request even when it
+    // names no network block, and their defaults deny everything.
     #[test]
     fn a_v08_request_naming_no_network_fields_is_given_no_interface() {
-        let policy = ContainerPolicy::default();
+        let policy = ContainerPolicy {
+            network_egress: Some(NetworkEgressPolicy::default()),
+            network_ingress: Some(wxc_common::models::NetworkIngressPolicy::default()),
+            ..Default::default()
+        };
 
-        let plan = plan_network(&policy, true);
+        let plan = plan_network(&policy);
         assert!(plan.omits_interface());
         assert!(!plan.installs_firewall());
     }
@@ -4228,7 +4261,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!plan_network(&policy, true).omits_interface());
+        assert!(!plan_network(&policy).omits_interface());
     }
 
     #[test]
@@ -4242,7 +4275,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(!plan_network(&policy, true).omits_interface());
+        assert!(!plan_network(&policy).omits_interface());
     }
 
     // Resolving a host name and reaching a proxy both need the interface up,
@@ -4252,8 +4285,8 @@ mod tests {
         let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
         policy.blocked_hosts = vec!["example.com".to_string()];
 
-        assert!(!plan_network(&policy, false).installs_firewall());
-        assert!(needs_network(&policy, false));
+        assert!(!plan_network(&policy).installs_firewall());
+        assert!(needs_network(&policy));
     }
 
     // `run_internal` reads these two predicates at separate points: the plan
@@ -4311,10 +4344,10 @@ mod tests {
                             ..Default::default()
                         };
 
-                        if plan_network(&policy, directional).omits_interface() {
+                        if plan_network(&policy).omits_interface() {
                             omitted += 1;
                             assert!(
-                                !needs_network(&policy, directional),
+                                !needs_network(&policy),
                                 "no interface means no address, yet this policy would treat a \
                                  missing address as fatal: directional={directional}, \
                                  egress={egress:?}, ingress={ingress:?}, bits={bits:05b}"

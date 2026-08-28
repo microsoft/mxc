@@ -623,11 +623,11 @@ fn icmp_uses_the_family_specific_protocol_without_a_port() {
 fn appended_ipv4_chain_rules(
     container: &str,
     policy: &ContainerPolicy,
-    uses_directional_schema: bool,
+    uses_directional_keys: bool,
 ) -> Vec<Vec<String>> {
     let fake = super::test_firewall::install();
     let mut manager = NetworkIptablesManager::new(container, EgressHookPoint::ContainerNetns(4242));
-    manager.set_directional_schema(uses_directional_schema);
+    manager.set_uses_directional_keys(uses_directional_keys);
     let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
     let _ = fake.forget_issued();
 
@@ -827,7 +827,7 @@ fn a_parsed_v08_request_without_a_network_section_drops_the_dns_exemption() {
     );
 
     assert!(
-        !plan_network(&policy, true).installs_firewall(),
+        !plan_network(&policy).installs_firewall(),
         "input=0.8 with no network section; expected no chain at all, so no rule can open DNS"
     );
 }

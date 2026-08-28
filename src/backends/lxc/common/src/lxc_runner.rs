@@ -18,7 +18,7 @@ use crate::filesystem_mounts;
 use crate::lxc_bindings::{LxcContainer, StartNetwork};
 use crate::network_ingress::IngressManager;
 use crate::network_iptables::{
-    needs_network, plan_network, EgressHookPoint, NetworkIptablesManager,
+    needs_network, plan_network, uses_directional_keys, EgressHookPoint, NetworkIptablesManager,
 };
 use crate::signal_cleanup;
 
@@ -224,9 +224,8 @@ impl LxcScriptRunner {
             }
         }
 
-        let uses_directional_schema =
-            wxc_common::supports_directional_network(&request.schema_version);
-        let plan = plan_network(&request.policy, uses_directional_schema);
+        let uses_directional_keys = uses_directional_keys(&request.policy);
+        let plan = plan_network(&request.policy);
 
         // Create container handle
         let container = LxcContainer::new(&container_name, None);
@@ -293,7 +292,7 @@ impl LxcScriptRunner {
         }
         let _ = writeln!(logger, "Container started successfully.");
 
-        let needs_network = needs_network(&request.policy, uses_directional_schema);
+        let needs_network = needs_network(&request.policy);
 
         if needs_network {
             // Fail closed: proceeding without an IP silently breaks DNS and produces
@@ -356,7 +355,7 @@ impl LxcScriptRunner {
         };
         let mut fw_manager = NetworkIptablesManager::new(&container_name, hook_point);
         fw_manager.set_preserve_policy(!self.cleanup_policy);
-        fw_manager.set_directional_schema(uses_directional_schema);
+        fw_manager.set_uses_directional_keys(uses_directional_keys);
 
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
@@ -379,7 +378,7 @@ impl LxcScriptRunner {
         let mut ingress_manager: Option<IngressManager> = None;
 
         if let Some(pid) = netns_pid {
-            let mut mgr = IngressManager::new(&container_name, pid, uses_directional_schema);
+            let mut mgr = IngressManager::new(&container_name, pid, uses_directional_keys);
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {

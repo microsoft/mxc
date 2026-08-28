@@ -187,7 +187,7 @@ pub struct IngressManager {
     /// Required at construction: unlike the egress manager there is no legacy
     /// caller to default for, and a run that forgot to state it would silently
     /// enforce the wrong schema.
-    uses_directional_schema: bool,
+    uses_directional_keys: bool,
 }
 
 /// The outcome of a single `iptables`/`ip6tables` invocation, structured so the
@@ -415,7 +415,7 @@ impl IngressManager {
     ///
     /// The PID is required: the chain is enforced inside the container's own
     /// netns, so there is no way to install or probe it without one.
-    pub fn new(container_name: &str, netns_pid: u32, uses_directional_schema: bool) -> Self {
+    pub fn new(container_name: &str, netns_pid: u32, uses_directional_keys: bool) -> Self {
         Self {
             chain_name: ingress_chain_name_for(container_name),
             netns_pid,
@@ -424,7 +424,7 @@ impl IngressManager {
             v4_hooked: false,
             v6_hooked: false,
             preserve_policy: false,
-            uses_directional_schema,
+            uses_directional_keys,
         }
     }
 
@@ -509,9 +509,9 @@ impl IngressManager {
     /// legacy schema.
     fn stated_ingress(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&NetworkIngressPolicy> {
-        if uses_directional_schema {
+        if uses_directional_keys {
             policy.network_ingress.as_ref()
         } else {
             None
@@ -526,9 +526,9 @@ impl IngressManager {
     /// LXC's single inbound chain refuses either `allow` value alike.
     fn permissive_inbound_field(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
     ) -> Option<&'static str> {
-        if let Some(ingress) = Self::stated_ingress(policy, uses_directional_schema) {
+        if let Some(ingress) = Self::stated_ingress(policy, uses_directional_keys) {
             if ingress.default == NetworkAction::Allow {
                 return Some("network.ingress.default");
             }
@@ -551,8 +551,8 @@ impl IngressManager {
         policy: &ContainerPolicy,
         logger: &mut Logger,
     ) -> Result<bool, String> {
-        let uses_directional_schema = self.uses_directional_schema;
-        if !plan_network(policy, uses_directional_schema).installs_firewall() {
+        let uses_directional_keys = self.uses_directional_keys;
+        if !plan_network(policy).installs_firewall() {
             logger.log_line("Network policy requests no firewall; skipping ingress chain.");
             return Ok(true);
         }
@@ -562,7 +562,7 @@ impl IngressManager {
         // claimed is a promise to either enforce the field or reject it.
         // Unconditional: we always have a real container netns to hook (the PID
         // is mandatory), so there is no inert path that could safely emit it.
-        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_schema) {
+        if let Some(field) = Self::permissive_inbound_field(policy, uses_directional_keys) {
             return Err(format!(
                 "{field} asks for permissive inbound, which is not yet implemented for \
                  the LXC firewall path. LXC has a single inbound chain and the policy \
@@ -578,7 +578,7 @@ impl IngressManager {
             "Creating inbound iptables chain: {}",
             self.chain_name
         ));
-        let inbound_field = if uses_directional_schema {
+        let inbound_field = if uses_directional_keys {
             "network.ingress"
         } else {
             "allowLocalNetwork"
@@ -624,7 +624,7 @@ impl IngressManager {
         let ipv4_rules = Self::build_ingress_rules(
             &self.chain_name,
             policy,
-            uses_directional_schema,
+            uses_directional_keys,
             IpFamily::V4,
         );
 
@@ -646,7 +646,7 @@ impl IngressManager {
             let ipv6_rules = Self::build_ingress_rules(
                 &self.chain_name,
                 policy,
-                uses_directional_schema,
+                uses_directional_keys,
                 IpFamily::V6,
             );
             self.install_family(IpFamily::V6, &ipv6_rules, &mut runner, logger)?;
@@ -797,7 +797,7 @@ impl IngressManager {
     fn build_ingress_rules(
         chain: &str,
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         family: IpFamily,
     ) -> IngressRules {
         fn argv(args: &[&str]) -> Vec<String> {
@@ -852,7 +852,7 @@ impl IngressManager {
         // Accept or drop NEW inbound connections to the container's listening
         // sockets. A permissive request is refused before any rule is built.
         let inbound_verb =
-            if Self::permissive_inbound_field(policy, uses_directional_schema).is_some() {
+            if Self::permissive_inbound_field(policy, uses_directional_keys).is_some() {
                 accept
             } else {
                 drop
@@ -1466,15 +1466,11 @@ mod tests {
     /// exact install order while the builder keeps body and hook separate.
     fn full_sequence(
         policy: &ContainerPolicy,
-        uses_directional_schema: bool,
+        uses_directional_keys: bool,
         family: IpFamily,
     ) -> Vec<Vec<String>> {
-        let rules = IngressManager::build_ingress_rules(
-            TEST_CHAIN,
-            policy,
-            uses_directional_schema,
-            family,
-        );
+        let rules =
+            IngressManager::build_ingress_rules(TEST_CHAIN, policy, uses_directional_keys, family);
         let mut seq = vec![vec!["-N".to_string(), TEST_CHAIN.to_string()]];
         seq.extend(rules.body.iter().cloned());
         seq.push(rules.hook.clone());
@@ -2078,7 +2074,7 @@ mod tests {
     fn a_lan_inbound_refusal_does_not_give_a_host_loopback_rationale() {
         let mut logger = Logger::new(wxc_common::logger::Mode::Buffer);
 
-        for (policy, uses_directional_schema, field) in [
+        for (policy, uses_directional_keys, field) in [
             (
                 directional_ingress(NetworkAction::Allow, NetworkAction::Deny),
                 true,
@@ -2086,7 +2082,7 @@ mod tests {
             ),
             (permissive_firewall_policy(), false, "allowLocalNetwork"),
         ] {
-            let mut mgr = IngressManager::new("lan-inbound", 42, uses_directional_schema);
+            let mut mgr = IngressManager::new("lan-inbound", 42, uses_directional_keys);
             let msg = mgr
                 .apply_firewall_rules(&policy, &mut logger)
                 .expect_err("permissive inbound must still be refused");
@@ -2913,7 +2909,7 @@ mod tests {
             let policy = legacy_firewall_mode_with_permissive_egress(mode);
 
             assert!(
-                plan_network(&policy, false).installs_firewall(),
+                plan_network(&policy).installs_firewall(),
                 "{label}: a config naming a firewall enforcement mode is owed the inbound \
                  deny chain even with nothing to restrict outbound"
             );
@@ -2929,7 +2925,7 @@ mod tests {
             legacy_firewall_mode_with_permissive_egress(NetworkEnforcementMode::Capabilities);
 
         assert!(
-            !plan_network(&policy, false).installs_firewall(),
+            !plan_network(&policy).installs_firewall(),
             "a policy naming no firewall mode, no posture, no hosts and no proxy has \
              nothing inbound to enforce"
         );
@@ -2943,7 +2939,7 @@ mod tests {
         policy.default_network_policy = NetworkPolicy::Allow;
         policy.network_egress = Some(Default::default());
 
-        assert!(plan_network(&policy, true).installs_firewall());
+        assert!(plan_network(&policy).installs_firewall());
     }
 
     #[test]
@@ -2951,6 +2947,6 @@ mod tests {
         let mut policy = directional_ingress(NetworkAction::Deny, NetworkAction::Deny);
         policy.network_egress = Some(Default::default());
 
-        assert!(!plan_network(&policy, true).installs_firewall());
+        assert!(!plan_network(&policy).installs_firewall());
     }
 }
