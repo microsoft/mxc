@@ -279,21 +279,21 @@ impl LxcContainer {
             })
     }
 
-    /// Start the container, applying `defines` to this start alone.
+    /// Start the container, applying `config_overrides` to this start alone.
     ///
     /// Each pair becomes an `lxc-start -s KEY=VAL` argument. LXC reads those
     /// in place of the container config's own values without writing to that
     /// file, so a value chosen for one run does not reach the next run over
     /// the same container id.
-    pub fn start(&self, defines: &[(&str, &str)]) -> Result<(), String> {
-        Self::run_status(self.start_command(defines), "lxc-start")
+    pub fn start(&self, config_overrides: &[(&str, &str)]) -> Result<(), String> {
+        Self::run_status(self.start_command(config_overrides), "lxc-start")
     }
 
     /// The argv [`Self::start`] runs, built apart from running it so a test can
     /// read the flags without an LXC host.
-    fn start_command(&self, defines: &[(&str, &str)]) -> std::process::Command {
+    fn start_command(&self, config_overrides: &[(&str, &str)]) -> std::process::Command {
         let mut cmd = self.lxc_command("lxc-start");
-        for (key, value) in defines {
+        for (key, value) in config_overrides {
             cmd.arg("-s").arg(format!("{}={}", key, value));
         }
         cmd
@@ -526,7 +526,7 @@ mod tests {
         );
         assert!(
             !plain.iter().any(|a| a == "-s"),
-            "a run that overrides nothing must define nothing, got {plain:?}"
+            "a run that overrides nothing must pass no -s, got {plain:?}"
         );
 
         let overridden: Vec<String> = container
