@@ -443,35 +443,6 @@ if (!tierMatch) {
   compare("isolation-tier wire names", managedTiers, rustTiers);
 }
 
-const rustStateAware = read(
-  "src",
-  "core",
-  "mxc_engine",
-  "src",
-  "state_aware.rs"
-).split("#[cfg(test)]")[0];
-const stateAwareMatch = /matches!\(\s*backend,\s*([\s\S]*?)\)\s*&&/.exec(
-  rustStateAware
-);
-if (!stateAwareMatch) {
-  errors.push("state_aware.rs: could not find experimental backend registry");
-} else {
-  const rustBackends = [
-    ...stateAwareMatch[1].matchAll(/ContainmentBackend::(\w+)/g),
-  ].map((match) => match[1]);
-  const managedStateAware = read(
-    "sdk",
-    "dotnet",
-    "Microsoft.Mxc.Sdk",
-    "StateAwareTypes.cs"
-  );
-  compare(
-    "state-aware containment enum",
-    enumVariants(managedStateAware, "StateAwareContainment", "csharp"),
-    rustBackends
-  );
-}
-
 const rustDispatch = read(
   "src",
   "core",
@@ -479,13 +450,33 @@ const rustDispatch = read(
   "src",
   "state_aware_dispatch.rs"
 );
+// The managed `StateAwareContainment` enum must cover every backend the
+// state-aware dispatcher can reach, which is the sandbox-id prefix registry in
+// `state_aware_dispatch.rs` — NOT the `require_experimental_optin` list in
+// `state_aware.rs`, which is only the experimental subset and shrinks as
+// backends are promoted to the stable surface.
+const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");
+const rustBackends = [
+  ...rustPrefixBody.matchAll(/=>\s*Ok\(ContainmentBackend::(\w+)\)/g),
+].map((match) => match[1]);
+const managedStateAware = read(
+  "sdk",
+  "dotnet",
+  "Microsoft.Mxc.Sdk",
+  "StateAwareTypes.cs"
+);
+compare(
+  "state-aware containment enum",
+  enumVariants(managedStateAware, "StateAwareContainment", "csharp"),
+  rustBackends
+);
+
 const managedLifecycle = read(
   "sdk",
   "dotnet",
   "Microsoft.Mxc.Sdk",
   "MxcLifecycle.cs"
 );
-const rustPrefixBody = namedBody(rustDispatch, "fn", "backend_from_prefix");
 const managedPrefixBody = namedBody(managedLifecycle, "StateAwareContainment", "ContainmentForId");
 const rustPrefixes = [
   ...rustPrefixBody.matchAll(/"([^"]+)"\s*=>\s*Ok\(ContainmentBackend::(\w+)\)/g),

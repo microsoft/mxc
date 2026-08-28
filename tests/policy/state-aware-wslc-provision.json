@@ -10,12 +10,10 @@
   "network": {
     "defaultPolicy": "allow"
   },
-  "experimental": {
-    "wslc": {
-      "provision": {
-        "image": "alpine:3.20",
-        "imageTarPath": "C:\\images\\alpine.tar"
-      }
+  "wslc": {
+    "provision": {
+      "image": "alpine:3.20",
+      "imageTarPath": "C:\\images\\alpine.tar"
     }
   }
 }

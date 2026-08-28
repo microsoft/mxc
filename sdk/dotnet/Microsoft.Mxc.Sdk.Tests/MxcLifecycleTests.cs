@@ -424,8 +424,13 @@ public class MxcLifecycleTests
         Assert.Equal(
             "allow",
             root.GetProperty("network").GetProperty("defaultPolicy").GetString());
-        var provision = root.GetProperty("experimental")
-            .GetProperty("wslc")
+        // WSLc is promoted to the stable surface, so its phase section is a
+        // closed top-level `wslc.<phase>` object rather than nested under
+        // `experimental`. The parser rejects the old shape outright.
+        Assert.False(
+            root.TryGetProperty("experimental", out _),
+            "a promoted backend must not emit an `experimental` section");
+        var provision = root.GetProperty("wslc")
             .GetProperty("provision");
         Assert.Equal("alpine:latest", provision.GetProperty("image").GetString());
         Assert.Equal(
