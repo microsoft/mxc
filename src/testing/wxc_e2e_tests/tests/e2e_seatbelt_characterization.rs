@@ -518,7 +518,7 @@ fn assert_denies_direct_egress(label: &str, cfg: &serde_json::Value) {
 
 /// Schema 0.8 `network.egress.default: "deny"` restricts egress to the loopback
 /// runtime proxy. This is the enforcement half of
-/// `tests/examples/30_mac_network_schema_v2.json`, which CI cannot run because
+/// `tests/examples/31_mac_network_0_8.json`, which CI cannot run because
 /// it expects an externally supplied proxy.
 #[test]
 fn seatbelt_directional_deny_blocks_direct_egress() {

@@ -1,0 +1,28 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Fetch dependencies from the internet into a scratch directory while the rest of the machine stays unreachable. The inverse of 32. Shows that egress 'allow' on Seatbelt is all-or-nothing (no per-host filtering -- allowedHosts/egress.allow are rejected), and that 'allow' does NOT imply loopback: hostLoopback still has to be opted into.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Dependency fetch: open egress, locked-down filesystem'; echo '============================================================'; echo ''; echo 'Seatbelt has no per-host filtering, so egress is all-or-nothing.'; echo 'Confine the blast radius with the filesystem policy instead.'; echo 'Requires working internet access.'; echo ''; rc=0; echo 'Test 1: Fetching from the internet (allowed)...'; if curl -s --max-time 10 --noproxy '*' https://api.github.com/zen > /dev/null 2>&1; then echo '  SUCCESS: outbound allowed'; else echo '  ERROR: fetch failed (needs internet access)'; rc=1; fi; echo ''; echo 'Test 2: Writing the download into the scratch directory...'; if mkdir -p /tmp/mxc_deps && curl -s --max-time 10 --noproxy '*' -o /tmp/mxc_deps/zen.txt https://api.github.com/zen && [ -s /tmp/mxc_deps/zen.txt ]; then echo '  SUCCESS: wrote /tmp/mxc_deps/zen.txt'; else echo '  ERROR: download or write failed'; rc=1; fi; echo ''; echo 'Test 3: Reading the home directory (denied -- not granted)...'; if ls ~/.ssh > /dev/null 2>&1; then echo '  ERROR: .ssh should not be readable!'; rc=1; else echo '  SUCCESS: home is unreachable'; fi; echo ''; echo 'Test 4: Reaching a service on the host loopback (denied)...'; echo '  (egress=allow does NOT imply loopback -- hostLoopback is still deny here)'; if curl -s --max-time 5 --noproxy '*' http://127.0.0.1:8931/ > /dev/null 2>&1; then echo '  ERROR: loopback should be blocked!'; rc=1; else echo '  SUCCESS: loopback blocked'; fi; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Dependency fetch test complete!'; else echo 'Dependency fetch test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "timeout": 45000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "/opt/homebrew"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "allow"
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    }
+}

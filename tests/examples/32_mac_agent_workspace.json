@@ -1,0 +1,36 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Run an untrusted script or coding agent against your home directory for context, while keeping credentials unreachable and the network off. Shows that deniedPaths outranks a broad readonlyPaths grant, and that the host environment is never inherited. Scratch space is /tmp here for portability -- in real use point readwritePaths at just your output directory.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Agent workspace: broad read, narrow write, no secrets, no network'; echo '============================================================'; echo ''; rc=0; echo 'Test 1: Read something from the home directory (allowed for context)...'; if ls ~ > /dev/null 2>&1; then echo '  SUCCESS: home is readable'; else echo '  ERROR: home should be readable'; rc=1; fi; echo ''; echo 'Test 2: Read ~/.ssh (denied -- deniedPaths outranks the readonly grant)...'; if ls ~/.ssh > /dev/null 2>&1; then echo '  ERROR: .ssh should not be readable!'; rc=1; else echo '  SUCCESS: .ssh blocked'; fi; echo ''; echo 'Test 3: Write to the scratch directory...'; if mkdir -p /tmp/mxc_agent && echo work > /tmp/mxc_agent/out.txt; then echo '  SUCCESS: scratch is writable'; else echo '  ERROR: scratch write failed'; rc=1; fi; echo ''; echo 'Test 4: Write back into the source tree (denied -- it is read-only)...'; if touch ~/.mxc_agent_probe 2>/dev/null; then echo '  ERROR: home should not be writable!'; rc=1; rm -f ~/.mxc_agent_probe; else echo '  SUCCESS: home is read-only'; fi; echo ''; echo 'Test 5: Host environment is not inherited...'; echo '  (export MXC_HOST_SECRET=leak before running to prove this)'; if [ -n \"$MXC_HOST_SECRET\" ]; then echo '  ERROR: host variable leaked into the sandbox!'; rc=1; else echo '  SUCCESS: host variables are absent'; fi; echo ''; echo 'Test 6: Reach the network (denied)...'; if curl -s --max-time 5 https://example.com > /dev/null 2>&1; then echo '  ERROR: Should not have connected!'; rc=1; else echo '  SUCCESS: outbound blocked'; fi; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Agent workspace test complete!'; else echo 'Agent workspace test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "timeout": 30000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "~",
+            "/opt/homebrew"
+        ],
+        "deniedPaths": [
+            "~/.ssh",
+            "~/.aws",
+            "~/.gnupg",
+            "~/.config/gh",
+            "~/Library/Keychains"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "deny"
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    }
+}

@@ -1,0 +1,39 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Run a JS/Python build or test runner offline. Highlights two Seatbelt-specific behaviors: AF_UNIX sockets are governed by the FILESYSTEM policy (worker IPC keeps working with the network fully denied), and nestedPty must stay true for anything that spawns a shell or pty.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Offline build: UNIX-socket IPC + pty, no network'; echo '============================================================'; echo ''; rc=0; echo 'Test 1: AF_UNIX bind + connect inside readwritePaths...'; echo '  (build tools use these for worker IPC -- Seatbelt governs them by PATH,'; echo '   not by network policy, so they work even under a full network deny)'; if python3 -c \"import socket,os; d='/tmp/mxc_build/ipc'; os.makedirs(d,exist_ok=True); p=d+'/w.sock'; os.path.exists(p) and os.unlink(p); s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.bind(p); s.listen(1); c=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); c.connect(p)\" 2>/dev/null; then echo '  SUCCESS: worker IPC available'; else echo '  ERROR: AF_UNIX bind/connect failed'; rc=1; fi; echo ''; echo 'Test 2: TCP to the internet (denied)...'; if curl -s --max-time 5 --noproxy '*' https://example.com > /dev/null 2>&1; then echo '  ERROR: Should not have connected!'; rc=1; else echo '  SUCCESS: IP networking blocked while UNIX sockets still work'; fi; echo ''; echo 'Test 3: Allocating a pty (needs seatbelt.nestedPty)...'; if python3 -c \"import os; m,s=os.openpty(); ok=os.isatty(s); os.close(m); os.close(s); assert ok\" > /dev/null 2>&1; then echo '  SUCCESS: pty allocated'; else echo '  ERROR: pty allocation failed -- is nestedPty false?'; rc=1; fi; echo ''; echo 'Test 4: Reaching an agent socket outside the build tree (denied)...'; if [ -n \"$SSH_AUTH_SOCK\" ]; then echo '  ERROR: SSH_AUTH_SOCK leaked into the sandbox!'; rc=1; else echo '  SUCCESS: no agent socket path in the environment'; fi; echo ''; echo 'Test 5: process.env is applied on top of the cleared environment...'; echo \"  PATH=$PATH\"; echo \"  HOME=$HOME  CI=$CI\"; if [ \"$CI\" = 1 ] && case \"$PATH\" in /opt/homebrew/bin:*) true;; *) false;; esac; then echo '  SUCCESS: configured variables are visible'; else echo '  ERROR: process.env was not applied'; rc=1; fi; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Offline build test complete!'; else echo 'Offline build test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "env": [
+            "PATH=/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME=/tmp",
+            "CI=1"
+        ],
+        "timeout": 45000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "/opt/homebrew"
+        ],
+        "deniedPaths": [
+            "/private/tmp/com.apple.launchd.ssh-agent"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "deny"
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    },
+    "seatbelt": {
+        "nestedPty": true
+    }
+}

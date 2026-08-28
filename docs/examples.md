@@ -148,7 +148,7 @@ loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
 there is no schema-0.8 equivalent for a remote proxy URL or
 `builtinTestServer`. See
 [`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
-for the full field mapping and [`tests/examples/30_mac_network_schema_v2.json`](../tests/examples/30_mac_network_schema_v2.json)
+for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
 for a complete example:
 
 ```json

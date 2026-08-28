@@ -334,6 +334,7 @@ Set under a top-level `"seatbelt"` key.
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `launchMethod` | `"exec"` \| `"open"` | `"exec"` | `"exec"` applies `sandbox_init()` then execs directly. `"open"` launches Terminal.app via LaunchServices and sandboxes the inner shell — required only for Terminal.app. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
+| `extraMachLookups` | string[] | `[]` | Additional Mach services the sandbox may look up, as exact `global-name` values. The escape hatch for an app that needs one XPC service without resorting to `profileOverride`. |
 
 <details>
 <summary><code>keychainAccess</code> — exactly what it opens</summary>
@@ -355,7 +356,11 @@ cleared environment, so host secrets (cloud credentials, API tokens) can't leak
 into untrusted code. This is unconditional.
 
 - `PATH` defaults to `/usr/bin:/bin:/usr/sbin:/sbin`
-- Each `process.env` entry adds to or overrides that baseline
+- `process.env` is an array of `"KEY=VALUE"` strings, not an object. Each entry
+  adds to or overrides that baseline.
+- Tools installed outside the default `PATH` need both an env entry **and** a
+  `readonlyPaths` grant — e.g. Homebrew on Apple silicon needs
+  `"PATH=/opt/homebrew/bin:…"` plus `readonlyPaths: ["/opt/homebrew"]`.
 
 ## Working directory
 
