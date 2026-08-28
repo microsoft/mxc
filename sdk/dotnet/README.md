@@ -47,9 +47,9 @@ actionable hint whenever the failure has one. `Operation` and `NativeCode` are
 operation and status, so logging the exception alone keeps the diagnosis:
 
 ```csharp
-catch (MxcException ex) when (ex.Operation is not null)
+catch (MxcException ex)
 {
-    Console.Error.WriteLine($"{ex.Operation} failed with {ex.NativeCode}: {ex.Message}");
+    Console.Error.WriteLine(ex.ToString());
     if (ex.Remediation is not null)
     {
         Console.Error.WriteLine($"  try: {ex.Remediation}");

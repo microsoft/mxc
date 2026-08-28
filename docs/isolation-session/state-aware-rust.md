@@ -47,10 +47,9 @@ Requirements on an in-process caller:
   *"requires an interactive session"* (`0x80040233`), so a caller running as a
   service, or over a remote SYSTEM-context shell, cannot complete the lifecycle.
   `provision` succeeds first and mints an OS account that must be deprovisioned.
-- **A caller in a single-threaded apartment is refused**, with
-  `RPC_E_CHANGED_MODE` as the native code. Any other caller enters a
-  multi-threaded apartment held for the manager's lifetime and balanced on drop.
-  A UI application must marshal onto a background thread.
+- **A caller in a single-threaded apartment is refused.** Any other caller enters
+  a multi-threaded apartment held for the manager's lifetime and balanced on
+  drop. A UI application must marshal onto a background thread.
   `mxc-sdk/examples/sta_probe.rs` measures this against a live host.
 
 The **one-shot** surface is not reachable in-process: `mxc_sdk::run` and
@@ -425,10 +424,10 @@ wire-format `MxcError` codes via `map_lifecycle_error`:
 
 ### Structured failure fields
 
-The components of an API failure travel as **discrete fields** on the wire error
-envelope — `operation`, `nativeCode` and `remediation` — rather than being concatenated
-into `message`. `message` holds the bare human-readable text; for a semantic API failure
-that is the API's own message, passed through verbatim.
+The components of a failure travel as **discrete fields** on the wire error envelope —
+`operation`, `nativeCode` and `remediation` — rather than being concatenated into
+`message`. `message` holds the bare human-readable text; for a semantic API failure that
+is the API's own message, passed through verbatim.
 
 | Failure | `operation` | `nativeCode` | `remediation` |
 |---|---|---|---|
@@ -436,6 +435,7 @@ that is the API's own message, passed through verbatim.
 | Transport failure (the call could not be completed, or a result property could not be read) | ✅ | ✅ | — |
 | Activation failure (`backend_unavailable`) | ✅ | ✅ | — |
 | The API's status code itself could not be read | ✅ | — | best-effort |
+| Single-threaded-apartment refusal | — | — | ✅ |
 | MXC-internal failure (relay threads, console handles) | — | — | — |
 | `Policy` and the MXC-side `malformed_*` rejections | — | — | — |
 

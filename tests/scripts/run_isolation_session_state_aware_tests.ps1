@@ -1034,8 +1034,8 @@ Run-StateAwareTest "filesystem: provision rejected" {
     Assert-True ($code -eq 'policy_validation') "error.code is 'policy_validation' (got '$code')"
 
     # MXC rejects this before any API call is made, so the fields describing
-    # that call must be absent. `remediation` is not one of them -- it rides on
-    # the error itself and is unasserted here.
+    # that call must be absent. `remediation` is not one of them, and is
+    # unasserted here.
     $hasOperation = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['operation'] } else { $true }
     Assert-True (-not $hasOperation) "error.operation is absent on an MXC-side rejection"
     $hasNativeCode = if ($envObj) { $null -ne $envObj.error.PSObject.Properties['nativeCode'] } else { $true }
