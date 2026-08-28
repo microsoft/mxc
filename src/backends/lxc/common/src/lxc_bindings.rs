@@ -419,9 +419,23 @@ impl LxcContainer {
         Err("LxcContainer::attach_run is only supported on Linux".to_string())
     }
 
-    /// Stop the container.
+    /// Stop the container, killing it rather than asking it to exit.
+    ///
+    /// A clean shutdown sends SIGPWR and then waits up to 60 seconds for a
+    /// reply.  systemd as PID 1 in an unprivileged userns never answers, and
+    /// every caller is abandoning or restarting the run rather than keeping
+    /// what is inside.
     pub fn stop(&self) -> Result<(), String> {
-        Self::run_status(self.lxc_command("lxc-stop"), "lxc-stop")
+        Self::run_status(self.stop_command(), "lxc-stop")
+    }
+
+    /// The argv [`Self::stop`] runs, built apart from running it so a test can
+    /// read the flags without an LXC host.
+    fn stop_command(&self) -> std::process::Command {
+        let mut cmd = self.lxc_command("lxc-stop");
+        // -k kills the container instead of requesting a clean shutdown.
+        cmd.arg("-k");
+        cmd
     }
 
     /// Destroy the container (removes rootfs and config).
@@ -466,6 +480,26 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn stop_kills_rather_than_waiting_for_a_clean_shutdown() {
+        let container = LxcContainer::new("mxc-stop-test", Some("/var/lib/lxc"));
+        let args: Vec<String> = container
+            .stop_command()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+
+        assert!(
+            args.iter().any(|a| a == "mxc-stop-test"),
+            "the command must address this container, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "-k"),
+            "stop must kill the container: a clean shutdown waits 60 seconds for an \
+             init that may never answer, got {args:?}"
+        );
     }
 
     #[test]
