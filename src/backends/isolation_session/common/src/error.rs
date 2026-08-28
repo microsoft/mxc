@@ -156,9 +156,9 @@ impl IsoApiFailure {
     }
 }
 
-/// A lifecycle step failed. The two arms exist so that an MXC-internal
-/// failure *cannot* carry an API operation: there was no API call in flight,
-/// so there is nothing to name.
+/// A lifecycle step failed. The arms exist so that a failure MXC raises itself
+/// *cannot* carry an API operation: there was no API call in flight, so there
+/// is nothing to name.
 #[derive(Debug)]
 pub(super) enum LifecycleFailure {
     /// An IsolationSession API call failed.
@@ -166,6 +166,13 @@ pub(super) enum LifecycleFailure {
     /// MXC's own machinery failed (thread creation, console handles, and
     /// other work that is not an API call). Message-only by construction.
     Internal(String),
+    /// MXC declined to proceed and can say what the caller should do instead.
+    /// The remediation is required — a refusal with no way forward is
+    /// [`LifecycleFailure::Internal`].
+    Refused {
+        message: String,
+        remediation: String,
+    },
 }
 
 /// Categorised errors from the IsolationSession backend.
@@ -209,6 +216,15 @@ impl std::fmt::Display for IsolationSessionError {
             }
             Self::Lifecycle(LifecycleFailure::Internal(msg)) => {
                 write!(f, "Isolation Session lifecycle error: {}", msg)
+            }
+            Self::Lifecycle(LifecycleFailure::Refused {
+                message,
+                remediation,
+            }) => {
+                write!(
+                    f,
+                    "Isolation Session lifecycle error: {message} -- remediation: {remediation}"
+                )
             }
             Self::Stale(failure) => {
                 write!(f, "Isolation Session stale id: {}", failure.describe())
@@ -288,22 +304,16 @@ pub(super) fn activation_error(code: u32, detail: &str) -> IsolationSessionError
 
 /// The refusal for a caller already in a single-threaded apartment.
 ///
-/// The operation and HRESULT are synthetic: the apartment query succeeded, and
-/// no API returned this code.
-pub(super) fn sta_refusal(code: u32) -> IsolationSessionError {
-    IsolationSessionError::Lifecycle(LifecycleFailure::Api(IsoApiFailure::new(
-        op::CO_GET_APARTMENT_TYPE,
-        Some(code),
-        Some(
-            "this thread is in a single-threaded apartment, where the lifecycle deadlocks"
-                .to_string(),
-        ),
-        Some(
-            "Call from a multi-threaded apartment; a UI application must marshal this onto a \
-             background thread."
-                .to_string(),
-        ),
-    )))
+/// The apartment query succeeded and no API call was in flight, so the refusal
+/// names no operation and carries no status.
+pub(super) fn sta_refusal() -> IsolationSessionError {
+    IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
+        message: "this thread is in a single-threaded apartment, where the lifecycle deadlocks"
+            .to_string(),
+        remediation: "Call from a multi-threaded apartment; a UI application must marshal this \
+                      onto a background thread."
+            .to_string(),
+    })
 }
 
 /// Whether an `ERROR_NOT_FOUND` from this operation means "the sandbox is
@@ -437,6 +447,10 @@ pub(super) fn map_lifecycle_error(err: IsolationSessionError) -> MxcError {
         IsolationSessionError::Lifecycle(LifecycleFailure::Internal(msg)) => {
             MxcError::backend_error(msg)
         }
+        IsolationSessionError::Lifecycle(LifecycleFailure::Refused {
+            message,
+            remediation,
+        }) => MxcError::backend_error(message).with_remediation(remediation),
         IsolationSessionError::Lifecycle(LifecycleFailure::Api(failure)) => {
             failure.into_mxc_error(MxcErrorCode::BackendError)
         }
@@ -766,6 +780,36 @@ mod tests {
         assert_eq!(mapped.code, MxcErrorCode::BackendError);
         assert!(mapped.operation().is_some());
         assert_eq!(mapped.native_code(), None);
+    }
+
+    /// The apartment query succeeds, so the refusal has no call to name and no
+    /// status to report — only a hint the caller can act on.
+    #[test]
+    fn the_sta_refusal_carries_a_hint_and_no_api_detail() {
+        let mapped = map_lifecycle_error(sta_refusal());
+        assert_eq!(mapped.code, MxcErrorCode::BackendError);
+        assert_eq!(mapped.operation(), None);
+        assert_eq!(mapped.native_code(), None);
+        assert!(
+            mapped
+                .remediation
+                .as_deref()
+                .is_some_and(|hint| hint.contains("multi-threaded apartment")),
+            "{:?}",
+            mapped.remediation
+        );
+    }
+
+    /// The one-shot path has no structured envelope, so the hint has to reach
+    /// the caller folded into the message.
+    #[test]
+    fn the_sta_refusal_folds_its_hint_into_the_one_shot_rendering() {
+        let rendered = sta_refusal().to_string();
+        assert!(rendered.contains("single-threaded apartment"), "{rendered}");
+        assert!(
+            rendered.contains("remediation: Call from a multi-threaded apartment"),
+            "{rendered}"
+        );
     }
 
     // ── One-shot rendering (Display) ─────────────────────────────────────
