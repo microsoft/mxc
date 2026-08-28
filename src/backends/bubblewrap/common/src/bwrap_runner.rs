@@ -105,12 +105,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
         // Keep the plan validation derived so the firewall path installs
         // exactly what was accepted instead of deriving it again.
         let egress_plan = self.validate_prepared(request)?;
-        // Object-based FS-policy normalization (D6): tighten aliases of the same
-        // host object to the strictest intent (deny > ro > rw). Done here, close
-        // to mount — config_parser stays string-only and the TOCTOU window
-        // between check and mount is minimized. Only clone the request when an
-        // aliasing conflict actually needs tightening (the common case is none);
-        // an unresolvable path with deniedPaths present fails closed.
+        // Tighten aliases of the same host object to the strictest intent
+        // (deny > ro > rw). Done here, close to mount, to minimize the TOCTOU
+        // window; an unresolvable path with deniedPaths present fails closed.
         let normalized;
         let request = match wxc_common::filesystem_object::normalize_object_conflicts(
             &request.policy,
@@ -126,10 +123,9 @@ impl SandboxBackend for BubblewrapScriptRunner {
             Ok(None) => request,
             Err(msg) => return Err(ScriptResponse::error(&msg)),
         };
-        // Delegation check (D3): reject any policy path the invoking user cannot
-        // access, so the sandbox never gains access the caller lacks. Runs AFTER
-        // object normalization so it is evaluated against the already-tightened
-        // intents (a path moved rw -> denied must not then require write access).
+        // Reject any policy path the invoking user cannot access, so the sandbox
+        // never gains access the caller lacks. Runs after object normalization
+        // so it sees the already-tightened intents.
         if let Err(msg) = wxc_common::filesystem_access::check_delegation(&request.policy) {
             return Err(ScriptResponse::error(&msg));
         }
