@@ -159,16 +159,13 @@ impl StartNetwork {
     ///
     /// `-s KEY=VAL` is lxc-start's `--define`: it assigns a config variable
     /// for this run alone and never writes the container's config file.
-    fn to_start_args(self) -> Vec<String> {
+    fn to_start_args(self) -> &'static [&'static str] {
         match self {
-            StartNetwork::FromContainerConfig => Vec::new(),
+            StartNetwork::FromContainerConfig => &[],
             // `up` keeps 127.0.0.1 available to a workload that binds it.
-            StartNetwork::NoInterface => vec![
-                "-s".to_string(),
-                "lxc.net.0.type=empty".to_string(),
-                "-s".to_string(),
-                "lxc.net.0.flags=up".to_string(),
-            ],
+            StartNetwork::NoInterface => {
+                &["-s", "lxc.net.0.type=empty", "-s", "lxc.net.0.flags=up"]
+            }
         }
     }
 }
@@ -219,7 +216,8 @@ impl LxcContainer {
 
     /// Run a prepared `lxc-*` command, mapping spawn / non-zero-exit failures
     /// to a `String` error tagged with the tool name.
-    fn run_tool(mut cmd: std::process::Command, tool: &str) -> Result<(), String> {
+    fn run_tool(mut cmd: std::process::Command) -> Result<(), String> {
+        let tool = cmd.get_program().to_string_lossy().into_owned();
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to run {}: {}", tool, e))?;
@@ -283,7 +281,7 @@ impl LxcContainer {
             .arg(release)
             .arg("-a")
             .arg(Self::current_arch());
-        Self::run_tool(cmd, "lxc-create")
+        Self::run_tool(cmd)
     }
 
     /// Set a configuration item on the container.
@@ -315,7 +313,7 @@ impl LxcContainer {
     pub fn start(&self, network: StartNetwork) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-start");
         cmd.args(network.to_start_args());
-        Self::run_tool(cmd, "lxc-start")
+        Self::run_tool(cmd)
     }
 
     /// Execute a command inside the container, capturing stdout/stderr.
@@ -451,7 +449,7 @@ impl LxcContainer {
     /// every caller is abandoning or restarting the run rather than keeping
     /// what is inside.
     pub fn stop(&self) -> Result<(), String> {
-        Self::run_tool(self.stop_command(), "lxc-stop")
+        Self::run_tool(self.stop_command())
     }
 
     /// The command [`Self::stop`] runs, built apart from running it. A test
@@ -474,7 +472,7 @@ impl LxcContainer {
     pub fn destroy(&self) -> Result<(), String> {
         let mut cmd = self.lxc_command("lxc-destroy");
         cmd.arg("-f");
-        Self::run_tool(cmd, "lxc-destroy")
+        Self::run_tool(cmd)
     }
 
     /// Get the path to the container's config file.
@@ -532,16 +530,16 @@ mod tests {
         let args = StartNetwork::NoInterface.to_start_args();
 
         assert_eq!(
-            args.iter().filter(|a| *a == "-s").count(),
+            args.iter().filter(|a| **a == "-s").count(),
             2,
             "each config item needs its own -s, got {args:?}"
         );
         assert!(
-            args.contains(&"lxc.net.0.type=empty".to_string()),
+            args.contains(&"lxc.net.0.type=empty"),
             "the container must be given no interface, got {args:?}"
         );
         assert!(
-            args.contains(&"lxc.net.0.flags=up".to_string()),
+            args.contains(&"lxc.net.0.flags=up"),
             "loopback must stay up for a workload that binds 127.0.0.1, got {args:?}"
         );
     }
