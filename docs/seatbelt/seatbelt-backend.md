@@ -54,8 +54,11 @@ That denies all network access. To open it up, see
 ./mxc-exec-mac --dry-run config.json    # validate only, don't execute
 ```
 
-**Tip:** always run `--dry-run` first. Every limitation below surfaces as an
-up-front validation error, never as a silent downgrade.
+**Tip:** always run `--dry-run` first. Almost every limitation below surfaces as
+an up-front validation error rather than a silent downgrade. There are two
+exceptions worth knowing, because both are *valid* configs that behave
+surprisingly: the [`hostLoopback` trap](#the-hostloopback-trap) and
+[`guiAccess` without `ui.disable: false`](#seatbelt-specific-options).
 
 > **Which schema version?** This doc uses the **0.8** network shape
 > (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout, since that's
@@ -177,6 +180,11 @@ Anything it hasn't declared is rejected up front.
 This is the cross-backend
 [0.8 networking shape](../sandbox-policy/0.8.0/networking/networking.md).
 
+> **Omitting `network` entirely denies all IP networking.** Every field below
+> defaults to `deny`, so a config with no `network` block behaves exactly like
+> `egress: {default: "deny"}, ingress: {default: "deny", hostLoopback: "deny"}`.
+> You only need a `network` block to *open* something up.
+
 | Field | Behavior |
 |---|---|
 | `egress.default` | `"deny"` → no outbound rule; baseline `(deny default)` blocks all IP sockets. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
@@ -297,7 +305,7 @@ rejected.**
 | `defaultPolicy: "allow"` | `egress.default: "allow"` | Identical profile output |
 | `allowLocalNetwork: true` | `ingress.default: "allow"` | Identical profile output |
 | `network.proxy.localhost` / loopback `network.proxy.url` | `runtimeConfig.networkProxy` | |
-| `allowedHosts` | *(no equivalent)* | Accepted under `"allow"` as a no-op superset; **rejected** under `"block"` unless `builtinTestServer` |
+| `allowedHosts` | *(no equivalent)* | Under `"allow"`: accepted but **ignored** — outbound is already unrestricted, so the list narrows nothing. **Rejected** under `"block"` unless `builtinTestServer` |
 | `blockedHosts` | *(no equivalent)* | **Rejected** always |
 | *(no equivalent)* | `ingress.hostLoopback` | New in 0.8 — legacy configs never emit a host-loopback rule |
 
@@ -372,11 +380,15 @@ paths are. `PWD` is exported to the resolved directory.
 import { spawnSandbox, SandboxPolicy } from '@microsoft/mxc-sdk';
 
 const policy: SandboxPolicy = {
+    version: '0.8.0-alpha',
     filesystem: {
         readwritePaths: ['/tmp/output'],
         readonlyPaths:  ['/opt/tools'],
     },
-    network: { allowOutbound: false },
+    network: {
+        egress:  { default: 'deny' },
+        ingress: { default: 'deny', hostLoopback: 'deny' },
+    },
 };
 
 // On macOS this resolves to mxc-exec-mac and builds a seatbelt config.
@@ -384,6 +396,10 @@ const pty = spawnSandbox('echo hello', policy);
 pty.onData((data) => console.log(data));
 pty.onExit((e) => console.log('Exit:', e.exitCode));
 ```
+
+`version` is required and must fall in the supported range. The SDK rejects a
+policy that mixes the 0.8 `egress`/`ingress` fields with the legacy
+`allowOutbound`/`allowedHosts`/`blockedHosts` fields.
 
 ## Building from source
 
@@ -459,10 +475,28 @@ Apple credentials.
 
 ## Troubleshooting / Configs that are rejected
 
+Run with `--debug` to print the generated profile — most surprises are obvious
+once you can see the rules that were emitted.
+
+### Common symptoms
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Internet works, but `localhost:3000` is refused | [The `hostLoopback` trap](#the-hostloopback-trap) — you set `egress.default: "allow"` and left `ingress` out, so `hostLoopback` defaulted to `deny` | Add `ingress: {default: "allow", hostLoopback: "allow"}` |
+| All network fails and you didn't configure any | Omitting `network` denies everything — it isn't "unset", it's deny | Add an explicit `egress`/`ingress` block |
+| `guiAccess: true` but no window, and no error | `ui.disable` is still `true`, so the GUI rules were silently dropped | Set `ui.disable: false` |
+| `readwritePaths` on `/System` or `/usr` still can't write | SIP outranks the profile | Nothing to fix — pick a different path |
+| Command not found, or a tool can't find its libraries | The environment is always cleared and `PATH` resets to `/usr/bin:/bin:/usr/sbin:/sbin` | Add `process.env`, and `readonlyPaths` for the install prefix (e.g. `/opt/homebrew`) |
+| A client is configured with `HTTP_PROXY` but reaches nothing | It's ignoring the proxy vars. Outbound is kernel-scoped to the proxy port, so it can't connect anywhere else | Use a proxy-aware client — see [Proxy support](#proxy-support-what-is-and-isnt-enforced) |
+| A test runner or build tool fails spawning workers | `nestedPty: false`, or its IPC socket sits under a `readonlyPaths`/`deniedPaths` entry | Leave `nestedPty` at `true`; put socket directories in `readwritePaths` |
+| The same config runs on Linux but is rejected on macOS | A `..` segment in a path — Seatbelt-only rejection | Pass the fully resolved path |
+
+### What gets rejected
+
 MXC refuses any config it cannot faithfully enforce, rather than quietly
 approximating it. This is the complete list.
 
-### Network
+#### Network
 
 Field names below are the 0.8 shape; the legacy 0.7 equivalent is noted where
 the rule applies to both.
@@ -472,8 +506,8 @@ the rule applies to both.
 | `egress.allow` / `egress.deny` (non-empty) | No CIDR/port/protocol filtering primitive | Use `egress.default` alone |
 | `ingress.hostLoopback` ≠ `ingress.default` | Only the outbound half is expressible; see [the trap](#the-hostloopback-trap) | Set both to the same value |
 | `runtimeConfig.networkProxy` + `egress.default: "allow"`<br>*(legacy: `network.proxy` + `defaultPolicy: "allow"`)* | Outbound is already open, so the proxy enforces nothing and traffic could silently bypass it | `egress.default: "deny"` + the proxy |
-| `runtimeConfig.networkProxy` with a non-loopback host | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
-| Remote (non-loopback) proxy + `egress.default: "deny"`<br>*(legacy: + `defaultPolicy: "block"`)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
+| `runtimeConfig.networkProxy` with a non-loopback host<br>*(0.8 only — rejected by the shared parser, whatever `egress.default` says)* | The runtime proxy endpoint must be loopback | Use `localhost`, `127.0.0.1`, or `[::1]` |
+| Remote (non-loopback) `network.proxy` + `defaultPolicy: "block"`<br>*(legacy only — the 0.8 field never gets this far, see the row above)* | Seatbelt can't express reachability to a remote host, so the proxy would be unreachable and *nothing* could connect | Loopback proxy, or `builtinTestServer` |
 | Proxy + `enforcementMode: "firewall"` or `"both"` | macOS has no packet-filter layer to enforce with | Drop `enforcementMode` — profile enforcement is implied |
 | `processContainer.network.allowedProxyPeer` | Peer identity pinning isn't supported | Remove it |
 | `egress`/`ingress` on schema `< 0.8.0-alpha` | Fields don't exist yet | Set `"version": "0.8.0-alpha"` |
@@ -481,7 +515,7 @@ the rule applies to both.
 | `blockedHosts` *(legacy only)* | No per-host filtering primitive | `egress.default: "deny"` to deny everything |
 | `allowedHosts` + `defaultPolicy: "block"` *(legacy only)* | Could only degrade to allow-all (the inverse of your request) or deny-all | Loopback proxy under deny, or `builtinTestServer` for tests |
 
-### Filesystem
+#### Filesystem
 
 | Config | Why it's rejected | Do this instead |
 |---|---|---|
@@ -492,7 +526,7 @@ cross-backend policy using it will run on Linux and fail on macOS. That's
 deliberate: the alternative is a rule that matches nothing, which for
 `deniedPaths` would fail *open*.
 
-### Streaming / GUI
+#### Streaming / GUI
 
 | Config | Why it's rejected |
 |---|---|
