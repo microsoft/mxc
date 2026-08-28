@@ -36,3 +36,7 @@ required-features = ["isolation_session"]
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 libc = { workspace = true }
+
+# Skip gate for the Bubblewrap streaming tests.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+bwrap_common = { workspace = true }

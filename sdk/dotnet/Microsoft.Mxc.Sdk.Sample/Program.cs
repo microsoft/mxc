@@ -26,6 +26,7 @@ var policy = new SandboxPolicy
     },
     TimeoutMs = 30_000,
 };
+SandboxContainment containment = new ProcessContainment();
 
 // Set MXC_SAMPLE_CAPTURE_DENIALS=1 to opt into Windows denial capture without
 // changing the sample's default host requirements or generating traces by default.
@@ -35,18 +36,22 @@ if (OperatingSystem.IsWindows()
         "1",
         StringComparison.Ordinal))
 {
-    policy.CaptureDenials = new CaptureDenialsPolicy
+    containment = new ProcessContainerContainment
     {
-        Mode = CaptureDenialsMode.Block,
-        RetainEtl = false,
+        CaptureDenials = new CaptureDenialsPolicy
+        {
+            Mode = CaptureDenialsMode.Block,
+            RetainEtl = false,
+        },
     };
 }
 
 Console.WriteLine($"Running: {command}");
+var request = new SandboxRequest(policy, command) { Containment = containment };
 
 try
 {
-    var result = MxcSandbox.Run(policy, command);
+    var result = MxcSandbox.Run(request);
     Console.WriteLine($"exit code : {result.ExitCode}");
     Console.WriteLine($"timed out : {result.TimedOut}");
     Console.WriteLine($"stdout    : {result.Stdout.TrimEnd()}");
@@ -76,7 +81,7 @@ try
     // its stdout as it is produced, then wait for exit.
     Console.WriteLine();
     Console.WriteLine("Streaming the same command live:");
-    using (var proc = MxcSandbox.Spawn(policy, command))
+    using (var proc = MxcSandbox.Spawn(request))
     {
         var stdout = proc.StandardOutput;
         if (stdout is not null)

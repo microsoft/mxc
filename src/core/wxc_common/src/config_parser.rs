@@ -132,7 +132,7 @@ pub fn load_request_with_options(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         validate_directional_network_field_versions(&raw)?;
 
-        convert_wire_config(cfg, logger, true, opts.allow_missing_command)
+        convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -156,7 +156,7 @@ pub fn load_request_from_value(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         validate_directional_network_field_versions(&raw)?;
 
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command, false)
     })();
     log_one_shot_error(logger, &result);
     result
@@ -248,7 +248,7 @@ fn parse_mxc_request_json(
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
-        convert_wire_config(cfg, logger, true, allow_missing_command)
+        convert_wire_config(cfg, logger, true, allow_missing_command, false)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
@@ -702,11 +702,17 @@ fn validate_capture_denials_output_path(path: &str, logger: &mut Logger) -> Resu
 // CLI command-line override (provided by the driver after parsing) can stand in
 // for `process.commandLine`. When set, a missing or empty `commandLine` is
 // silently accepted and `script_code` is left empty.
+//
+// `state_aware_wslc_exec` identifies the state-aware exec exception: network
+// mode was fixed at provision, so a proxy-only exec inherits that mode rather
+// than restating `defaultPolicy`. Backend phase validation still rejects every
+// post-provision network-mode or host-filtering field.
 fn convert_wire_config(
     cfg: wire::MxcConfig,
     logger: &mut Logger,
     require_process: bool,
     allow_missing_command: bool,
+    state_aware_wslc_exec: bool,
 ) -> Result<ExecutionRequest, WxcError> {
     // `phase` / `sandboxId` are state-aware-only fields. The state-aware path
     // consumes them before delegating here, so if either is still present the
@@ -1042,6 +1048,7 @@ fn convert_wire_config(
         // Require an 'allow' default with no host lists so the proxy is reachable.
         if containment == ContainmentBackend::Wslc
             && policy.network_proxy.is_enabled()
+            && !state_aware_wslc_exec
             && (policy.default_network_policy == NetworkPolicy::Block
                 || !policy.allowed_hosts.is_empty()
                 || !policy.blocked_hosts.is_empty())
@@ -1585,7 +1592,18 @@ fn convert_wire_state_aware(
     }
 
     let require_process = phase == Phase::Exec;
-    let mut request = convert_wire_config(cfg, logger, require_process, allow_missing_command)?;
+    let state_aware_wslc_exec = phase == Phase::Exec
+        && cfg
+            .containment
+            .as_ref()
+            .is_some_and(|value| map_wire_containment(Some(value)) == ContainmentBackend::Wslc);
+    let mut request = convert_wire_config(
+        cfg,
+        logger,
+        require_process,
+        allow_missing_command,
+        state_aware_wslc_exec,
+    )?;
     if phase != Phase::Provision && !network_supplied {
         request.policy.network_egress = None;
         request.policy.network_ingress = None;
@@ -1704,6 +1722,27 @@ mod tests {
 
     fn test_logger() -> Logger {
         Logger::new(Mode::Buffer)
+    }
+
+    #[test]
+    fn state_aware_wslc_exec_accepts_proxy_without_redeclaring_network_mode() {
+        let json = r#"{
+            "version": "0.8.0-alpha",
+            "phase": "exec",
+            "sandboxId": "wslc:0123456789abcdef0123456789abcdef",
+            "process": {"commandLine": "echo hi"},
+            "network": {"proxy": {"url": "http://proxy.example:8080"}}
+        }"#;
+        let mut logger = test_logger();
+
+        let parsed = load_mxc_request_from_json(json, &mut logger).unwrap();
+        let MxcRequest::StateAware(parsed) = parsed else {
+            panic!("expected a state-aware request");
+        };
+        assert!(parsed.request.policy.network_proxy.is_enabled());
+        assert!(!parsed.request.policy.network_mode_specified);
+        assert!(parsed.request.policy.allowed_hosts.is_empty());
+        assert!(parsed.request.policy.blocked_hosts.is_empty());
     }
 
     fn load_mxc(json: &str) -> Result<MxcRequest, ParseError> {

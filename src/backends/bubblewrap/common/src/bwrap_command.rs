@@ -583,6 +583,13 @@ pub(crate) fn build_args_classified_with_mode(
             .map(String::from),
     );
 
+    // `--unshare-pid` alone does not make killing our `bwrap` handle tear the
+    // sandbox down: bwrap forks, so pid 1 of the new namespace is that child,
+    // not the process we spawned. Without this flag a backgrounded descendant
+    // outlives a timeout kill and keeps running after `run_teardown()` has
+    // removed the network enforcement it was sandboxed by.
+    args.push("--die-with-parent".into());
+
     // Network: full-block and proxy modes use a private namespace. Proxy mode
     // receives rootless connectivity from the runner's slirp supervisor.
     // Per-host firewall mode continues to share the host namespace.
@@ -806,6 +813,15 @@ mod tests {
         assert!(args.contains(&"--unshare-pid".to_string()));
         assert!(args.contains(&"--unshare-ipc".to_string()));
         assert!(args.contains(&"--unshare-uts".to_string()));
+    }
+
+    /// Dropping this flag silently reintroduces a real leak: a backgrounded
+    /// descendant survives the timeout kill and keeps running after teardown
+    /// has removed its network enforcement.
+    #[test]
+    fn basic_args_request_die_with_parent() {
+        let args = build_args(&base_request(), None);
+        assert!(args.contains(&"--die-with-parent".to_string()));
     }
 
     struct NetworkPlanCase {

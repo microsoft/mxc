@@ -12,9 +12,12 @@
 //! `dispatch.rs`, so both the public SDK and the executor binaries can share a
 //! single implementation.
 
+use serde::Serialize;
+
 /// Platform support information — the Rust analogue of the SDK
 /// `PlatformSupport` type.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlatformSupport {
     /// Whether MXC is supported on the current host.
     pub is_supported: bool,
