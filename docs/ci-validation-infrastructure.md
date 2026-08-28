@@ -384,9 +384,26 @@ installing whatever the image did not already provide. The Linux pools run stock
 distribution images that MXC does not bake, so there is no curated image to
 drift *from*; refusing to install would not surface a provisioning mistake, it
 would only cost coverage. Most of the list comes from the distribution's own
-repositories, `pwsh` and `az` from Microsoft's feed and `gh` from GitHub's since
+repositories, `pwsh` and `az` from Microsoft's feeds and `gh` from GitHub's since
 no distribution carries them, and `npx` from nowhere at all — it arrives with
 `npm`.
+
+Microsoft publishes those two tools to *different* feeds, and only on the RPM
+side do they coincide. `packages-microsoft-prod` carries `powershell` on both
+families and `azure-cli` on the RPM side only; on apt the Azure CLI has a
+repository of its own, keyed by distribution codename rather than version. Asking
+the prod feed for `azure-cli` on a Debian-family host resolves nothing and fails
+with `E: Unable to locate package azure-cli`, so `add_azure_cli_apt_feed` adds
+that second feed separately.
+
+That feed lags new distribution releases, so a host's own codename may not be
+published yet — Debian 13 (`trixie`) is not. The function probes for the suite
+before writing it and falls back to the newest suite the vendor does publish for
+the family (`bookworm` for Debian, `noble` for Ubuntu), warning when it
+substitutes. The probe is what makes the fallback safe to skip entirely when
+nothing matches: an unpublished suite written into a source list makes *every*
+later `apt-get update` fail, which would cost the host the packages that were
+otherwise going to install.
 
 Two properties make that safe to run on every job:
 

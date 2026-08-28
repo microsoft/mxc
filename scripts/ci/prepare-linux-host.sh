@@ -306,6 +306,90 @@ add_microsoft_feed() {
     microsoft_feed_state="added"
 }
 
+# On apt the Azure CLI is not in packages-microsoft-prod. It is published to a
+# repository of its own, keyed by distribution codename rather than version, so
+# adding the prod feed and then asking for azure-cli resolves nothing and fails
+# with "E: Unable to locate package azure-cli". The RPM side needs none of this:
+# the prod feed carries azure-cli directly, which is why only Debian-family
+# hosts were affected.
+azure_cli_feed_state=""
+add_azure_cli_apt_feed() {
+    case "$azure_cli_feed_state" in
+        added) return 0 ;;
+        failed) return 1 ;;
+    esac
+    azure_cli_feed_state="failed"
+
+    local id="" codename=""
+    if [[ -r /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id="${ID:-}"
+        codename="${VERSION_CODENAME:-}"
+    fi
+    if [[ -z "$codename" ]] && command -v lsb_release >/dev/null 2>&1; then
+        codename="$(lsb_release -cs 2>/dev/null || true)"
+    fi
+    if [[ -z "$codename" ]]; then
+        echo "WARNING: could not read the distribution codename; skipping the Azure CLI package feed." >&2
+        return 1
+    fi
+
+    # The vendor publishes a suite per codename and lags new releases, so the
+    # host's own codename may not exist yet. An unpublished suite must never
+    # reach a source list: apt then fails every later refresh against it, which
+    # would cost this host the packages that were going to install fine. Probe
+    # first, and fall back to the newest suite the vendor does publish for the
+    # family. The package vendors its own Python interpreter, so it does not
+    # bind to the release it was built against.
+    local suites=("$codename")
+    case "$id" in
+        debian) [[ "$codename" == "bookworm" ]] || suites+=(bookworm) ;;
+        ubuntu) [[ "$codename" == "noble" ]] || suites+=(noble) ;;
+    esac
+
+    local suite="" candidate
+    for candidate in "${suites[@]}"; do
+        if curl -fsL --head -o /dev/null \
+            "https://packages.microsoft.com/repos/azure-cli/dists/$candidate/Release"; then
+            suite="$candidate"
+            break
+        fi
+        echo "The Azure CLI feed publishes no '$candidate' suite." >&2
+    done
+
+    if [[ -z "$suite" ]]; then
+        echo "WARNING: the Azure CLI feed publishes no suite usable on ${id:-this distribution} '$codename'." >&2
+        return 1
+    fi
+    if [[ "$suite" != "$codename" ]]; then
+        echo "WARNING: the Azure CLI feed has no '$codename' suite; using '$suite' instead." >&2
+    fi
+
+    local keyring="/etc/apt/keyrings/microsoft.gpg"
+    if ! sudo install -d -m 0755 /etc/apt/keyrings; then
+        echo "WARNING: could not create the apt keyring directory." >&2
+        return 1
+    fi
+    if ! curl -fsSL https://packages.microsoft.com/keys/microsoft.asc |
+        gpg --dearmor | sudo dd of="$keyring" status=none; then
+        echo "WARNING: could not install the Microsoft signing key." >&2
+        return 1
+    fi
+    if ! sudo chmod go+r "$keyring"; then
+        echo "WARNING: could not make the Microsoft signing key readable." >&2
+        return 1
+    fi
+    if ! echo "deb [arch=$(dpkg --print-architecture) signed-by=$keyring] https://packages.microsoft.com/repos/azure-cli/ $suite main" |
+        sudo tee /etc/apt/sources.list.d/azure-cli.list >/dev/null; then
+        echo "WARNING: could not write the Azure CLI package source." >&2
+        return 1
+    fi
+    apt_update
+
+    azure_cli_feed_state="added"
+}
+
 add_github_feed() {
     if [[ "$package_manager" == "apt-get" ]]; then
         local keyring="/usr/share/keyrings/githubcli-archive-keyring.gpg"
@@ -397,20 +481,25 @@ install_workload_interpreters() {
     fi
 
     if [[ "$need_pwsh" == "true" || "$need_az" == "true" || "$need_gh" == "true" ]]; then
-        # Both feeds are fetched over HTTPS and verified against a signing key,
-        # so these have to be present before either can be added.
+        # Every feed is fetched over HTTPS and verified against a signing key,
+        # so these have to be present before any of them can be added.
         install_packages ca-certificates curl gnupg ||
             echo "WARNING: could not install the prerequisites for adding vendor package feeds." >&2
     fi
 
-    if [[ "$need_pwsh" == "true" || "$need_az" == "true" ]]; then
-        if add_microsoft_feed; then
-            if [[ "$need_pwsh" == "true" ]]; then
-                wanted+=(powershell)
-            fi
-            if [[ "$need_az" == "true" ]]; then
+    if [[ "$need_pwsh" == "true" ]] && add_microsoft_feed; then
+        wanted+=(powershell)
+    fi
+
+    # Two different feeds: the prod feed carries azure-cli on the RPM side, but
+    # on apt it lives in the Azure CLI's own repository.
+    if [[ "$need_az" == "true" ]]; then
+        if [[ "$package_manager" == "apt-get" ]]; then
+            if add_azure_cli_apt_feed; then
                 wanted+=(azure-cli)
             fi
+        elif add_microsoft_feed; then
+            wanted+=(azure-cli)
         fi
     fi
 

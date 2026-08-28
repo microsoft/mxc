@@ -44,7 +44,7 @@ case "$backend" in
         # Strict: a skip on a provisioned runner means a prerequisite vanished,
         # not that the assertion held. Without this the job goes green having
         # verified none of the directional enforcement.
-        MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$script_root/run_bwrap_all_tests.sh"
+        MXC_BWRAP_TESTS_REQUIRE_EXECUTION=1 bash "$test_script_root/run_bwrap_all_tests.sh"
         # The inbound chain test needs real host CAP_NET_ADMIN to read the
         # sandbox's network namespace and inject a peer into it, so the non-root
         # suite above can only report it as skipped. Invoking it separately here
@@ -60,7 +60,7 @@ case "$backend" in
         # the assertion passed. Translate it into an explicit failure so the
         # inbound guarantee can never be reported as verified without running.
         inbound_status=0
-        sudo -n bash "$script_root/run_bwrap_inbound_deny_test.sh" || inbound_status=$?
+        sudo -n bash "$test_script_root/run_bwrap_inbound_deny_test.sh" || inbound_status=$?
         if [[ $inbound_status -eq 77 ]]; then
             echo "The Bubblewrap inbound default-deny test skipped for a missing prerequisite;" \
                  "prepare-linux-host.sh should have installed slirp4netns, nsenter, iptables," \

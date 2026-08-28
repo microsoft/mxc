@@ -98,8 +98,13 @@ Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
 duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
 platform's list can diverge. macOS verifies only; Linux first runs
 `install_workload_interpreters`, which installs whatever the stock distribution
-image lacks (distribution repositories, plus Microsoft's feed for `pwsh`/`az`
-and GitHub's for `gh`). That pass is best-effort and can never fail the job —
+image lacks (distribution repositories, plus Microsoft's feeds for `pwsh`/`az`
+and GitHub's for `gh`). Microsoft splits those two: `packages-microsoft-prod`
+carries `powershell` everywhere and `azure-cli` on RPM only, while on apt the
+Azure CLI has its own codename-keyed feed added by `add_azure_cli_apt_feed`,
+which probes for the suite before writing it and falls back to the newest
+published one for the family (Debian 13 `trixie` is not published). That pass is
+best-effort and can never fail the job —
 the inventory that follows reports the outcome. Its package-manager access goes
 through `resolve_package_manager` and `install_packages`, the same helpers the
 backend prerequisite installers use, so a new distribution family is one arm in
@@ -174,7 +179,7 @@ tests\scripts\run_windows_sandbox_one_shot_tests.ps1       # Windows Sandbox one
 tests\scripts\run_windows_sandbox_state_aware_tests.ps1     # Windows Sandbox state-aware lifecycle E2E (provision/start/exec*/stop/deprovision; requires the Windows Sandbox optional feature; skips if absent)
 tests\scripts\run_lxc_all_tests.sh            # All LXC tests (Linux)
 tests\scripts\run_bwrap_all_tests.sh          # All Bubblewrap tests (Linux, requires bwrap). Must NOT run as root — several tests assert the sandbox drops capabilities, which cannot hold under a root launcher; the script refuses root explicitly.
-sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_ci_backend_tests.sh.
+sudo tests\scripts\run_bwrap_inbound_deny_test.sh  # Bubblewrap inbound default-deny E2E (root-only: needs host CAP_NET_ADMIN to read the sandbox netns and inject a peer). Reported as skipped by the suite above; CI runs it separately from run_backend_validation_tests.sh.
 
 # E2E test crate — Rust executor integration tests (from src/)
 cargo test -p wxc_e2e_tests                 # Invokes MXC binaries directly
