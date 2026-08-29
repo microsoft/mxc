@@ -387,11 +387,11 @@ fn write_outbound_allow_rules(out: &mut String) {
 /// ignore `HTTP_PROXY` can't reach any other port or machine. Note the scoping
 /// is by port, not by address: `localhost` means "this machine", so the rule
 /// also covers the host's non-loopback addresses on that same port. A
-    /// non-loopback proxy can't be expressed at all — Seatbelt's `(remote ip ...)`
-    /// matches neither DNS names nor specific addresses — so it fails closed. The
-    /// backend validator rejects that combination before profile construction;
-    /// failing closed here keeps any future disagreement about what counts as
-    /// loopback from silently opening up egress.
+/// non-loopback proxy can't be expressed at all — Seatbelt's `(remote ip ...)`
+/// matches neither DNS names nor specific addresses — so it fails closed. The
+/// backend validator rejects that combination before profile construction;
+/// failing closed here keeps any future disagreement about what counts as
+/// loopback from silently opening up egress.
 fn write_proxy_reachability_rules(out: &mut String, proxy_address: &ProxyAddress) {
     if host_is_canonical_loopback(proxy_address.host()) {
         let _ = writeln!(
