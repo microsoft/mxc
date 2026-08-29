@@ -3,13 +3,29 @@
 Attaching a debugger to a process running inside an MXC sandbox is harder than
 debugging a normal process, for reasons that are inherent to containment:
 
-- The sandboxed process starts with a restricted token in a container the
-  debugger is not part of, so a debugger running as you cannot simply open it.
-- The interesting failures usually happen in the first few milliseconds — a DLL
-  failing to initialize, a config file that cannot be read — and are over long
-  before you can attach by hand.
-- The workload may not fail *visibly* at all. Deny-by-default turns a missing
-  grant into a generic "Access is denied" deep inside someone else's library.
+- **You cannot put the debugger in front of the process.** The usual flow — the
+  debugger creates the target with `DEBUG_PROCESS` and owns it from instruction
+  zero — is unavailable. A sandboxed process must be created by MXC through the
+  OS sandbox-creation API with a fully-formed sandbox spec, and a debugger has
+  no way to issue that call. Nor can you redirect the launch with a classic
+  Image File Execution Options `Debugger` value: that substitutes the debugger
+  for the target image, so the debugger would end up running *inside* the
+  container, restricted by the very policy you are trying to investigate.
+- **Attaching afterwards is usually too late.** The interesting failures — a DLL
+  failing to initialize, a config file that cannot be read — happen in the first
+  few milliseconds and are over long before you can attach by hand.
+- **The workload may not fail *visibly* at all.** Deny-by-default turns a
+  missing grant into a generic "Access is denied" deep inside someone else's
+  library.
+
+> **What is *not* the problem: access to the process.** Containment restricts
+> what the sandboxed process can reach; it does not hide that process from you.
+> A same-user debugger can open a running AppContainer process with
+> `PROCESS_ALL_ACCESS` without elevation — mandatory integrity control's
+> no-write-up rule blocks *low-to-high* access, not the high-to-low direction a
+> debugger needs. So if you can catch the process while it is still alive,
+> ordinary attach works. The difficulty is one of *timing and launch control*,
+> which is exactly what the hook below addresses.
 
 This document covers the techniques available today, in the order you should
 reach for them.
@@ -34,10 +50,14 @@ foot in a debugger.
 
 ## Debug on launch
 
-The OS-side process sandbox has a **debug-on-launch hook**, conceptually similar
-to the classic
+The OS-side process sandbox has a **debug-on-launch hook**: a registry-configured
+debugger that is started as part of a sandboxed launch. It is the spiritual
+counterpart of the classic
 [Image File Execution Options](https://learn.microsoft.com/windows-hardware/drivers/debugger/debugging-a-uwp-app-using-windbg)
-`Debugger` value, but scoped to sandboxed launches rather than to an image name.
+`Debugger` value, with the one difference that matters here — instead of
+*substituting* the debugger for the target image (which would put the debugger
+inside the container), it launches the debugger **alongside** the target,
+outside the container, and hands it the target's PID.
 
 > **This is a mitigation, not a feature.** It exists to unblock developers until
 > a designed solution ships. It is gated off by default (see
