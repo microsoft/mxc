@@ -53,12 +53,7 @@ That denies all network access. To open it up, see
 ./mxc-exec-mac --dry-run config.json    # validate only, don't execute
 ```
 
-**Tip:** always run `--dry-run` first. Almost every limitation below surfaces as
-an up-front validation error rather than a silent downgrade. There are two
-exceptions worth knowing, because both are *valid* configs that behave
-surprisingly: the [`hostLoopback` trap](#the-hostloopback-trap) and
-[`guiAccess` without `ui.disable: false`](#seatbelt-specific-options).
-
+**Tip:** always run `--dry-run` first.
 > **Which schema version?** This doc uses the **0.8** network shape
 > (`egress` / `ingress` / `runtimeConfig.networkProxy`) throughout, since that's
 > the current cross-backend design. The older 0.7 fields still work — see
@@ -329,7 +324,7 @@ Set under a top-level `"seatbelt"` key.
 | Option | Type | Default | What it does |
 |---|---|---|---|
 | `nestedPty` | bool | `true` | Lets the inner process allocate its own ptys. Needed by anything that spawns a shell — test runners, `git`, `gh`, REPLs, agent tools. Set `false` for a tighter sandbox. |
-| `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows. **Only effective when `ui.disable` is `false`** — with UI disabled the GUI rules are silently suppressed rather than rejected. |
+| `guiAccess` | bool | `false` | Adds Mach/IOKit rules so GUI apps can create windows. **Requires UI to be enabled**, which is spelled `ui.disable: false` (there is no `ui.enable`). |
 | `keychainAccess` | bool | `false` | Opens the sandbox enough for `keytar` / Security.framework to reach the Keychain. Opt in only if genuinely needed. |
 | `launchMethod` | `"exec"` \| `"open"` | `"exec"` | `"exec"` applies `sandbox_init()` then execs directly. `"open"` launches Terminal.app via LaunchServices and sandboxes the inner shell — required only for Terminal.app. |
 | `profileOverride` | string | unset | Replaces the generated profile with raw TinyScheme. **All `filesystem`/`network`/`ui` policy is ignored for profile generation.** Last resort. |
@@ -495,7 +490,7 @@ once you can see the rules that were emitted.
 |---|---|---|
 | Internet works, but `localhost:3000` is refused | [The `hostLoopback` trap](#the-hostloopback-trap) — you set `egress.default: "allow"` and left `ingress` out, so `hostLoopback` defaulted to `deny` | Add `ingress: {default: "allow", hostLoopback: "allow"}` |
 | All network fails and you didn't configure any | Omitting `network` denies everything — it isn't "unset", it's deny | Add an explicit `egress`/`ingress` block |
-| `guiAccess: true` but no window, and no error | `ui.disable` is still `true`, so the GUI rules were silently dropped | Set `ui.disable: false` |
+| `guiAccess: true` rejected: "cannot be combined with `ui.disable=true`" | `ui.disable` defaults to `true`, so an omitted `ui` section conflicts | Add `ui: {disable: false}` |
 | `readwritePaths` on `/System` or `/usr` still can't write | SIP outranks the profile | Nothing to fix — pick a different path |
 | Command not found, or a tool can't find its libraries | The environment is always cleared and `PATH` resets to `/usr/bin:/bin:/usr/sbin:/sbin` | Add `process.env`, and `readonlyPaths` for the install prefix (e.g. `/opt/homebrew`) |
 | A client is configured with `HTTP_PROXY` but reaches nothing | It's ignoring the proxy vars. Outbound is kernel-scoped to the proxy port, so it can't connect anywhere else | Use a proxy-aware client — see [Proxy support](#proxy-support-what-is-and-isnt-enforced) |
@@ -541,6 +536,7 @@ deliberate: the alternative is a rule that matches nothing, which for
 
 | Config | Why it's rejected |
 |---|---|
+| `guiAccess: true` with `ui.disable: true`, or with no `ui` section | The GUI rules are only emitted when UI is enabled, so the request would otherwise be dropped without a word |
 | `guiAccess: true` with piped stdio (SDK streaming) | GUI mode needs inherited stdio and a real terminal |
 | `launchMethod: "open"` with piped stdio | Launches Terminal.app; there are no pipes to stream |
 

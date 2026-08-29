@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Seatbelt network invariants, enforced by the backend's own `validate`.
+//! Seatbelt policy invariants, enforced by the backend's own `validate`.
 //!
 //! `validate` runs on every execution path -- the JSON parser feeds one here,
 //! and a Rust caller that hands `mxc_engine` an `ExecutionRequest` it built
@@ -11,7 +11,38 @@
 //! `ScriptResponse`.
 
 use wxc_common::host_is_canonical_loopback;
-use wxc_common::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
+use wxc_common::models::{
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
+};
+
+/// Effective GUI posture: `seatbelt.guiAccess` only means anything when the UI
+/// policy leaves UI enabled, since every GUI grant is emitted alongside the
+/// WindowServer allows. Single source of truth so the profile builder and the
+/// runner cannot drift apart on what "GUI access" means.
+///
+/// [`validate_seatbelt_ui_policy`] rejects the contradictory combination, so on
+/// an executed request this equals the raw `guiAccess` flag; the helper keeps
+/// the direct `build_profile` callers (unit tests, embedders) consistent too.
+pub fn gui_access_effective(request: &ExecutionRequest) -> bool {
+    request.seatbelt.as_ref().is_some_and(|c| c.gui_access) && !request.policy.ui.disable
+}
+
+/// Reject a `guiAccess` request that the UI policy contradicts.
+/// Fail loudly rather than hand back a sandbox that ignored the request.
+pub fn validate_seatbelt_ui_policy(request: &ExecutionRequest) -> Result<(), String> {
+    let gui_requested = request.seatbelt.as_ref().is_some_and(|c| c.gui_access);
+    if gui_requested && request.policy.ui.disable {
+        return Err("Seatbelt: seatbelt.guiAccess=true cannot be combined with \
+                    ui.disable=true. The GUI grants (Mach IPC, mach-register, IOKit, \
+                    pseudo-tty, per-user temp/cache writes) are only emitted when UI \
+                    is enabled, so this combination would drop every GUI capability \
+                    and deny WindowServer instead. Set 'ui.disable' to false to grant \
+                    GUI access, or remove 'seatbelt.guiAccess'. Note that 'ui.disable' \
+                    defaults to true, so an omitted 'ui' section conflicts too."
+            .to_string());
+    }
+    Ok(())
+}
 
 /// Effective outbound posture, preferring the directional `network.egress`
 /// over the legacy `defaultPolicy` when both are present.
@@ -159,7 +190,7 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ProxyAddress, ProxyConfig};
+    use wxc_common::models::{ProxyAddress, ProxyConfig, SeatbeltConfig};
 
     #[test]
     fn host_loopback_allowed_is_none_for_the_legacy_shape() {
@@ -338,5 +369,45 @@ mod tests {
         p.allowed_hosts = vec!["api.github.com".to_string()];
 
         assert!(validate_seatbelt_network_policy(&p).is_ok());
+    }
+
+    /// `guiAccess` with a `SeatbeltConfig` and the given `ui.disable`.
+    fn gui_request(gui_access: bool, ui_disabled: bool) -> ExecutionRequest {
+        let mut r = ExecutionRequest::default();
+        r.policy.ui.disable = ui_disabled;
+        r.seatbelt = Some(SeatbeltConfig {
+            gui_access,
+            ..Default::default()
+        });
+        r
+    }
+
+    #[test]
+    fn rejects_gui_access_when_ui_is_disabled() {
+        // ui.disable defaults to true, so this is what an omitted `ui`
+        // section produces — the case that used to be silently ignored.
+        let msg = validate_seatbelt_ui_policy(&gui_request(true, true)).unwrap_err();
+        assert!(msg.contains("guiAccess"), "got: {msg}");
+        assert!(msg.contains("ui.disable"), "got: {msg}");
+    }
+
+    #[test]
+    fn accepts_gui_access_when_ui_is_enabled() {
+        assert!(validate_seatbelt_ui_policy(&gui_request(true, false)).is_ok());
+    }
+
+    #[test]
+    fn accepts_ui_disabled_without_gui_access() {
+        assert!(validate_seatbelt_ui_policy(&gui_request(false, true)).is_ok());
+        // An absent seatbelt section must not trip the rule either.
+        assert!(validate_seatbelt_ui_policy(&ExecutionRequest::default()).is_ok());
+    }
+
+    #[test]
+    fn gui_access_effective_requires_both_flags() {
+        assert!(gui_access_effective(&gui_request(true, false)));
+        assert!(!gui_access_effective(&gui_request(true, true)));
+        assert!(!gui_access_effective(&gui_request(false, false)));
+        assert!(!gui_access_effective(&ExecutionRequest::default()));
     }
 }

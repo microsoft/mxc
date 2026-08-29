@@ -126,6 +126,7 @@ impl SandboxBackend for SeatbeltScriptRunner {
         // builds an ExecutionRequest directly gets the same rules.
         crate::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
             .map_err(error_response)?;
+        crate::seatbelt_policy::validate_seatbelt_ui_policy(request).map_err(error_response)?;
 
         Ok(())
     }
@@ -172,11 +173,10 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .as_ref()
             .map(|s| s.launch_method.clone())
             .unwrap_or_default();
-        let gui_access = request
-            .seatbelt
-            .as_ref()
-            .map(|s| s.gui_access)
-            .unwrap_or(false);
+        // Effective posture, not the raw flag: a `guiAccess` the UI policy
+        // suppressed emits no GUI rules, so it must not cost the caller
+        // streaming either.
+        let gui_access = crate::seatbelt_policy::gui_access_effective(request);
 
         match launch_method {
             LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger, proxy),

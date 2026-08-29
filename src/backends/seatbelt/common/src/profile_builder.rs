@@ -425,7 +425,7 @@ fn write_local_network_rules(out: &mut String, allow_local_network: bool) {
 
 fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
     let ui = &request.policy.ui;
-    let gui_access = request.seatbelt.as_ref().is_some_and(|c| c.gui_access);
+    let gui_access = seatbelt_policy::gui_access_effective(request);
 
     // The baseline profile uses `(deny default)`, so services are blocked
     // unless explicitly allowed. When UI is enabled, we allow the mach
@@ -506,7 +506,7 @@ fn write_ui_rules(out: &mut String, request: &ExecutionRequest) {
 fn write_nested_pty_rules(out: &mut String, request: &ExecutionRequest) {
     let sb = request.seatbelt.as_ref();
     let enabled = sb.is_none_or(|c| c.nested_pty);
-    let gui_block_emitted = sb.is_some_and(|c| c.gui_access) && !request.policy.ui.disable;
+    let gui_block_emitted = seatbelt_policy::gui_access_effective(request);
     if !enabled || gui_block_emitted {
         return;
     }
