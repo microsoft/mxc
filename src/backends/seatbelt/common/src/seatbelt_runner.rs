@@ -121,6 +121,8 @@ impl SandboxBackend for SeatbeltScriptRunner {
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
+        wxc_common::seatbelt_policy::validate_system_power_access(request)
+            .map_err(error_response)?;
 
         // Shared with the config parser so a caller that builds an
         // ExecutionRequest directly gets the same rules.
@@ -881,6 +883,23 @@ mod tests {
         assert_eq!(response.exit_code, -1);
         assert!(response.error_message.contains("blockedHosts"));
         assert!(response.error_message.contains("cannot be enforced"));
+    }
+
+    #[test]
+    fn rejects_system_power_access_before_v09() {
+        let mut request = base_request();
+        request.schema_version = "0.8.0-alpha".to_string();
+        request
+            .seatbelt
+            .as_mut()
+            .expect("Seatbelt config")
+            .system_power_access = true;
+
+        let error = SeatbeltScriptRunner::new().validate(&request).unwrap_err();
+        assert!(
+            error.error_message.contains("schema version 0.9"),
+            "{error:?}"
+        );
     }
 
     /// The parser is not the only door: `mxc_engine::run` takes an

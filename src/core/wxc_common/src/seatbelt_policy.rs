@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Seatbelt network invariants, enforced by the backend's own `validate`.
+//! Seatbelt invariants enforced by the backend's own `validate`.
 //!
 //! `validate` runs on every execution path -- the JSON parser and a Rust caller
 //! that hands `mxc_engine::run` an `ExecutionRequest` it built itself both
@@ -11,7 +11,38 @@
 //! `ScriptResponse`.
 
 use crate::host_is_canonical_loopback;
-use crate::models::{ContainerPolicy, NetworkAction, NetworkEnforcementMode, NetworkPolicy};
+use crate::models::{
+    ContainerPolicy, ExecutionRequest, NetworkAction, NetworkEnforcementMode, NetworkPolicy,
+};
+
+pub(crate) const SYSTEM_POWER_ACCESS_VERSION_ERROR: &str =
+    "seatbelt.systemPowerAccess requires schema version 0.9 or later";
+
+/// Returns system-power capability support for a valid schema version.
+///
+/// `None` leaves malformed-version diagnostics to the config parser.
+pub(crate) fn system_power_access_support(version: &str) -> Option<bool> {
+    semver::Version::parse(version)
+        .ok()
+        .map(|version| version.major > 0 || version.minor >= 9)
+}
+
+/// Reject system power access when the request predates its 0.9 contract.
+///
+/// This validation runs at execution time so requests changed after parsing,
+/// including through the Rust SDK setters, cannot bypass the version boundary.
+pub fn validate_system_power_access(request: &ExecutionRequest) -> Result<(), String> {
+    let enabled = request
+        .seatbelt
+        .as_ref()
+        .is_some_and(|seatbelt| seatbelt.system_power_access);
+
+    if enabled && !system_power_access_support(&request.schema_version).unwrap_or(false) {
+        return Err(SYSTEM_POWER_ACCESS_VERSION_ERROR.to_string());
+    }
+
+    Ok(())
+}
 
 /// Effective outbound posture, preferring the directional `network.egress`
 /// over the legacy `defaultPolicy` when both are present.
@@ -115,7 +146,7 @@ pub fn validate_seatbelt_network_policy(policy: &ContainerPolicy) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{ProxyAddress, ProxyConfig};
+    use crate::models::{ProxyAddress, ProxyConfig, SeatbeltConfig};
 
     fn policy() -> ContainerPolicy {
         ContainerPolicy::default()
@@ -130,6 +161,28 @@ mod tests {
             )),
             builtin_test_server: false,
         }
+    }
+
+    #[test]
+    fn system_power_access_support_starts_at_v09() {
+        assert_eq!(system_power_access_support("0.8.0-alpha"), Some(false));
+        assert_eq!(system_power_access_support("0.9.0-alpha"), Some(true));
+        assert_eq!(system_power_access_support("invalid"), None);
+    }
+
+    #[test]
+    fn system_power_access_validation_rejects_pre_v09_requests() {
+        let request = ExecutionRequest {
+            schema_version: "0.8.0-alpha".to_string(),
+            seatbelt: Some(SeatbeltConfig {
+                system_power_access: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let error = validate_system_power_access(&request).unwrap_err();
+        assert!(error.contains("schema version 0.9"), "got: {error}");
     }
 
     #[test]

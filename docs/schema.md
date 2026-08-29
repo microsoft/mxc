@@ -188,6 +188,15 @@ cannot mix both formats in one request.
         "release": "3.19"
     },
 
+    "seatbelt": {                          // macOS sandbox settings (macOS only)
+        "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
+        "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
+        "launchMethod": "exec",            // "exec" or "open" (LaunchServices, for Apple-constrained apps)
+        "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
+        "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        "systemPowerAccess": false         // Allow sleep/wake notifications and power assertions
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -199,14 +208,6 @@ cannot mix both formats in one request.
             "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
-        },
-        "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
-            "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
-            "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
-            "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
-            "keychainAccess": false,       // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
-            "systemPowerAccess": false      // Allow sleep/wake notifications and power assertions
         },
         "telemetry": {                // Telemetry (Windows only)
             "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate

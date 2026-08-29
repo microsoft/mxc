@@ -680,7 +680,8 @@ impl SandboxRequest {
 
     /// Allow (or deny) the Seatbelt-sandboxed (macOS) child access to system
     /// sleep/wake notifications and power assertions. Creates a default
-    /// Seatbelt config if the request carries none.
+    /// Seatbelt config if the request carries none. Enabling this on a request
+    /// older than schema 0.9 is rejected when the request executes.
     pub fn set_seatbelt_system_power_access(&mut self, allow: bool) -> &mut Self {
         self.inner
             .seatbelt
@@ -1308,7 +1309,7 @@ mod tests {
     #[test]
     fn seatbelt_options_round_trip() {
         let policy = SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
+            version: "0.9.0-alpha".to_string(),
             filesystem: None,
             network: None,
             ui: None,
