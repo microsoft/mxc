@@ -51,13 +51,14 @@ foot in a debugger.
 ## Debug on launch
 
 The OS-side process sandbox has a **debug-on-launch hook**: a registry-configured
-debugger that is started as part of a sandboxed launch. It is the spiritual
-counterpart of the classic
+debugger that is started as part of a sandboxed launch. It is configured through
 [Image File Execution Options](https://learn.microsoft.com/windows-hardware/drivers/debugger/debugging-a-uwp-app-using-windbg)
-`Debugger` value, with the one difference that matters here — instead of
-*substituting* the debugger for the target image (which would put the debugger
-inside the container), it launches the debugger **alongside** the target,
-outside the container, and hands it the target's PID.
+(IFEO), but through its own value — **not** the classic `Debugger` value, and the
+distinction is the whole point. `Debugger` *substitutes* the named program for
+the target image, which here would run the debugger **inside** the container,
+restricted by the very policy you are trying to investigate. This hook instead
+launches the debugger **alongside** the target, outside the container, and hands
+it the target's PID.
 
 > **This is a mitigation, not a feature.** It exists to unblock developers until
 > a designed solution ships. It is off by default (see
@@ -73,11 +74,10 @@ that request is carried out. Nothing in the MXC config turns it on or off.
 
 When the hook is enabled:
 
-1. The sandboxed process is created **suspended**. Its initial thread has not
-   run a single instruction, so nothing in the workload's startup path has
-   happened yet.
-2. The OS reads the debugger command line from the registry (see
-   [Configuring the debugger](#configuring-the-debugger)).
+1. The sandboxed process is created and its initial thread is **suspended**, so
+   nothing in the workload's startup path has run yet.
+2. The OS looks up the debugger command line under the **target executable's**
+   IFEO key (see [Configuring the debugger](#configuring-the-debugger)).
 3. If a command line is configured, it is launched **under the caller's token**
    — that is, as *you*, outside the sandbox — with the sandboxed process's
    **process ID and thread ID appended**, following the same convention used for
@@ -87,14 +87,13 @@ When the hook is enabled:
    <configured debugger command line> -p <PID> -tid <TID>
    ```
 
-4. The debugger attaches and resumes the process, and you get control at the
-   very first instruction.
+4. The debugger attaches and **is responsible for resuming** the target. You get
+   control at the very first instruction.
 
-If **no** command line is configured, step 3 is skipped and the process simply
-**stays suspended**. That is a deliberate escape hatch: you can attach by
-whatever means you like and resume manually. Be aware that manually attaching to
-the suspended process is known to be finicky — prefer configuring a debugger
-command line and letting the hook launch it.
+If **no** debugger command line is configured for that executable, the hook
+drops the suspend and the process runs normally. There is no "leave it suspended
+and attach by hand" mode: without a configured debugger you get an ordinary
+launch, so configuring the value is the only way to use this hook.
 
 ### Availability
 
@@ -103,25 +102,35 @@ available Windows builds**. It is a developer aid that only functions in
 specific internal development configurations. Nothing in the MXC config, CLI, or
 SDK turns it on, and how it is enabled is out of scope for this document.
 
-The practical test is behavioral: when the hook is active, a sandboxed launch
-visibly stops before your workload runs, because the process is created
-suspended. If your workload instead runs straight through, the hook is not
-active on your build and the registry value below is never consulted. If you
-believe you should have access to it and do not, ask through the usual internal
-channels rather than trying to enable it yourself.
+The practical test is behavioral: with the hook active and a debugger configured
+for your executable, a sandboxed launch visibly stops and your debugger comes up
+before the workload runs. If the workload instead runs straight through, either
+the hook is not active on your build or the value below is not set for that
+executable. If you believe you should have access to it and do not, ask through
+the usual internal channels rather than trying to enable it yourself.
 
 ### Configuring the debugger
 
-Set the debugger command line in:
+The debugger command line is read from the **target executable's** Image File
+Execution Options key, under a dedicated `SecurityEnvironmentDebugger` value:
 
 ```text
-HKLM\SOFTWARE\wxc
-    debugOnLaunch = "<debugger command line>"   (REG_SZ)
+HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\<yourapp.exe>
+    SecurityEnvironmentDebugger = "<debugger command line>"   (REG_SZ)
 ```
 
-Writing under `HKLM` requires elevation. The value is a command line, not just
-an image path, so you can include switches; the PID/TID arguments are appended
-to whatever you put there.
+Two consequences worth internalizing:
+
+- **It is scoped to one executable**, keyed by image name — not to MXC, and not
+  to sandboxed launches in general. Set it on the program you actually want to
+  debug. Note that this is the *sandboxed workload's* exe, not `wxc-exec.exe`.
+- **It does not collide with normal IFEO debugging.** `SecurityEnvironmentDebugger`
+  is a separate value from `Debugger`, so setting it does not change how the
+  program behaves when launched outside a sandbox.
+
+Writing under `HKLM` requires elevation. The value is a command line rather than
+a bare image path, so you may include switches; the PID/TID arguments are
+appended to whatever you put there.
 
 #### WinDbg
 
@@ -129,38 +138,39 @@ WinDbg is the configuration that has been verified end to end — it launches,
 attaches, and resumes correctly.
 
 ```powershell
-# Run elevated. Substitute the path to your own WinDbg install.
+# Run elevated. Substitute your executable and your WinDbg install path.
+$exe    = 'myapp.exe'
 $windbg = 'C:\Debuggers\windbgx.exe'
+$key    = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$exe"
 
-New-Item -Path 'HKLM:\SOFTWARE\wxc' -Force | Out-Null
-Set-ItemProperty -Path 'HKLM:\SOFTWARE\wxc' -Name 'debugOnLaunch' `
-    -Value $windbg -Type String
+New-Item -Path $key -Force | Out-Null
+Set-ItemProperty -Path $key -Name 'SecurityEnvironmentDebugger' -Value $windbg -Type String
 ```
 
-Because the value is a command line rather than a bare image path, quote it the
-way a command line would be quoted if the path contains spaces, and append any
-switches you want the debugger to start with.
+If the debugger path contains spaces, quote it the way a command line would be
+quoted.
 
 To turn it back off, remove the value:
 
 ```powershell
-Remove-ItemProperty -Path 'HKLM:\SOFTWARE\wxc' -Name 'debugOnLaunch'
+Remove-ItemProperty -Path $key -Name 'SecurityEnvironmentDebugger'
 ```
 
 #### Visual Studio
 
 **Not verified.** Visual Studio's on-launch attach path for packaged apps
-differs from WinDbg's, and pointing `debugOnLaunch` at `devenv.exe` has not been
-confirmed to work. If you need Visual Studio today, the pragmatic route is to
-attach it to the still-suspended process (leave `debugOnLaunch` unset) and
-resume by hand, accepting the rough edges noted above.
+differs from WinDbg's, and pointing `SecurityEnvironmentDebugger` at Visual
+Studio has not been confirmed to work. Use WinDbg unless you are prepared to
+work out the Visual Studio invocation yourself.
 
 ### Caveats
 
-- **Leave it off when you are done.** A stale `debugOnLaunch` value means
-  *every* sandboxed launch on the machine tries to spawn a debugger, which will
-  look like a hang to anything that runs MXC non-interactively — including test
-  suites and CI.
+- **Remove the value when you are done.** A stale `SecurityEnvironmentDebugger`
+  makes every *sandboxed* launch of that executable spawn a debugger, which
+  looks like a hang to anything running MXC non-interactively — test suites and
+  CI included. Because the value is keyed by image name, this bites hardest on
+  common interpreters: setting it on something like `python.exe` or
+  `pwsh.exe` affects every sandboxed run of that interpreter, not just yours.
 - **The debugger is not contained.** It runs under your token, outside the
   sandbox, by design: a debugger inside the container could not do its job.
   Consequently, what you can see and touch from the debugger does **not**
@@ -177,13 +187,13 @@ There is also an **inject-learning-mode hook**, subject to the same
 [availability](#availability) constraints as debug-on-launch. When active, it
 adds one of the two learning-mode capabilities to every sandboxed launch:
 
-| Variant | Capability injected | Enforcement |
+| Mode | Capability injected | Enforcement |
 |---|---|---|
-| 1 | `learningModeLogging` | **Unchanged** — accesses stay denied, denials are recorded. |
-| 2 | `permissiveLearningMode` | **Relaxed** — every access check is allowed and recorded. |
+| Non-permissive | `learningModeLogging` | **Unchanged** — accesses stay denied, denials are recorded. |
+| Permissive | `permissiveLearningMode` | **Relaxed** — every access check is allowed and recorded. |
 
-If the launch already names one of the two capabilities explicitly, the hook
-leaves it alone; it never overrides an explicit choice.
+If the launch already names either capability explicitly, the hook leaves it
+alone; it never overrides an explicit choice.
 
 This exists for the case where you do not control the config being passed to
 MXC — an app generates it, or it is baked into a harness — but you still need to
@@ -192,9 +202,9 @@ the supported entry points instead:
 [`processContainer.learningMode`](../learning-mode/capabilities.md#how-to-enable-them)
 for deny-and-record, or `wxc-exec --audit` for permissive audit.
 
-> **Variant 2 turns off deny-by-default** for every sandboxed process on the
-> machine while it is enabled — not just the one you are debugging. It is a
-> machine-wide weakening of containment. Turn it off as soon as you are done,
+> **The permissive mode turns off deny-by-default** for every sandboxed process
+> on the machine while it is active — not just the one you are debugging. It is
+> a machine-wide weakening of containment. Turn it off as soon as you are done,
 > and never enable it on a machine handling anything you care about.
 
 See [Learning-mode capabilities](../learning-mode/capabilities.md) for what the
