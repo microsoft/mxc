@@ -207,6 +207,8 @@ Pick the latest stable schema for new code on any supported platform. See [docs/
 
 ## Debugging
 
+For attaching a debugger to a workload running *inside* a Windows process container — including the debug-on-launch hook — see [docs/process-container/debugging.md](docs/process-container/debugging.md).
+
 ### Debug Console Mode
 
 By default, native binaries run in **silent mode** — stdin/stdout/stderr is coupled directly to the container. Use `--debug` for verbose output:
@@ -276,6 +278,8 @@ Privacy information can be found at https://privacy.microsoft.com and in the Mic
 | [docs/diagnostics.md](docs/diagnostics.md) | Diagnostic logging and ETW |
 | [docs/sandbox-policy/0.7.0/policy.md](docs/sandbox-policy/0.7.0/policy.md) | Sandbox policy 0.7.0 specification |
 | [docs/process-container/guide.md](docs/process-container/guide.md) | Windows AppContainer / BaseContainer guide |
+| [docs/process-container/debugging.md](docs/process-container/debugging.md) | Debugging workloads inside the process container |
+| [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) | Learning-mode capabilities and denial capture |
 | [docs/lxc-support/lxc-backend.md](docs/lxc-support/lxc-backend.md) | LXC backend (Linux) |
 | [docs/bwrap-support/bubblewrap-backend.md](docs/bwrap-support/bubblewrap-backend.md) | Bubblewrap backend (Linux) |
 | [docs/seatbelt/seatbelt-backend.md](docs/seatbelt/seatbelt-backend.md) | Seatbelt backend (macOS) |

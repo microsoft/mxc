@@ -82,6 +82,11 @@ When either learning-mode capability is in effect the runner emits a diagnostic
 describing the mode (informational logging for `learningModeLogging`, a retained
 security warning for `permissiveLearningMode`, readable via `warnings()`).
 
+On builds where the OS-side debug hooks are enabled, a learning-mode capability
+can also be injected into every sandboxed launch without touching the config.
+That is a debugging aid, not a supported configuration path — see
+[Forcing learning mode without editing the config](../process-container/debugging.md#forcing-learning-mode-without-editing-the-config).
+
 ## Three learning-mode flows
 
 Learning-mode telemetry is consumed through three distinct flows. They differ in

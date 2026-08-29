@@ -231,6 +231,7 @@ Core references:
 Per-backend guides:
 
 - `docs/process-container/guide.md` — process container (Windows AppContainer / BaseContainer)
+- `docs/process-container/debugging.md` — debugging workloads inside the process container (OS-side debug-on-launch hook, inject-learning-mode hook, self-diagnosed launch failures)
 - `docs/process-container/UIPolicy_Schema.md` — UI policy schema (JOB_OBJECT_UILIMIT_* mappings)
 - `docs/process-container/os-version-support.md` — per-Windows-release policy-support matrix (filesystem / network / UI)
 - `docs/lxc-support/lxc-backend.md` — LXC container backend (Linux)

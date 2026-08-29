@@ -95,3 +95,11 @@ messages work without elevation.
 ## Scope
 
 Diagnostic logging currently covers the **BaseContainer runner only**.
+
+## See also
+
+- [Debugging workloads inside the process container](./process-container/debugging.md)
+  — attaching a debugger to the sandboxed process, including the
+  debug-on-launch hook
+- [Learning-mode capabilities](./learning-mode/capabilities.md) — recording what
+  the sandbox denied
