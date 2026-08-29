@@ -2174,9 +2174,9 @@ impl NetworkIptablesManager {
         //
         // Each hook is claimed before its `-I` runs, so a fatal signal landing
         // between the command returning and the record being written still
-        // finds the hook in the published snapshot. A hook that was never
-        // inserted is disowned again the moment `-I` reports failure, which
-        // costs nothing a rollback could not give back.
+        // finds the hook in the published snapshot. A failed `-I` gives the
+        // claim back only after taking the rule out again, so the released
+        // claim always describes an OUTPUT chain this hook is absent from.
         if !self.is_hooked() {
             logger.log_line(
                 "Warning: no container network namespace to enforce in. \
@@ -2186,10 +2186,15 @@ impl NetworkIptablesManager {
         }
 
         let hook_args = ["-I", "OUTPUT", "1", "-j", self.chain_name.as_str()];
+        let unhook_args = ["-D", "OUTPUT", "-j", self.chain_name.as_str()];
 
         created.v4.hook = true;
         Self::publish_created(created);
         if let Err(e) = self.run_iptables(&hook_args, logger) {
+            // iptables can apply the rule and still report failure, and
+            // releasing the claim below is what leaves teardown with nothing
+            // recorded to remove it.
+            let _ = self.run_iptables(&unhook_args, logger);
             created.v4.hook = false;
             Self::publish_created(created);
             return Err(e);
@@ -2203,6 +2208,7 @@ impl NetworkIptablesManager {
             created.v6.hook = true;
             Self::publish_created(created);
             if let Err(e) = self.run_ip6tables(&hook_args, logger) {
+                let _ = self.run_ip6tables(&unhook_args, logger);
                 created.v6.hook = false;
                 Self::publish_created(created);
                 return Err(e);
@@ -4898,6 +4904,39 @@ mod tests {
                 .iter()
                 .any(|cmd| cmd[0] == "iptables" && cmd[1] == "-X" && cmd[2] == chain),
             "the rollback must delete the chain whose hook never installed; issued: {issued:?}"
+        );
+    }
+
+    #[test]
+    fn a_hook_the_kernel_may_have_applied_is_removed_before_the_claim_is_released() {
+        // Releasing the claim is what lets the chain be deleted, and it is also
+        // what stops teardown ever issuing a `-D` for this hook.  A failure
+        // report is not proof the kernel refused the insert, so the two tests
+        // either side of this one both hold only if the release is preceded by
+        // an attempt to take the rule back out.
+        let fake = test_firewall::install();
+        fake.fail_commands_matching("OUTPUT", "iptables: Resource temporarily unavailable");
+
+        let mut manager =
+            NetworkIptablesManager::new("maybe-applied", EgressHookPoint::ContainerNetns(4242));
+        let policy = policy_with_enforcement_mode(NetworkEnforcementMode::Firewall);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let outcome = manager.apply_firewall_rules(&policy, &mut logger);
+        assert!(
+            outcome.is_err(),
+            "an apply whose OUTPUT hook could not be installed must fail"
+        );
+
+        let chain = chain_name_for("maybe-applied");
+        let issued = fake.issued();
+        assert!(
+            issued.iter().any(|cmd| {
+                cmd[1] == "-D" && cmd[2] == "OUTPUT" && cmd.iter().any(|arg| arg == &chain)
+            }),
+            "the failed hook must be removed from OUTPUT before its claim is \
+             released, or a rule the kernel did apply is left with nothing \
+             recorded to remove it; issued: {issued:?}"
         );
     }
 
