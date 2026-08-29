@@ -131,24 +131,10 @@ fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
     NetworkPlan::Unfiltered
 }
 
-/// True when the container needs a reachable address.
-///
-/// Wider than [`NetworkPlan::installs_firewall`]: host lists resolve names,
-/// and a proxy has to be reachable, even where the declared mode installs
-/// nothing.
+/// True when the container holds an interface, which is unusable until an
+/// address lands on it.
 pub(crate) fn needs_network(policy: &ContainerPolicy) -> bool {
-    let plan = plan_network(policy);
-
-    // Nothing to resolve and nothing to reach when the container is given no
-    // interface, whatever else the policy happens to name.
-    if plan.omits_interface() {
-        return false;
-    }
-
-    plan.installs_firewall()
-        || !policy.allowed_hosts.is_empty()
-        || !policy.blocked_hosts.is_empty()
-        || policy.network_proxy.is_enabled()
+    !plan_network(policy).omits_interface()
 }
 
 /// One destination the container is allowed to reach when the policy routes
@@ -4321,6 +4307,24 @@ mod tests {
 
         assert!(!plan_network(&policy).installs_firewall());
         assert!(needs_network(&policy));
+    }
+
+    // Alpine's DHCP lease arrives around ten seconds after LXC marks the
+    // container running.
+    #[test]
+    fn a_plan_that_starts_an_interface_demands_an_address() {
+        let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
+        policy.default_network_policy = NetworkPolicy::Allow;
+
+        assert!(
+            !plan_network(&policy).omits_interface(),
+            "a policy that allows everything is given an interface"
+        );
+        assert!(
+            needs_network(&policy),
+            "a container given an interface waits for its address; running the \
+             script first points it at a network that is not up yet"
+        );
     }
 
     // `run_internal` reads these two predicates at separate points: the plan
