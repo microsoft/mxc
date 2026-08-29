@@ -232,6 +232,17 @@ is where inbound filtering already lives.
 
 Egress firewall state is torn down automatically with best-effort removal of the `OUTPUT` hook and both per-container chains; there is no egress network-policy opt-out field, and `preservePolicy` suppresses that teardown on both the explicit path and the drop path. Setup failures after partial creation are rolled back before returning an error, so retries do not trip over leftover chains. Because the chains live in the container's namespace, they also vanish with it, so teardown only has work to do while the container is still running.
 
+### No network at all
+
+A request that permits nothing and names no proxy is given no network
+interface: the container's network slot is set to `empty`, so no veth is
+created and neither the egress nor the inbound chain is installed. The
+container keeps its own loopback and reaches nothing else.
+
+This is not an opt-out from enforcement. There is no field that leaves a
+networked container unfiltered; a container with no interface has nothing to
+filter, and it arrives at the same place the chains would have left it.
+
 ### Inbound (ingress) policy
 
 Inbound filtering is a separate chain from the egress chains above, and it lives **inside the container's own network namespace** rather than on the host. Every command is issued through `nsenter -t <init-pid> -n`, so the container's init PID is mandatory. When a firewall enforcement mode is requested and MXC cannot discover that PID, the run is aborted rather than started with inbound enforcement silently disabled. This is LXC-specific, and the Bubblewrap comparison is policy-dependent rather than absolute: Bubblewrap gives the sandbox its own network namespace via `--unshare-net` when the default policy is `block` with no `allowedHosts`, no `blockedHosts`, and no proxy, and shares the host's namespace otherwise. It installs no inbound chain in either case — under `--unshare-net` because nothing outside the sandbox can reach in, and when the namespace is shared because an inbound chain there would be host-wide.
@@ -256,7 +267,7 @@ The signal is the file's *existence* rather than its contents, because a contain
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
-Default-deny is not a containment boundary against the sandboxed workload, in either direction. Because both chains live in the container's own network namespace, the workload can reach them: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chains live in, where it can flush or delete them. Default-deny therefore holds for any workload that does not deliberately tear it down, and does not survive one that does. Making enforcement tamper-proof is tracked in issue #854.
+Default-deny is not a containment boundary against the sandboxed workload, in either direction. Because both chains live in the container's own network namespace, the workload can reach them: MXC creates containers from the stock `lxc-create -t download` template and never sets `lxc.cap.drop` or `lxc.cap.keep`, so LXC's defaults apply — the shared default drops only `mac_admin`, `mac_override`, `sys_time`, `sys_module`, and `sys_rawio`, and an unprivileged user-namespace container starts with a full capability set. `lxc-attach` is invoked without `-u` or `-g`, so the workload runs as container root and holds `CAP_NET_ADMIN` in the namespace the chains live in, where it can flush or delete them. Default-deny therefore holds for any workload that does not deliberately tear it down, and does not survive one that does. Making enforcement tamper-proof is tracked in issue #897.
 
 The inbound chain honors the lifecycle's `preservePolicy` as the egress chains do: when it is set *and* installation succeeded, the chain is deliberately left in place after the run for inspection. A partially installed chain from a failed run is always torn down regardless of the setting.
 
@@ -306,12 +317,13 @@ each of which would otherwise be a hole in the posture:
 |----------------|---------------|-----|
 | Terminal rule follows `defaultPolicy` | Terminal rule is always DROP | An ACCEPT terminal would make the proxy rule above it meaningless |
 | Accepts UDP/TCP port 53 | No DNS rule | An unscoped port-53 accept is a standing DNS-tunnel exfil path through a deny-all posture |
-| Accepts `-i lo` and `ESTABLISHED,RELATED` | Neither | Neither describes traffic this chain sees, and the conntrack rule would carry flows the proxy never brokered |
+| Accepts `-o lo` and `ESTABLISHED,RELATED` | Accepts `-o lo` only | Loopback stays out of policy in both, which 0.8 requires of a backend holding a private loopback; the conntrack rule would carry flows the proxy never brokered |
 | Programs `allowedHosts` and `blockedHosts` | Programs neither | A block entry is redundant under the closing DROP, and an allow entry naming anything but the proxy contradicts the model |
 
-The IPv6 chain of a proxied container carries its closing DROP and nothing
-else, because the proxy rule is emitted with IPv4 `iptables` only. An IPv6
-proxy endpoint is therefore rejected outright rather than silently discarded.
+The IPv6 chain of a proxied container carries the loopback accept and its
+closing DROP, because the proxy rule is emitted with IPv4 `iptables` only. An
+IPv6 proxy endpoint is therefore rejected outright rather than silently
+discarded.
 
 With DNS closed, a container handed a proxy URL naming a hostname has no
 resolver to find it with. MXC resolves the proxy once, when it builds the
