@@ -94,8 +94,11 @@ fn a_single_threaded_apartment_is_refused_before_the_service_is_reached() {
         "message: {}",
         err.message
     );
-    assert_eq!(err.operation.as_deref(), Some("Com.CoGetApartmentType"));
-    assert_eq!(err.native_code.as_deref(), Some("0x80010106"));
+    assert_eq!(
+        err.operation, None,
+        "the apartment query succeeds, so the refusal has no call to name"
+    );
+    assert_eq!(err.native_code, None);
     assert!(
         err.remediation.is_some(),
         "the refusal must tell the caller what to do instead"

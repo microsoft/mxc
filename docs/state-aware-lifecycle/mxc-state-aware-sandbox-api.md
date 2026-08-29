@@ -796,28 +796,25 @@ consumer branches on; `message` is the human-readable description, and for a fai
 raised by an underlying platform API it is that API's own message, passed through
 verbatim rather than concatenated with the other fields.
 
-The three optional named fields describe a failure that originated in an underlying
-platform API:
+The three optional named fields carry structured failure detail. `operation` and
+`nativeCode` describe an underlying platform call; `remediation` describes the failure:
 
 | Field | Meaning |
 |---|---|
 | `operation` | The API call that failed, namespaced by its interface — e.g. `IsoSessionOps.RunProcessWithOptionsAsync`. Low-cardinality and free of call parameters, so it is safe to aggregate on in telemetry. **Best-effort diagnostic, not a versioned contract** — see below. |
 | `nativeCode` | The underlying platform status as a string. An HRESULT such as `0x80070490` on Windows; the field is platform-neutral, so another backend can carry an errno or equivalent. |
-| `remediation` | The API's actionable "how to fix it" hint, when it supplies one. |
+| `remediation` | An actionable "how to fix it" hint, when the failure has one. |
 
 **Availability.** These fields are currently populated only by **IsolationSession
-state-aware** operations. Windows Sandbox has no semantic error channel to derive them
-from, and the one-shot surface composes its full detail into `message` instead, so all
-three are uniformly absent there. Other backends may adopt them as they grow an
-equivalent channel — treat all three as optional on every backend, and branch program
-logic on `code` first.
+state-aware** operations. Other backends may adopt them — treat all three as optional on
+every backend, and branch program logic on `code` first.
 
 **Stability.** Unlike `code`, which is a closed and versioned enum, the *values* of `operation` and `nativeCode` are **best-effort diagnostics and may change without a schema version bump**. They are derived from the underlying platform API — for IsolationSession, from the projected WinRT class and method names — which MXC does not own and cannot version. Consumers should aggregate on them for telemetry and log them for diagnosis, but branch program logic on `code`, and should not treat a particular `operation` value as a guarantee. (MXC's own end-to-end tests do pin exact values; that is deliberate — they verify MXC's mapping, and move with it in the same change.)
 
 **Invariant:** `operation` marks that an API operation was in flight. A failure
 MXC raises before or outside any API call — a malformed request or id, a policy
-rejection, or an internal failure of MXC's own machinery — carries only `code`
-and `message`.
+rejection, or an internal failure of MXC's own machinery — carries neither
+`operation` nor `nativeCode`. It may still carry a `remediation`.
 
 **Which fields earn a place here.** A named top-level field is for a **backend-neutral**
 concept: `operation`, `nativeCode` and `remediation` all apply equally to a Windows
