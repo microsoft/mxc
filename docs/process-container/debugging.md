@@ -60,8 +60,8 @@ inside the container), it launches the debugger **alongside** the target,
 outside the container, and hands it the target's PID.
 
 > **This is a mitigation, not a feature.** It exists to unblock developers until
-> a designed solution ships. It is gated off by default (see
-> [Enabling the hook](#enabling-the-hook)), the configuration surface is not a
+> a designed solution ships. It is off by default (see
+> [Availability](#availability)), the configuration surface is not a
 > supported API, and it can change or disappear without notice. Do not build
 > tooling on top of it.
 
@@ -96,28 +96,19 @@ whatever means you like and resume manually. Be aware that manually attaching to
 the suspended process is known to be finicky — prefer configuring a debugger
 command line and letting the hook launch it.
 
-### Enabling the hook
+### Availability
 
-The debug hooks live in their own OS feature group, and the root hook is
-**disabled by default on every build**, release branches included. It is only
-turned on in internal Windows engineering test runs. On a normal build —
-including internal flighting builds — the hook is inert and the registry value
-below is never read.
+The debug-on-launch hook is **off by default and is not available on generally
+available Windows builds**. It is a developer aid that only functions in
+specific internal development configurations. Nothing in the MXC config, CLI, or
+SDK turns it on, and how it is enabled is out of scope for this document.
 
-The feature flag IDs are not published here because they are OS-side and change
-across branches. To check whether a given feature flag is on, MXC reads the
-Windows Feature Store the same way it does for BaseContainer:
-
-```text
-HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\FeatureManagement\Overrides\<priority>\<featureId>
-    EnabledState = 2   (REG_DWORD; 2 means enabled)
-```
-
-`<priority>` is `4` or `8`. See `check_velocity_keys` in
-[`src/backends/appcontainer/common/src/launch_diagnostics.rs`](../../src/backends/appcontainer/common/src/launch_diagnostics.rs)
-for the implementation MXC uses to report disabled flags in launch diagnostics,
-and [`tests/scripts/README.md`](../../tests/scripts/README.md) for the flags the
-E2E suite already depends on.
+The practical test is behavioral: when the hook is active, a sandboxed launch
+visibly stops before your workload runs, because the process is created
+suspended. If your workload instead runs straight through, the hook is not
+active on your build and the registry value below is never consulted. If you
+believe you should have access to it and do not, ask through the usual internal
+channels rather than trying to enable it yourself.
 
 ### Configuring the debugger
 
@@ -182,9 +173,9 @@ resume by hand, accepting the rough edges noted above.
 
 ## Forcing learning mode without editing the config
 
-The same debug hook group includes an **inject-learning-mode hook**. When
-enabled, it adds one of the two learning-mode capabilities to every sandboxed
-launch:
+There is also an **inject-learning-mode hook**, subject to the same
+[availability](#availability) constraints as debug-on-launch. When active, it
+adds one of the two learning-mode capabilities to every sandboxed launch:
 
 | Variant | Capability injected | Enforcement |
 |---|---|---|
