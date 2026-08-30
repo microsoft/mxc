@@ -104,6 +104,16 @@ run_rejected "a directional section before 0.8 is refused" \
     "require schema version 0.8 or later" \
     "DIRECTIONAL_PRE_0_8_SHOULD_NOT_RUN"
 
+# The per-peer block budget. `except` is the amplifier: 20 dispersed /32
+# exclusions look small but split 0.0.0.0/0 past the 256-block ceiling, because
+# each one carves its own full-depth path down the prefix tree. Rules must be
+# refused up front rather than part-way through a run with a partial policy
+# already installed.
+run_rejected "an egress peer that over-expands its block budget is refused" \
+    "bubblewrap_network_egress_budget_rejected.json" \
+    "expands into more than 256 address blocks" \
+    "EGRESS_BUDGET_SHOULD_NOT_RUN"
+
 # ---------------------------------------------------------------------------
 # 2. Enforcement
 # ---------------------------------------------------------------------------
@@ -309,6 +319,14 @@ run_enforced "directional except carve-out" "bubblewrap_network_directional_exce
 # so the one case where the bug above would have looked correct.
 run_enforced "directional ruleless deny" "bubblewrap_network_directional_block.json" \
     EGRESS_BLOCKED_OK
+
+# No other directional config carries an IPv6 peer or an ICMP rule, so the real
+# ip6tables-restore never sees a v6 address or the icmp -> icmpv6 token the v6
+# table requires. Connectivity is not the point: a token or transaction the tool
+# rejects fails namespace setup, so lxc-exec exits before the workload runs.
+run_enforced "directional ipv6 and icmp rendering" \
+    "bubblewrap_network_directional_ipv6_icmp.json" \
+    V6_ICMP_RULES_INSTALLED_OK CAP_NET_ADMIN_DROPPED_OK
 
 # Port narrowing: one address, two ports, only one allowed. Both ports are
 # probed reachable above, so the denied one being closed is the rule working.

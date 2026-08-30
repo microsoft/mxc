@@ -1,23 +1,27 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+using System.Text.Json.Serialization;
+
 namespace Microsoft.Mxc.Sdk;
 
 /// <summary>
 /// The containment backend a sandbox is provisioned under. Selected at
-/// provision; the later phases identify the sandbox by the <see cref="SandboxId"/>
-/// provision returned, so they take no containment.
+/// provision; later phases resolve it from the <see cref="SandboxId"/>.
 /// </summary>
 public enum StateAwareContainment
 {
-    /// <summary>Windows IsolationSession (experimental; requires its OS-side service).</summary>
+    /// <summary>Windows IsolationSession.</summary>
     IsolationSession,
+
+    /// <summary>Windows Sandbox.</summary>
+    WindowsSandbox,
+
+    /// <summary>Windows Subsystem for Linux container.</summary>
+    Wslc,
 }
 
-/// <summary>
-/// The default action for traffic with no matching rule. The zero value is
-/// <see cref="Block"/>, so a policy left unset denies rather than allows.
-/// </summary>
+/// <summary>The default action for traffic with no matching rule.</summary>
 public enum StateAwareNetworkDefault
 {
     /// <summary>Deny traffic by default.</summary>
@@ -28,24 +32,28 @@ public enum StateAwareNetworkDefault
 }
 
 /// <summary>
-/// Network posture sent on a state-aware lifecycle request. This is the wire
-/// vocabulary the lifecycle phases use, a different layer from the one-shot
-/// <see cref="NetworkPolicy"/>.
+/// Network posture sent on a state-aware lifecycle request. Omitted values are
+/// resolved by the native backend using its fail-closed defaults.
 /// </summary>
 public sealed class StateAwareNetworkPolicy
 {
     /// <summary>The default action for outbound traffic.</summary>
-    public StateAwareNetworkDefault DefaultPolicy { get; set; }
+    public StateAwareNetworkDefault? DefaultPolicy { get; set; }
 
     /// <summary>Whether the sandbox may reach the local network.</summary>
-    public bool AllowLocalNetwork { get; set; }
+    public bool? AllowLocalNetwork { get; set; }
+
+    /// <summary>Host names or IP addresses the sandbox may contact.</summary>
+    public List<string>? AllowedHosts { get; set; }
+
+    /// <summary>Host names or IP addresses the sandbox may not contact.</summary>
+    public List<string>? BlockedHosts { get; set; }
+
+    /// <summary>Optional cooperative HTTP/HTTPS proxy configuration.</summary>
+    public NetworkProxyPolicy? Proxy { get; set; }
 }
 
-/// <summary>
-/// Filesystem posture sent on a state-aware lifecycle request. This is the wire
-/// vocabulary the lifecycle phases use, a different layer from the one-shot
-/// <see cref="FilesystemPolicy"/>.
-/// </summary>
+/// <summary>Filesystem posture sent on a state-aware lifecycle request.</summary>
 public sealed class StateAwareFilesystemPolicy
 {
     /// <summary>Paths the sandbox can read and write.</summary>
@@ -58,40 +66,157 @@ public sealed class StateAwareFilesystemPolicy
     public List<string> DeniedPaths { get; set; } = new();
 }
 
-/// <summary>Options for <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>
-public sealed class ProvisionSandboxOptions
+/// <summary>Base class for backend-specific provision options.</summary>
+public abstract class StateAwareProvisionOptions
+{
+    /// <summary>Overrides the backend's default state-aware schema version.</summary>
+    public string? Version { get; set; }
+}
+
+/// <summary>IsolationSession provision options.</summary>
+public sealed class IsolationSessionProvisionOptions : StateAwareProvisionOptions
 {
     /// <summary>
-    /// Network posture for the sandbox, fixed for its lifetime. Sent only when
-    /// supplied; a backend may refuse an absent policy rather than default it.
+    /// Creates options with the unrestricted-network acknowledgement required
+    /// by IsolationSession.
     /// </summary>
+    public IsolationSessionProvisionOptions(StateAwareNetworkPolicy network)
+    {
+        ValidateNetwork(network, nameof(network));
+        Network = network;
+    }
+
+    /// <summary>
+    /// Required unrestricted posture: default allow with local network access.
+    /// </summary>
+    public StateAwareNetworkPolicy Network { get; set; }
+
+    /// <summary>Optional packaged-app PFN or unpackaged-app identifier.</summary>
+    public string? AppId { get; set; }
+
+    internal static void ValidateNetwork(
+        StateAwareNetworkPolicy network,
+        string parameterName)
+    {
+        ArgumentNullException.ThrowIfNull(network, parameterName);
+        if (network.DefaultPolicy != StateAwareNetworkDefault.Allow
+            || network.AllowLocalNetwork != true
+            || network.AllowedHosts is { Count: > 0 }
+            || network.BlockedHosts is { Count: > 0 }
+            || network.Proxy is not null)
+        {
+            throw new ArgumentException(
+                "IsolationSession requires default allow with local network access, "
+                    + "no host rules, and no proxy.",
+                parameterName);
+        }
+    }
+}
+
+/// <summary>Windows Sandbox provision options.</summary>
+public sealed class WindowsSandboxProvisionOptions : StateAwareProvisionOptions
+{
+    /// <summary>Host paths to map into the sandbox.</summary>
+    public StateAwareFilesystemPolicy? Filesystem { get; set; }
+}
+
+/// <summary>WSLC provision options.</summary>
+public sealed class WslcProvisionOptions : StateAwareProvisionOptions
+{
+    /// <summary>Host paths to mount into the container.</summary>
+    public StateAwareFilesystemPolicy? Filesystem { get; set; }
+
+    /// <summary>Container network mode.</summary>
+    public StateAwareNetworkPolicy? Network { get; set; }
+
+    /// <summary>Container image reference, such as <c>alpine:latest</c>.</summary>
+    public string? Image { get; set; }
+
+    /// <summary>Optional local image archive to import instead of pulling.</summary>
+    public string? ImageTarPath { get; set; }
+}
+
+/// <summary>
+/// Compatibility options for the original IsolationSession-only API. New code
+/// should use <see cref="IsolationSessionProvisionOptions"/>.
+/// </summary>
+public sealed class ProvisionSandboxOptions : StateAwareProvisionOptions
+{
+    /// <summary>IsolationSession network acknowledgement.</summary>
     public StateAwareNetworkPolicy? Network { get; set; }
 
     /// <summary>
-    /// Filesystem policy applied at provision, immutable for the sandbox's
-    /// lifetime.
+    /// Legacy filesystem field. IsolationSession rejects it because that
+    /// backend cannot share host paths.
     /// </summary>
     public StateAwareFilesystemPolicy? Filesystem { get; set; }
 
-    /// <summary>
-    /// Application identity for the sandbox, fixed at provision. A packaged app
-    /// passes its Package Family Name as <c>PFN:&lt;packageFamilyName&gt;</c>.
-    /// Validated structurally only: no control characters, at most 256
-    /// characters; an explicitly supplied empty string is a distinct value from
-    /// omitting the field.
-    /// </summary>
+    /// <summary>Optional packaged-app PFN or unpackaged-app identifier.</summary>
     public string? AppId { get; set; }
+}
+
+/// <summary>Options shared by start, stop, and deprovision phases.</summary>
+public class StateAwarePhaseOptions
+{
+    /// <summary>Overrides the schema version inferred from the sandbox id.</summary>
+    public string? Version { get; set; }
+}
+
+/// <summary>Process and schema options for a state-aware exec phase.</summary>
+public class StateAwareExecOptions : StateAwarePhaseOptions
+{
+    /// <summary>Working directory inside the sandbox.</summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>Environment variables encoded as <c>KEY=VALUE</c> strings.</summary>
+    public List<string>? Environment { get; set; }
+
+    /// <summary>Wall-clock timeout in milliseconds. Zero means no timeout.</summary>
+    public uint? TimeoutMs { get; set; }
+}
+
+/// <summary>WSLC exec options, including its per-exec proxy override.</summary>
+public sealed class WslcExecOptions : StateAwareExecOptions
+{
+    /// <summary>Optional exec-time URL proxy configuration.</summary>
+    public WslcExecNetworkPolicy? Network { get; set; }
+}
+
+/// <summary>
+/// WSLC's exec-time network override. Network mode is immutable after
+/// provision, so only a cooperative proxy may be supplied here.
+/// </summary>
+public sealed class WslcExecNetworkPolicy
+{
+    /// <summary>Optional URL proxy injected into the process environment.</summary>
+    public NetworkProxyPolicy? Proxy { get; set; }
 }
 
 /// <summary>The result of <see cref="MxcLifecycle.ProvisionSandbox"/>.</summary>
 public sealed class ProvisionResult
 {
-    /// <summary>The freshly minted sandbox id, used for the later lifecycle phases.</summary>
+    /// <summary>The freshly minted sandbox id.</summary>
     public SandboxId SandboxId { get; init; }
 
-    /// <summary>
-    /// Backend-typed provision metadata as raw JSON (e.g. the per-instance agent
-    /// user identity), or null when the backend produced none.
-    /// </summary>
+    /// <summary>Backend-typed provision metadata as raw JSON.</summary>
     public string? MetadataJson { get; init; }
+
+    /// <summary>Typed IsolationSession metadata, when available.</summary>
+    public IsolationSessionProvisionMetadata? IsolationSessionMetadata { get; init; }
+}
+
+/// <summary>Metadata returned by IsolationSession provision.</summary>
+public sealed class IsolationSessionProvisionMetadata
+{
+    /// <summary>Sandbox agent account name.</summary>
+    [JsonPropertyName("agentUserName")]
+    public string? AgentUserName { get; init; }
+
+    /// <summary>Sandbox agent account SID.</summary>
+    [JsonPropertyName("agentUserSid")]
+    public string? AgentUserSid { get; init; }
+
+    /// <summary>Ephemeral host workspace shared with the agent.</summary>
+    [JsonPropertyName("ephemeralWorkspacePath")]
+    public string? EphemeralWorkspacePath { get; init; }
 }

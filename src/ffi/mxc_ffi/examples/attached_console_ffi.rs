@@ -17,6 +17,9 @@
 //! `isolation_session_console` example asks for: the prompt draws and redraws,
 //! input works, and `exit 7` comes back as `exit_code: 7`. Running both isolates
 //! whether a failure is in the ABI or beneath it.
+//!
+//! The driver exits with the workload's exit code.
+//!
 //! Must run at a real interactive console.
 
 use std::ffi::{CStr, CString};
@@ -83,7 +86,9 @@ impl Drop for Teardown {
     }
 }
 
-fn main() {
+/// Returns the exit code rather than calling `std::process::exit`, which would
+/// skip the `Teardown` guard.
+fn run() -> i32 {
     let command = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "powershell.exe -NoLogo".into());
@@ -102,7 +107,7 @@ fn main() {
         // Panicking here would strand the account this provision just minted,
         // with no id to reclaim it by, so print the payload a human needs.
         eprintln!("[driver] provision returned no sandboxId; reclaim by hand from: {provisioned}");
-        std::process::exit(1);
+        return 1;
     };
     let _teardown = Teardown(sandbox_id.clone());
     eprintln!("[driver] provisioned.");
@@ -136,6 +141,7 @@ fn main() {
             "\n[driver] status: 0, timed_out: {}, exit_code: {}",
             outcome.timed_out, outcome.exit_code
         );
+        outcome.exit_code
     } else {
         let message = if error.message_utf8.is_null() {
             String::from("(no message)")
@@ -148,5 +154,10 @@ fn main() {
         println!("\n[driver] status: {status}, error: {message}");
         // SAFETY: filled by the call and not yet freed.
         unsafe { mxc_error_detail_free(&mut error) };
+        1
     }
+}
+
+fn main() {
+    std::process::exit(run())
 }

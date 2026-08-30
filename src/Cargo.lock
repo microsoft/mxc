@@ -1488,6 +1488,7 @@ dependencies = [
 name = "mxc-sdk"
 version = "0.8.0"
 dependencies = [
+ "bwrap_common",
  "libc",
  "mxc_engine",
  "serde_json",
@@ -1562,6 +1563,7 @@ version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "serde",
  "serde_json",
 ]
 
