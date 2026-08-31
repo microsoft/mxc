@@ -106,7 +106,8 @@ fn plan_directional(policy: &ContainerPolicy) -> NetworkPlan {
 }
 
 /// 0.7 names an enforcement mode, and only some modes install rules.  A mode
-/// that installs none still has to answer a policy that permits nothing.
+/// that installs none still has to answer a policy that permits nothing, or
+/// one that names the hosts it will reach.
 fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
     if NetworkIptablesManager::enforcement_mode_uses_firewall(&policy.network_enforcement_mode) {
         return NetworkPlan::Filtered;
@@ -126,6 +127,14 @@ fn plan_legacy(policy: &ContainerPolicy) -> NetworkPlan {
         && !policy.allow_local_network
     {
         return NetworkPlan::Isolated;
+    }
+
+    // A named host list is a restriction the caller stated.  0.8 carries no
+    // mode to opt out of, and 0.7 makes an allow list the only reachable set on
+    // a filtering backend, so neither schema offers handing the container an
+    // unfiltered interface here.
+    if !policy.allowed_hosts.is_empty() || !policy.blocked_hosts.is_empty() {
+        return NetworkPlan::Filtered;
     }
 
     NetworkPlan::Unfiltered
@@ -4352,6 +4361,36 @@ mod tests {
         );
     }
 
+    // A named host list is a restriction the caller stated.  Neither schema
+    // lists `enforcementMode` among its network fields, and both say an allow
+    // list is the only reachable set and a block list holds even when outbound
+    // is allowed, so an unfiltered interface is never the answer to one.
+    // Withholding the interface entirely satisfies this too, and is stricter.
+    #[test]
+    fn a_named_host_list_is_never_answered_by_an_unfiltered_interface() {
+        for (allowed, blocked) in [
+            (&["140.82.112.0/20"][..], &[][..]),
+            (&[][..], &["140.82.112.0/20"][..]),
+        ] {
+            for default_policy in [NetworkPolicy::Block, NetworkPolicy::Allow] {
+                let policy = ContainerPolicy {
+                    default_network_policy: default_policy.clone(),
+                    ..policy_with_hosts(allowed, blocked)
+                };
+
+                let plan = plan_network(&policy);
+
+                assert!(
+                    !matches!(plan, NetworkPlan::Unfiltered),
+                    "a policy naming hosts to allow or block states a restriction, and \
+                     the default enforcement mode must not discard it; \
+                     allowed={allowed:?} blocked={blocked:?} default={default_policy:?} \
+                     gave {plan:?}"
+                );
+            }
+        }
+    }
+
     // The 0.7 keys can say "permit nothing" just as the 0.8 keys can, and the
     // answer to that has to be the same either way: no interface at all.
     #[test]
@@ -4449,15 +4488,17 @@ mod tests {
         assert!(!plan_network(&policy).omits_interface());
     }
 
-    // Resolving a host name and reaching a proxy both need the interface up,
-    // whatever the mode decides about installing rules. The policy has to
-    // permit something for either to arise: nothing is reachable to begin with
-    // under a posture that blocks outbound and grants no host.
+    // Reaching a proxy needs the interface up, whatever the mode decides about
+    // installing rules. The policy has to permit something for that to arise:
+    // nothing is reachable to begin with under a posture that blocks outbound
+    // and grants no host.
     #[test]
     fn a_legacy_policy_that_installs_nothing_can_still_need_the_network() {
         let mut policy = policy_with_enforcement_mode(NetworkEnforcementMode::Capabilities);
-        policy.default_network_policy = NetworkPolicy::Allow;
-        policy.blocked_hosts = vec!["example.com".to_string()];
+        policy.network_proxy = ProxyConfig {
+            address: Some(ProxyAddress::new("10.0.0.5".to_string(), 3128)),
+            builtin_test_server: false,
+        };
 
         assert!(!plan_network(&policy).installs_firewall());
         assert!(needs_network(&policy));
