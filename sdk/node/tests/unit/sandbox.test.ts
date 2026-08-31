@@ -1310,6 +1310,7 @@ describe('createConfigFromPolicy', () => {
             egress: {
               default: 'deny',
               allow: [{ to: [{ cidr: '203.0.113.0/24' }], ports: [{ protocol: 'tcp', port: 443 }] }],
+              deny: [{ to: [{ cidr: '203.0.113.128/25' }] }],
             },
             ingress: { default: 'deny', hostLoopback: 'deny' },
           },
@@ -1318,6 +1319,7 @@ describe('createConfigFromPolicy', () => {
         assert.deepStrictEqual(config.network!.egress, {
           default: 'deny',
           allow: [{ to: [{ cidr: '203.0.113.0/24' }], ports: [{ protocol: 'tcp', port: 443 }] }],
+          deny: [{ to: [{ cidr: '203.0.113.128/25' }] }],
         });
       } finally {
         restore();
