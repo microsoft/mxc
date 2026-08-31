@@ -11,6 +11,7 @@ use std::io::IsTerminal;
 use wxc_common::logger::Logger;
 use wxc_common::models::{ExecutionRequest, ScriptResponse};
 use wxc_common::script_runner::ScriptRunner;
+use wxc_common::validator::{validate_network_policy_support, NetworkPolicySupport};
 
 use super::manager::IsolationSessionManager;
 use super::policy::validate_provision_policy;
@@ -56,7 +57,9 @@ impl ScriptRunner for IsolationSessionRunner {
         // backend configuration, so there is nothing backend-specific to
         // validate here — only the cross-cutting stable-surface policy.
         reject_unsupported_lifecycle(request)?;
-        validate_provision_policy(request).map_err(ScriptResponse::from)
+        validate_provision_policy(request).map_err(ScriptResponse::from)?;
+        validate_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
+        Ok(())
     }
 
     fn execute(&mut self, request: &ExecutionRequest, logger: &mut Logger) -> ScriptResponse {
@@ -84,7 +87,11 @@ impl ScriptRunner for IsolationSessionRunner {
         // keeps a freshly-minted agent user from being stranded: a separate
         // `new()` would activate the service a second time, and a failure
         // there would leave an account that can no longer be removed.
-        let manager = match IsolationSessionManager::add_user() {
+        // One-shot takes no backend config, so there is no caller-supplied
+        // `appId`. Passing `None` selects the default registration, which the
+        // in-proc client resolves to the calling process's PFN when packaged
+        // (or leaves empty when unpackaged).
+        let manager = match IsolationSessionManager::add_user(None) {
             Ok((provisioned, manager)) => {
                 let _ = writeln!(
                     logger,

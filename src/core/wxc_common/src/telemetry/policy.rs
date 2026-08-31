@@ -103,7 +103,9 @@ const POLICY_KEY_OVERRIDE_OWNER_ENV: &str = "MXC_TEST_POLICY_KEY_OVERRIDE_OWNER_
 /// Fail-closed: a value that is present but not understood resolves to
 /// [`PolicyState::Blocked`]. An *absent* policy resolves to
 /// [`PolicyState::Unrestricted`] — the unmanaged default, where the user's own
-/// consent decision governs.
+/// consent decision governs. Registry failures and unrecognized values are
+/// reported to stderr once per distinct failure so the fail-closed result does
+/// not hide a broken policy deployment from operators.
 pub fn get_policy() -> PolicyState {
     platform::read()
 }
@@ -123,6 +125,9 @@ pub fn is_blocked_by_policy() -> bool {
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{PolicyState, POLICY_VALUE_OPTIONAL};
+    use crate::telemetry::FailureReporter;
+    use std::io::Write;
+    use std::sync::OnceLock;
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
 
@@ -163,18 +168,60 @@ mod platform {
         Unreadable,
     }
 
+    fn report_policy_failure(signature: String) {
+        static FAILURES: OnceLock<FailureReporter> = OnceLock::new();
+        FAILURES
+            .get_or_init(FailureReporter::default)
+            .report(signature, |detail| {
+                let stderr = std::io::stderr();
+                let mut handle = stderr.lock();
+                let _ = writeln!(
+                    handle,
+                    "mxc: telemetry administrative policy failure ({detail}); \
+                     treating policy as blocked"
+                );
+                let _ = handle.flush();
+            });
+    }
+
+    fn report_policy_read_failure(operation: &str, error: &std::io::Error) {
+        report_policy_failure(format!(
+            "{operation}: kind={:?}, os_error={:?}, error={error}",
+            error.kind(),
+            error.raw_os_error()
+        ));
+    }
+
+    fn report_unrecognized_policy_value(value: u32) {
+        report_policy_failure(format!(
+            "read AllowTelemetry value: unrecognized DWORD value {value}"
+        ));
+    }
+
     pub(super) fn read() -> PolicyState {
         policy_state_from_value(read_policy_value())
     }
 
     fn policy_state_from_value(value: PolicyValue) -> PolicyState {
+        policy_state_from_value_with_reporter(value, report_unrecognized_policy_value)
+    }
+
+    fn policy_state_from_value_with_reporter(
+        value: PolicyValue,
+        report_unrecognized: impl FnOnce(u32),
+    ) -> PolicyState {
         match value {
             PolicyValue::Absent => PolicyState::Unrestricted,
             PolicyValue::Value(POLICY_VALUE_OPTIONAL) => PolicyState::Allowed,
-            // Every other value — including `0` (off) and `1` (required-only,
-            // a category MXC does not emit) — denies. Unrecognized values deny
-            // too rather than being guessed at: fail closed.
-            PolicyValue::Value(_) => PolicyState::Blocked,
+            // Values `0` (off) and `1` (required-only, a category MXC does not
+            // emit) are recognized blocking levels.
+            PolicyValue::Value(0) | PolicyValue::Value(1) => PolicyState::Blocked,
+            // Anything else is a broken deployment. Deny and report it rather
+            // than silently guessing at the administrator's intent.
+            PolicyValue::Value(value) => {
+                report_unrecognized(value);
+                PolicyState::Blocked
+            }
             // Fail closed. An administrator who typed the value in as a string,
             // or a machine whose registry we cannot read, must not be treated
             // as unmanaged.
@@ -185,6 +232,15 @@ mod platform {
     #[cfg(test)]
     pub(super) fn unreadable_policy_state_for_test() -> PolicyState {
         policy_state_from_value(PolicyValue::Unreadable)
+    }
+
+    #[cfg(test)]
+    pub(super) fn policy_value_report_for_test(value: u32) -> (PolicyState, Option<u32>) {
+        let mut reported = None;
+        let state = policy_state_from_value_with_reporter(PolicyValue::Value(value), |value| {
+            reported = Some(value);
+        });
+        (state, reported)
     }
 
     /// Reads the policy value, distinguishing "not configured" from
@@ -201,12 +257,18 @@ mod platform {
         let key = match RegKey::predef(hive).open_subkey(subkey) {
             Ok(key) => key,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return PolicyValue::Absent,
-            Err(_) => return PolicyValue::Unreadable,
+            Err(error) => {
+                report_policy_read_failure("open policy key", &error);
+                return PolicyValue::Unreadable;
+            }
         };
         match key.get_value::<u32, _>(POLICY_VALUE_NAME) {
             Ok(value) => PolicyValue::Value(value),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => PolicyValue::Absent,
-            Err(_) => PolicyValue::Unreadable,
+            Err(error) => {
+                report_policy_read_failure("read AllowTelemetry value", &error);
+                PolicyValue::Unreadable
+            }
         }
     }
 
@@ -381,6 +443,36 @@ mod platform {
             assert_eq!(
                 scoped_policy_key_override(Some("".into()), Some("42".into()), 42, Some(41)),
                 None
+            );
+        }
+    }
+
+    #[cfg(test)]
+    mod failure_reporter {
+        use crate::telemetry::FailureReporter;
+        use std::sync::Mutex;
+
+        #[test]
+        fn reports_each_distinct_failure_once() {
+            let reporter = FailureReporter::default();
+            let emitted = Mutex::new(Vec::new());
+
+            for signature in [
+                "open: access denied",
+                "open: access denied",
+                "read: wrong type",
+            ] {
+                reporter.report(signature.to_string(), |message| {
+                    emitted
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(message.to_string());
+                });
+            }
+
+            assert_eq!(
+                *emitted.lock().unwrap_or_else(|error| error.into_inner()),
+                ["open: access denied", "read: wrong type"]
             );
         }
     }
@@ -636,5 +728,21 @@ mod windows_tests {
         let state = crate::telemetry::policy::platform::unreadable_policy_state_for_test();
         assert_eq!(state, PolicyState::Blocked);
         assert!(!state.allows_collection());
+    }
+
+    #[test]
+    fn only_unrecognized_dword_values_are_reported() {
+        for value in [0, 1, 3] {
+            let (_, reported) =
+                crate::telemetry::policy::platform::policy_value_report_for_test(value);
+            assert_eq!(reported, None, "recognized value {value} was reported");
+        }
+
+        for value in [2, 4, 99, u32::MAX] {
+            let (state, reported) =
+                crate::telemetry::policy::platform::policy_value_report_for_test(value);
+            assert_eq!(state, PolicyState::Blocked);
+            assert_eq!(reported, Some(value));
+        }
     }
 }

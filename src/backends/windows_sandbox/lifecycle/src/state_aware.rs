@@ -21,6 +21,7 @@ use wxc_common::state_aware_backend::{
     DeprovisionResult, ExecConsumer, ExecHandle, ExecOutcome, ProvisionResult, StartResult,
     StatefulSandboxBackend, StopResult,
 };
+use wxc_common::validator::{validate_state_aware_network_policy_support, NetworkPolicySupport};
 
 use windows::Win32::Foundation::HANDLE;
 
@@ -216,6 +217,9 @@ fn reject_post_provision_policy(request: &ExecutionRequest) -> Result<(), MxcErr
         || !p.allowed_hosts.is_empty()
         || !p.blocked_hosts.is_empty()
         || p.network_proxy.is_enabled()
+        || p.network_mode_specified
+        || p.network_egress.is_some()
+        || p.network_ingress.is_some()
     {
         return Err(MxcError::policy_validation(
             "Windows Sandbox filesystem/network policy is fixed at provision; it cannot be \
@@ -321,11 +325,11 @@ fn run_exec_stream(daemon: &DaemonRecord, request: &ExecutionRequest) -> Result<
         use std::io::IsTerminal;
         if std::io::stdin().is_terminal() {
             eprintln!(
-                "[wxc-exec] WARNING: stdin is a TTY but the state-aware Windows Sandbox exec \
-                 path does not currently forward interactive PTY input to the guest. Any data \
-                 you type will be dropped; the guest child will see immediate EOF on stdin. \
-                 Pipe stdin instead (e.g. `< /dev/null` or `< file`), or use the one-shot \
-                 backend for now. (Tracked: TODO h6-pty-plumbing -- ConPTY support.)"
+                "WARNING: stdin is a TTY but the state-aware Windows Sandbox exec path does not \
+                 currently forward interactive PTY input to the guest. Any data you type will be \
+                 dropped; the guest child will see immediate EOF on stdin. Redirect stdin from a \
+                 file or the null device to send input. (Tracked: TODO h6-pty-plumbing -- ConPTY \
+                 support.)"
             );
             let _ = stream.shutdown(std::net::Shutdown::Write);
         } else {
@@ -759,7 +763,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         consumer: ExecConsumer,
     ) -> Result<ExecHandle, MxcError> {
         // Before any work: this backend relays to the executor's stdio, so it
-        // cannot serve an in-process caller, and running the workload first
+        // cannot return exec streams to the caller, and running the workload first
         // would make the refusal a lie about what has already happened.
         if consumer == ExecConsumer::Library {
             return Err(wxc_common::state_aware_backend::unsupported_library_exec(
@@ -803,6 +807,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
             stdout: null,
             stderr: null,
             stdin: null,
+            stdin_closer: None,
             // `Exited`, not `TimedOut`: this backend runs the workload to
             // completion inside `exec` and reports what the guest returned, so
             // there is no live process left to have timed out. A `Library` path
@@ -997,6 +1002,7 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
         request: &ExecutionRequest,
         _config: Option<&()>,
     ) -> Result<(), MxcError> {
+        validate_state_aware_network_policy_support(request, NetworkPolicySupport::LEGACY)?;
         policy::plan_policy(request)
             .map(|_| ())
             .map_err(map_policy_error)
@@ -1046,13 +1052,13 @@ impl StatefulSandboxBackend for WindowsSandboxRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wxc_common::models::{ContainerPolicy, NetworkPolicy};
+    use wxc_common::models::{ContainerPolicy, NetworkEgressPolicy, NetworkPolicy};
     use wxc_common::mxc_error::MxcErrorCode;
 
     /// A `Library` exec is refused before the backend looks for the daemon.
     ///
     /// This backend relays the workload's output to *this process's* stdio, so
-    /// it cannot serve an in-process caller. The refusal has to precede any
+    /// it cannot return exec streams to the caller. The refusal has to precede any
     /// work: refusing after the workload ran would report "unsupported" for
     /// something that already took effect.
     ///
@@ -1069,10 +1075,9 @@ mod tests {
                 None,
                 ExecConsumer::Library,
             )
-            .expect_err("an in-process caller must be refused");
+            .expect_err("a streams-consuming caller must be refused");
         assert!(
-            err.message
-                .contains("does not support exec for an in-process caller"),
+            err.message.contains("cannot return exec streams"),
             "expected the shared refusal ahead of id and daemon checks, got: {}",
             err.message
         );
@@ -1304,6 +1309,22 @@ mod tests {
             policy: ContainerPolicy {
                 allowed_hosts: vec!["example.com".into()],
                 default_network_policy: NetworkPolicy::Block,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = backend
+            .validate_start("wsb:abcd1234", &req, None)
+            .unwrap_err();
+        assert_eq!(err.code, MxcErrorCode::PolicyValidation);
+    }
+
+    #[test]
+    fn validate_start_rejects_raw_directional_network() {
+        let backend = WindowsSandboxRunner::new();
+        let req = ExecutionRequest {
+            policy: ContainerPolicy {
+                network_egress: Some(NetworkEgressPolicy::default()),
                 ..Default::default()
             },
             ..Default::default()

@@ -11,7 +11,7 @@ import { prepareSpawn, diagLogVersion, applyLinuxNetworkPolicy } from './helper.
 import { diagLog } from './diagnostic.js';
 import { MxcError, mxcErrorFromEnvelope } from './errors.js';
 
-const SUPPORTED_VERSION = '0.8.0-alpha';
+const SUPPORTED_VERSION = '0.9.0-alpha';
 const MIN_VERSION = '0.6.0-alpha';
 
 /**
@@ -58,6 +58,49 @@ function validatePolicyVersion(version: string): void {
             ` Upgrade the SDK.`
         );
     }
+}
+
+function hasLegacyNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
+    return network.allowOutbound !== undefined ||
+        network.allowLocalNetwork !== undefined ||
+        network.allowedHosts !== undefined ||
+        network.blockedHosts !== undefined ||
+        network.proxy !== undefined;
+}
+
+function hasDirectionalNetworkFields(network: NonNullable<SandboxPolicy['network']>): boolean {
+    return network.egress !== undefined || network.ingress !== undefined;
+}
+
+function usesDirectionalNetwork(policy: SandboxPolicy): boolean {
+    const network = policy.network;
+    return (network !== undefined && hasDirectionalNetworkFields(network)) ||
+        policy.runtimeConfig?.networkProxy !== undefined ||
+        policy.processContainer?.network?.allowedProxyPeer !== undefined;
+}
+
+function selectDirectionalNetwork(policy: SandboxPolicy): boolean {
+    const network = policy.network;
+    const hasLegacy = network !== undefined && hasLegacyNetworkFields(network);
+    const hasDirectional = usesDirectionalNetwork(policy);
+
+    if (hasLegacy && hasDirectional) {
+        throw new Error(
+            'Network configuration cannot mix allowOutbound, allowLocalNetwork, allowedHosts, ' +
+            'blockedHosts, or proxy with egress, ingress, runtimeConfig, or processContainer.network.',
+        );
+    }
+
+    const parsed = semverParse(policy.version)!;
+    const supportsDirectional = parsed.major > 0 || parsed.minor >= 8;
+    if (hasDirectional && !supportsDirectional) {
+        throw new Error(
+            `Schema ${policy.version} does not support network.egress, network.ingress, ` +
+            'runtimeConfig, or processContainer.network; use schema 0.8.0-alpha or later.',
+        );
+    }
+
+    return hasDirectional || (supportsDirectional && !hasLegacy);
 }
 
 
@@ -139,10 +182,14 @@ function buildProcessBaseContainerConfig(
     policy: SandboxPolicy,
 ): ContainerConfig {
     const capabilities: string[] = [];
-    if (policy.network?.allowOutbound) {
+    const allowsInternet =
+        policy.network?.allowOutbound ||
+        policy.network?.egress?.default === 'allow' ||
+        Boolean(policy.network?.egress?.allow?.length);
+    if (allowsInternet) {
         capabilities.push("internetClient");
     }
-    if (policy.network?.allowLocalNetwork) {
+    if (policy.network?.allowLocalNetwork || policy.network?.ingress?.default === 'allow') {
         capabilities.push("privateNetworkClientServer");
     }
 
@@ -155,10 +202,13 @@ function buildProcessBaseContainerConfig(
             systemSettings: "none",
             ime: false,
         },
+        network: policy.processContainer?.network?.allowedProxyPeer !== undefined
+            ? { allowedProxyPeer: policy.processContainer.network.allowedProxyPeer }
+            : undefined,
     };
 
     // Network enforcement: use firewall only when host filtering is needed (requires admin)
-    if (config.network) {
+    if (config.network && !usesDirectionalNetwork(policy)) {
         if (config.network.allowedHosts?.length || config.network.blockedHosts?.length) {
             config.network.enforcementMode = 'both';
         } else {
@@ -180,10 +230,10 @@ function buildMicroVmConfig(
     if (os.platform() !== 'win32') {
         throw new Error('The microvm backend is only supported on Windows (requires WHP/Hyper-V).');
     }
-    if (policy.network) {
+    if (policy.network || usesDirectionalNetwork(policy)) {
         throw new Error(
-            'The microvm backend does not support network policy enforcement. ' +
-            'Remove policy.network or use a different containment backend.'
+            'The microvm backend does not support network configuration. ' +
+            'Remove network, runtimeConfig, and processContainer.network or use a different backend.'
         );
     }
     if (policy.filesystem?.readwritePaths?.length ||
@@ -234,6 +284,7 @@ export function createConfigFromPolicy(
 ): ContainerConfig {
     diagLogVersion();
     validatePolicyVersion(policy.version);
+    const directionalNetwork = selectDirectionalNetwork(policy);
 
     const platform = os.platform();
     const containerId = containerName ?? generateRandomContainerName();
@@ -271,8 +322,27 @@ export function createConfigFromPolicy(
         injection: policy.ui?.allowInputInjection ?? false,
     };
 
-    // Network mapping (cross-platform) — default-deny: block if not explicitly allowed
-    if (policy.network) {
+    if (directionalNetwork) {
+        if (policy.network?.egress !== undefined || policy.network?.ingress !== undefined) {
+            config.network = {
+                egress: policy.network.egress,
+                ingress: policy.network.ingress,
+            };
+        }
+        if (policy.runtimeConfig?.networkProxy !== undefined) {
+            config.runtimeConfig = {
+                networkProxy: policy.runtimeConfig.networkProxy,
+            };
+        }
+        if (policy.processContainer?.network?.allowedProxyPeer !== undefined) {
+            config.processContainer = {
+                network: {
+                    allowedProxyPeer: policy.processContainer.network.allowedProxyPeer,
+                },
+            };
+        }
+        // Legacy network mapping (cross-platform) — default-deny unless explicitly allowed.
+    } else if (policy.network) {
         // Linux: only Bubblewrap supports network.proxy (cooperative env-var
         // proxy, no privilege required). LXC and explicit non-bubblewrap
         // containments do not. Abstract `'process'` on Linux resolves to

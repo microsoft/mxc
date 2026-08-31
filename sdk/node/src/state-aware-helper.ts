@@ -20,7 +20,7 @@ export const WSLC_STATE_AWARE_VERSION = '0.8.0-alpha';
 // Wire-format cross-cutting fields that live at the envelope's top level.
 // Anything else on a per-(backend, phase) Config is backend-specific and is
 // nested under `experimental.<backend>.<phase>`.
-export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process'] as const;
+export const CROSS_CUTTING_FIELDS = ['filesystem', 'network', 'ui', 'process', 'telemetry'] as const;
 
 // Per-backend wire-format prefix. Each value mirrors the corresponding
 // Rust `<Backend>Runner::ID_PREFIX` const and is the leading segment of a
@@ -90,7 +90,7 @@ export interface BuildEnvelopeArgs {
 /**
  * Constructs the wire-format JSON-shaped envelope for a state-aware request
  * from a per-(backend, phase) Config. Lifts cross-cutting fields
- * (filesystem, network, ui, process) to envelope top-level; nests any
+ * (filesystem, network, ui, process, telemetry) to envelope top-level; nests any
  * remaining backend-specific fields under `experimental.<backend>.<phase>`.
  */
 export function buildStateAwareEnvelope(args: BuildEnvelopeArgs): Record<string, unknown> {

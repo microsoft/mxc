@@ -45,7 +45,7 @@ pub fn finalize(
     context: &AuditContext,
     exe_dir: &Path,
     verbose: bool,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let metadata = response
         .output_metadata
         .as_mut()
@@ -61,6 +61,13 @@ pub fn finalize(
         .as_mut()
         .ok_or_else(|| "captureDenials returned no successful output metadata".to_string())?;
     let source_denials = PathBuf::from(&capture.output_path);
+    let source_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&source_denials)
+        .map_err(|error| {
+            format!(
+                "failed to derive verbose logging path from {}: {error}",
+                source_denials.display()
+            )
+        })?;
     let source_etl = capture
         .etl_path
         .as_deref()
@@ -78,6 +85,12 @@ pub fn finalize(
             source_etl.display()
         ));
     }
+    if !source_verbose_logging.is_file() {
+        return Err(format!(
+            "captureDenials verbose logging output file is missing: {}",
+            source_verbose_logging.display()
+        ));
+    }
 
     let document: learning_mode_core::DenialsDocument =
         serde_json::from_slice(&std::fs::read(&source_denials).map_err(|error| {
@@ -88,20 +101,40 @@ pub fn finalize(
         })?)
         .map_err(|error| {
             format!(
-                "captureDenials output {} is not valid canonical denials JSON: {error}",
+                "captureDenials output {} is not valid actionable denials JSON: {error}",
                 source_denials.display()
             )
         })?;
     validate_metadata(capture, &document)?;
+    let _: learning_mode_core::VerboseLoggingDocument =
+        serde_json::from_slice(&std::fs::read(&source_verbose_logging).map_err(|error| {
+            format!(
+                "failed to read captureDenials verbose logging output {}: {error}",
+                source_verbose_logging.display()
+            )
+        })?)
+        .map_err(|error| {
+            format!(
+                "captureDenials verbose logging output {} is not valid JSON: {error}",
+                source_verbose_logging.display()
+            )
+        })?;
 
     let final_denials = context.log_dir.join("denials.json");
+    let final_verbose_logging = learning_mode_core::verbose_logging_sibling_path(&final_denials)
+        .map_err(|error| format!("failed to derive audit verbose logging output path: {error}"))?;
     let final_etl = context.log_dir.join("trace.etl");
-    relocate_artifacts(
+    let cleanup_warnings = relocate_artifacts(
         capture,
-        &source_denials,
-        &final_denials,
-        &source_etl,
-        &final_etl,
+        &ArtifactRelocation {
+            source_denials: &source_denials,
+            final_denials: &final_denials,
+            source_verbose_logging: &source_verbose_logging,
+            final_verbose_logging: &final_verbose_logging,
+            source_etl: &source_etl,
+            final_etl: &final_etl,
+        },
+        learning_mode_core::relocate_paired_output_files,
         move_new_file,
     )?;
     remove_empty_managed_directory(source_etl.parent(), &context.log_dir)?;
@@ -120,7 +153,7 @@ pub fn finalize(
     )
     .map_err(|error| format!("failed to generate audit compatibility artifacts: {error:#}"))?;
 
-    Ok(())
+    Ok(cleanup_warnings)
 }
 
 fn validate_metadata(
@@ -133,7 +166,7 @@ fn validate_metadata(
         || capture.denied_resources_truncated != document.summary.denied_resources_truncated
     {
         return Err(
-            "captureDenials metadata does not match the canonical denials document".to_string(),
+            "captureDenials metadata does not match the actionable denials document".to_string(),
         );
     }
     Ok(())
@@ -143,67 +176,73 @@ fn validate_metadata(
 /// on-disk state and the metadata paths mutually truthful even on partial
 /// failure.
 ///
-/// Both destinations are preflighted (no-clobber) before anything moves. The
-/// primary denials JSON moves first and its final path is published to the
-/// metadata immediately; the retained ETL moves second and its final path is
-/// published immediately on success. If the ETL move fails, the JSON is
-/// truthfully recorded at its final location while the ETL — never touched —
-/// stays at its source with `etl_path` still pointing there. Nothing is
-/// stranded and no metadata is left referencing a file that has moved.
+/// The JSON pair is relocated transactionally and its final actionable path is
+/// published only after both siblings commit. The retained ETL moves last and
+/// its final path is published immediately on success. A later move failure
+/// therefore leaves every metadata path truthful.
 ///
 /// `move_file` is injected so tests can force a second-move failure
 /// deterministically; production passes [`move_new_file`].
-fn relocate_artifacts(
-    capture: &mut wxc_common::models::CaptureDenialsOutput,
-    source_denials: &Path,
-    final_denials: &Path,
-    source_etl: &Path,
-    final_etl: &Path,
-    mut move_file: impl FnMut(&Path, &Path) -> Result<(), String>,
-) -> Result<(), String> {
-    ensure_destination_available(source_denials, final_denials)?;
-    ensure_destination_available(source_etl, final_etl)?;
-
-    // Primary denials JSON first: publish its final path the instant it moves so
-    // a later ETL failure can never leave `output_path` referencing a file that
-    // has already been renamed away.
-    move_file(source_denials, final_denials)?;
-    capture.output_path = final_denials.to_string_lossy().into_owned();
-
-    // Retained ETL second: on failure it stays at its source and `etl_path`
-    // still points there (unchanged), so each artifact remains individually
-    // truthful even though the relocation as a whole failed.
-    move_file(source_etl, final_etl)?;
-    capture.etl_path = Some(final_etl.to_string_lossy().into_owned());
-    Ok(())
+struct ArtifactRelocation<'a> {
+    source_denials: &'a Path,
+    final_denials: &'a Path,
+    source_verbose_logging: &'a Path,
+    final_verbose_logging: &'a Path,
+    source_etl: &'a Path,
+    final_etl: &'a Path,
 }
 
-fn move_new_file(source: &Path, destination: &Path) -> Result<(), String> {
-    if source == destination {
-        return Ok(());
-    }
-    ensure_destination_available(source, destination)?;
-    match std::fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(rename_error) => {
-            std::fs::copy(source, destination).map_err(|copy_error| {
-                format!(
-                    "failed to move audit artifact {} to {}: {rename_error}; \
-                     copy fallback failed: {copy_error}",
-                    source.display(),
-                    destination.display()
-                )
-            })?;
-            std::fs::remove_file(source).map_err(|remove_error| {
-                let _ = std::fs::remove_file(destination);
-                format!(
-                    "copied audit artifact to {}, but failed to remove source {}: {remove_error}",
-                    destination.display(),
-                    source.display()
-                )
-            })
-        }
-    }
+fn relocate_artifacts(
+    capture: &mut wxc_common::models::CaptureDenialsOutput,
+    paths: &ArtifactRelocation<'_>,
+    relocate_pair: impl FnOnce(
+        &str,
+        &Path,
+        &Path,
+        &Path,
+        &Path,
+    ) -> std::io::Result<learning_mode_core::RelocationOutcome>,
+    mut move_file: impl FnMut(&Path, &Path) -> Result<learning_mode_core::RelocationOutcome, String>,
+) -> Result<Vec<String>, String> {
+    ensure_destination_available(paths.source_etl, paths.final_etl)?;
+
+    let pair_outcome = relocate_pair(
+        "audit output relocation",
+        paths.source_denials,
+        paths.source_verbose_logging,
+        paths.final_denials,
+        paths.final_verbose_logging,
+    )
+    .map_err(|error| format!("failed to relocate audit output pair: {error}"))?;
+    capture.output_path = paths.final_denials.to_string_lossy().into_owned();
+    let mut cleanup_warnings = pair_outcome.into_cleanup_warnings();
+
+    // Retained ETL last: on failure it stays at its source and `etl_path`
+    // still points there (unchanged), so each artifact remains individually
+    // truthful even though the relocation as a whole failed.
+    let etl_outcome = move_file(paths.source_etl, paths.final_etl)?;
+    capture.etl_path = Some(paths.final_etl.to_string_lossy().into_owned());
+    cleanup_warnings.extend(etl_outcome.into_cleanup_warnings());
+    Ok(cleanup_warnings)
+}
+
+fn move_new_file(
+    source: &Path,
+    destination: &Path,
+) -> Result<learning_mode_core::RelocationOutcome, String> {
+    learning_mode_core::relocate_output_file(
+        "audit artifact relocation",
+        "retained ETL",
+        source,
+        destination,
+    )
+    .map_err(|error| {
+        format!(
+            "failed to move audit artifact {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
 }
 
 fn ensure_destination_available(source: &Path, destination: &Path) -> Result<(), String> {
@@ -251,7 +290,9 @@ fn remove_empty_managed_directory(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use learning_mode_core::{DenialSummary, DenialsDocument};
+    use learning_mode_core::{
+        DenialSummary, DenialsDocument, VerboseLoggingDocument, VerboseLoggingSummary,
+    };
     use wxc_common::models::{
         CaptureDenialsErrorOutput, CaptureDenialsOutput, SandboxOutputMetadata,
     };
@@ -298,9 +339,15 @@ mod tests {
         finalize(&mut response, &context, directory.path(), false).unwrap();
 
         assert!(!source_denials.exists());
+        assert!(
+            !learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(!source_etl.exists());
         assert!(!retained_dir.exists());
         assert_eq!(std::fs::read(log_dir.join("trace.etl")).unwrap(), b"etl");
+        assert!(log_dir.join("denials.verbose.json").is_file());
         let capture = response
             .output_metadata
             .as_ref()
@@ -353,6 +400,7 @@ mod tests {
             Some(log_dir.join("trace.etl").as_path())
         );
         assert!(log_dir.join("denials.json").is_file());
+        assert!(log_dir.join("denials.verbose.json").is_file());
         assert!(log_dir.join("trace.etl").is_file());
     }
 
@@ -400,9 +448,45 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("canonical denials JSON"));
+        assert!(error.contains("actionable denials JSON"));
         assert!(source_denials.exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn finalize_rejects_malformed_verbose_logging_without_moving_artifacts() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_verbose_logging =
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap();
+        let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::write(&source_verbose_logging, b"{").unwrap();
+        let context = AuditContext {
+            log_dir: log_dir.clone(),
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("verbose logging output"));
+        assert!(error.contains("not valid JSON"));
+        assert!(source_denials.is_file());
+        assert!(source_verbose_logging.is_file());
+        assert!(source_etl.is_file());
+        assert!(!log_dir.join("denials.json").exists());
+        assert!(!log_dir.join("denials.verbose.json").exists());
+        assert!(!log_dir.join("trace.etl").exists());
     }
 
     #[test]
@@ -424,26 +508,72 @@ mod tests {
 
         let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
 
-        assert!(error.contains("destination already exists"));
+        assert!(error.contains("actionable output file already exists"));
         assert!(source_denials.exists());
+        assert!(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials)
+                .unwrap()
+                .exists()
+        );
         assert!(source_etl.exists());
         assert!(!log_dir.join("trace.etl").exists());
     }
 
     #[test]
-    fn relocate_keeps_metadata_truthful_when_second_move_fails() {
-        // Primary JSON moves; the ETL (second) move is forced to fail. The JSON
-        // must be truthfully recorded at its final path, and the ETL — never
-        // touched — must remain at its source with `etl_path` still pointing
-        // there. Nothing is stranded and no metadata is left stale.
+    fn etl_relocation_never_clobbers_an_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.json");
+        let destination = directory.path().join("destination.json");
+        std::fs::write(&source, b"new").unwrap();
+        std::fs::write(&destination, b"existing").unwrap();
+
+        let error = move_new_file(&source, &destination).unwrap_err();
+
+        assert!(error.contains("already exists"));
+        assert_eq!(std::fs::read(&source).unwrap(), b"new");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"existing");
+    }
+
+    #[test]
+    fn finalize_rejects_missing_verbose_logging_output() {
         let directory = tempfile::tempdir().unwrap();
         let log_dir = directory.path().join("audit");
         std::fs::create_dir_all(&log_dir).unwrap();
         let source_denials = log_dir.join("denials.unique.json");
         let source_etl = log_dir.join("denials.unique.etl");
+        let document = DenialsDocument::new(Vec::new(), DenialSummary::new(0, 0, false));
+        std::fs::write(&source_denials, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut response = response_with_capture(&source_denials, &source_etl, 0);
+        std::fs::remove_file(
+            learning_mode_core::verbose_logging_sibling_path(&source_denials).unwrap(),
+        )
+        .unwrap();
+        let context = AuditContext {
+            log_dir,
+            config_path: None,
+        };
+
+        let error = finalize(&mut response, &context, directory.path(), false).unwrap_err();
+
+        assert!(error.contains("verbose logging output file is missing"));
+        assert!(source_denials.exists());
+        assert!(source_etl.exists());
+    }
+
+    #[test]
+    fn relocate_keeps_metadata_truthful_when_etl_move_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_dir = directory.path().join("audit");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let source_denials = log_dir.join("denials.unique.json");
+        let source_verbose_logging = log_dir.join("denials.unique.verbose.json");
+        let source_etl = log_dir.join("denials.unique.etl");
         let final_denials = log_dir.join("denials.json");
+        let final_verbose_logging = log_dir.join("denials.verbose.json");
         let final_etl = log_dir.join("trace.etl");
         std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
         std::fs::write(&source_etl, b"etl").unwrap();
         let mut capture = CaptureDenialsOutput {
             kind: CaptureDenialsOutput::KIND.to_string(),
@@ -457,16 +587,23 @@ mod tests {
         let mut calls = 0;
         let error = relocate_artifacts(
             &mut capture,
-            &source_denials,
-            &final_denials,
-            &source_etl,
-            &final_etl,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &final_denials,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &final_verbose_logging,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
+            learning_mode_core::relocate_paired_output_files,
             |source, destination| {
                 calls += 1;
                 if calls == 1 {
-                    std::fs::rename(source, destination).map_err(|error| error.to_string())
-                } else {
                     Err("injected ETL move failure".to_string())
+                } else {
+                    std::fs::rename(source, destination)
+                        .map(|_| learning_mode_core::RelocationOutcome::default())
+                        .map_err(|error| error.to_string())
                 }
             },
         )
@@ -477,6 +614,8 @@ mod tests {
         assert!(final_denials.is_file());
         assert!(!source_denials.exists());
         assert_eq!(Path::new(&capture.output_path), final_denials);
+        assert!(final_verbose_logging.is_file());
+        assert!(!source_verbose_logging.exists());
         // ETL untouched; metadata still truthfully points at the source.
         assert!(source_etl.is_file());
         assert!(!final_etl.exists());
@@ -486,11 +625,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn relocate_rolls_back_json_pair_before_publishing_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let source_denials = directory.path().join("denials.unique.json");
+        let source_verbose_logging = directory.path().join("denials.unique.verbose.json");
+        let source_etl = directory.path().join("denials.unique.etl");
+        let shared_destination = directory.path().join("denials.json");
+        let final_etl = directory.path().join("trace.etl");
+        std::fs::write(&source_denials, b"denials").unwrap();
+        std::fs::write(&source_verbose_logging, b"verbose").unwrap();
+        std::fs::write(&source_etl, b"etl").unwrap();
+        let mut capture = CaptureDenialsOutput {
+            kind: CaptureDenialsOutput::KIND.to_string(),
+            output_path: source_denials.to_string_lossy().into_owned(),
+            exit_code: 0,
+            total_denials: 0,
+            denied_resources_truncated: false,
+            etl_path: Some(source_etl.to_string_lossy().into_owned()),
+        };
+
+        let error = relocate_artifacts(
+            &mut capture,
+            &ArtifactRelocation {
+                source_denials: &source_denials,
+                final_denials: &shared_destination,
+                source_verbose_logging: &source_verbose_logging,
+                final_verbose_logging: &shared_destination,
+                source_etl: &source_etl,
+                final_etl: &final_etl,
+            },
+            learning_mode_core::relocate_paired_output_files,
+            |_, _| panic!("ETL relocation must not run after JSON-pair failure"),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("failed to promote actionable"));
+        assert_eq!(Path::new(&capture.output_path), source_denials);
+        assert!(source_denials.is_file());
+        assert!(source_verbose_logging.is_file());
+        assert!(!shared_destination.exists());
+        assert!(source_etl.is_file());
+        assert!(!final_etl.exists());
+    }
+
     fn response_with_capture(
         denials_path: &Path,
         etl_path: &Path,
         exit_code: i32,
     ) -> ScriptResponse {
+        let verbose_logging_path =
+            learning_mode_core::verbose_logging_sibling_path(denials_path).unwrap();
+        let verbose_logging = VerboseLoggingDocument::new(&VerboseLoggingSummary::default());
+        std::fs::write(
+            verbose_logging_path,
+            serde_json::to_vec(&verbose_logging).unwrap(),
+        )
+        .unwrap();
         ScriptResponse {
             exit_code,
             output_metadata: Some(Box::new(SandboxOutputMetadata {

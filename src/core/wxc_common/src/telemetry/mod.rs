@@ -33,7 +33,56 @@ pub use consent::ConsentState;
 pub use events::{log_error, log_execution, ExecutionEvent, FailureReason, TelemetryContext};
 pub use policy::PolicyState;
 
-/// Reported exit code for a Rust panic or abort.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct FailureReporter {
+    reported: Mutex<std::collections::HashSet<String>>,
+}
+
+#[cfg(target_os = "windows")]
+impl FailureReporter {
+    fn report(&self, signature: String, emit: impl FnOnce(&str)) {
+        let is_new = self
+            .reported
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(signature.clone());
+        if is_new {
+            emit(&signature);
+        }
+    }
+}
+
+#[cfg(any(test, all(feature = "test-support", debug_assertions)))]
+pub mod test_support {
+    use super::consent::test_support::LocalAppDataGuard;
+    use super::policy::test_support::PolicyKeyGuard;
+
+    /// Lock-order-safe redirect guard for tests that need both the consent
+    /// store and the policy key redirected away from real user/machine state.
+    pub struct TelemetryTestEnv {
+        _consent: LocalAppDataGuard,
+        policy: PolicyKeyGuard,
+    }
+
+    impl TelemetryTestEnv {
+        /// Redirect both telemetry globals for the lifetime of the guard.
+        pub fn new(store: &std::path::Path) -> Self {
+            let policy = PolicyKeyGuard::new();
+            let _consent = LocalAppDataGuard::set(store);
+            Self { _consent, policy }
+        }
+
+        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+        pub fn set_policy_value(&self, value: u32) {
+            self.policy.set_value(value);
+        }
+    }
+}
+
+/// Conventional process exit code for a Rust panic/abort. Used as the reported
+/// `exit_code` on crash telemetry, since the panicking process has not (and
+/// will not) produce a real [`ScriptResponse`].
 const PANIC_EXIT_CODE: i32 = 101;
 
 /// Reported exit code for a cancelled run.
@@ -83,10 +132,6 @@ fn authorization_allows_emission() -> bool {
     if let Some(allowed) = TEST_AUTHORIZATION_OVERRIDE.with(|value| value.get()) {
         return allowed;
     }
-    #[cfg(test)]
-    if TEST_FORCE_ACTIVE.with(|active| active.get()) {
-        return true;
-    }
 
     consent::get_consent().allows_collection() && policy::get_policy().allows_collection()
 }
@@ -130,7 +175,6 @@ impl EmissionAuthorization {
         process_can_emit().then_some(Self { _private: () })
     }
 }
-
 /// Claim the terminal-event slot for this process.
 fn already_emitted() -> bool {
     HAS_EMITTED.swap(true, Ordering::SeqCst)
@@ -869,52 +913,6 @@ pub fn emit_sdk_cancellation_with_kind(
 }
 
 #[cfg(test)]
-pub(crate) mod test_support {
-    use super::consent::test_support::LocalAppDataGuard;
-    use super::policy::test_support::PolicyKeyGuard;
-
-    /// A fully isolated telemetry environment: both the administrative policy
-    /// key and the user consent store are redirected to throwaway, per-test
-    /// locations.
-    ///
-    /// This is the **only** supported way to hold both guards at once. They
-    /// protect separate process-global mutexes, so acquiring them in
-    /// inconsistent orders across tests would deadlock under `cargo test`'s
-    /// multithreaded runner. Constructing them here — policy first, then
-    /// consent — is what establishes the total order that makes the pair
-    /// deadlock-free, and a caller cannot get it wrong because a caller never
-    /// sees the individual acquisitions.
-    ///
-    /// Every test that reaches [`super::is_enabled`],
-    /// [`super::consent::needs_consent_prompt`], or [`super::policy::get_policy`]
-    /// must hold this — *including* tests that only care about consent.
-    /// Otherwise they read the real machine policy and fail on an
-    /// administratively managed device.
-    pub(crate) struct TelemetryTestEnv {
-        // Fields drop in declaration order, so consent is released before
-        // policy: the exact reverse of the acquisition order below.
-        _consent: LocalAppDataGuard,
-        policy: PolicyKeyGuard,
-    }
-
-    impl TelemetryTestEnv {
-        /// Redirects the consent store to `store` and the policy key to a
-        /// fresh, empty one (i.e. an unmanaged machine).
-        pub(crate) fn new(store: &std::path::Path) -> Self {
-            let policy = PolicyKeyGuard::new();
-            let _consent = LocalAppDataGuard::set(store);
-            Self { _consent, policy }
-        }
-
-        /// Sets the administrative `AllowTelemetry` policy value.
-        #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-        pub(crate) fn set_policy_value(&self, value: u32) {
-            self.policy.set_value(value);
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::test_support::TelemetryTestEnv;
     use super::*;
@@ -1286,6 +1284,7 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        TEST_AUTHORIZATION_OVERRIDE.with(|value| value.set(Some(true)));
         set_process_context(&ContainmentBackend::IsolationSession);
         set_process_phase("exec");
 
@@ -1913,6 +1912,42 @@ mod tests {
         );
 
         mxc_telemetry::shutdown();
+        reset_for_test();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_withdrawal_and_policy_block_suppress_the_next_emission() {
+        let store = tempfile::tempdir().expect("temp dir");
+        let env = test_support::TelemetryTestEnv::new(store.path());
+        env.set_policy_value(3);
+        consent::set_consent(true, "test").expect("set consent");
+
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        set_process_context(&ContainmentBackend::IsolationSession);
+
+        consent::withdraw_consent().expect("withdraw consent");
+        emit_panic();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "withdrawal must suppress the next logical emission"
+        );
+
+        reset_for_test();
+        events::test_sink::install();
+        TEST_FORCE_ACTIVE.with(|f| f.set(true));
+        consent::set_consent(true, "test").expect("restore consent");
+        env.set_policy_value(0);
+
+        emit_cancellation();
+        assert!(
+            events::test_sink::take_executions().is_empty(),
+            "a newly blocking policy must suppress the next logical emission"
+        );
+
         reset_for_test();
     }
 }

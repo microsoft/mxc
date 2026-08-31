@@ -833,6 +833,13 @@ fn main() {
             output.probes.isolation_session_available = mxc_engine::isolation_session_available();
             output
         };
+        // WHP is delay-loaded; check before pyhl::install warms a VM.
+        #[cfg(all(target_os = "windows", feature = "hyperlight", target_arch = "x86_64"))]
+        let output = {
+            let mut output = output;
+            output.probes.hyperlight_available = hyperlight_common::is_whp_available();
+            output
+        };
         match appcontainer_common::probe::to_json_pretty(&output) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -877,6 +884,16 @@ fn main() {
     if cli.setup_hyperlight {
         #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
         {
+            // WHP is delay-loaded; check before pyhl::install warms a VM.
+            #[cfg(target_os = "windows")]
+            if !hyperlight_common::is_whp_available() {
+                eprintln!(
+                    "Error: --setup-hyperlight requires Windows Hypervisor Platform (WHP). \
+                     Enable the HypervisorPlatform optional feature and reboot."
+                );
+                process::exit(1);
+            }
+
             let mut logger = Logger::new(if cli.debug {
                 Mode::Console
             } else {
@@ -1293,18 +1310,25 @@ fn main() {
     #[cfg(target_os = "windows")]
     if let Some(context) = audit_context.as_ref() {
         if !cli.dry_run {
-            if let Err(error) = audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose)
-            {
-                let message = format!("audit finalization failed: {error}");
-                let _ = writeln!(logger, "[audit] {message}");
-                eprintln!("error: {message}");
-                response.exit_code = -1;
-                response.error_message = match response.error_message.is_empty() {
-                    true => message,
-                    false => format!("{}; {message}", response.error_message),
-                };
-            } else {
-                eprintln!("[audit] artifacts written to {}", context.log_dir.display());
+            match audit::finalize(&mut response, context, &exe_dir, cli.audit_verbose) {
+                Ok(cleanup_warnings) => {
+                    for warning in cleanup_warnings {
+                        let message = format!("[audit] warning: {warning}");
+                        let _ = writeln!(logger, "{message}");
+                        eprintln!("{message}");
+                    }
+                    eprintln!("[audit] artifacts written to {}", context.log_dir.display());
+                }
+                Err(error) => {
+                    let message = format!("audit finalization failed: {error}");
+                    let _ = writeln!(logger, "[audit] {message}");
+                    eprintln!("error: {message}");
+                    response.exit_code = -1;
+                    response.error_message = match response.error_message.is_empty() {
+                        true => message,
+                        false => format!("{}; {message}", response.error_message),
+                    };
+                }
             }
         }
     }

@@ -171,13 +171,12 @@ impl ConsentState {
         matches!(self, ConsentState::Granted)
     }
 
-    /// Whether a hosting application should offer its own first-run consent
-    /// prompt for this state.
+    /// Whether this consent state represents an absent user decision.
     ///
-    /// This shared predicate keeps all consumer surfaces consistent. It is
-    /// false for [`NotApplicable`](ConsentState::NotApplicable), because MXC
-    /// collects no telemetry off Windows.
-    pub fn needs_prompt(&self) -> bool {
+    /// This is deliberately private and policy-blind. Host applications must
+    /// use [`needs_consent_prompt`], which also suppresses the prompt under an
+    /// administrative block.
+    fn needs_prompt(&self) -> bool {
         matches!(self, ConsentState::Undetermined)
     }
 }
@@ -228,10 +227,11 @@ struct ConsentRecord {
 
 /// Returns the current, persisted telemetry consent state.
 ///
-/// Fail-closed: a missing file, an unreadable file, unparseable JSON, or an
-/// unrecognized `schemaVersion` all resolve to [`ConsentState::Undetermined`]
-/// — never to `Granted`. Always [`ConsentState::NotApplicable`] on
-/// non-Windows platforms, without any filesystem access.
+/// Fail-closed: a missing file, an unreadable file, or unparseable JSON resolves
+/// to [`ConsentState::Undetermined`]. An unrecognized `schemaVersion`
+/// invalidates a stored grant to `Undetermined`, while a stored denial remains
+/// denied. Always [`ConsentState::NotApplicable`] on non-Windows platforms,
+/// without any filesystem access.
 pub fn get_consent() -> ConsentState {
     get_status().effective_state
 }
@@ -520,26 +520,30 @@ fn persist_presented_decision(
 /// Withdrawal does not require a permitting administrative policy. Off
 /// Windows it succeeds as a typed `NotApplicable` result without storage.
 pub fn withdraw_consent() -> Result<ConsentActionOutcome, ConsentActionError> {
-    let current_status = get_status();
-    if current_status.effective_state == ConsentState::NotApplicable {
-        return Ok(ConsentActionOutcome {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let current_status = get_status();
+        Ok(ConsentActionOutcome {
             result: ConsentActionResult::NotApplicable,
             status: current_status,
             policy: super::policy::get_policy(),
-        });
+        })
     }
 
-    platform::with_store_lock(|| {
-        platform::begin_withdrawal()?;
-        platform::write(false, "withdrawal")?;
-        platform::finish_withdrawal()?;
-        Ok(ConsentActionOutcome {
-            result: ConsentActionResult::Withdrawn,
-            status: platform::read_status_unlocked(),
-            policy: super::policy::get_policy(),
+    #[cfg(target_os = "windows")]
+    {
+        platform::with_store_lock(|| {
+            platform::begin_withdrawal()?;
+            platform::write(false, "withdrawal")?;
+            platform::finish_withdrawal()?;
+            Ok(ConsentActionOutcome {
+                result: ConsentActionResult::Withdrawn,
+                status: platform::read_status_unlocked(),
+                policy: super::policy::get_policy(),
+            })
         })
-    })
-    .map_err(ConsentActionError::Persist)
+        .map_err(ConsentActionError::Persist)
+    }
 }
 
 /// Current time as Unix seconds. Debug/support provenance only (see
@@ -566,9 +570,12 @@ mod platform {
         CONSENT_SCHEMA_VERSION,
     };
     use crate::telemetry::consent_prompt::{CONSENT_RESOURCE_VERSION, FALLBACK_LOCALE};
+    use crate::telemetry::FailureReporter;
     use std::fs;
     use std::io::{Read, Write};
+    use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
     use std::time::Duration;
 
     /// Number of attempts for filesystem operations that can transiently fail
@@ -597,6 +604,22 @@ mod platform {
     const WITHDRAWAL_PENDING_FILE: &str = "telemetry-consent.withdrawal-pending";
     const CONSENT_LOCK_FILE: &str = "telemetry-consent.lock";
     const WITHDRAWAL_MARKER_STALE_AFTER: Duration = Duration::from_secs(5);
+
+    fn report_consent_store_failure(signature: String) {
+        static FAILURES: OnceLock<FailureReporter> = OnceLock::new();
+        FAILURES
+            .get_or_init(FailureReporter::default)
+            .report(signature, |detail| {
+                let stderr = std::io::stderr();
+                let mut handle = stderr.lock();
+                let _ = writeln!(
+                    handle,
+                    "mxc: telemetry consent store failure ({detail}); \
+                     treating consent as undetermined"
+                );
+                let _ = handle.flush();
+            });
+    }
 
     /// Resolves the per-user `%LocalAppData%` directory through the Windows
     /// known-folder API rather than trusting `LOCALAPPDATA`. A parent process
@@ -892,17 +915,37 @@ mod platform {
     pub(super) fn read_status_unlocked_with_marker_for_test(
         marker_state: std::io::Result<WithdrawalMarkerState>,
     ) -> ConsentStatus {
-        read_status_unlocked_inner(|_| marker_state, recover_stale_withdrawal_marker)
+        read_status_unlocked_inner(
+            |_| marker_state,
+            recover_stale_withdrawal_marker,
+            report_consent_store_failure,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn read_status_unlocked_with_reporter_for_test(
+        marker_state: std::io::Result<WithdrawalMarkerState>,
+        report: impl FnMut(String),
+    ) -> ConsentStatus {
+        read_status_unlocked_inner(|_| marker_state, recover_stale_withdrawal_marker, report)
     }
 
     pub(super) fn read_status() -> ConsentStatus {
-        read_status_unlocked_inner(withdrawal_marker_state, |path, marker| {
-            with_store_lock(|| recover_stale_withdrawal_marker(path, marker))
-        })
+        match with_store_lock(|| Ok(read_status_unlocked())) {
+            Ok(status) => status,
+            Err(error) => {
+                report_consent_store_failure(format!("lock consent store: {error}"));
+                unreadable_status()
+            }
+        }
     }
 
     pub(super) fn read_status_unlocked() -> ConsentStatus {
-        read_status_unlocked_inner(withdrawal_marker_state, recover_stale_withdrawal_marker)
+        read_status_unlocked_inner(
+            withdrawal_marker_state,
+            recover_stale_withdrawal_marker,
+            report_consent_store_failure,
+        )
     }
 
     pub(super) fn read_revision_unlocked() -> Result<Option<u64>, String> {
@@ -915,15 +958,8 @@ mod platform {
     fn read_status_unlocked_inner(
         marker_check: impl FnOnce(&Path) -> std::io::Result<WithdrawalMarkerState>,
         recover_stale: impl FnOnce(&Path, &Path) -> Result<(), String>,
+        mut report: impl FnMut(String),
     ) -> ConsentStatus {
-        fn unreadable_status() -> ConsentStatus {
-            ConsentStatus {
-                stored_state: ConsentState::Undetermined,
-                effective_state: ConsentState::Undetermined,
-                reason: Some(ConsentStatusReason::StoreUnreadable),
-            }
-        }
-
         fn no_record_status() -> ConsentStatus {
             ConsentStatus {
                 stored_state: ConsentState::Undetermined,
@@ -933,19 +969,30 @@ mod platform {
         }
 
         let Some(path) = consent_file_path() else {
+            report("resolve consent store path".to_string());
             return unreadable_status();
         };
         let Some(dir) = path.parent() else {
+            report("resolve consent store parent directory".to_string());
             return unreadable_status();
         };
         let marker_path = dir.join(WITHDRAWAL_PENDING_FILE);
         match marker_check(&marker_path) {
             Ok(WithdrawalMarkerState::Absent) => {}
-            Ok(WithdrawalMarkerState::Pending) | Err(_) => {
+            Ok(WithdrawalMarkerState::Pending) => {
+                return unreadable_status();
+            }
+            Err(error) => {
+                report(format!(
+                    "inspect withdrawal marker: kind={:?}, os_error={:?}, error={error}",
+                    error.kind(),
+                    error.raw_os_error()
+                ));
                 return unreadable_status();
             }
             Ok(WithdrawalMarkerState::Stale) => {
-                if recover_stale(&path, &marker_path).is_err() {
+                if let Err(error) = recover_stale(&path, &marker_path) {
+                    report(format!("recover stale withdrawal marker: {error}"));
                     return unreadable_status();
                 }
             }
@@ -955,25 +1002,29 @@ mod platform {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return no_record_status()
             }
-            Err(_) => return unreadable_status(),
+            Err(error) => {
+                report(format!(
+                    "read consent record: kind={:?}, os_error={:?}, error={error}",
+                    error.kind(),
+                    error.raw_os_error()
+                ));
+                return unreadable_status();
+            }
         };
-        let Ok(record) = serde_json::from_str::<ConsentRecord>(&data) else {
-            return ConsentStatus {
-                stored_state: ConsentState::Undetermined,
-                effective_state: ConsentState::Undetermined,
-                reason: Some(ConsentStatusReason::StoreMalformed),
-            };
+        let record = match serde_json::from_str::<ConsentRecord>(&data) {
+            Ok(record) => record,
+            Err(error) => {
+                report(format!("parse consent record: {error}"));
+                return malformed_status();
+            }
         };
 
         let stored_state = match record.consent.as_str() {
             "granted" => ConsentState::Granted,
             "denied" => ConsentState::Denied,
             _ => {
-                return ConsentStatus {
-                    stored_state: ConsentState::Undetermined,
-                    effective_state: ConsentState::Undetermined,
-                    reason: Some(ConsentStatusReason::StoreMalformed),
-                };
+                report("validate consent record: unrecognized consent value".to_string());
+                return malformed_status();
             }
         };
 
@@ -998,11 +1049,21 @@ mod platform {
         }
 
         match record.prompt_resource_version {
-            Some(CONSENT_RESOURCE_VERSION) if !record.prompt_locale.is_empty() => ConsentStatus {
-                stored_state,
-                effective_state: ConsentState::Granted,
-                reason: None,
-            },
+            Some(CONSENT_RESOURCE_VERSION) if record.prompt_locale == FALLBACK_LOCALE => {
+                ConsentStatus {
+                    stored_state,
+                    effective_state: ConsentState::Granted,
+                    reason: None,
+                }
+            }
+            Some(CONSENT_RESOURCE_VERSION) => {
+                report("validate consent record: unsupported prompt locale".to_string());
+                ConsentStatus {
+                    stored_state,
+                    effective_state: ConsentState::Undetermined,
+                    reason: Some(ConsentStatusReason::PromptVersionUnsupported),
+                }
+            }
             None => ConsentStatus {
                 stored_state,
                 effective_state: ConsentState::Undetermined,
@@ -1013,6 +1074,22 @@ mod platform {
                 effective_state: ConsentState::Undetermined,
                 reason: Some(ConsentStatusReason::PromptVersionUnsupported),
             },
+        }
+    }
+
+    fn unreadable_status() -> ConsentStatus {
+        ConsentStatus {
+            stored_state: ConsentState::Undetermined,
+            effective_state: ConsentState::Undetermined,
+            reason: Some(ConsentStatusReason::StoreUnreadable),
+        }
+    }
+
+    fn malformed_status() -> ConsentStatus {
+        ConsentStatus {
+            stored_state: ConsentState::Undetermined,
+            effective_state: ConsentState::Undetermined,
+            reason: Some(ConsentStatusReason::StoreMalformed),
         }
     }
 
@@ -1095,8 +1172,13 @@ mod platform {
             .parent()
             .ok_or_else(|| "invalid telemetry consent path".to_string())?;
         fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-        with_io_retry(|| fs::write(dir.join(WITHDRAWAL_PENDING_FILE), b"pending"))
-            .map_err(|e| format!("failed to mark withdrawal pending: {e}"))
+        let marker = dir.join(WITHDRAWAL_PENDING_FILE);
+        with_io_retry(|| {
+            let mut file = fs::File::create(&marker)?;
+            file.write_all(b"pending")?;
+            file.sync_all()
+        })
+        .map_err(|e| format!("failed to durably mark withdrawal pending: {e}"))
     }
 
     pub(super) fn finish_withdrawal() -> Result<(), String> {
@@ -1140,7 +1222,8 @@ mod platform {
         // Atomic write: write to a *unique* temp file in the same directory
         // (process id + a random suffix, so two concurrent `wxc-exec`
         // grant/revoke invocations never share — and thus never race on —
-        // the same temp path), then rename over the real path. A crash
+        // the same temp path), then replace the real path with write-through
+        // semantics. A crash
         // mid-write never leaves a torn/corrupt file in place of a
         // previously-valid one; if the rename itself fails, the temp file is
         // removed rather than left behind as a leaked, orphaned artifact.
@@ -1155,11 +1238,49 @@ mod platform {
             remove_best_effort(&tmp_path);
             return Err(format!("failed to write {}: {e}", tmp_path.display()));
         }
-        if let Err(e) = with_io_retry(|| fs::rename(&tmp_path, &path)) {
+        if let Err(e) = with_io_retry(|| replace_file_write_through(&tmp_path, &path)) {
             remove_best_effort(&tmp_path);
             return Err(format!("failed to finalize {}: {e}", path.display()));
         }
         clear_withdrawal_marker(&path)
+    }
+
+    pub(super) fn replace_file_write_through(
+        source: &Path,
+        destination: &Path,
+    ) -> std::io::Result<()> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        };
+
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+
+        // SAFETY: both paths are valid, NUL-terminated UTF-16 buffers that
+        // remain alive for the duration of the call.
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(windows_error_to_io)
+    }
+
+    fn windows_error_to_io(error: windows::core::Error) -> std::io::Error {
+        let hresult = error.code().0 as u32;
+        let raw_error = if hresult & 0xffff_0000 == 0x8007_0000 {
+            (hresult & 0xffff) as i32
+        } else {
+            hresult as i32
+        };
+        std::io::Error::from_raw_os_error(raw_error)
     }
 
     fn clear_withdrawal_marker(path: &Path) -> Result<(), String> {
@@ -1217,16 +1338,9 @@ mod platform {
         Ok(None)
     }
 
+    #[cfg(test)]
     pub(super) fn write(_granted: bool, _source: &str) -> Result<(), String> {
         Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
-    }
-
-    pub(super) fn begin_withdrawal() -> Result<(), String> {
-        Err("telemetry is Windows-only; consent is not applicable on this platform".to_string())
-    }
-
-    pub(super) fn finish_withdrawal() -> Result<(), String> {
-        Ok(())
     }
 
     pub(super) fn write_presented(
@@ -1861,27 +1975,33 @@ mod tests {
         }
 
         #[test]
-        fn consent_read_does_not_wait_for_the_store_lock() {
+        fn consent_read_waits_for_the_store_lock() {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
             set_consent(true, "prompt").unwrap();
 
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
             let (status_tx, status_rx) = std::sync::mpsc::channel();
             std::thread::scope(|scope| {
                 let read_handle = platform::with_store_lock(|| {
-                    let status_tx = status_tx.clone();
                     let handle = scope.spawn(move || {
+                        started_tx.send(()).expect("send reader start");
                         status_tx.send(get_status()).expect("send consent status");
                     });
-                    let status = status_rx
-                        .recv_timeout(std::time::Duration::from_millis(100))
-                        .expect("consent read must not wait for the store lock");
-                    assert_eq!(status.effective_state, ConsentState::Granted);
+                    started_rx.recv().expect("reader start");
+                    assert!(
+                        status_rx
+                            .recv_timeout(std::time::Duration::from_millis(100))
+                            .is_err(),
+                        "consent read must wait while a writer owns the store lock"
+                    );
                     Ok(handle)
                 })
                 .expect("store lock");
                 read_handle.join().unwrap();
             });
+            let status = status_rx.recv().expect("consent status after lock release");
+            assert_eq!(status.effective_state, ConsentState::Granted);
         }
 
         #[test]
@@ -1936,6 +2056,65 @@ mod tests {
             assert_eq!(status.stored_state, ConsentState::Undetermined);
             assert_eq!(status.effective_state, ConsentState::Undetermined);
             assert_eq!(status.reason, Some(ConsentStatusReason::StoreUnreadable));
+        }
+
+        #[test]
+        fn swallowed_store_failures_are_reported() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let reports = std::sync::Mutex::new(Vec::new());
+
+            let status = platform::read_status_unlocked_with_reporter_for_test(
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "marker temporarily unreadable",
+                )),
+                |message| {
+                    reports
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(message);
+                },
+            );
+
+            assert_eq!(status.reason, Some(ConsentStatusReason::StoreUnreadable));
+            assert_eq!(
+                reports
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .as_slice(),
+                ["inspect withdrawal marker: kind=PermissionDenied, os_error=None, error=marker temporarily unreadable"]
+            );
+        }
+
+        #[test]
+        fn malformed_store_is_reported() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let dir = tmp.path().join("mxc");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("telemetry-consent.json"), "not json at all").unwrap();
+            let reports = std::sync::Mutex::new(Vec::new());
+
+            let status = platform::read_status_unlocked_with_reporter_for_test(
+                Ok(platform::WithdrawalMarkerState::Absent),
+                |message| {
+                    reports
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push(message);
+                },
+            );
+
+            assert_eq!(status.reason, Some(ConsentStatusReason::StoreMalformed));
+            assert!(
+                reports
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .iter()
+                    .any(|message| message.starts_with("parse consent record:")),
+                "malformed consent must produce a diagnostic"
+            );
         }
 
         #[test]
@@ -2047,7 +2226,7 @@ mod tests {
         }
 
         #[test]
-        fn unknown_schema_version_is_undetermined() {
+        fn unsupported_schema_grant_is_undetermined() {
             let tmp = tempfile::tempdir().unwrap();
             let _guard = LocalAppDataGuard::set(tmp.path());
             let dir = tmp.path().join("mxc");
@@ -2058,6 +2237,25 @@ mod tests {
             )
             .unwrap();
             assert_eq!(get_consent(), ConsentState::Undetermined);
+        }
+
+        #[test]
+        fn unsupported_schema_denial_remains_denied() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let dir = tmp.path().join("mxc");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("telemetry-consent.json"),
+                r#"{"schemaVersion":999,"consent":"denied"}"#,
+            )
+            .unwrap();
+
+            let status = get_status();
+
+            assert_eq!(status.stored_state, ConsentState::Denied);
+            assert_eq!(status.effective_state, ConsentState::Denied);
+            assert_eq!(status.reason, None);
         }
 
         #[test]
@@ -2102,6 +2300,42 @@ mod tests {
                 status.reason,
                 Some(ConsentStatusReason::PromptVersionUnsupported)
             );
+        }
+
+        #[test]
+        fn unsupported_prompt_locale_cannot_authorize_collection() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _guard = LocalAppDataGuard::set(tmp.path());
+            let dir = tmp.path().join("mxc");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("telemetry-consent.json"),
+                r#"{"schemaVersion":2,"consent":"granted","promptResourceVersion":1,"promptLocale":"fr-FR"}"#,
+            )
+            .unwrap();
+
+            let status = get_status();
+
+            assert_eq!(status.stored_state, ConsentState::Granted);
+            assert_eq!(status.effective_state, ConsentState::Undetermined);
+            assert_eq!(
+                status.reason,
+                Some(ConsentStatusReason::PromptVersionUnsupported)
+            );
+        }
+
+        #[test]
+        fn write_through_replace_handles_new_and_existing_records() {
+            let tmp = tempfile::tempdir().unwrap();
+            let destination = tmp.path().join("telemetry-consent.json");
+
+            for contents in ["first", "replacement"] {
+                let source = tmp.path().join(format!("{contents}.tmp"));
+                std::fs::write(&source, contents).unwrap();
+                platform::replace_file_write_through(&source, &destination).unwrap();
+                assert_eq!(std::fs::read_to_string(&destination).unwrap(), contents);
+                assert!(!source.exists());
+            }
         }
 
         #[test]

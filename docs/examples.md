@@ -43,10 +43,48 @@ For a more comprehensive list of examples, look in the examples\ directory.
 }
 ```
 
+### Schema 0.8 Directional Network Policy
+
+Schema 0.8 adds a directional format with explicit egress CIDR, protocol, and
+port rules plus separate ingress defaults:
+
+```json
+{
+  "version": "0.8.0-alpha",
+  "containment": "process",
+  "process": {
+    "commandLine": "echo schema 0.8 directional network example"
+  },
+  "network": {
+    "egress": {
+      "default": "deny",
+      "allow": [
+        {
+          "to": [{ "cidr": "192.0.2.0/24" }],
+          "ports": [{ "protocol": "tcp", "port": 443 }]
+        }
+      ]
+    },
+    "ingress": {
+      "default": "deny",
+      "hostLoopback": "deny"
+    }
+  }
+}
+```
+
+See
+[`tests/examples/30_network_0_8_directional.json`](../tests/examples/30_network_0_8_directional.json)
+for the complete config and
+[`sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
+for network modes and backend support.
+
 ### Network Proxy
 
-Route process-container traffic through a localhost proxy. Supported with the
-`processcontainer` containment backend only. Two mutually exclusive modes are available:
+Route sandboxed traffic through a localhost proxy via the legacy `network.proxy`
+field. Supported by **ProcessContainer** (Windows), **Bubblewrap** (Linux), and
+**Seatbelt** (macOS) — see each backend's doc for enforcement specifics. Two
+mutually exclusive modes are available:
 
 **External proxy** — connect to an already-running localhost proxy:
 
@@ -64,8 +102,8 @@ Route process-container traffic through a localhost proxy. Supported with the
 }
 ```
 
-**Builtin test server** — `wxc-exec` launches its own minimal HTTP CONNECT proxy on
-an OS-assigned port (for integration testing only, not production):
+**Builtin test server** — the executor launches its own minimal HTTP CONNECT
+proxy on an OS-assigned port (for integration testing only, not production):
 
 ```json
 {
@@ -89,3 +127,40 @@ is a separate axis from `--experimental` (which selects experimental backends
 and features). The MXC SDK exposes the same gate as the `allowTestingFeatures`
 spawn option, which must be set to `true` for a policy that uses
 `builtinTestServer`.
+
+#### Schema 0.8 shape: `egress` / `ingress` / `runtimeConfig.networkProxy`
+
+Starting at `"version": "0.8.0-alpha"`, the `egress`/`ingress`/`runtimeConfig.networkProxy`
+shape replaces the legacy `defaultPolicy`/`allowedHosts`/`blockedHosts`/`network.proxy`
+fields above — a config must use one shape or the other, never both. This is
+the official, cross-backend schema (see
+[`docs/sandbox-policy/0.8.0/networking/networking.md`](sandbox-policy/0.8.0/networking/networking.md)
+for the full design and per-backend enforcement matrix), not a
+backend-specific format: it's parsed the same way regardless of
+`containment`. Each backend independently declares which parts of it — if
+any — it actually enforces; a backend that hasn't declared support for a
+given field rejects a config that sets it.
+
+Note that `EGRESS_RULES` is what carries per-CIDR/port rules; a backend
+without it accepts only `egress.default`. On Seatbelt,
+`runtimeConfig.networkProxy` covers only the
+loopback-proxy case (`network.proxy.localhost` / loopback `network.proxy.url`);
+there is no schema-0.8 equivalent for a remote proxy URL or
+`builtinTestServer`. See
+[`docs/sandbox-policy/0.8.0/networking/schema-updates.md`](sandbox-policy/0.8.0/networking/schema-updates.md)
+for the full field mapping and [`tests/examples/31_mac_network_0_8.json`](../tests/examples/31_mac_network_0_8.json)
+for a complete example:
+
+```json
+{
+  "version": "0.8.0-alpha",
+  "containment": "seatbelt",
+  "network": {
+    "egress": { "default": "deny" },
+    "ingress": { "default": "deny", "hostLoopback": "deny" }
+  },
+  "runtimeConfig": {
+    "networkProxy": "http://127.0.0.1:8080"
+  }
+}
+```

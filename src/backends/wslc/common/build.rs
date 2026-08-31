@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Pinned WSLC SDK version. Override with the `WSLC_SDK_VERSION` env var.
-const WSLC_SDK_VERSION: &str = "2.9.3";
+const WSLC_SDK_VERSION: &str = "2.9.9";
 
 /// Direct anonymous content URL for a package version on the public
 /// MxcDependencies Azure Artifacts feed (mirrors nuget.org; reachable from the
@@ -294,6 +294,9 @@ fn expected_sha256(version: &str) -> Option<String> {
     // version. This is an exact-bytes content pin, independent of the NuGet
     // author signature.
     match version {
+        "2.9.9" => {
+            Some("7764355a4fa3ca29d3c8a1dc2a0f4ee1c9c4603d110a20218aef5cd2efa90fe2".to_string())
+        }
         "2.9.3" => {
             Some("d49b66796cb3b88ff513f5e65cd0333ddfed8fe998bf8ed3845ebdecf8563281".to_string())
         }

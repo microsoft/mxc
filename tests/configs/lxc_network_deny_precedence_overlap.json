@@ -1,9 +1,9 @@
 {
-  "version": "0.8.0-alpha",
+  "version": "0.7.0-alpha",
   "containerId": "CLI-LXC-Net-DenyWins",
   "containment": "lxc",
   "process": {
-    "commandLine": "sh -c \"wget -qO- --timeout=10 https://api.github.com/zen >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+    "commandLine": "sh -c \"wget -qO- --timeout=10 http://198.51.100.10:443/ >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
   },
   "lifecycle": {
     "destroyOnExit": true

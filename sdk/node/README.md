@@ -58,14 +58,81 @@ child.on('close', (code) => console.log('exit:', code));
 | `0.4.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.4.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.4.0-alpha.json) |
 | `0.5.0-alpha` | Retired — below the `0.6.0-alpha` floor (no longer accepted) | [`schemas/stable/mxc-config.schema.0.5.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.5.0-alpha.json) |
 | `0.6.0-alpha` | Stable (minimum supported) | [`schemas/stable/mxc-config.schema.0.6.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.6.0-alpha.json) |
-| `0.7.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
-| `0.8.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.8.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.8.0-dev.json) |
+| `0.7.0-alpha` | Stable | [`schemas/stable/mxc-config.schema.0.7.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.7.0-alpha.json) |
+| `0.8.0-alpha` | Stable (current) | [`schemas/stable/mxc-config.schema.0.8.0-alpha.json`](https://github.com/microsoft/mxc/blob/main/schemas/stable/mxc-config.schema.0.8.0-alpha.json) |
+| `0.9.0-alpha` | Dev (experimental backends, the `experimental.*` block, state-aware sandbox lifecycle) | [`schemas/dev/mxc-config.schema.0.9.0-dev.json`](https://github.com/microsoft/mxc/blob/main/schemas/dev/mxc-config.schema.0.9.0-dev.json) |
 
-Pick `0.7.0-alpha` for new code on any supported platform.
+Pick `0.8.0-alpha` for new code on any supported platform.
 
-> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.8.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
+> **Stable schemas document only the non-experimental surface.** Experimental backends (`windows_sandbox`, `wslc`, `microvm`, `hyperlight`, `isolation_session`), the `experimental.*` block, and state-aware lifecycle live in `0.9.0-dev`. The parser still accepts them when paired with `--experimental` regardless of which schema your config validates against — schema choice affects editor validation, not runtime behavior.
 
 > **Network host allow/block lists are not implemented on Windows.** `network.allowedHosts` / `network.blockedHosts` have no enforcement on this platform — use `network.defaultPolicy` (`allow` / `block`) or `network.proxy` to constrain network access.
+
+<a id="schema-080-networking"></a>
+
+**Schema 0.8 directional networking:** `createConfigFromPolicy` accepts
+`network.egress` / `network.ingress`, `runtimeConfig.networkProxy`, and
+`processContainer.network.allowedProxyPeer`. Do not mix those fields with the
+legacy `network.allowOutbound`, `network.allowLocalNetwork`,
+`network.allowedHosts`, `network.blockedHosts`, or `network.proxy` fields.
+`createConfigFromPolicy` authors either shape according to the supplied policy
+version and fields. Schema 0.6 and 0.7 policies continue to produce the legacy
+wire shape. With schema 0.8, omitting all network fields leaves the
+`network` block out of the generated config; the native parser interprets that
+as directional default-deny for egress, ingress, and host loopback. See the
+[Sandbox Policy 0.8.0 specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
+for the complete cross-platform authoring shape.
+
+Model 1 permits direct connections selected by IP/CIDR, protocol, and port
+rules; it does not configure an application-layer proxy. Model 2 denies direct
+internet access and supplies a loopback HTTP/S proxy endpoint. Backend-specific
+requirements determine how that proxy endpoint is made reachable.
+
+**Simple model 1 example — direct egress with L3/L4 filtering:**
+
+```typescript
+import {
+  createConfigFromPolicy,
+  spawnSandboxFromConfig,
+} from '@microsoft/mxc-sdk';
+
+const directConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: {
+      default: 'deny',
+      allow: [{
+        to: [{ cidr: '192.0.2.0/24' }],
+        ports: [{ protocol: 'tcp', port: 443 }],
+      }],
+    },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+});
+directConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(directConfig);
+```
+
+**Simple model 2 example — loopback HTTP/S proxy:**
+
+```typescript
+const proxyConfig = createConfigFromPolicy({
+  version: '0.8.0-alpha',
+  network: {
+    egress: { default: 'deny' },
+    ingress: { default: 'deny', hostLoopback: 'deny' },
+  },
+  runtimeConfig: { networkProxy: 'http://127.0.0.1:8080' },
+});
+proxyConfig.process!.commandLine = 'node agent.js';
+spawnSandboxFromConfig(proxyConfig);
+```
+
+These are example configurations rather than universal backend recipes.
+ProcessContainer proxy configurations have additional criteria; see the
+[ProcessContainer 0.8 proxy example](https://github.com/microsoft/mxc/blob/main/docs/process-container/examples/0.8.0-schema.md).
+See the [networking specification](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/networking/networking.md)
+for all three connectivity modes and backend-specific support.
 
 **Platforms:**
 
@@ -79,7 +146,7 @@ The default `processcontainer`, `bubblewrap`, `lxc`, and `seatbelt` backends wor
 
 > **Hyperlight** is an opt-in build flavor (Linux x64 and Windows x64) gated by the `--with-hyperlight` cargo feature. Default shipped binaries do not include it; build from source with `build.bat --with-hyperlight` (Windows) or the equivalent cargo invocation on Linux.
 
-`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data.
+`getPlatformSupport()` reports backend availability and, when the native probe can determine it, `uiCapabilities`: a platform-neutral view of which UI restrictions the host can enforce. This is currently populated only by the Windows native probe, where it is derived from `JOB_OBJECT_UILIMIT_*` support; Linux and macOS omit the field until their probes expose equivalent data. On Linux, `unavailableReasons` provides a diagnostic for each unavailable LXC or Bubblewrap backend even when the other backend keeps the platform supported.
 
 **Node.js:** ≥ 18.
 
@@ -196,7 +263,7 @@ console.log(result.stdout);
 | `processcontainer` | `process` | Windows | ✅ | [`docs/process-container/guide.md`](https://github.com/microsoft/mxc/blob/main/docs/process-container/guide.md) |
 | `bubblewrap` | `process` | Linux | ✅ | [`docs/bwrap-support/bubblewrap-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/bwrap-support/bubblewrap-backend.md) |
 | `lxc` | (concrete only) | Linux | ✅ | [`docs/lxc-support/lxc-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/lxc-support/lxc-backend.md) |
-| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/macos-support/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/macos-support/seatbelt-backend.md) |
+| `seatbelt` | `process` | macOS | ✅ (schema `0.7.0-alpha`+) | [`docs/seatbelt/seatbelt-backend.md`](https://github.com/microsoft/mxc/blob/main/docs/seatbelt/seatbelt-backend.md) |
 | `windows_sandbox` | `vm` | Windows | Experimental | [`docs/windows-sandbox/windows-sandbox.md`](https://github.com/microsoft/mxc/blob/main/docs/windows-sandbox/windows-sandbox.md) |
 | `microvm` | `microvm` | Windows | Experimental | [`docs/nanvix-microvm/nanvix.md`](https://github.com/microsoft/mxc/blob/main/docs/nanvix-microvm/nanvix.md) — MicroVM via NanVix on Windows Hypervisor Platform |
 | `wslc` | (concrete only) | Windows | Experimental | [`docs/wsl/wsl-container-getting-started.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wsl-container-getting-started.md) |
@@ -264,7 +331,7 @@ await deprovisionSandbox(sandboxId, undefined, opts);
 
 `wslc` follows the same shape and needs no provision config at all (it defaults to an `alpine:latest` container with no network). Provide `filesystem.readwritePaths` / `readonlyPaths` (mounted for the sandbox's lifetime), `network.defaultPolicy: 'allow'` (a bridged container; the default `'block'` gives no network), and/or a backend-specific `image` / `imageTarPath` at provision; inject a cooperative `network.proxy: { url }` per-exec. WSLc state-aware requests default to schema `0.8.0-alpha`. See [`docs/wsl/wslc-state-aware.md`](https://github.com/microsoft/mxc/blob/main/docs/wsl/wslc-state-aware.md) for the per-phase config matrix.
 
-**Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first; when the failure came from an underlying platform API, the error also carries discrete diagnostic fields rather than a prose blob:
+**Handling failures.** Every lifecycle call rejects with a typed `MxcError`. Branch on `code` first:
 
 ```typescript
 import { MxcError } from '@microsoft/mxc-sdk';
@@ -277,14 +344,14 @@ try {
     console.error(err.message);      // bare, human-readable
     console.error(err.operation);    // e.g. 'IsoSessionOps.StartSessionAsync'
     console.error(err.nativeCode);   // e.g. '0x80070490'
-    console.error(err.remediation);  // the API's own fix-it hint, when it supplies one
+    console.error(err.remediation);  // an actionable fix-it hint, when there is one
   }
 }
 ```
 
-`operation`, `nativeCode` and `remediation` are optional. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries only `code` and `message`.
+`operation`, `nativeCode` and `remediation` are optional. A failure MXC raises before reaching the backend — a malformed request or id, or a policy rejection — carries neither `operation` nor `nativeCode`, though it may still carry a `remediation`.
 
-These three are currently populated only by **IsolationSession state-aware** operations. Windows Sandbox has no semantic error channel to derive them from, and the one-shot surface folds the same detail into `message` instead, so they are uniformly absent there — always treat them as optional.
+These three are currently populated only by **IsolationSession state-aware** operations — always treat them as optional.
 
 Branch program logic on `code`, which is a closed, versioned union. The *values* of `operation` and `nativeCode` are best-effort diagnostics derived from the underlying platform API and may change without a version bump — use them for telemetry, logging and diagnosis rather than control flow.
 
@@ -367,14 +434,14 @@ Setting `cwd` (or the `workingDirectory` argument) does **not** add that path to
 
 | Error | Cause | Fix |
 | --- | --- | --- |
-| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux: neither LXC nor Bubblewrap on PATH. On macOS: schema version < `0.6.0-alpha`. | Install LXC/Bubblewrap, or switch to schema `0.6.0-alpha` (or `0.7.0-alpha` if you need state-aware lifecycle). |
+| `MXC is not supported on this platform` | `getPlatformSupport()` returned `isSupported: false`. On Linux, neither LXC nor a usable Bubblewrap 0.5.0+ installation is available. On macOS, the Seatbelt platform probe could not find `/usr/bin/sandbox-exec`. | Inspect `support.reason`. On Linux, also inspect `support.unavailableReasons` and install LXC or Bubblewrap 0.5.0+. On macOS, verify that `/usr/bin/sandbox-exec` exists; its absence indicates an incomplete or unsupported macOS installation. |
 | `wxc-exec.exe not found` / `lxc-exec not found` | The SDK couldn't locate the native binary. | Set `MXC_BIN_DIR=<dir>` so `<dir>/<arch>/wxc-exec.exe` (or `lxc-exec`) exists, or pass `options.executablePath` explicitly. |
 | `Invalid containment value '<x>'` | `containment` field doesn't match the parser's accepted values. | Use one of the abstract intents (`process`, `vm`, `microvm`) or a concrete backend listed in [Choosing a Backend](#choosing-a-backend). |
 | `'<x>' containment requires experimental mode` | A `windows_sandbox` / `wslc` / `microvm` / `isolation_session` / `hyperlight` backend was selected without the flag. | Pass `{ experimental: true }` in `SandboxSpawnOptions`. |
 | `process.commandLine starts with an unquoted Windows path containing a space` | `wxc-exec` rejects unquoted paths with spaces at parse time. | Quote the executable: `'"C:\\Program Files\\…\\foo.exe" args'`. |
 | `Experimental_CreateProcessInSandbox failed: WIN32_ERROR(...)` | Native sandbox API returned an OS-level error, e.g. `448` = device feature not supported (Windows build / WIP feature not enabled). Note `120` (call not implemented / BaseContainer disabled) is now handled automatically — the default `process` backend falls back to AppContainer+DACL, so it no longer surfaces here. | Check the Windows build / WIP requirements for the backend you selected. |
 | Process exits `-1` / `4294967295` with no stdout | Native binary terminated abnormally. | Re-run with `options.debug: true` (or `options.logDir: '<dir>'`) to capture diagnostic logs. |
-| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, or `0.8.0-alpha`. See [Compatibility](#compatibility). |
+| `policy.version '<x>' is older than supported` / `newer than supported` | Version is outside the SDK's accepted range. | Use `0.6.0-alpha`, `0.7.0-alpha`, `0.8.0-alpha`, or `0.9.0-alpha`. See [Compatibility](#compatibility). |
 
 For backend-specific errors, see the per-backend guide linked from the [Choosing a Backend](#choosing-a-backend) table.
 
@@ -452,7 +519,7 @@ for the stable registry contract and interaction rules.
 - [`docs/schema.md`](https://github.com/microsoft/mxc/blob/main/docs/schema.md) — full configuration schema reference
 - [`docs/versioning.md`](https://github.com/microsoft/mxc/blob/main/docs/versioning.md) — schema versioning model and experimental-feature lifecycle
 - [`docs/examples.md`](https://github.com/microsoft/mxc/blob/main/docs/examples.md) — annotated configuration examples
-- [Sandbox policy 0.7.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.7.0/policy.md)
+- [Sandbox policy 0.8.0](https://github.com/microsoft/mxc/blob/main/docs/sandbox-policy/0.8.0/policy.md)
   — policy specification
 - Backend-specific guides linked in the [Choosing a Backend](#choosing-a-backend) section above.
 

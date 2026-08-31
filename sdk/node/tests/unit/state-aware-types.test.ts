@@ -130,9 +130,9 @@ describe('IsolationSessionProvisionConfig', () => {
   it('accepts an optional appId', () => {
     const cfg: IsolationSessionProvisionConfig = {
       network,
-      appId: 'Contoso.App_8wekyb3d8bbwe',
+      appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
     };
-    assert.strictEqual(cfg.appId, 'Contoso.App_8wekyb3d8bbwe');
+    assert.strictEqual(cfg.appId, 'PFN:Contoso.App_8wekyb3d8bbwe');
   });
 
   it('accepts an empty appId as a value distinct from omitting it', () => {
@@ -160,7 +160,7 @@ describe('IsolationSessionStartConfig', () => {
   it('rejects appId (provision-only; fixed for the sandbox lifetime)', () => {
     const cfg: IsolationSessionStartConfig = {
       // @ts-expect-error — appId is accepted only at provision.
-      appId: 'Contoso.App_8wekyb3d8bbwe',
+      appId: 'PFN:Contoso.App_8wekyb3d8bbwe',
     };
     assert.ok(cfg);
   });

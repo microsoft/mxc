@@ -62,7 +62,16 @@ try {
 
     execFileSync(
       "cargo",
-      ["run", "-q", "-p", "mxc_schema_gen", "--", ...generatorArgs, generatedPath],
+      [
+        "run",
+        "-q",
+        "-p",
+        "mxc_schema_gen",
+        "--",
+        ...generatorArgs,
+        "--out",
+        generatedPath,
+      ],
       { cwd: join(repoRoot, "src"), stdio: ["ignore", "ignore", "inherit"] }
     );
 
@@ -86,16 +95,16 @@ try {
   compareGeneratedSchema({
     committedPath: configSchemaPath,
     generatedPath: tmpConfigOut,
-    generatorArgs: [],
-    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
+    generatorArgs: ["schema", "--legacy-wire"],
+    regenCommand: `cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --legacy-wire --out schemas/dev/mxc-config.schema.${schemaVer.devSchemaFile}.json`,
   });
 
   compareGeneratedSchema({
     committedPath: telemetryConsentSchemaPath,
     generatedPath: tmpTelemetryConsentOut,
-    generatorArgs: ["--telemetry-consent"],
+    generatorArgs: ["schema", "--telemetry-consent"],
     regenCommand:
-      "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- --telemetry-consent schemas/dev/mxc-telemetry-consent.schema.1.json",
+      "cargo run --manifest-path src/Cargo.toml -p mxc_schema_gen -- schema --telemetry-consent --out schemas/dev/mxc-telemetry-consent.schema.1.json",
   });
 } finally {
   rmSync(tmpDir, { recursive: true, force: true });

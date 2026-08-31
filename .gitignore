@@ -48,3 +48,6 @@ output
 
 # iterative-review working artifacts
 .review/
+
+# OS generated files
+.DS_Store

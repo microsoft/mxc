@@ -49,6 +49,9 @@ jobs:
   sdk-unit-tests:
     uses: ./.github/workflows/SDK.Unit.Test.Job.yml
 
+  sdk-dotnet-tests:
+    uses: ./.github/workflows/SDK.Dotnet.Test.Job.yml
+
   package-npm-sdk:
     needs: [windows, linux, macos]
     uses: ./.github/workflows/Package.NpmSdk.Job.yml

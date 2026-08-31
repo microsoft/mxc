@@ -20,6 +20,23 @@ use tokio::net::{TcpListener, TcpStream};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Hosts the proxy answers itself instead of dialing out, so a test cannot
+/// fail for a reason unrelated to containment.
+///
+/// Two names are served because filtering runs first: a blocked
+/// [`SELF_SERVED_BLOCKED_ORIGIN`] yields 403 when enforcement works and 200
+/// when it does not, never an unreachable-host error that would pass by
+/// accident. `.invalid` (RFC 6761) never resolves, so neither name reaches the
+/// network; CONNECT to either is refused (501).
+pub const SELF_SERVED_ORIGIN: &str = "mxc-test.invalid";
+
+/// Companion to [`SELF_SERVED_ORIGIN`], by convention the one a test denies.
+pub const SELF_SERVED_BLOCKED_ORIGIN: &str = "mxc-blocked.invalid";
+
+/// Body returned for a self-served host, so a test can assert on content
+/// rather than only on the status code.
+pub const SELF_SERVED_BODY: &str = "MXC_TEST_ORIGIN_OK";
+
 /// Default policy applied when the `allow` list is empty.
 ///
 /// - `Allow` — permit any host that isn't explicitly blocked.
@@ -102,6 +119,22 @@ fn empty_response(status: StatusCode) -> Response<Full<Bytes>> {
         .unwrap()
 }
 
+fn text_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "text/plain")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .unwrap()
+}
+
+/// Whether `host` (possibly `host:port`) is one of the self-served origins.
+fn is_self_served(host: &str) -> bool {
+    let host = strip_port(host);
+    [SELF_SERVED_ORIGIN, SELF_SERVED_BLOCKED_ORIGIN]
+        .iter()
+        .any(|served| host.eq_ignore_ascii_case(served))
+}
+
 /// Start the test proxy. Binds to `bind_addr:0` (OS-assigned port) and
 /// returns the actual port the listener is bound to. The accept loop runs
 /// in a background tokio task and applies `filter` to every request.
@@ -162,6 +195,16 @@ async fn handle_connect(
 
     eprintln!("[unix-test-proxy] CONNECT {}", authority);
 
+    // A tunnel would have to present a TLS identity for this name, which the
+    // proxy has none for. Say so rather than failing later on a name that by
+    // definition cannot resolve.
+    if is_self_served(&authority) {
+        eprintln!(
+            "[unix-test-proxy] CONNECT to a self-served origin is unsupported; use plain http://"
+        );
+        return Ok(empty_response(StatusCode::NOT_IMPLEMENTED));
+    }
+
     let server = TcpStream::connect(&authority).await.map_err(|err| {
         eprintln!("[unix-test-proxy] connect error for {}: {}", authority, err);
         err
@@ -203,6 +246,13 @@ async fn handle_forward(
     if !filter.permits(host) {
         eprintln!("[unix-test-proxy] BLOCK {} {}", method, uri);
         return Ok(empty_response(StatusCode::FORBIDDEN));
+    }
+
+    // Answered here rather than dialed, but only after filtering, so an
+    // allow/block list governs it like any other host.
+    if is_self_served(host) {
+        eprintln!("[unix-test-proxy] SERVE {} {}", method, uri);
+        return Ok(text_response(StatusCode::OK, SELF_SERVED_BODY));
     }
 
     let port = uri.port_u16().unwrap_or(80);
@@ -260,6 +310,55 @@ async fn handle_forward(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_self_served_origin_is_recognised_with_and_without_a_port() {
+        assert!(is_self_served(SELF_SERVED_ORIGIN));
+        assert!(is_self_served(SELF_SERVED_BLOCKED_ORIGIN));
+        assert!(is_self_served(&format!("{SELF_SERVED_ORIGIN}:80")));
+        assert!(is_self_served(&SELF_SERVED_ORIGIN.to_uppercase()));
+        assert!(!is_self_served("example.com"));
+    }
+
+    /// The self-served origins must stay reserved. A resolvable name would let
+    /// a test reach the network and reintroduce the flake it exists to remove.
+    #[test]
+    fn the_self_served_origins_use_a_reserved_tld() {
+        for host in [SELF_SERVED_ORIGIN, SELF_SERVED_BLOCKED_ORIGIN] {
+            assert!(
+                host.ends_with(".invalid"),
+                "{host} must sit under the RFC 6761 .invalid TLD"
+            );
+        }
+        assert_ne!(SELF_SERVED_ORIGIN, SELF_SERVED_BLOCKED_ORIGIN);
+    }
+
+    /// Serving happens after filtering, so a denied self-served host is a real
+    /// control: enforcement gives 403 while a broken filter gives a live 200.
+    #[test]
+    fn the_self_served_origin_is_still_subject_to_filtering() {
+        let blocked = HostFilter::new(
+            vec![],
+            vec![SELF_SERVED_BLOCKED_ORIGIN.into()],
+            DefaultPolicy::Allow,
+        );
+        assert!(!blocked.permits(SELF_SERVED_BLOCKED_ORIGIN));
+        assert!(blocked.permits(SELF_SERVED_ORIGIN));
+
+        let unlisted = HostFilter::new(
+            vec![SELF_SERVED_ORIGIN.into()],
+            vec![],
+            DefaultPolicy::Allow,
+        );
+        assert!(!unlisted.permits(SELF_SERVED_BLOCKED_ORIGIN));
+
+        let allowed = HostFilter::new(
+            vec![SELF_SERVED_ORIGIN.into()],
+            vec![],
+            DefaultPolicy::Block,
+        );
+        assert!(allowed.permits(SELF_SERVED_ORIGIN));
+    }
 
     #[test]
     fn allow_list_empty_permits_everything_when_default_allow() {

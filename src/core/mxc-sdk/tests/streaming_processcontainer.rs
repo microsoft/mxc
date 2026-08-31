@@ -27,7 +27,6 @@ fn streaming_processcontainer_bidirectional_stdio() {
         network: None,
         ui: None,
         timeout_ms: None,
-        capture_denials: None,
     };
     let mut request = build_request(&policy, None).expect("build_request");
     // `cmd /c more` echoes stdin to stdout until EOF, then exits.

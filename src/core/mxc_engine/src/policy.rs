@@ -2,24 +2,37 @@
 // Licensed under the MIT License.
 
 //! Policy discovery and config building — the Rust port of the SDK's
-//! `policy.ts` helpers and `createConfigFromPolicy`.
+//! policy discovery helpers and request construction.
 //!
 //! - [`available_tools_policy`], [`user_profile_policy`], and
 //!   [`temporary_files_policy`] enumerate the host environment to discover
 //!   tool/SDK/profile/temp directories as filesystem-policy fragments.
-//! - [`SandboxPolicy`] mirrors the SDK's cross-platform policy type, and
-//!   [`build_request`] maps it to an [`ExecutionRequest`] for the backends the
-//!   crate supports (Seatbelt, Bubblewrap, ProcessContainer) — so callers no
-//!   longer need the TypeScript SDK to build a spawnable config.
+//! - [`SandboxPolicy`] describes cross-platform restrictions, and
+//!   [`build_request`] maps it to an [`ExecutionRequest`] for Seatbelt,
+//!   Bubblewrap, and ProcessContainer.
+
+pub(crate) mod network;
 
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::configs::process_container;
+use crate::configs::ProcessContainer;
+#[cfg(test)]
+use crate::configs::{CaptureDenials, CaptureDenialsMode};
 use wxc_common::logger::{Logger, Mode};
 use wxc_common::models::{ExecutionRequest, TelemetryConfig};
 use wxc_common::mxc_error::MxcError;
 
+#[cfg(target_os = "linux")]
+use network::has_host_rules;
+use network::{proxy_to_wire, select_network_format, NetworkFormat};
+pub use network::{
+    NetworkAction, NetworkEgressSection, NetworkIngressSection, NetworkPeerSection,
+    NetworkPortSection, NetworkProtocol, NetworkRuleSection, NetworkSection, ProxySpec,
+    RuntimeConfigSection,
+};
 // ---------------------------------------------------------------------------
 // Filesystem policy discovery
 // ---------------------------------------------------------------------------
@@ -433,68 +446,6 @@ pub struct FilesystemSection {
     pub clear_policy_on_exit: Option<bool>,
 }
 
-/// Network proxy configuration, mirroring the SDK union type
-/// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
-#[derive(Debug, Clone)]
-pub enum ProxySpec {
-    /// Route through the built-in test proxy server.
-    BuiltinTestServer,
-    /// Route through `127.0.0.1:<port>`.
-    Localhost(u16),
-    /// Route through an explicit proxy URL.
-    Url(String),
-}
-
-// Custom `Deserialize` matching the SDK's object union
-// `{ builtinTestServer: true } | { localhost: number } | { url: string }`.
-// serde's default derive can't express it, and an untagged enum would silently
-// keep the first matching variant when several conflicting keys are present, so
-// we parse all recognised modes and require exactly one — rejecting conflicts
-// the way the shared wire-config parser does.
-impl<'de> serde::Deserialize<'de> for ProxySpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct Raw {
-            #[serde(default)]
-            builtin_test_server: Option<bool>,
-            #[serde(default)]
-            localhost: Option<u16>,
-            #[serde(default)]
-            url: Option<String>,
-        }
-        let raw = Raw::deserialize(deserializer)?;
-        match (raw.builtin_test_server, raw.localhost, raw.url) {
-            (Some(true), None, None) => Ok(ProxySpec::BuiltinTestServer),
-            // The SDK union type is `{ builtinTestServer: true }`, so an explicit
-            // `false` is malformed. Reject it rather than silently selecting the
-            // (experimental, deliberately-permissive) built-in proxy — fail closed.
-            (Some(false), None, None) => Err(serde::de::Error::custom(
-                "network.proxy.builtinTestServer must be true; omit the proxy to disable it",
-            )),
-            (None, Some(port), None) => Ok(ProxySpec::Localhost(port)),
-            (None, None, Some(url)) => Ok(ProxySpec::Url(url)),
-            _ => Err(serde::de::Error::custom(
-                "network.proxy must set exactly one of builtinTestServer, localhost, or url",
-            )),
-        }
-    }
-}
-
-/// Network section of a [`SandboxPolicy`]. All flags default to deny.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct NetworkSection {
-    pub allow_outbound: bool,
-    pub allow_local_network: bool,
-    pub allowed_hosts: Vec<String>,
-    pub blocked_hosts: Vec<String>,
-    pub proxy: Option<ProxySpec>,
-}
-
 /// UI section of a [`SandboxPolicy`]. All flags default to denied.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -502,55 +453,6 @@ pub struct UiSection {
     pub allow_windows: bool,
     pub clipboard: ClipboardPolicy,
     pub allow_input_injection: bool,
-}
-
-/// How `captureDenials` handles each ungranted access check while it records
-/// it. Both modes log every access the policy does not grant.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CaptureDenialsMode {
-    /// The access stays denied and the denial is recorded; deny-by-default
-    /// containment is preserved. Safe default.
-    #[default]
-    Block,
-    /// The access is allowed and recorded (audit mode). This relaxes
-    /// deny-by-default for the run, so the runner emits a security warning
-    /// surfaced through [`Sandbox::warnings`](crate::SandboxProcess::warnings).
-    Allow,
-}
-
-#[cfg(any(target_os = "windows", test))]
-impl CaptureDenialsMode {
-    /// Wire-format value accepted by the config parser.
-    fn wire(self) -> &'static str {
-        match self {
-            CaptureDenialsMode::Block => "block",
-            CaptureDenialsMode::Allow => "allow",
-        }
-    }
-}
-
-/// Denial-capture section of a [`SandboxPolicy`] (Windows ProcessContainer
-/// only). Its presence enables capture: the runner records the sandboxed
-/// process's ungranted access attempts and writes a JSON denials document,
-/// reported back through
-/// [`SandboxOutputMetadata::capture_denials`](wxc_common::models::SandboxOutputMetadata).
-///
-/// Ignored on Linux and macOS, whose backends have no learning-mode API.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct CaptureDenialsSection {
-    /// How each ungranted access check is handled while it is recorded.
-    pub mode: CaptureDenialsMode,
-    /// Absolute path for the JSON denials document. The runner stamps a
-    /// per-run identifier into the file stem (`denials.json` ->
-    /// `denials.<run-id>.json`) and reports the actual path back. When `None`,
-    /// a managed per-run temporary file is used. The parent directory must
-    /// already exist.
-    pub output_path: Option<String>,
-    /// Preserve the sealed ETL trace after analysis and report its path in
-    /// output metadata. Defaults to `false`.
-    pub retain_etl: bool,
 }
 
 /// The containment backend [`build_request_with_containment`] targets — the
@@ -561,11 +463,15 @@ pub struct CaptureDenialsSection {
 /// concrete backend when you specifically need it, and prefer
 /// [`Containment::Process`] otherwise.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Containment {
     /// Abstract "OS-native process isolation" intent, resolved per host:
     /// ProcessContainer (Windows), Bubblewrap (Linux), Seatbelt (macOS).
     #[default]
     Process,
+    /// Windows ProcessContainer with explicit AppContainer/BaseContainer
+    /// settings.
+    ProcessContainer(ProcessContainer),
     /// WSL Container backend: a Linux container on a Windows host, via the WSLC
     /// SDK, configured by the carried [`WslcSection`]
     /// (`WslcSection::default()` matches the SDK's defaults).
@@ -573,23 +479,27 @@ pub enum Containment {
     /// **Experimental** — the request must have experimental features enabled
     /// ([`SandboxRequest::set_experimental`]) or the spawn is rejected.
     Wslc(WslcSection),
+    /// IsolationSession backend: a Windows isolated user session.
+    ///
+    /// Not served by [`crate::spawn`]; reach it through the state-aware
+    /// lifecycle.
+    IsolationSession,
 }
 
-/// WSL Container settings, mirroring the SDK's `experimental.wslc` config
-/// block; carried by [`Containment::Wslc`].
+/// WSL Container settings carried by [`Containment::Wslc`].
 ///
 /// [`Default`] matches the native backend's defaults: the `alpine:latest`
-/// image, host-determined CPU/memory, no GPU, and the SDK's default store.
+/// image, host-determined CPU/memory, no GPU, and the default store.
 ///
 /// # Network policy
 ///
 /// WSLC derives its networking mode from `allowOutbound` alone (bridged when
 /// true, isolated when false). Per-host rules (`allowedHosts`/`blockedHosts`)
-/// are accepted here for parity with the TypeScript SDK, but the backend
-/// currently enforces them with in-container `iptables`, which the container
-/// lacks `CAP_NET_ADMIN` to install — so such a policy **fails the run at
-/// spawn** rather than silently going unenforced. Until enforcement moves to a
-/// VM-level API, prefer expressing WSLC network intent with `allowOutbound`.
+/// are accepted, but the backend currently enforces them with in-container
+/// `iptables`, which the container lacks `CAP_NET_ADMIN` to install — so such a
+/// policy **fails the run at spawn** rather than silently going unenforced.
+/// Until enforcement moves to a VM-level API, prefer expressing WSLC network
+/// intent with `allowOutbound`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WslcSection {
     /// Container image reference (e.g. `"alpine:latest"`, `"python:3.12"`).
@@ -681,9 +591,6 @@ pub struct SandboxPolicy {
     /// Execution timeout in milliseconds (`None` = no timeout).
     #[serde(default)]
     pub timeout_ms: Option<u32>,
-    /// Windows denial capture. `Some` enables it; ignored on Linux and macOS.
-    #[serde(default)]
-    pub capture_denials: Option<CaptureDenialsSection>,
 }
 
 /// A spawnable sandbox request, built from a [`SandboxPolicy`] by
@@ -774,9 +681,6 @@ impl SandboxRequest {
     /// Enable (or disable) experimental features for this request — the
     /// analogue of the SDK's `SandboxSpawnOptions.experimental` and the
     /// executor's `--experimental` flag.
-    ///
-    /// Experimental backends (today: [`Containment::Wslc`]) refuse to spawn
-    /// unless this is set, so the gate stays fail-closed.
     pub fn set_experimental(&mut self, enabled: bool) -> &mut Self {
         self.inner.experimental_enabled = enabled;
         self
@@ -835,7 +739,6 @@ pub fn build_request(
 ///     network: None,
 ///     ui: None,
 ///     timeout_ms: None,
-///     capture_denials: None,
 /// };
 /// let wslc = WslcSection { image: "python:3.12".to_string(), ..Default::default() };
 /// let mut request = build_request_with_containment(&policy, &Containment::Wslc(wslc), None)?;
@@ -865,7 +768,7 @@ pub fn build_request_with_containment(
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
 /// backends, mirroring `createConfigFromPolicy` + the per-backend builders.
-fn build_wire_config(
+pub(crate) fn build_wire_config(
     policy: &SandboxPolicy,
     containment: &Containment,
     container_name: Option<&str>,
@@ -917,10 +820,33 @@ fn build_wire_config(
     // non-empty `allowedHosts` to allow-all outbound), but we accept it on macOS
     // anyway to stay consistent with the SDK rather than diverging — keeping the
     // two ports reconciled matters more than being stricter here.
-    let accepts_host_rules_without_outbound = cfg!(any(target_os = "linux", target_os = "macos"))
-        || matches!(containment, Containment::Wslc(_));
+    let accepts_host_rules_without_outbound = match containment {
+        Containment::Process => cfg!(any(target_os = "linux", target_os = "macos")),
+        Containment::ProcessContainer(_) => false,
+        Containment::Wslc(_) => true,
+        Containment::IsolationSession => false,
+    };
+
+    let has_process_container_network = match containment {
+        Containment::ProcessContainer(process_container) => process_container
+            .network
+            .as_ref()
+            .and_then(|network| network.allowed_proxy_peer.as_deref())
+            .is_some_and(|peer| !peer.trim().is_empty()),
+        _ => false,
+    };
+    let network_format = select_network_format(
+        &policy.version,
+        policy.network.as_ref(),
+        has_process_container_network,
+    )?;
 
     if let Some(net) = &policy.network {
+        if matches!(net.proxy, Some(ProxySpec::BuiltinTestServer)) {
+            return Err(MxcError::malformed_request(
+                "network.proxy.builtinTestServer is not supported by the in-process Rust SDK; use localhost or url",
+            ));
+        }
         if !accepts_host_rules_without_outbound
             && (!net.allowed_hosts.is_empty() || !net.blocked_hosts.is_empty())
             && !net.allow_outbound
@@ -929,35 +855,80 @@ fn build_wire_config(
                 "allowedHosts/blockedHosts require allowOutbound to be true",
             ));
         }
+    }
 
-        let mut network = json!({
-            "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
-            "allowLocalNetwork": net.allow_local_network,
-            "allowedHosts": net.allowed_hosts,
-            "blockedHosts": net.blocked_hosts,
-        });
-        if let Some(proxy) = &net.proxy {
-            network["proxy"] = proxy_to_wire(proxy);
+    match network_format {
+        NetworkFormat::Directional => {
+            if let Some(net) = &policy.network {
+                if net.egress.is_some() || net.ingress.is_some() {
+                    let mut network = serde_json::Map::new();
+                    if let Some(egress) = &net.egress {
+                        network.insert(
+                            "egress".to_string(),
+                            serde_json::to_value(egress).map_err(|error| {
+                                MxcError::malformed_request(format!(
+                                    "failed to serialize network.egress: {error}"
+                                ))
+                            })?,
+                        );
+                    }
+                    if let Some(ingress) = &net.ingress {
+                        network.insert(
+                            "ingress".to_string(),
+                            serde_json::to_value(ingress).map_err(|error| {
+                                MxcError::malformed_request(format!(
+                                    "failed to serialize network.ingress: {error}"
+                                ))
+                            })?,
+                        );
+                    }
+                    config["network"] = serde_json::Value::Object(network);
+                }
+                if let Some(runtime_config) = &net.runtime_config {
+                    config["runtimeConfig"] =
+                        serde_json::to_value(runtime_config).map_err(|error| {
+                            MxcError::malformed_request(format!(
+                                "failed to serialize runtimeConfig: {error}"
+                            ))
+                        })?;
+                }
+            }
         }
-        config["network"] = network;
-    } else {
-        config["network"] = json!({ "defaultPolicy": "block" });
+        NetworkFormat::Legacy => {
+            if let Some(net) = &policy.network {
+                let mut network = json!({
+                    "defaultPolicy": if net.allow_outbound { "allow" } else { "block" },
+                    "allowLocalNetwork": net.allow_local_network,
+                    "allowedHosts": net.allowed_hosts,
+                    "blockedHosts": net.blocked_hosts,
+                });
+                if let Some(proxy) = &net.proxy {
+                    network["proxy"] = proxy_to_wire(proxy);
+                }
+                config["network"] = network;
+            } else {
+                config["network"] = json!({ "defaultPolicy": "block" });
+            }
+        }
     }
 
     match containment {
-        Containment::Process => apply_host_process_backend(&mut config, policy, &container_id),
+        Containment::Process => {
+            apply_host_process_backend(&mut config, policy, network_format, &container_id)?
+        }
+        Containment::ProcessContainer(process_container) => process_container::apply(
+            &mut config,
+            policy,
+            process_container,
+            network_format,
+            "processcontainer",
+        )?,
         Containment::Wslc(wslc) => apply_wslc_backend(&mut config, wslc),
+        Containment::IsolationSession => {
+            config["containment"] = serde_json::json!("isolation_session");
+        }
     }
     Ok(config)
-}
-
-fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
-    use serde_json::json;
-    match proxy {
-        ProxySpec::BuiltinTestServer => json!({ "builtinTestServer": true }),
-        ProxySpec::Localhost(port) => json!({ "localhost": port }),
-        ProxySpec::Url(url) => json!({ "url": url }),
-    }
 }
 
 /// Apply backend-specific fields, resolving the abstract `Process` intent the
@@ -967,8 +938,9 @@ fn proxy_to_wire(proxy: &ProxySpec) -> serde_json::Value {
 fn apply_host_process_backend(
     config: &mut serde_json::Value,
     policy: &SandboxPolicy,
+    network_format: NetworkFormat,
     container_id: &str,
-) {
+) -> Result<(), MxcError> {
     use serde_json::json;
 
     // Resolve the abstract Process intent per host.
@@ -976,13 +948,13 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "linux")]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
         apply_linux_network_policy(config);
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
         config["containment"] = json!("seatbelt");
         if config.get("seatbelt").is_none() {
             config["seatbelt"] = json!({});
@@ -991,62 +963,22 @@ fn apply_host_process_backend(
 
     #[cfg(target_os = "windows")]
     {
-        let mut capabilities: Vec<&str> = Vec::new();
-        if let Some(net) = &policy.network {
-            if net.allow_outbound {
-                capabilities.push("internetClient");
-            }
-            if net.allow_local_network {
-                capabilities.push("privateNetworkClientServer");
-            }
-        }
-        // The container id is carried only at the top level (`containerId`); the
-        // wire `processContainer` object intentionally has no `name` field.
         let _ = container_id;
-        config["processContainer"] = json!({
-            "leastPrivilege": false,
-            "capabilities": capabilities,
-            "ui": {
-                "isolation": "container",
-                "desktopSystemControl": false,
-                "systemSettings": "none",
-                "ime": false,
-            },
-        });
-        if let Some(cd) = &policy.capture_denials {
-            config["processContainer"]["captureDenials"] = json!({
-                "mode": cd.mode.wire(),
-                "outputPath": cd.output_path,
-                "retainEtl": cd.retain_etl,
-            });
-        }
-        if let Some(network) = config.get_mut("network") {
-            let mode = if has_host_rules(network) {
-                "both"
-            } else {
-                "capabilities"
-            };
-            network["enforcementMode"] = json!(mode);
-        }
+        process_container::apply(
+            config,
+            policy,
+            &ProcessContainer::default(),
+            network_format,
+            "process",
+        )?;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
-        let _ = (policy, container_id);
+        let _ = (policy, network_format, container_id);
     }
-}
 
-/// True when the network section carries any host allow/deny rules, deciding
-/// whether host-level enforcement is engaged. (Linux + Windows only.)
-#[cfg(any(target_os = "linux", target_os = "windows"))]
-fn has_host_rules(network: &serde_json::Value) -> bool {
-    let non_empty = |key: &str| {
-        network
-            .get(key)
-            .and_then(|v| v.as_array())
-            .is_some_and(|a| !a.is_empty())
-    };
-    non_empty("allowedHosts") || non_empty("blockedHosts")
+    Ok(())
 }
 
 /// Apply the WSL Container backend fields — the Rust port of the SDK's
@@ -1077,8 +1009,6 @@ fn apply_linux_network_policy(config: &mut serde_json::Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::ProxySpec;
-
     // `ui` must be emitted only when the caller supplied one.
     //
     // These pin the fix for a defect that was invisible by value: the builder
@@ -1123,51 +1053,6 @@ mod tests {
             config.get("ui").is_some(),
             "wire config dropped a `ui` block the caller supplied: {config}"
         );
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_true_is_accepted() {
-        let spec: ProxySpec =
-            serde_json::from_str(r#"{ "builtinTestServer": true }"#).expect("true is valid");
-        assert!(matches!(spec, ProxySpec::BuiltinTestServer));
-    }
-
-    #[test]
-    fn proxy_builtin_test_server_false_is_rejected() {
-        // An explicit `false` must not silently select the (experimental,
-        // deliberately-permissive) built-in proxy — it is rejected as malformed.
-        let err = serde_json::from_str::<ProxySpec>(r#"{ "builtinTestServer": false }"#)
-            .expect_err("false must be rejected");
-        assert!(
-            err.to_string().contains("builtinTestServer must be true"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_conflicting_modes_are_rejected() {
-        // Several modes at once must be rejected (cr-005), not silently reduced
-        // to the first matching one.
-        let err = serde_json::from_str::<ProxySpec>(
-            r#"{ "builtinTestServer": true, "localhost": 8080 }"#,
-        )
-        .expect_err("conflicting proxy modes must be rejected");
-        assert!(
-            err.to_string().contains("exactly one"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn proxy_localhost_and_url_still_parse() {
-        assert!(matches!(
-            serde_json::from_str::<ProxySpec>(r#"{ "localhost": 8080 }"#).expect("localhost"),
-            ProxySpec::Localhost(8080)
-        ));
-        assert!(matches!(
-            serde_json::from_str::<ProxySpec>(r#"{ "url": "http://proxy" }"#).expect("url"),
-            ProxySpec::Url(_)
-        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -1220,7 +1105,8 @@ mod tests {
     }
 
     use super::{
-        build_request, CaptureDenialsMode, CaptureDenialsSection, NetworkSection, SandboxPolicy,
+        build_request, CaptureDenials, CaptureDenialsMode, NetworkEgressSection, NetworkSection,
+        ProxySpec, SandboxPolicy,
     };
     use wxc_common::wire;
 
@@ -1231,12 +1117,30 @@ mod tests {
             network: Some(network),
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         }
     }
 
-    // Mirror the TypeScript SDK by accepting `allowedHosts` with or without
-    // `allowOutbound`, even though Seatbelt cannot enforce the host list.
+    #[test]
+    fn malformed_schema_version_precedes_directional_field_gate() {
+        let mut policy = policy_with_network(NetworkSection {
+            egress: Some(NetworkEgressSection::default()),
+            ..Default::default()
+        });
+        policy.version = "0.8x".to_string();
+
+        let error = build_request(&policy, None)
+            .expect_err("a malformed schema version must be rejected")
+            .to_string();
+
+        assert!(error.contains("Invalid schema version"), "got: {error}");
+        assert!(
+            !error.contains("require schema version 0.8"),
+            "got: {error}"
+        );
+    }
+
+    // Accept `allowedHosts` with or without `allowOutbound`, even though
+    // Seatbelt cannot enforce the host list.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_allowed_hosts_without_outbound_is_accepted() {
@@ -1244,7 +1148,7 @@ mod tests {
         // Rust port must too (the guard only applies to Windows ProcessContainer).
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         assert!(
@@ -1260,7 +1164,7 @@ mod tests {
         // builds (allowedHosts simply isn't enforceable on Seatbelt).
         let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         assert!(
@@ -1300,7 +1204,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: Some(5000),
-            capture_denials: None,
         };
 
         // Inspect the internal model the SDK maps to — a unit concern; the public
@@ -1327,7 +1230,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         };
         let mut request = build_request(&policy, None).expect("build_request should succeed");
         request.set_env([("FIRST", "1"), ("SECOND", "2")]);
@@ -1355,7 +1257,6 @@ mod tests {
                     allow_input_injection: false,
                 }),
                 timeout_ms: None,
-                capture_denials: None,
             };
             let request = build_request(&policy, None).expect("build_request should succeed");
             assert_eq!(
@@ -1370,8 +1271,8 @@ mod tests {
         let policy = policy_with_network(NetworkSection {
             allow_outbound: true,
             allow_local_network: true,
-            allowed_hosts: vec!["allowed.example".to_string()],
-            blocked_hosts: vec!["blocked.example".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
+            blocked_hosts: vec!["198.51.100.10".to_string()],
             ..Default::default()
         });
         let request = build_request(&policy, None)
@@ -1380,13 +1281,28 @@ mod tests {
             .inner
             .policy
             .allowed_hosts
-            .contains(&"allowed.example".to_string()));
+            .contains(&"192.0.2.10".to_string()));
         assert!(request
             .inner
             .policy
             .blocked_hosts
-            .contains(&"blocked.example".to_string()));
+            .contains(&"198.51.100.10".to_string()));
         assert!(request.inner.policy.allow_local_network);
+    }
+
+    #[test]
+    fn build_request_rejects_builtin_test_server_proxy() {
+        let policy = policy_with_network(NetworkSection {
+            proxy: Some(ProxySpec::BuiltinTestServer),
+            ..Default::default()
+        });
+
+        let error = build_request(&policy, None)
+            .expect_err("the in-process SDK cannot start the built-in test proxy");
+
+        assert!(error.message.contains("builtinTestServer"));
+        assert!(error.message.contains("in-process Rust SDK"));
+        assert!(error.message.contains("localhost or url"));
     }
 
     #[cfg(target_os = "macos")]
@@ -1398,7 +1314,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         };
         // build_request resolves Seatbelt on macOS, so the config is present and
         // the consumer can read its defaults and write back.
@@ -1420,39 +1335,35 @@ mod tests {
             .contains(&"com.example.service".to_string()));
     }
 
-    fn policy_with_capture_denials(section: CaptureDenialsSection) -> SandboxPolicy {
-        SandboxPolicy {
-            version: "0.7.0-alpha".to_string(),
-            filesystem: None,
-            network: None,
-            ui: None,
-            timeout_ms: None,
-            capture_denials: Some(section),
-        }
+    fn process_container_with_capture_denials(config: CaptureDenials) -> Containment {
+        Containment::ProcessContainer(ProcessContainer {
+            capture_denials: Some(config),
+            ..Default::default()
+        })
     }
 
     #[test]
-    fn capture_denials_section_deserializes_from_camel_case_json() {
-        let section: CaptureDenialsSection = serde_json::from_value(serde_json::json!({
+    fn capture_denials_config_deserializes_from_camel_case_json() {
+        let config: CaptureDenials = serde_json::from_value(serde_json::json!({
             "mode": "allow",
             "outputPath": "/tmp/denials.json",
             "retainEtl": true,
         }))
-        .expect("section deserializes");
+        .expect("config deserializes");
 
-        assert_eq!(section.mode, CaptureDenialsMode::Allow);
-        assert_eq!(section.output_path.as_deref(), Some("/tmp/denials.json"));
-        assert!(section.retain_etl);
+        assert_eq!(config.mode, CaptureDenialsMode::Allow);
+        assert_eq!(config.output_path.as_deref(), Some("/tmp/denials.json"));
+        assert!(config.retain_etl);
     }
 
     #[test]
-    fn capture_denials_section_defaults_to_block_without_output_path() {
-        let section: CaptureDenialsSection =
-            serde_json::from_value(serde_json::json!({})).expect("section deserializes");
+    fn capture_denials_config_defaults_to_block_without_output_path() {
+        let config: CaptureDenials =
+            serde_json::from_value(serde_json::json!({})).expect("config deserializes");
 
-        assert_eq!(section.mode, CaptureDenialsMode::Block);
-        assert!(section.output_path.is_none());
-        assert!(!section.retain_etl);
+        assert_eq!(config.mode, CaptureDenialsMode::Block);
+        assert!(config.output_path.is_none());
+        assert!(!config.retain_etl);
     }
 
     #[cfg(target_os = "windows")]
@@ -1464,12 +1375,15 @@ mod tests {
         // the path somewhere guaranteed to be present.
         let output_path = std::env::temp_dir().join("denials.json");
         let expected = output_path.to_string_lossy().into_owned();
-        let policy = policy_with_capture_denials(CaptureDenialsSection {
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request_with_containment(&policy, &containment, None)
+            .expect("build_request_with_containment");
 
         let captured = request
             .inner
@@ -1485,27 +1399,19 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn capture_denials_absent_leaves_the_container_policy_untouched() {
-        let policy = policy_with_capture_denials(CaptureDenialsSection::default());
-        let request = build_request(&policy, None).expect("build_request");
+        let mut policy = minimal_policy();
+        policy.version = "0.8.0-alpha".to_string();
+        let containment = process_container_with_capture_denials(CaptureDenials::default());
+        let request = build_request_with_containment(&policy, &containment, None)
+            .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_some());
 
-        let mut policy = policy;
-        policy.capture_denials = None;
-        let request = build_request(&policy, None).expect("build_request");
-        assert!(request.inner.policy.capture_denials.is_none());
-    }
-
-    // captureDenials has no Linux/macOS counterpart, so it is accepted and
-    // dropped rather than rejected.
-    #[cfg(not(target_os = "windows"))]
-    #[test]
-    fn capture_denials_is_ignored_off_windows() {
-        let policy = policy_with_capture_denials(CaptureDenialsSection {
-            mode: CaptureDenialsMode::Allow,
-            output_path: Some("/tmp/denials.json".to_string()),
-            retain_etl: true,
-        });
-        let request = build_request(&policy, None).expect("build_request");
+        let request = build_request_with_containment(
+            &policy,
+            &Containment::ProcessContainer(ProcessContainer::default()),
+            None,
+        )
+        .expect("build_request_with_containment");
         assert!(request.inner.policy.capture_denials.is_none());
     }
 
@@ -1534,13 +1440,12 @@ mod tests {
 
         let omitted = serde_json::json!({
             "mode": CaptureDenialsMode::Block.wire(),
-            "outputPath": Option::<String>::None,
-            "retainEtl": Option::<bool>::None,
+            "retainEtl": false,
         });
         let parsed: wire::CaptureDenials =
-            serde_json::from_value(omitted).expect("null outputPath satisfies the wire type");
+            serde_json::from_value(omitted).expect("omitted outputPath satisfies the wire type");
         assert!(parsed.output_path.is_none());
-        assert!(parsed.retain_etl.is_none());
+        assert_eq!(parsed.retain_etl, Some(false));
     }
 
     // `captureDenials` and `network.proxy` are independent: capture records
@@ -1593,13 +1498,14 @@ mod tests {
             proxy: Some(ProxySpec::Localhost(8080)),
             ..NetworkSection::default()
         });
-        policy.capture_denials = Some(CaptureDenialsSection {
+        policy.version = "0.8.0-alpha".to_string();
+        let containment = process_container_with_capture_denials(CaptureDenials {
             mode: CaptureDenialsMode::Allow,
             output_path: Some(expected.clone()),
             retain_etl: true,
         });
 
-        let request = build_request(&policy, None)
+        let request = build_request_with_containment(&policy, &containment, None)
             .expect("captureDenials and network.proxy are accepted together");
 
         let captured = request
@@ -1613,7 +1519,7 @@ mod tests {
         assert!(request.inner.policy.network_proxy.is_enabled());
     }
 
-    use super::{build_request_with_containment, Containment, WslcSection};
+    use super::{build_request_with_containment, Containment, ProcessContainer, WslcSection};
     use wxc_common::models::ContainmentBackend;
 
     fn minimal_policy() -> SandboxPolicy {
@@ -1623,7 +1529,6 @@ mod tests {
             network: None,
             ui: None,
             timeout_ms: None,
-            capture_denials: None,
         }
     }
 
@@ -1765,7 +1670,7 @@ mod tests {
         // rejected at build time rather than silently ignored.
         let policy = policy_with_network(NetworkSection {
             allow_outbound: false,
-            allowed_hosts: vec!["example.com".to_string()],
+            allowed_hosts: vec!["192.0.2.10".to_string()],
             ..Default::default()
         });
         let err = build_request_with_containment(
@@ -1778,6 +1683,79 @@ mod tests {
             err.message.contains("per-host egress filtering"),
             "got: {}",
             err.message
+        );
+    }
+
+    /// The canonical unrestricted-network acknowledgment the IsolationSession
+    /// backend requires: outbound allowed, local network allowed, no host
+    /// rules, no proxy.
+    fn isolation_session_network() -> NetworkSection {
+        NetworkSection {
+            allow_outbound: true,
+            allow_local_network: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn isolation_session_names_the_backend_and_carries_no_section() {
+        // The one-shot surface takes no backend configuration at all, so the
+        // wire config must name the backend and add nothing else — unlike
+        // WSLc, which also writes an `experimental.wslc` block.
+        let policy = policy_with_network(isolation_session_network());
+        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
+            .expect("build_wire_config");
+        assert_eq!(config["containment"], "isolation_session");
+        assert!(
+            config.get("experimental").is_none(),
+            "IsolationSession takes no backend configuration, got: {config}"
+        );
+    }
+
+    #[test]
+    fn isolation_session_carries_the_unrestricted_network_acknowledgment() {
+        // The backend accepts *only* this shape and refuses an absent policy,
+        // so the SDK types must be able to express it.
+        let policy = policy_with_network(isolation_session_network());
+        let config = super::build_wire_config(&policy, &Containment::IsolationSession, None)
+            .expect("build_wire_config");
+        assert_eq!(config["network"]["defaultPolicy"], "allow");
+        assert_eq!(config["network"]["allowLocalNetwork"], true);
+        assert_eq!(
+            config["network"]["allowedHosts"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            config["network"]["blockedHosts"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert!(
+            config["network"].get("proxy").is_none(),
+            "no proxy expected"
+        );
+    }
+
+    #[test]
+    fn isolation_session_is_not_experimental_enabled_by_default() {
+        // Selecting an experimental backend must not silently satisfy the
+        // experimental gate. Mirrors `wslc_is_not_experimental_enabled_by_default`.
+        let policy = policy_with_network(isolation_session_network());
+        let mut request =
+            build_request_with_containment(&policy, &Containment::IsolationSession, None)
+                .expect("build_request_with_containment");
+        assert!(!request.inner.experimental_enabled);
+        request.set_experimental(true);
+        assert!(request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn isolation_session_selects_the_backend() {
+        let policy = policy_with_network(isolation_session_network());
+        let request = build_request_with_containment(&policy, &Containment::IsolationSession, None)
+            .expect("build_request_with_containment");
+        assert_eq!(
+            request.inner.containment,
+            ContainmentBackend::IsolationSession
         );
     }
 }

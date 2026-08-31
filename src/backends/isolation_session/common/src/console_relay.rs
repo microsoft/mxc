@@ -84,12 +84,13 @@ pub(super) fn classify(record: &INPUT_RECORD) -> InputAction {
 /// `resize_callback` captures a cloned (AddRef'd) `IsoSessionProcess`
 /// reference, so freeing the struct releases that COM reference. Letting the
 /// spawning frame own it would drop that reference while the thread may still
-/// be invoking the callback. The HANDLEs it carries are borrowed — see the
-/// safety contract on [`create_console_relay_thread`].
+/// be invoking the callback. `h_write` and `h_stop_event` are owned duplicates;
+/// `h_read` is borrowed — see the safety contract on
+/// [`create_console_relay_thread`].
 pub(super) struct ConsoleRelayParams {
     pub h_read: HANDLE,
-    pub h_write: HANDLE,
-    pub h_stop_event: HANDLE,
+    pub h_write: OwnedHandle,
+    pub h_stop_event: OwnedHandle,
     pub resize_callback: Box<dyn Fn(u16, u16) + Send + 'static>,
 }
 
@@ -109,7 +110,7 @@ unsafe extern "system" fn console_relay_thread_proc(param: *mut core::ffi::c_voi
     // use of it.
     let params = unsafe { Box::from_raw(param as *mut ConsoleRelayParams) };
     let mut buffer = [0u8; BUFFER_SIZE as usize];
-    let wait_handles = [params.h_stop_event, params.h_read];
+    let wait_handles = [params.h_stop_event.get(), params.h_read];
 
     loop {
         let wait_result = WaitForMultipleObjects(&wait_handles, false, u32::MAX);
@@ -148,7 +149,7 @@ unsafe extern "system" fn console_relay_thread_proc(param: *mut core::ffi::c_voi
                 }
                 let mut bytes_written = 0u32;
                 if WriteFile(
-                    params.h_write,
+                    params.h_write.get(),
                     Some(&buffer[..bytes_read as usize]),
                     Some(&mut bytes_written),
                     None,
@@ -158,7 +159,7 @@ unsafe extern "system" fn console_relay_thread_proc(param: *mut core::ffi::c_voi
                 {
                     break;
                 }
-                let _ = FlushFileBuffers(params.h_write);
+                let _ = FlushFileBuffers(params.h_write.get());
             }
             InputAction::ResizeViewport => {
                 // Consume the record so the next iteration sees fresh
@@ -219,6 +220,7 @@ pub(super) unsafe fn create_console_relay_thread(
 
 #[cfg(test)]
 mod tests {
+    use super::super::pipe_relay::duplicate_handle;
     use super::*;
     use windows::Win32::System::Console::{
         COORD, FOCUS_EVENT, KEY_EVENT_RECORD, KEY_EVENT_RECORD_0, MENU_EVENT, MOUSE_EVENT,
@@ -351,8 +353,8 @@ mod tests {
 
         let params = ConsoleRelayParams {
             h_read: HANDLE::default(),
-            h_write: HANDLE::default(),
-            h_stop_event: HANDLE::default(),
+            h_write: OwnedHandle::new(HANDLE::default()),
+            h_stop_event: OwnedHandle::new(HANDLE::default()),
             resize_callback: Box::new(move |cols, rows| {
                 assert_eq!(cols, 120);
                 assert_eq!(rows, 30);
@@ -384,8 +386,8 @@ mod tests {
 
         let params = ConsoleRelayParams {
             h_read: HANDLE::default(),
-            h_write: HANDLE::default(),
-            h_stop_event: stop_event.get(),
+            h_write: OwnedHandle::new(HANDLE::default()),
+            h_stop_event: duplicate_handle(stop_event.get()).unwrap(),
             resize_callback: Box::new(|_, _| {}),
         };
         let relay_thread = unsafe { create_console_relay_thread(params).unwrap() };

@@ -112,11 +112,11 @@ version is 2 and records:
 - `promptLocale`
 - MXC version, source, and update timestamp for local audit/support provenance
 
-Stored and effective state are reported separately. A legacy grant without the
-current prompt version remains visible as `storedState: "granted"` but is
-`effectiveState: "undetermined"` with reason `prompt-version-missing` or
-`prompt-version-unsupported`. It never authorizes collection. Legacy denial
-remains denied.
+Stored and effective state are reported separately. A grant without the
+current prompt version and canonical prompt locale remains visible as
+`storedState: "granted"` but is `effectiveState: "undetermined"` with reason
+`prompt-version-missing` or `prompt-version-unsupported`. It never authorizes
+collection. Legacy denial remains denied.
 
 Only two operations mutate the store:
 

@@ -1,0 +1,8 @@
+{
+  "version": "0.9.0-alpha",
+  "process": {
+    "commandLine": "echo duplicate"
+  },
+  "seatbelt": {},
+  "macos_sandbox": {}
+}

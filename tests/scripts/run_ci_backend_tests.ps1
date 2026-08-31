@@ -28,7 +28,6 @@ param(
     [string]$Architecture
 )
 
-Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -41,6 +40,27 @@ function Assert-File {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         throw "Required CI artifact file is missing: $Path"
     }
+}
+
+# The suites, and MXC itself, write logs and scratch trees under $env:TEMP,
+# which is not the directory CI uploads from. Rather than enumerate every
+# artifact and copy it afterwards, point TEMP at the upload directory for the
+# duration of the run: parameter defaults, .NET GetTempPath(), and child
+# processes all follow it, so anything temp-rooted lands where CI collects it.
+#
+# The suites' scratch-root guards compare against $env:TEMP, so they stay
+# satisfied — this redirects what TEMP means rather than pointing a path
+# outside it.
+function Redirect-TempToRunnerTemp {
+    if (-not $env:RUNNER_TEMP) {
+        return
+    }
+    if (-not (Test-Path -LiteralPath $env:RUNNER_TEMP)) {
+        New-Item -ItemType Directory -Force -Path $env:RUNNER_TEMP | Out-Null
+    }
+    $env:TEMP = $env:RUNNER_TEMP
+    $env:TMP  = $env:RUNNER_TEMP
+    Write-Host "Redirected TEMP to $env:RUNNER_TEMP so test logs are collected."
 }
 
 function Invoke-TestScript {
@@ -78,6 +98,8 @@ function Invoke-ProcessContainerTests {
     Copy-Item -LiteralPath $uiProbe -Destination (Join-Path $releaseDirectory 'wxc-ui-probe.exe') -Force
 
     $script = Join-Path $scriptRoot 'WinProcessContainer-Tests.ps1'
+    # -KeepArtifacts stops the harness deleting its scratch tree on a clean
+    # run, so a passing job still uploads its per-test logs and configs.
     # Skip build and Cargo phases because this job consumes a previously
     # built artifact; retain the host and containment behavior phases.
     $phases = @(
@@ -97,11 +119,14 @@ function Invoke-ProcessContainerTests {
         -WxcRelease (Join-Path $releaseDirectory 'wxc-exec.exe') `
         -UiProbeDebug (Join-Path $debugDirectory 'wxc-ui-probe.exe') `
         -UiProbeRelease (Join-Path $releaseDirectory 'wxc-ui-probe.exe') `
+        -KeepArtifacts `
         -Phases $phases
     if ($LASTEXITCODE -ne 0) {
         throw "Process Container tests failed with exit code $LASTEXITCODE."
     }
 }
+
+Redirect-TempToRunnerTemp
 
 switch ($Backend) {
     'process-t1' {
