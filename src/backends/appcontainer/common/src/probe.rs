@@ -132,6 +132,8 @@ pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
 
     let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
     let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
+    let base_container_supports_deny_paths =
+        BaseContainerRunner::base_container_supports_deny_paths();
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
         native_capture_available: BaseContainerRunner::is_capture_denials_usable(),
@@ -140,18 +142,13 @@ pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
-        base_container_supports_deny_paths: BaseContainerRunner::base_container_supports_deny_paths(),
+        base_container_supports_deny_paths,
         isolation_session_available: false,
         hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
 
-    run_probe_with_capabilities(
-        request,
-        probes,
-        prefer_base_container,
-        supports_deny_paths,
-    )
+    run_probe_with_capabilities(request, probes, prefer_base_container, supports_deny_paths)
 }
 
 fn run_probe_with_capabilities(
@@ -326,6 +323,7 @@ mod tests {
 
     #[test]
     fn request_capabilities_control_base_container_selection() {
+        let _lock = crate::test_env::lock();
         let request = ExecutionRequest::default();
         let probes = test_probe_facts(false);
 
@@ -338,12 +336,13 @@ mod tests {
     #[test]
     fn capture_denials_remains_launchable_on_appcontainer_fallback() {
         let _guard = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut policy = ContainerPolicy::default();
-        policy.capture_denials = Some(Default::default());
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
         let request = request_with_policy(policy);
 
-        let output =
-            run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
+        let output = run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
         assert!(!output.probes.native_capture_available);
