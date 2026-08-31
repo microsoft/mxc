@@ -14,7 +14,7 @@
 use serde::Serialize;
 
 use crate::fallback_detector::{self, FallbackError};
-use wxc_common::models::ContainerPolicy;
+use wxc_common::models::ExecutionRequest;
 use wxc_common::ui_policy::EffectiveUiRestrictions;
 
 /// JSON output emitted by `wxc-exec --probe`.
@@ -43,6 +43,11 @@ pub struct ProbeOutput {
 pub struct ProbeFacts {
     /// `Experimental_CreateProcessInSandbox` is resolvable.
     pub base_container_api_present: bool,
+    /// Whether the preferred native PSEC plus Learning Mode capture path is usable.
+    ///
+    /// A false value does not mean `captureDenials` is unsupported: the executor
+    /// can use guarded WPR on a compatible fallback tier.
+    pub native_capture_available: bool,
     /// `bfscfg.exe` is on disk in `%SystemRoot%\System32`.
     ///
     /// Always `false` when [`Self::bfs_compiled_in`] is `false`, because
@@ -121,25 +126,46 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
     }
 }
 
-/// Run the fallback detector against `policy` and return a JSON-shaped
-/// summary. The detector is always asked to prefer BaseContainer (Tier 1).
-pub fn run_probe(policy: &ContainerPolicy) -> ProbeOutput {
+/// Run the fallback detector against `request` and return a JSON-shaped summary.
+pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
+    use crate::base_container_runner::BaseContainerRunner;
+
+    let prefer_base_container = BaseContainerRunner::is_usable_for_request(request);
+    let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let probes = ProbeFacts {
-        base_container_api_present:
-            crate::base_container_runner::BaseContainerRunner::is_base_container_api_present()
-                .is_ok(),
+        base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
+        native_capture_available: BaseContainerRunner::is_capture_denials_usable(),
         bfscfg_present: fallback_detector::find_bfscfg_exe()
             .ok()
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
-        base_container_supports_deny_paths:
-            crate::base_container_runner::BaseContainerRunner::base_container_supports_deny_paths(),
+        base_container_supports_deny_paths: BaseContainerRunner::base_container_supports_deny_paths(),
         isolation_session_available: false,
         hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
-    match fallback_detector::detect(policy, /* prefer_base_container */ true) {
+
+    run_probe_with_capabilities(
+        request,
+        probes,
+        prefer_base_container,
+        supports_deny_paths,
+    )
+}
+
+fn run_probe_with_capabilities(
+    request: &ExecutionRequest,
+    probes: ProbeFacts,
+    prefer_base_container: bool,
+    supports_deny_paths: bool,
+) -> ProbeOutput {
+    match fallback_detector::detect_with_base_container_capabilities(
+        &request.policy,
+        prefer_base_container,
+        prefer_base_container,
+        supports_deny_paths,
+    ) {
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
             needs_dacl_augmentation: Some(decision.needs_dacl_augmentation),
@@ -185,6 +211,7 @@ mod tests {
     use super::*;
     use crate::fallback_detector::IsolationTier;
     use crate::test_env::ForceTierGuard;
+    use wxc_common::models::{ContainerPolicy, ExecutionRequest};
 
     fn all_ui_capabilities() -> UiCapabilitySupport {
         UiCapabilitySupport {
@@ -201,6 +228,26 @@ mod tests {
         }
     }
 
+    fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            policy,
+            ..Default::default()
+        }
+    }
+
+    fn test_probe_facts(native_capture_available: bool) -> ProbeFacts {
+        ProbeFacts {
+            base_container_api_present: true,
+            native_capture_available,
+            bfscfg_present: false,
+            bfs_compiled_in: false,
+            base_container_supports_deny_paths: false,
+            isolation_session_available: false,
+            hyperlight_available: false,
+            ui_capabilities: all_ui_capabilities(),
+        }
+    }
+
     #[test]
     fn probe_output_serializes() {
         let out = ProbeOutput {
@@ -209,6 +256,7 @@ mod tests {
             warnings: vec!["a warning".to_string()],
             probes: ProbeFacts {
                 base_container_api_present: true,
+                native_capture_available: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -224,6 +272,7 @@ mod tests {
         assert_eq!(v["needsDaclAugmentation"], false);
         assert_eq!(v["warnings"][0], "a warning");
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
+        assert_eq!(v["probes"]["nativeCaptureAvailable"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
         assert_eq!(v["probes"]["isolationSessionAvailable"], true);
@@ -247,6 +296,7 @@ mod tests {
             warnings: vec![],
             probes: ProbeFacts {
                 base_container_api_present: false,
+                native_capture_available: false,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -275,6 +325,32 @@ mod tests {
     }
 
     #[test]
+    fn request_capabilities_control_base_container_selection() {
+        let request = ExecutionRequest::default();
+        let probes = test_probe_facts(false);
+
+        let selected = run_probe_with_capabilities(&request, probes, true, true);
+
+        assert_eq!(selected.tier, Some("base-container"));
+        assert!(selected.error.is_none());
+    }
+
+    #[test]
+    fn capture_denials_remains_launchable_on_appcontainer_fallback() {
+        let _guard = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
+        let mut policy = ContainerPolicy::default();
+        policy.capture_denials = Some(Default::default());
+        let request = request_with_policy(policy);
+
+        let output =
+            run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
+
+        assert_eq!(output.tier, Some("appcontainer-dacl"));
+        assert!(!output.probes.native_capture_available);
+        assert!(output.error.is_none());
+    }
+
+    #[test]
     fn tier_strings_stable() {
         assert_eq!(IsolationTier::BaseContainer.as_str(), "base-container");
         assert_eq!(IsolationTier::AppContainerBfs.as_str(), "appcontainer-bfs");
@@ -287,8 +363,8 @@ mod tests {
     #[test]
     fn run_probe_with_force_tier() {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerBfs);
-        let policy = ContainerPolicy::default();
-        let out = run_probe(&policy);
+        let request = ExecutionRequest::default();
+        let out = run_probe(&request);
         assert_eq!(out.tier, Some("appcontainer-bfs"));
         assert_eq!(out.needs_dacl_augmentation, Some(false));
         assert!(out.error.is_none());
@@ -299,7 +375,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = ContainerPolicy::default();
         policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&policy);
+        let out = run_probe(&request_with_policy(policy));
         assert!(out.tier.is_none());
         assert!(out.needs_dacl_augmentation.is_none());
         assert!(out.error.is_some());
@@ -315,7 +391,7 @@ mod tests {
         let _g = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
         let mut policy = ContainerPolicy::default();
         policy.fallback.allow_dacl_mutation = false;
-        let out = run_probe(&policy);
+        let out = run_probe(&request_with_policy(policy));
         let v = serde_json::to_value(&out).expect("to_value");
         let obj = v.as_object().expect("object");
         assert!(
@@ -335,7 +411,7 @@ mod tests {
     fn probe_always_emits_isolation_session_available() {
         // The SDK's isolation-session gate reads this non-optional field, so
         // it must always serialize (never omitted), even when false.
-        let out = run_probe(&ContainerPolicy::default());
+        let out = run_probe(&ExecutionRequest::default());
         let v = serde_json::to_value(&out).expect("to_value");
         let probes = v["probes"].as_object().expect("probes object");
         assert!(
