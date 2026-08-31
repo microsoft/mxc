@@ -34,20 +34,21 @@
 //! cannot run, the inbound deny is unenforceable for that family, so the run
 //! fails closed rather than silently leaving IPv6 open.
 //!
-//! **Permissive path is not yet implemented.** Three settings ask for the
-//! sandboxed process to bind, listen, and accept incoming connections:
-//! `allowLocalNetwork: true`, its 0.8 successor
-//! `network.ingress.default: "allow"`, and
-//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8 and has no 0.7
-//! equivalent. LXC has a single inbound chain and the policy carries no way to
-//! narrow an accept to particular ports, sources, or interfaces, so the only
-//! rule available today is an unscoped
-//! `--state NEW -j ACCEPT` accepting inbound from every interface and source, LAN
-//! and WAN included. Rather than install that silently,
-//! [`IngressManager::apply_firewall_rules`] returns a not-yet-implemented error
-//! naming the field the operator wrote. Scoping the host-loopback field on its own
-//! additionally needs a `loopbackPorts` policy field and an MXC-owned forwarder,
-//! tracked as AB#63505947. The internal rule *builder* still supports both toggle
+//! **Permissive path is not yet implemented.** Three settings ask for
+//! reachability the deny path withholds: `allowLocalNetwork: true`, its 0.8
+//! successor `network.ingress.default: "allow"`, and
+//! `network.ingress.hostLoopback: "allow"`, which is new in 0.8, has no 0.7
+//! equivalent, and governs host-loopback traffic in both directions. LXC has a
+//! single inbound chain and the policy carries no way to narrow an accept to
+//! particular ports, sources, or interfaces, so the only rule available today
+//! is an unscoped `--state NEW -j ACCEPT` accepting inbound from every
+//! interface and source, LAN and WAN included. Rather than install that
+//! silently, [`IngressManager::apply_firewall_rules`] returns a
+//! not-yet-implemented error naming the field the operator wrote. Honoring the
+//! host-loopback field on its own additionally needs cross-namespace plumbing
+//! in both directions — the container's `127.0.0.1` is not the host's — and a
+//! runtime port-mapping contract the allow/deny policy does not carry, tracked
+//! as AB#63505947. The internal rule *builder* still supports both toggle
 //! values so the decision table is testable.
 //!
 //! **Why the container netns.** A packet destined to a container socket

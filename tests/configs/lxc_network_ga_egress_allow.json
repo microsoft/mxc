@@ -3,7 +3,7 @@
   "containerId": "CLI-LXC-GA-Egress-Allow",
   "containment": "lxc",
   "process": {
-    "commandLine": "sh -c \"wget -qO- --timeout=10 https://api.github.com/zen >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
+    "commandLine": "sh -c \"wget -qO- --timeout=10 http://203.0.113.2:443/ >/dev/null 2>&1 && echo MXC_NET_ALLOWED || echo MXC_NET_BLOCKED\""
   },
   "lifecycle": {
     "destroyOnExit": true
@@ -17,7 +17,7 @@
       "default": "deny",
       "allow": [
         {
-          "to": [{ "cidr": "140.82.112.0/20" }],
+          "to": [{ "cidr": "203.0.113.0/24" }],
           "ports": [{ "protocol": "tcp", "port": 443 }]
         }
       ]

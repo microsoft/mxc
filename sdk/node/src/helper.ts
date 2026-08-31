@@ -260,8 +260,11 @@ export function resolveExecutableAndArgs(
       effectiveContainment as ContainmentBackend
     );
     if (!isIntent && !isExperimental && !isAvailable) {
+      const unavailableReason =
+        platformSupport.unavailableReasons?.[effectiveContainment as ContainmentBackend];
       throw new Error(
         `Containment backend '${rawContainment}' is not available on this platform. ` +
+        (unavailableReason ? `${unavailableReason} ` : '') +
         `Available methods: ${platformSupport.availableMethods.join(', ')}`
       );
     }

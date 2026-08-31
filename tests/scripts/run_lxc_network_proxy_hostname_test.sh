@@ -144,6 +144,7 @@ PROXY_PID=""
 HOSTS_BACKUP=""
 NETNS_MADE=""
 VETH_MADE=""
+IP_FORWARD_WAS=""
 
 cleanup() {
     [ -n "$PROXY_PID" ] && kill "$PROXY_PID" >/dev/null 2>&1
@@ -154,6 +155,9 @@ cleanup() {
     if [ -n "$HOSTS_BACKUP" ] && [ -f "$HOSTS_BACKUP" ]; then
         cat "$HOSTS_BACKUP" > /etc/hosts
         rm -f "$HOSTS_BACKUP"
+    fi
+    if [ -n "$IP_FORWARD_WAS" ]; then
+        sysctl -w net.ipv4.ip_forward="$IP_FORWARD_WAS" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
@@ -181,6 +185,7 @@ ip -n "$NETNS" route add default via "$HOST_SIDE_IP" \
 # Forwarding is what makes this test meaningful: without it the container's
 # packets never reach the namespace and PROXY_OK could not distinguish an
 # allowed path from a broken one.
+IP_FORWARD_WAS="$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || true)"
 sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 \
     || skip_live "could not enable IPv4 forwarding"
 

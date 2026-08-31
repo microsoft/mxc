@@ -121,41 +121,13 @@ impl SandboxBackend for SeatbeltScriptRunner {
 
     fn validate(&self, request: &ExecutionRequest) -> Result<(), ScriptResponse> {
         validate_network_policy_support(request, self.network_policy_support())?;
-        wxc_common::seatbelt_policy::validate_system_power_access(request)
+
+        // Seatbelt's own invariants — the only home for them, so a caller that
+        // builds an ExecutionRequest directly gets the same rules.
+        crate::seatbelt_policy::validate_system_power_access(request).map_err(error_response)?;
+        crate::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
             .map_err(error_response)?;
-
-        // Shared with the config parser so a caller that builds an
-        // ExecutionRequest directly gets the same rules.
-        wxc_common::seatbelt_policy::validate_seatbelt_network_policy(&request.policy)
-            .map_err(error_response)?;
-
-        // Seatbelt cannot filter network by hostname — reject blockedHosts
-        // rather than silently allowing traffic the user expects to be denied.
-        if !request.policy.blocked_hosts.is_empty() {
-            return Err(error_response(
-                "macOS Seatbelt does not support per-host network filtering. \
-                 'blockedHosts' cannot be enforced; remove it or use \
-                 defaultPolicy: \"block\" to deny all network."
-                    .to_string(),
-            ));
-        }
-
-        // Seatbelt has no private loopback, so it cannot enforce an
-        // independent `hostLoopback` posture: `ingress.default` alone drives
-        // the `(allow network-inbound (local ip))` rule. Reject configs where
-        // `hostLoopback` diverges from `default` instead of silently applying
-        // one and ignoring the other.
-        if let Some(ingress) = request.policy.network_ingress.as_ref() {
-            if ingress.host_loopback != ingress.default {
-                return Err(error_response(
-                    "macOS Seatbelt has no private loopback and cannot enforce an \
-                     independent network.ingress.hostLoopback posture. Set \
-                     'hostLoopback' equal to 'default', or omit 'hostLoopback' to \
-                     inherit 'default'."
-                        .to_string(),
-                ));
-            }
-        }
+        crate::seatbelt_policy::validate_seatbelt_ui_policy(request).map_err(error_response)?;
 
         Ok(())
     }
@@ -202,11 +174,10 @@ impl SandboxBackend for SeatbeltScriptRunner {
             .as_ref()
             .map(|s| s.launch_method.clone())
             .unwrap_or_default();
-        let gui_access = request
-            .seatbelt
-            .as_ref()
-            .map(|s| s.gui_access)
-            .unwrap_or(false);
+        // Effective posture, not the raw flag: a `guiAccess` the UI policy
+        // suppressed emits no GUI rules, so it must not cost the caller
+        // streaming either.
+        let gui_access = crate::seatbelt_policy::gui_access_effective(request);
 
         match launch_method {
             LaunchMethod::Exec => spawn_exec(&profile, request, gui_access, stdio, logger, proxy),
@@ -902,9 +873,10 @@ mod tests {
         );
     }
 
-    /// The parser is not the only door: `mxc_engine::run` takes an
-    /// `ExecutionRequest` built by hand. These assert `validate` rejects the
-    /// same policies the parser does, in both the legacy and directional shape.
+    /// The parser is not a door at all for these rules: `validate` is the only
+    /// place they live, and `mxc_engine` will happily take an `ExecutionRequest`
+    /// built by hand. These assert `validate` rejects them without any help from
+    /// the parser, in both the legacy and directional shape.
     #[test]
     fn rejects_proxy_with_egress_allow_bypassing_the_parser() {
         let runner = SeatbeltScriptRunner::new();
@@ -1016,7 +988,10 @@ mod tests {
         let runner = SeatbeltScriptRunner::new();
         let response = runner.validate(&request).unwrap_err();
         assert!(response.error_message.contains("hostLoopback"));
-        assert!(response.error_message.contains("independent"));
+        // Names both values so the caller can see which pair was rejected.
+        assert!(response.error_message.contains("('allow')"));
+        assert!(response.error_message.contains("('deny')"));
+        assert!(!response.error_message.contains("inherit 'default'"));
     }
 
     #[test]
