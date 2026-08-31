@@ -177,6 +177,7 @@ network boundary.
 | `block`         | _(empty)_      | _(empty)_      | no egress |
 | `allow`         | _(empty)_      | _(empty)_      | unrestricted egress |
 | `block`         | `[A, ...]`     | _(empty)_      | **allowlist** — only listed destinations are reachable |
+| `allow`         | `[A, ...]`     | _(empty)_      | **allowlist** — only listed destinations are reachable |
 | `allow`         | _(empty)_      | `[B, ...]`     | **blocklist** — every unlisted destination is reachable |
 | `block`         | _(empty)_      | `[B, ...]`     | rejected at preflight |
 | _either_        | `[A, ...]`     | `[B, ...]`     | rejected at preflight (mutually exclusive) |
