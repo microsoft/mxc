@@ -106,7 +106,13 @@ fn build_child_env_block(
         }
         entries
     } else {
-        crate::appcontainer_runner::build_explicit_entries(&request.env, proxy_address)
+        // A caller-supplied environment replaces the block wholesale, so top it up
+        // with the names the OS requires to create the container. Without this a
+        // sparse `process.env` fails with ERROR_ENVVAR_NOT_FOUND (203).
+        let mut entries =
+            crate::appcontainer_runner::build_explicit_entries(&request.env, proxy_address);
+        crate::appcontainer_runner::ensure_required_env_entries(&mut entries)?;
+        entries
     };
     Ok(Some(crate::appcontainer_runner::encode_env_block(&entries)))
 }

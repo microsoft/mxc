@@ -202,6 +202,57 @@ pub(crate) fn build_explicit_entries(
     entries
 }
 
+/// Environment variables the OS itself requires to be present in a child's
+/// environment block when creating an AppContainer or process-security-environment
+/// process.
+///
+/// The OS looks these names up while preparing the container's profile and system
+/// paths. Only presence matters — the values are never validated — but if either
+/// name is absent, process creation fails with `ERROR_ENVVAR_NOT_FOUND` (203)
+/// before the workload ever starts.
+const REQUIRED_CHILD_ENV_VARS: [&str; 2] = ["SYSTEMROOT", "LOCALAPPDATA"];
+
+/// Ensure `entries` carries the variables the OS requires to launch a contained
+/// process, appending any that a caller-supplied environment omitted.
+///
+/// Missing values are sourced from the current user's profile block
+/// (`CreateEnvironmentBlock` with `bInherit = FALSE`) and never from the parent
+/// process's environment, so an explicit environment keeps its isolation
+/// guarantee: the child still sees only what the caller asked for, plus the
+/// handful of names without which it could not be created at all.
+///
+/// Does nothing when every required name is already present, which is the common
+/// case for a caller that passes a full environment.
+pub(crate) fn ensure_required_env_entries(
+    entries: &mut Vec<(String, String)>,
+) -> Result<(), WxcError> {
+    let missing: Vec<&str> = REQUIRED_CHILD_ENV_VARS
+        .iter()
+        .copied()
+        .filter(|required| {
+            !entries
+                .iter()
+                .any(|(key, _)| key.eq_ignore_ascii_case(required))
+        })
+        .collect();
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let defaults = create_default_env_entries()?;
+    for required in missing {
+        if let Some((key, value)) = defaults
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(required))
+        {
+            entries.push((key.clone(), value.clone()));
+        }
+    }
+
+    Ok(())
+}
+
 /// Strip any pre-existing proxy env vars from `entries`, then inject the
 /// configured proxy as `HTTP_PROXY` / `HTTPS_PROXY`.
 pub(crate) fn inject_proxy_vars(
@@ -1039,11 +1090,13 @@ impl AppContainerScriptRunner {
         // Environment block for the sandboxed child.
         // SECURITY: Never pass NULL (which would inherit the parent process's
         // full environment). Always build an explicit block:
-        //   1. If explicit env vars were provided, use only those (+ proxy injection).
+        //   1. If explicit env vars were provided, use only those (+ proxy injection),
+        //      topped up with the names the OS requires to create the container.
         //   2. Otherwise, call CreateEnvironmentBlock(bInherit=FALSE) for a clean
         //      default user environment and merge proxy vars if needed.
         let env_block: Vec<u16> = if !request.env.is_empty() {
-            let entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+            let mut entries = build_explicit_entries(&request.env, self.proxy_address.as_ref());
+            ensure_required_env_entries(&mut entries)?;
             encode_env_block(&entries)
         } else {
             // Get clean default user env without inheriting process env vars.
@@ -2449,6 +2502,46 @@ mod tests {
         let block = super::encode_env_block(&entries);
         let parsed = super::parse_environment_block(block.as_ptr());
         assert_eq!(parsed, entries);
+    }
+
+    #[test]
+    fn ensure_required_env_entries_adds_missing_names() {
+        let mut entries = vec![("MYVAR".to_string(), "hello".to_string())];
+        super::ensure_required_env_entries(&mut entries).expect("profile block is readable");
+
+        assert!(entries.iter().any(|(k, _)| k.eq_ignore_ascii_case("MYVAR")));
+        for required in super::REQUIRED_CHILD_ENV_VARS {
+            assert!(
+                entries
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case(required)),
+                "{required} should have been injected"
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_required_env_entries_preserves_caller_values() {
+        let mut entries = vec![
+            ("SystemRoot".to_string(), "C:\\Custom".to_string()),
+            ("localappdata".to_string(), "C:\\Other".to_string()),
+        ];
+        super::ensure_required_env_entries(&mut entries).expect("no lookup needed");
+
+        // Already present (in any case), so nothing is added or overwritten.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].1, "C:\\Custom");
+        assert_eq!(entries[1].1, "C:\\Other");
+    }
+
+    #[test]
+    fn ensure_required_env_entries_is_idempotent() {
+        let mut entries = vec![("MYVAR".to_string(), "hello".to_string())];
+        super::ensure_required_env_entries(&mut entries).expect("profile block is readable");
+        let after_first = entries.len();
+        super::ensure_required_env_entries(&mut entries).expect("profile block is readable");
+
+        assert_eq!(entries.len(), after_first);
     }
 
     #[test]

@@ -150,7 +150,9 @@ fn check_exe_heuristics(
             message: "PowerShell exited with STATUS_DLL_INIT_FAILED (0xC0000142). \
                       This typically means the sandbox is blocking Win32k system calls \
                       (UI subsystem access), which PowerShell requires to initialize. \
-                      Enable UI access in your sandbox policy (set `ui.allowWindows: true`)."
+                      Enable UI access in your sandbox policy: set `ui.disable: false` \
+                      in the JSON config, or `ui.allowWindows: true` if you are using \
+                      the SDK's SandboxPolicy."
                 .to_string(),
         });
     }
