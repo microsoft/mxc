@@ -150,9 +150,9 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 
 /**
  * Run the probe binary and merge its results into `support`: the isolation
- * tier, any warnings, portable UI capabilities, and — when the probe reports
- * the isolation-session service available — the `isolation_session` method.
- * On any failure (binary missing, timeout, malformed JSON), the function
+ * tier, any warnings, portable UI capabilities, and the `isolation_session`
+ * and `hyperlight` methods when the probe reports them available. On any
+ * failure (binary missing, timeout, malformed JSON), the function
  * silently leaves those fields unset, so callers see the same contract as
  * pre-probe SDKs.
  */
@@ -177,6 +177,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
         }
         if (facts.isolationSessionAvailable === true) {
           support.availableMethods.push('isolation_session');
+        }
+        if (facts.hyperlightAvailable === true) {
+          support.availableMethods.push('hyperlight');
         }
       }
     }
