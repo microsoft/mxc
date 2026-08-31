@@ -347,6 +347,7 @@ public static class MxcSandbox
             "seatbelt" => ContainmentBackend.Seatbelt,
             "isolation_session" => ContainmentBackend.IsolationSession,
             "bubblewrap" => ContainmentBackend.Bubblewrap,
+            "hyperlight" => ContainmentBackend.Hyperlight,
             _ => ContainmentBackend.Unknown,
         };
 
