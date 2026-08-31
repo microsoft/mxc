@@ -24,7 +24,7 @@ pub mod bwrap_version;
 #[cfg(target_os = "linux")]
 pub(crate) mod network_rules;
 /// Shared by the `bwrap` version probe and the proxy dependency walk.
-pub(crate) mod probe_io;
+pub(crate) mod probe_exec;
 /// Only [`proxy_network::probe_proxy_enforcement`] is reachable outside the
 /// crate; every other item stays `pub(crate)`.
 #[cfg(target_os = "linux")]

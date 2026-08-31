@@ -215,7 +215,6 @@ mod tests {
     use super::linux_platform_support_with;
     use super::platform_support;
     #[cfg(target_os = "linux")]
-    #[cfg(target_os = "linux")]
     use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
     #[cfg(target_os = "linux")]
     use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
@@ -316,7 +315,9 @@ mod tests {
         let expected = failure.to_string();
         let support = linux_platform_support_with(
             BwrapProbe(|| Err(failure)),
-            ProxyEnforcementProbe(|| panic!("the network walk must not run without a usable bwrap")),
+            ProxyEnforcementProbe(|| {
+                panic!("the network walk must not run without a usable bwrap")
+            }),
         );
         assert!(!support.is_supported);
         assert_eq!(support.reason.as_deref(), Some(expected.as_str()));

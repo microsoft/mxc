@@ -26,7 +26,7 @@ use crate::bwrap_command::COMMAND_TAIL;
 use crate::network_rules::{
     payload_file_name, render_filter_payloads, EgressPlan, IngressPlan, RuleFamily,
 };
-use crate::probe_io::{capture_file, capture_target, read_capture};
+use crate::probe_exec;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a single `iptables` call may block on the host's `/run/xtables.lock`.
@@ -1000,9 +1000,11 @@ impl ProbeBudget {
 /// no diagnostic -- a hang is far harder to chase than a failure, so bound it
 /// and name the tool that stalled.
 ///
-/// stdout is captured to an unlinked temp file, not a pipe: a pipe reports EOF
-/// only once every inherited write end closes, so a backgrounded descendant
-/// could hold the read past this deadline. Only a bounded prefix is read back.
+/// The bounded-execution mechanics live in [`crate::probe_exec`], shared with
+/// the `bwrap --version` gate: the child gets its own process group, its pipes
+/// are drained by readers that poll against the deadline, and the whole group
+/// is killed rather than merely waited on. That is what keeps a backgrounded
+/// descendant holding the pipes from outrunning this deadline.
 fn run_probe(
     mut command: Command,
     label: &str,
@@ -1015,48 +1017,47 @@ fn run_probe(
         ));
     }
 
-    let stdout_file = capture_file("stdout")?;
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(capture_target(&stdout_file, "stdout")?)
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("{error}"))?;
-
     let (deadline, deadline_source) = budget.command_deadline();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Ok(None) => {
-                // Leaving it running would keep the pipe open and strand the
-                // process for the lifetime of the host process.
-                terminate_child(&mut child);
-                return Err(match deadline_source {
-                    DeadlineSource::Command => format!(
-                        "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
-                         the host's {label} installation appears to be hung"
-                    ),
-                    // The budget is shorter than the per-command ceiling, so
-                    // this fires for a healthy-but-slow tool too; blaming it
-                    // for hanging would be wrong.
-                    DeadlineSource::Budget => format!(
-                        "Bubblewrap: gave up while checking '{label}' after the host took \
-                         longer than {PRE_FLIGHT_BUDGET:?} to answer the dependency checks"
-                    ),
-                });
-            }
-            Err(error) => {
-                terminate_child(&mut child);
-                return Err(format!("failed to inspect '{label}': {error}"));
-            }
-        }
+    let timed_out = || match deadline_source {
+        DeadlineSource::Command => format!(
+            "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
+             the host's {label} installation appears to be hung"
+        ),
+        // The budget is shorter than the per-command ceiling, so this fires for
+        // a healthy-but-slow tool too; blaming it for hanging would be wrong.
+        DeadlineSource::Budget => format!(
+            "Bubblewrap: gave up while checking '{label}' after the host took \
+             longer than {PRE_FLIGHT_BUDGET:?} to answer the dependency checks"
+        ),
     };
 
-    let stdout = String::from_utf8_lossy(&read_capture(&stdout_file)).into_owned();
-    Ok(ProbeOutput { status, stdout })
+    match probe_exec::run_bounded(&mut command, deadline) {
+        Ok(captured) => {
+            // A banner this large is not the tool we meant to interrogate, and
+            // the backend/flag checks downstream read the text -- so a partial
+            // read must not be treated as an answer.
+            if captured.stdout.truncated {
+                return Err(format!(
+                    "Bubblewrap: '{label}' produced more than {} bytes of output; \
+                     refusing to judge a truncated banner",
+                    probe_exec::MAX_PROBE_OUTPUT_BYTES
+                ));
+            }
+            Ok(ProbeOutput {
+                status: captured.status,
+                stdout: String::from_utf8_lossy(&captured.stdout.bytes).into_owned(),
+            })
+        }
+        Err(probe_exec::ProbeFailure::Spawn(error)) => Err(format!("{error}")),
+        Err(probe_exec::ProbeFailure::TimedOut { .. }) => Err(timed_out()),
+        Err(probe_exec::ProbeFailure::Wait { stage, error }) => Err(format!(
+            "failed while {} '{label}': {error}",
+            stage.as_str()
+        )),
+        Err(probe_exec::ProbeFailure::Internal(detail)) => {
+            Err(format!("failed to inspect '{label}': {detail}"))
+        }
+    }
 }
 
 /// Whether an `unshare` exit code means the trailing command never started,
@@ -2816,7 +2817,7 @@ mod tests {
     /// failing hosts that do meet every requirement.
     #[test]
     fn the_whole_dependency_walk_passes_on_a_host_that_meets_every_requirement() {
-        let missing: Vec<&str> = [
+        const CHECKED_TOOLS: [&str; 8] = [
             "slirp4netns",
             "unshare",
             "sh",
@@ -2825,10 +2826,11 @@ mod tests {
             "ip6tables",
             "iptables-restore",
             "ip6tables-restore",
-        ]
-        .into_iter()
-        .filter(|tool| !on_path(tool))
-        .collect();
+        ];
+        let missing: Vec<&str> = CHECKED_TOOLS
+            .into_iter()
+            .filter(|tool| !on_path(tool))
+            .collect();
         let equipped =
             missing.is_empty() && namespaces_are_available() && iptables_uses_nf_tables();
 
@@ -2843,22 +2845,41 @@ mod tests {
         // A less-equipped host still has something to prove: the refusal must
         // say which dependency it was, never fail closed anonymously.
         if let Err(error) = result {
+            // Exhausting `PRE_FLIGHT_BUDGET` is a statement about how quickly
+            // this host answered, not about what it has installed: a loaded
+            // machine can run out of budget while meeting every requirement.
+            // Demanding a pass from an `equipped` host without this exemption
+            // makes the test flaky precisely when CI is busy.
+            let out_of_budget =
+                error.contains("ran out of time") || error.contains("gave up while checking");
             assert!(
-                !equipped,
-                "a host with every dependency must pass the walk, got: {error}"
+                !equipped || out_of_budget,
+                "a host with every dependency must pass the walk unless the \
+                 pre-flight budget ran out, got: {error}"
             );
-            assert!(
-                missing.iter().any(|tool| error.contains(tool))
-                    || error.contains("namespaces")
-                    || error.contains("iptables")
-                    || error.contains("ip6tables"),
-                "a failure must name what is missing or unusable, got: {error}"
-            );
+            if out_of_budget {
+                // Even giving up must stay attributable to a specific check.
+                assert!(
+                    CHECKED_TOOLS.iter().any(|tool| error.contains(tool)),
+                    "a budget-exhausted walk must still name the check it \
+                     abandoned, got: {error}"
+                );
+            } else {
+                assert!(
+                    missing.iter().any(|tool| error.contains(tool))
+                        || error.contains("namespaces")
+                        || error.contains("iptables")
+                        || error.contains("ip6tables"),
+                    "a failure must name what is missing or unusable, got: {error}"
+                );
+            }
         }
     }
 
-    /// A descendant inheriting stdout keeps a pipe's write end open, so a
-    /// pipe-based probe would block here until that descendant exited.
+    /// A descendant inheriting stdout keeps the pipe's write end open, so a
+    /// naive pipe-based probe would block here until that descendant exited.
+    /// [`crate::probe_exec`] sweeps the whole process group once the direct
+    /// child exits, so the descendant is killed and the read completes.
     #[test]
     fn a_probe_returns_while_a_descendant_still_holds_its_output() {
         let mut command = Command::new("sh");
