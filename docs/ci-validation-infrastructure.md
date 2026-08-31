@@ -29,9 +29,11 @@ the individual local test scripts are documented in
 | `.github/workflows/Validation.Tests.Matrix.Job.yml` | `workflow_call`-only. Resolves the plan and runs the per-family test jobs. |
 | `scripts/ci/validation-test-matrix.json` | The matrix: OS versions, backends, triggers, job staggering. |
 | `scripts/ci/resolve-validation-test-matrix.mjs` | Matrix validator + plan expander. Emits the GitHub Actions matrices. |
-| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair. |
-| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter install pass. |
+| `scripts/ci/prepare-windows-host.ps1` | Per-backend Windows host preparation / prerequisite assertions, plus the `winget` repair and the packaged-tooling install. |
+| `scripts/ci/prepare-linux-host.sh` | Per-backend Linux package install and service startup (distro-aware), plus the workload-interpreter top-up pass. |
 | `scripts/ci/prepare-macos-host.sh` | Per-backend macOS host preparation / prerequisite assertions. |
+| `scripts/ci/Setup.sh` / `scripts/ci/Setup-rhel.sh` | Image-provisioning scripts. Run when the Linux images are built, not per job. |
+| `scripts/ci/Setup.ps1` | Image-provisioning script. Runs when the Windows image is built, not per job. |
 | `scripts/ci/run_backend_validation_tests.ps1` | Windows dispatcher: backend id → existing backend suite. Also points `TEMP` at `$RUNNER_TEMP` so logs get collected. |
 | `scripts/ci/run_backend_validation_tests.sh` | Linux/macOS dispatcher: backend id → existing backend suite. |
 
@@ -264,10 +266,11 @@ Windows optional features are **verified, never enabled**: turning one on needs 
 reboot the job cannot take, so a mis-imaged pool fails here with a pointed
 message instead of surfacing later as an opaque backend error.
 
-The script does provision one thing, for every backend rather than a particular
+The script does provision two things, for every backend rather than a particular
 one: `Repair-Winget` re-registers the App Installer package when `winget` is on
-`PATH` but cannot run
-([below](#verified-everywhere-installed-on-linux-repaired-on-windows)).
+`PATH` but cannot run, and `Install-PackagedTooling` then installs `winapp` and
+`openssl`
+([below](#who-installs-what)).
 
 `prepare-linux-host.sh`:
 
@@ -303,123 +306,69 @@ Every one of the three scripts also takes the workload-interpreter inventory
 
 Some suites do not just exercise MXC's primitives — they run *real programs*
 inside the sandbox and assert on what those programs produce. Each preparation
-script takes that host-side inventory up front, so a missing tool is reported
-once as a preparation result rather than repeatedly as a confusing mid-suite
-failure. On Linux the inventory is preceded by an install pass, and on Windows
-by a narrow `winget` repair
-([below](#verified-everywhere-installed-on-linux-repaired-on-windows)).
+script inventories those programs on the host up front, so a missing one is
+reported once, as a preparation result, rather than repeatedly as a confusing
+mid-suite failure.
 
-The list is `pwsh`, `git`, `node`, `npm`, `npx`, `python`, `pip`, `dotnet`, `az`,
-`gh`, and `openssl` on every OS, plus `nuget`, `winapp` (the Windows App
-Development CLI), `winget`, `scoop`, and `choco` on Windows only, and `brew` on
-macOS only. The Windows five have no Unix counterpart — except NuGet, which Unix
-reaches through `dotnet nuget` rather than a standalone binary, so checking for
-one there would warn forever.
+#### The list
 
-The check is **suite-agnostic by design**, and runs for *every* backend rather
-than only the ones whose suites happen to need it today. It describes what a
-validation *host* is expected to provide, not what any one suite consumes, so
-any current or future suite that shells out to these programs is served by the
-same list. `T3-Workloads.ps1` is simply the first caller; wiring up the next one
-needs no change here.
+| Interpreter | Platforms | Version | Notes |
+|-------------|-----------|---------|-------|
+| `pwsh` | all | Latest 7.x | The only entry whose absence fails a job, and only on Windows. |
+| `git` | all | Latest | |
+| `node`, `npm`, `npx` | all | 24.x | `npm` and `npx` arrive with Node. |
+| `python`, `pip` | all | Latest | Windows tries `python` first, Unix `python3`. |
+| `dotnet` | all | Latest LTS | |
+| `az` | all | Latest | No ARM64 Windows build exists; ARM64 images get the x64 one under emulation. |
+| `gh` | all | Latest | |
+| `openssl` | all | Latest | On Windows, installed per job — see below. |
+| `nuget` | Windows | Latest | Unix reaches NuGet through `dotnet nuget`, so looking for a binary there would warn forever. |
+| `winapp` | Windows | Latest | The Windows App Development CLI. Installed per job — see below. |
+| `winget` | Windows | Image | The only entry allowed to resolve inside `WindowsApps`. |
+| `scoop`, `choco` | Windows | Latest | |
+| `brew` | macOS | Latest | |
 
-Each preparation script carries its own copy — `Assert-WorkloadInterpreters` in
+Nothing is pinned: every entry is whatever was current when the image was built,
+within the constraint in the Version column. Only Node is held to a major
+version, because the SDK targets it.
+
+The list is **suite-agnostic by design** and is checked for every backend, not
+only the ones whose suites need it today: it describes what a validation *host*
+provides, not what any one suite consumes. `T3-Workloads.ps1` is simply the
+first caller, and wiring up the next one needs no change here.
+
+Each script carries its own copy — `Assert-WorkloadInterpreters` in
 `prepare-windows-host.ps1`, `assert_workload_interpreters` in the two `.sh`
-scripts.
+scripts — so the platform lists can diverge.
 
-Each inventory entry carries:
+#### Missing means a warning, not a failure
 
-- the command names to try, in order. Resolution mirrors what the suites
-  themselves do: on Windows `python` is tried before `python3`, while on Unix
-  `python3` is tried first.
-- on Windows, whether a match under `WindowsApps` counts. By default it does
-  not: that is usually a Microsoft Store `AppExecutionAlias` stub, a 0-byte
-  redirect that opens the Store rather than running. But `WindowsApps` is also
-  how App Installer legitimately ships `winget`, and a working alias is
-  indistinguishable from a stub by path or size — both are 0-byte reparse
-  points — so entries delivered that way set `AllowStoreAlias` and opt out.
-  Without it the check reports an installed `winget` as missing.
-- whether an absence fails the job or only warns. On Windows only `pwsh` is
-  required; its absence means a mis-imaged pool. Everything else warns, because
-  suites are expected to report their dependent cases as skipped rather than
-  failing. Nothing is required on Unix yet — no Unix suite drives these
-  interpreters — so that check currently runs purely as host inventory.
-- the image-level fix, quoted in whichever message is emitted.
+Only `pwsh` on Windows is required; everything else warns, because suites are
+expected to report their dependent cases as skipped rather than failing. Nothing
+is required on Unix yet.
 
-Because a warning is deliberately not a failure, an absent optional interpreter
-silently shrinks coverage while the job still shows green. GitHub's pass/fail
-icon cannot express "passed, but with less coverage than yesterday" — a future
-test-analysis portal is intended to surface skip counts so that erosion is
-visible.
+The cost is that an absent interpreter silently shrinks coverage while the job
+still shows green. GitHub's pass/fail icon cannot express "passed, but with less
+coverage than yesterday" — a future test-analysis portal is intended to surface
+skip counts so that erosion is visible.
 
-#### Verified everywhere, installed on Linux, repaired on Windows
+On Windows a command resolving under `WindowsApps` does not count. That is
+normally a Microsoft Store `AppExecutionAlias` stub: a 0-byte redirect that
+opens the Store rather than running. App Installer legitimately ships `winget`
+that way, and a working alias is indistinguishable from a stub — both are 0-byte
+reparse points — so `winget` alone opts out of the filter.
 
-On Windows and macOS the tools are, with one exception, **verified, never
-installed**, for the same reason the optional features are: provisioning a
-toolchain mid-run would mask the image drift the check exists to surface.
-Neither platform needs it anyway — Windows runs on a 1ES image whose contents we
-control, and the GitHub-hosted macOS runners already ship all twelve.
+#### Who installs what
 
-The Windows exception is `winget`, which `Repair-Winget` provisions immediately
-before the inventory. It is the narrowest form of install there is: it downloads
-nothing and adds nothing to the image, it only re-registers for the running
-account a package the image already shipped. That is worth doing because the
-failure it fixes is not image drift at all — App Installer is routinely present
-but unregistered for the account the job runs as, which leaves an
-`AppExecutionAlias` that resolves on `PATH` and then fails with "The file cannot
-be accessed by the system". Reporting a tool the image *does* carry as missing
-would surface nothing anyone could act on.
+Every pool runs images pre-provisioned with programs installed by
+`ubuntu-debian-provision.sh` / `rhel-provision.sh` for Linux and 
+`windows-provision.ps1` for Windows. These scripts are located in the
+`validation-provision-artifacts` branch in the ADO repo. On Windows that
+script covers `choco`, `scoop`, `az`, `gh` and `nuget`; the language runtimes
+(`dotnet`, `node`, `python`, `pwsh`, `git`) come from separate image artifacts.
 
-The repair is written to be indistinguishable from a no-op when it is not
-needed. It decides by *running* `winget --version` rather than by resolving the
-command, because a resolvable alias is precisely the broken case; an operational
-host returns before touching Appx at all. Like the Linux install pass, nothing
-it does can fail the job — an absent package, an unreachable `Appx` module, and
-a failed registration all warn and fall through to the inventory, which then
-reports `winget` in the usual way.
-
-Linux is the exception. `prepare-linux-host.sh` runs
-`install_workload_interpreters` immediately before taking the inventory,
-installing whatever the image did not already provide. The Linux pools run stock
-distribution images that MXC does not bake, so there is no curated image to
-drift *from*; refusing to install would not surface a provisioning mistake, it
-would only cost coverage. Most of the list comes from the distribution's own
-repositories, `pwsh` and `az` from Microsoft's feeds and `gh` from GitHub's since
-no distribution carries them, and `npx` from nowhere at all — it arrives with
-`npm`.
-
-Microsoft publishes those two tools to *different* feeds, and only on the RPM
-side do they coincide. `packages-microsoft-prod` carries `powershell` on both
-families and `azure-cli` on the RPM side only; on apt the Azure CLI has a
-repository of its own, keyed by distribution codename rather than version. Asking
-the prod feed for `azure-cli` on a Debian-family host resolves nothing and fails
-with `E: Unable to locate package azure-cli`, so `add_azure_cli_apt_feed` adds
-that second feed separately.
-
-That feed lags new distribution releases, so a host's own codename may not be
-published yet — Debian 13 (`trixie`) is not. The function probes for the suite
-before writing it and falls back to the newest suite the vendor does publish for
-the family (`bookworm` for Debian, `noble` for Ubuntu), warning when it
-substitutes. The probe is what makes the fallback safe to skip entirely when
-nothing matches: an unpublished suite written into a source list makes *every*
-later `apt-get update` fail, which would cost the host the packages that were
-otherwise going to install.
-
-Two properties make that safe to run on every job:
-
-- **Nothing it does can fail the job.** Every step warns and continues, and a
-  host with no recognized package manager is skipped outright. The inventory
-  immediately afterwards is what reports the outcome, so a tool that could not
-  be installed stays visible instead of becoming a silent absence.
-- **A failed batch degrades to individual installs.** apt and dnf abort the
-  *entire* transaction over a single unavailable package, so one name missing on
-  one distribution would otherwise cost that host every other interpreter as
-  well. After a batch failure each package is retried on its own.
-
-A host that already has everything short-circuits before touching the package
-manager, so the common case costs one `command -v` per entry. Vendor feeds are
-added at most once and a failure is remembered, so the second tool wanting a
-broken feed does not retry it.
+During the start of a job, the installed programs are inventoried. Windows also
+installs OpenSSL and WinApp via the repaired WinGet. 
 
 ## Log collection
 

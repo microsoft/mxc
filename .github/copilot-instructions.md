@@ -96,10 +96,13 @@ verify the host's workload interpreters and CLIs (`pwsh`, `git`, `node`, `npm`,
 `winget`, `scoop`, and `choco` on Windows only, and `brew` on macOS only) —
 Windows in `Assert-WorkloadInterpreters`, Linux and macOS in a deliberately
 duplicated bash-3.2-compatible `assert_workload_interpreters` function so each
-platform's list can diverge. macOS verifies only; Linux first runs
-`install_workload_interpreters`, which installs whatever the stock distribution
-image lacks (distribution repositories, plus Microsoft's feeds for `pwsh`/`az`
-and GitHub's for `gh`). Microsoft splits those two: `packages-microsoft-prod`
+platform's list can diverge. Every pool runs an image provisioned ahead of time
+by `scripts/ci/Setup.sh` / `Setup-rhel.sh` (Linux) and `scripts/ci/Setup.ps1`
+(Windows), so the whole list is normally present before a job starts. macOS
+verifies only; Linux first runs `install_workload_interpreters`, which re-runs
+the install as a top-up and is a no-op on a correctly built image (distribution
+repositories, plus Microsoft's feeds for `pwsh`/`az` and GitHub's for `gh`).
+Microsoft splits those two: `packages-microsoft-prod`
 carries `powershell` everywhere and `azure-cli` on RPM only, while on apt the
 Azure CLI has its own codename-keyed feed added by `add_azure_cli_apt_feed`,
 which probes for the suite before writing it and falls back to the newest
@@ -108,13 +111,27 @@ best-effort and can never fail the job —
 the inventory that follows reports the outcome. Its package-manager access goes
 through `resolve_package_manager` and `install_packages`, the same helpers the
 backend prerequisite installers use, so a new distribution family is one arm in
-`install_packages` rather than a branch in every installer. Windows provisions
-one entry, also best-effort and also ahead of the inventory: `Repair-Winget`
+`install_packages` rather than a branch in every installer. `Setup.ps1` installs
+no packaged application and never uses winget, because neither is available
+during image provisioning; it takes only `-Architecture` (`x64`/`arm64`, which
+selects the `gh` MSI — the Azure CLI has no ARM64 build and is used emulated)
+and `-ScoopRoot`. Its scope is `choco`, `scoop`, `az`, `gh` and `nuget`: the
+language runtimes (`dotnet`, `node`, `python`, `pwsh`, `git`) arrive from
+separate image artifacts, and `Setup.ps1` only inventories them. Windows
+therefore provisions
+two entries at job time, also best-effort and also ahead of the inventory.
+`Repair-Winget`
 re-registers the App Installer package (`Add-AppxPackage -RegisterByFamilyName`)
 when `winget` resolves on `PATH` but fails to run, the symptom of a package the
 image shipped but never registered for the account the job runs as. It decides
 by invoking `winget --version`, not by resolving the command, since a resolvable
-alias is the broken case.
+alias is the broken case. `Install-PackagedTooling` then installs `winapp` and
+`openssl`, the two interpreters that cannot be baked into an image at all
+because both ship only as packaged applications; `winapp` is requested as
+`--installer-type zip` so the portable build lands on `PATH` instead of behind a
+`WindowsApps` alias the inventory's store-alias filter would reject, and
+`openssl`'s `bin` directory is appended to `PATH` afterwards because its
+installer publishes none.
 
 **Test dispatch** goes through `scripts/ci/run_backend_validation_tests.ps1`
 (Windows) and `scripts/ci/run_backend_validation_tests.sh` (Linux/macOS), which map

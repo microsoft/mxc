@@ -391,17 +391,9 @@
     "weekly": [],
     "enabled": [
       {
-        "os": "rhel-10",
+        "os": "macos-26",
         "backends": [
-          "bubblewrap",
-          "lxc"
-        ]
-      },
-      {
-        "os": "debian-13",
-        "backends": [
-          "bubblewrap",
-          "lxc"
+          "seatbelt"
         ]
       }
     ]

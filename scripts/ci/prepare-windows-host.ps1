@@ -162,10 +162,10 @@ function Assert-WorkloadInterpreters {
         @{ Name = 'dotnet';  Candidates = @('dotnet');            Required = $false; Remedy = 'install the .NET SDK in the image' },
         @{ Name = 'az';      Candidates = @('az');                Required = $false; Remedy = 'install the Azure CLI in the image' },
         @{ Name = 'gh';      Candidates = @('gh');                Required = $false; Remedy = 'install the GitHub CLI in the image' },
-        @{ Name = 'openssl'; Candidates = @('openssl');           Required = $false; Remedy = 'install OpenSSL in the image' },
+        @{ Name = 'openssl'; Candidates = @('openssl');           Required = $false; Remedy = 'only published as a packaged application, so it is installed by Install-PackagedTooling rather than baked into the image' },
         # Windows-only
         @{ Name = 'nuget';   Candidates = @('nuget');             Required = $false; Remedy = 'install the NuGet CLI in the image' },
-        @{ Name = 'winapp';  Candidates = @('winapp');            Required = $false; Remedy = 'install the Windows App Development CLI (winget install Microsoft.WinAppCli) in the image' },
+        @{ Name = 'winapp';  Candidates = @('winapp');            Required = $false; Remedy = 'only published as a packaged application, so it is installed by Install-PackagedTooling rather than baked into the image' },
         @{ Name = 'winget';  Candidates = @('winget');            Required = $false; AllowStoreAlias = $true; Remedy = 'install the Windows Package Manager (App Installer) in the image' },
         @{ Name = 'scoop';   Candidates = @('scoop');             Required = $false; Remedy = 'install Scoop in the image' },
         @{ Name = 'choco';   Candidates = @('choco');             Required = $false; Remedy = 'install Chocolatey in the image' }
@@ -221,6 +221,7 @@ function Test-WingetOperational {
             $version = & $candidate --version 2>&1
             if ($LASTEXITCODE -eq 0 -and $version) {
                 Write-Host "winget is operational ($($version | Select-Object -First 1)) at $candidate"
+                $script:WingetPath = $candidate
                 return $true
             }
         } catch {
@@ -282,6 +283,124 @@ function Repair-Winget {
         Write-Host "winget is operational after registering App Installer."
     } else {
         Write-Host "::warning::winget is still not operational after registering App Installer."
+    }
+}
+
+# Re-reads PATH from the registry so a directory an installer just published is
+# visible to this process, which otherwise keeps the PATH it started with.
+function Update-ProcessPath {
+    $parts = foreach ($scope in 'Machine', 'User') {
+        $value = [Environment]::GetEnvironmentVariable('Path', $scope)
+        if ($value) { $value -split ';' }
+    }
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $env:Path = (($parts | Where-Object { $_ -and $seen.Add($_) }) -join ';')
+}
+
+# Resolves a command the way Assert-WorkloadInterpreters does, so a tool this
+# step installs is judged by the same rule that reports it later.
+function Resolve-Interpreter {
+    param([Parameter(Mandatory)][string[]]$Candidates)
+
+    foreach ($candidate in $Candidates) {
+        $found = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($found -and $found.Source -notlike '*\WindowsApps\*') {
+            return $found.Source
+        }
+    }
+    return $null
+}
+
+# openssl and the Windows App Development CLI are the two workload interpreters
+# that cannot be baked into an image: both are published only as packaged
+# applications, and no packaged application can be registered while an image is
+# being provisioned. They are installed here instead, on the running machine,
+# which is the first point at which winget works.
+#
+# This is the second exception to the verify-never-install rule above. It is
+# best effort: both tools are optional, so a failure warns here and the
+# inventory that follows reports what the machine actually ended up with.
+function Install-PackagedTooling {
+    # 0 is success; the other two are "already installed" and "no applicable
+    # upgrade", which both mean the tool is present and are equally fine.
+    $success = @(0, -1978335135, -1978335189)
+
+    $packages = @(
+        @{
+            Name       = 'winapp'
+            Candidates = @('winapp')
+            Id         = 'Microsoft.WinAppCli'
+            # This package publishes a packaged build and a portable one. The
+            # packaged build installs behind an execution alias in WindowsApps,
+            # which is indistinguishable from a Store stub and is therefore not
+            # counted as present. The portable build puts a real executable on
+            # PATH instead, so it is the one to ask for.
+            Extra      = @('--installer-type', 'zip')
+            PathHints  = @(
+                (Join-Path $env:ProgramFiles 'WinGet\Links'),
+                (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links')
+            )
+        },
+        @{
+            Name       = 'openssl'
+            Candidates = @('openssl')
+            Id         = 'ShiningLight.OpenSSL.Light'
+            Extra      = @()
+            # This installer does not publish its own bin directory.
+            PathHints  = @(
+                (Join-Path $env:ProgramFiles 'OpenSSL-Win64\bin'),
+                (Join-Path $env:ProgramFiles 'OpenSSL\bin')
+            )
+        }
+    )
+
+    $wanted = $packages | Where-Object { -not (Resolve-Interpreter -Candidates $_.Candidates) }
+    if (-not $wanted) {
+        Write-Host "Packaged workload tooling is already present."
+        return
+    }
+
+    if (-not $script:WingetPath) {
+        Write-Host "::warning::winget is unavailable, so $(($wanted.Name) -join ' and ') cannot be installed."
+        return
+    }
+
+    foreach ($package in $wanted) {
+        Write-Host "Installing $($package.Name) ($($package.Id))."
+        $arguments = @(
+            'install', '--id', $package.Id, '--exact', '--silent',
+            '--disable-interactivity', '--accept-source-agreements',
+            '--accept-package-agreements'
+        ) + $package.Extra
+
+        try {
+            $output = & $script:WingetPath @arguments 2>&1
+            $code = $LASTEXITCODE
+        } catch {
+            Write-Host "::warning::Could not install $($package.Name): $(($_.Exception.Message -split "`r?`n" | Select-Object -First 1).Trim())"
+            continue
+        }
+
+        if ($success -notcontains $code) {
+            $detail = ($output | Select-Object -Last 3 | Out-String).Trim()
+            if ($detail) { Write-Host $detail }
+            Write-Host "::warning::Installing $($package.Name) reported exit code $code."
+            continue
+        }
+
+        Update-ProcessPath
+        foreach ($hint in $package.PathHints) {
+            if ((Test-Path -LiteralPath $hint) -and (($env:Path -split ';') -notcontains $hint)) {
+                $env:Path = "$env:Path;$hint"
+            }
+        }
+
+        $resolved = Resolve-Interpreter -Candidates $package.Candidates
+        if ($resolved) {
+            Write-Host "$($package.Name) is available at $resolved"
+        } else {
+            Write-Host "::warning::$($package.Name) installed but still does not resolve on PATH."
+        }
     }
 }
 
@@ -453,8 +572,10 @@ $BinaryDirectory = (Resolve-Path $BinaryDirectory).Path
 Write-Host "Preparing Windows host for backend '$Backend' using $BinaryDirectory"
 
 # Run for every backend: this is host inventory, not a backend prerequisite.
-# The winget repair comes first so the inventory reports the repaired state.
+# The winget repair comes first so the packaged-tooling install below can use
+# it, and the inventory reports the state after both.
 Repair-Winget
+Install-PackagedTooling
 Assert-WorkloadInterpreters
 
 switch ($Backend) {
