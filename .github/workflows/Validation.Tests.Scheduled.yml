@@ -51,4 +51,4 @@ jobs:
     if: (github.event_name == 'schedule' && github.event.schedule == '0 8 * * 0') || inputs.plan == 'weekly'
     uses: ./.github/workflows/Validation.Tests.Matrix.Job.yml
     with:
-      plan: weekly
+      plan: enabled

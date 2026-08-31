@@ -389,6 +389,21 @@
       }
     ],
     "weekly": [],
-    "enabled": []
+    "enabled": [
+      {
+        "os": "rhel-10",
+        "backends": [
+          "bubblewrap",
+          "lxc"
+        ]
+      },
+      {
+        "os": "debian-13",
+        "backends": [
+          "bubblewrap",
+          "lxc"
+        ]
+      }
+    ]
   }
 }
