@@ -700,9 +700,10 @@ impl NanVixScriptRunner {
         // Per-host egress filtering. The two lists are mutually exclusive
         // (validated upstream), so at most one of these loops emits flags.
         // nanvixd requires `-allow-host-networking` for these to take effect,
-        // which is guaranteed because a non-empty list forces host_networking
-        // on (see `host_networking_enabled`). The guest daemon auto-exempts the
-        // DNS port in allowlist mode, so no resolver IPs are added here.
+        // which is guaranteed for valid requests: allowlists enable networking
+        // directly, while blocklists require an allow default. The guest daemon
+        // auto-exempts the DNS port in allowlist mode, so no resolver IPs are
+        // added here.
         for host in allow_hosts {
             cmd.arg("-allow-host").arg(host);
         }
@@ -1318,6 +1319,7 @@ mod tests {
         // be resolved -- silently dropping it would let blocked traffic flow.
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["10.0.0.1".to_string(), "::1".to_string()],
                 ..Default::default()
             },
@@ -1340,6 +1342,7 @@ mod tests {
     fn resolve_host_lists_accepts_fully_resolved_blocklist() {
         let request = ExecutionRequest {
             policy: ContainerPolicy {
+                default_network_policy: NetworkPolicy::Allow,
                 blocked_hosts: vec!["10.0.0.1".to_string(), "192.168.0.0/16".to_string()],
                 ..Default::default()
             },
