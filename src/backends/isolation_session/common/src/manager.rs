@@ -37,10 +37,6 @@ use super::pipe_relay::{
 };
 use super::process_options::{build_iso_process_options, ProcessOptions};
 
-/// `CoInitializeEx` returns this when the thread is already in a different
-/// apartment model.
-const RPC_E_CHANGED_MODE: u32 = 0x8001_0106;
-
 /// Keeps the process's MTA alive for as long as the lifecycle's WinRT objects,
 /// which outlive their creating call and are used from threads MXC does not own.
 /// `CoIncrementMTAUsage` holds a reference releasable from any thread;
@@ -56,7 +52,7 @@ impl MtaReference {
         if apartment.is_single_threaded() {
             // The lifecycle deadlocks in a single-threaded apartment: its
             // asynchronous calls block without pumping.
-            return Err(sta_refusal(RPC_E_CHANGED_MODE));
+            return Err(sta_refusal());
         }
 
         // SAFETY: the out-parameter is a valid, writable local.

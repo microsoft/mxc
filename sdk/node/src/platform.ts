@@ -2,12 +2,24 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync, execFileSync } from 'child_process';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
-import { BubblewrapNetworkSupport, ContainmentBackend, IsolationTier, PlatformSupport, UiCapabilitySupport } from './types.js';
+import { createRequire } from 'node:module';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
+import {
+  BubblewrapNetworkSupport,
+  ContainmentBackend,
+  IsolationTier,
+  PlatformSupport,
+  UiCapabilitySupport,
+} from './types.js';
 import { diagLog } from './diagnostic.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+// This module is emitted as ESM, so there is no ambient CommonJS `require`;
+// synthesize one bound to this file's URL for `require.resolve`.
+const require = createRequire(import.meta.url);
 
 /**
  * Resolves the SDK package root directory.
@@ -24,6 +36,11 @@ function getSdkPackageRoot(): string {
   }
 }
 
+const bwrapProbeScriptDirectory = fs.existsSync(
+  path.join(__dirname, 'bwrap-probe-worker.js'),
+)
+  ? __dirname
+  : path.join(getSdkPackageRoot(), 'dist');
 let windowsSandboxAvailableCache: boolean | undefined;
 
 /**
@@ -63,11 +80,13 @@ function isWindowsSandboxAvailable(): boolean {
  *
  * On Windows, this also invokes `wxc-exec --probe` to populate
  * `isolationTier`, the `isolationWarnings` array (if any), and portable UI
- * capability facts. On Linux, when bubblewrap is available, it invokes
- * `lxc-exec --available-backends` to populate `bubblewrapNetwork`. macOS
- * currently does not expose native probe data. `uiCapabilities` is omitted
- * outside Windows. The result is cached for the lifetime of the SDK module —
- * the underlying machine state is not expected to change at runtime.
+ * capability facts. On Linux, `unavailableReasons` contains per-backend
+ * diagnostics for unavailable LXC or Bubblewrap backends, and — when
+ * bubblewrap is available — `lxc-exec --available-backends` is invoked to
+ * populate `bubblewrapNetwork`. macOS currently does not expose native probe
+ * data. `uiCapabilities` is omitted outside Windows. The result is cached for
+ * the lifetime of the SDK module — the underlying machine state is not
+ * expected to change at runtime.
  *
  * @returns Platform support details including available sandboxing methods
  */
@@ -139,9 +158,9 @@ function isUiCapabilitySupport(value: unknown): value is UiCapabilitySupport {
 
 /**
  * Run the probe binary and merge its results into `support`: the isolation
- * tier, any warnings, portable UI capabilities, and — when the probe reports
- * the isolation-session service available — the `isolation_session` method.
- * On any failure (binary missing, timeout, malformed JSON), the function
+ * tier, any warnings, portable UI capabilities, and the `isolation_session`
+ * and `hyperlight` methods when the probe reports them available. On any
+ * failure (binary missing, timeout, malformed JSON), the function
  * silently leaves those fields unset, so callers see the same contract as
  * pre-probe SDKs.
  */
@@ -166,6 +185,9 @@ function populateIsolationFromProbe(support: PlatformSupport): void {
         }
         if (facts.isolationSessionAvailable === true) {
           support.availableMethods.push('isolation_session');
+        }
+        if (facts.hyperlightAvailable === true) {
+          support.availableMethods.push('hyperlight');
         }
       }
     }
@@ -280,17 +302,27 @@ function computeSupport(): PlatformSupport {
     // LXC and Bubblewrap are both supported on Linux. Report whichever
     // are installed; callers pick via the containment field.
     const methods: ContainmentBackend[] = [];
-    if (isLxcAvailable()) methods.push('lxc');
+    if (lxcAvailabilityProbe()) {
+      methods.push('lxc');
+    } else {
+      support.unavailableReasons = {
+        lxc: 'LXC is not installed or not available on this system.',
+      };
+    }
     const bubblewrap = _probeBubblewrap();
     if (bubblewrap.available) {
       methods.push('bubblewrap');
       support.bubblewrapNetwork = _probeBubblewrapNetwork();
     } else {
+      support.unavailableReasons = {
+        ...support.unavailableReasons,
+        bubblewrap: bubblewrap.reason,
+      };
       // Always surface why bwrap is unavailable. When LXC is present the
       // platform is still supported, so `reason` — documented as why the
       // platform is *not* supported — must stay unset, and the detail would
-      // otherwise be dropped with no way to diagnose the missing backend.
-      diagLog(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
+      // otherwise be dropped without the per-backend reason above.
+      platformDiagnosticLogger(`getPlatformSupport: bubblewrap unavailable — ${bubblewrap.reason}`);
       if (methods.length === 0) {
         support.reason = `Neither LXC nor Bubblewrap is available on this system (${bubblewrap.reason})`;
       }
@@ -319,13 +351,27 @@ function computeSupport(): PlatformSupport {
 /**
  * Check if LXC is available on the system
  */
-function isLxcAvailable(): boolean {
+function defaultLxcAvailabilityProbe(): boolean {
   try {
     execSync('lxc-ls --version', { encoding: 'utf-8', stdio: 'pipe' });
     return true;
   } catch {
     return false;
   }
+}
+
+let lxcAvailabilityProbe = defaultLxcAvailabilityProbe;
+
+/** @internal Test-only: override the LXC availability probe. */
+export function _setLxcAvailabilityProbe(fn: (() => boolean) | null): void {
+  lxcAvailabilityProbe = fn ?? defaultLxcAvailabilityProbe;
+}
+
+let platformDiagnosticLogger: (message: string) => void = diagLog;
+
+/** @internal Test-only: override platform-support diagnostic logging. */
+export function _setPlatformDiagnosticLogger(fn: ((message: string) => void) | null): void {
+  platformDiagnosticLogger = fn ?? diagLog;
 }
 
 /**
@@ -341,6 +387,7 @@ function isLxcAvailable(): boolean {
  * `src/backends/bubblewrap/common/src/bwrap_version.rs` — keep both in sync.
  */
 const MIN_BWRAP_VERSION: readonly [number, number, number] = [0, 5, 0];
+const MIN_BWRAP_VERSION_REASON = 'the sandbox uses `--clearenv`, added in bwrap 0.5.0';
 
 /** Outcome of the Bubblewrap probe: available, or unavailable with a reason. */
 type BubblewrapProbe = { available: true } | { available: false; reason: string };
@@ -355,76 +402,236 @@ type BwrapVersionResult =
   | { kind: 'failed'; status: number | null; detail: string };
 
 /**
- * Whether a `bwrap` candidate exists anywhere on `PATH`.
- *
- * Linux reports `ENOENT` both for a genuinely absent binary and for one that
- * exists but cannot be executed (a missing ELF interpreter or script shebang
- * target), so the spawn error alone cannot tell `notFound` from `failed`. A
- * candidate on `PATH` means the package is installed and the failure is a
- * broken install.
- */
-function bwrapExistsOnPath(): boolean {
-  const pathVar = process.env.PATH;
-  if (!pathVar) return false;
-  return pathVar
-    .split(path.delimiter)
-    .some((dir) => dir !== '' && fs.existsSync(path.join(dir, 'bwrap')));
-}
-
-/**
  * How long to wait for `bwrap --version` before giving up.
  *
  * `getPlatformSupport()` is synchronous, so without a bound a `bwrap` that
  * hangs — a wrapper script on PATH, a binary on a stalled network mount —
  * would block the caller indefinitely. Printing a version string is
- * near-instant, so this is generous.
+ * near-instant, so this is generous. This is the total wall-clock bound the
+ * caller observes: the supervision layers run *inside* it.
  */
 const BWRAP_VERSION_TIMEOUT_MS = 5000;
+const BWRAP_VERSION_MAX_BUFFER_BYTES = 64 * 1024;
+const BWRAP_HELPER_RESULT_BYTES = 1024 * 1024;
+/**
+ * Time reserved out of the caller's budget for the supervision layers to stop
+ * the probe, publish a result, and hand it back.
+ */
+const BWRAP_PROBE_SUPERVISION_MARGIN_MS = 1500;
 
 /**
- * Default runner for `bwrap --version`. Uses `execFileSync` rather than a
- * shell so a missing binary surfaces as `ENOENT` instead of the shell's
- * indistinguishable exit code 127 — that separation is what lets us report
- * "not installed" and "installed but broken" differently.
+ * Inline bootstrap for the packaged probe worker.
  *
- * Replaceable in unit tests via {@link _setBwrapVersionRunner}.
+ * The caller blocks in `Atomics.wait`, so an `error` event on the main-thread
+ * Worker object cannot report a missing, corrupt, or throwing worker module in
+ * time. This trusted bootstrap runs without a packaged asset, imports the real
+ * worker, and publishes import/startup failures through the same shared result
+ * buffer the worker uses for normal outcomes.
  */
-function defaultBwrapVersionRunner(): BwrapVersionResult {
+const BWRAP_PROBE_WORKER_BOOTSTRAP = String.raw`
+const { pathToFileURL } = require('node:url');
+const { workerData } = require('node:worker_threads');
+
+function publishStartupError(error) {
+  const header = new Int32Array(workerData.shared, 0, 3);
+  if (Atomics.load(header, 0) !== 0) return;
+  const payload = new Uint8Array(workerData.shared, 12);
+  const detail = error instanceof Error ? error.message : String(error);
+  let encoded = Buffer.from(JSON.stringify({
+    kind: 'spawnError',
+    detail: 'probe worker failed to start: ' + detail,
+  }));
+  if (encoded.length > payload.length) {
+    encoded = Buffer.from(JSON.stringify({
+      kind: 'spawnError',
+      detail: 'probe worker startup error exceeded its bound',
+    }));
+  }
+  payload.set(encoded);
+  Atomics.store(header, 1, encoded.length);
+  if (Atomics.compareExchange(header, 0, 0, 1) === 0) {
+    Atomics.notify(header, 0);
+  }
+}
+
+function publishFatalStartupError(error) {
+  publishStartupError(error);
+}
+
+process.once('uncaughtException', publishFatalStartupError);
+process.once('unhandledRejection', publishFatalStartupError);
+import(pathToFileURL(workerData.workerPath).href)
+  .then(() => {
+    process.removeListener('uncaughtException', publishFatalStartupError);
+    process.removeListener('unhandledRejection', publishFatalStartupError);
+  })
+  .catch(publishStartupError);
+`;
+
+/**
+ * Split the caller's budget into the probe deadline (how long `bwrap` itself
+ * may run) and the worker's publish deadline, so the caller-visible wait never
+ * exceeds `timeoutMs`. Budgets smaller than twice the margin split in half
+ * rather than starving the probe.
+ *
+ * @internal Exported for unit tests.
+ */
+export function _bwrapProbeDeadlines(timeoutMs: number): {
+  probeTimeoutMs: number;
+  publishTimeoutMs: number;
+} {
+  const probeTimeoutMs = Math.max(
+    1,
+    Math.max(Math.ceil(timeoutMs / 2), timeoutMs - BWRAP_PROBE_SUPERVISION_MARGIN_MS),
+  );
+  const publishTimeoutMs = Math.max(
+    probeTimeoutMs + 1,
+    timeoutMs - Math.ceil((timeoutMs - probeTimeoutMs) / 2),
+  );
+  return { probeTimeoutMs, publishTimeoutMs };
+}
+
+function resolveBwrapProbeScript(fileName: string): string {
+  return path.join(bwrapProbeScriptDirectory, fileName);
+}
+
+type BwrapProbeWorkerFactory = (fileName: string, options: WorkerOptions) => Worker;
+
+const defaultBwrapProbeWorkerFactory: BwrapProbeWorkerFactory = (fileName, options) =>
+  new Worker(fileName, options);
+
+let bwrapProbeWorkerFactory = defaultBwrapProbeWorkerFactory;
+
+/** @internal Test-only: replace worker construction to exercise setup deadlines. */
+export function _setBwrapProbeWorkerFactory(factory: BwrapProbeWorkerFactory | null): void {
+  bwrapProbeWorkerFactory = factory ?? defaultBwrapProbeWorkerFactory;
+}
+
+type BwrapHelperResult =
+  | { kind: 'completed'; status: number | null; signal: string | null; stdout: string; stderr: string }
+  | { kind: 'notFound' }
+  | { kind: 'timeout' }
+  | { kind: 'overflow' }
+  | { kind: 'spawnError'; detail: string };
+
+function parseBwrapHelperResult(output: Buffer | string | undefined): BwrapHelperResult | null {
+  if (output === undefined || output.length === 0) return null;
   try {
-    return {
-      kind: 'output',
-      stdout: execFileSync('bwrap', ['--version'], {
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: BWRAP_VERSION_TIMEOUT_MS,
-      }),
-    };
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException & {
-      status?: number | null;
-      stderr?: Buffer | string;
-      killed?: boolean;
-    };
-    // `ENOENT` covers both an absent binary and a present-but-unusable one
-    // (missing ELF interpreter / shebang target), so confirm the binary is
-    // really absent before blaming the package manager.
-    if (e.code === 'ENOENT' && !bwrapExistsOnPath()) {
+    return JSON.parse(output.toString()) as BwrapHelperResult;
+  } catch {
+    return null;
+  }
+}
+
+/** @internal Pure helper-result normalization for unit tests. */
+export function _mapBwrapHelperResult(
+  result: BwrapHelperResult,
+  timeoutMs = BWRAP_VERSION_TIMEOUT_MS,
+): BwrapVersionResult {
+  switch (result.kind) {
+    case 'notFound':
       return { kind: 'notFound' };
-    }
-    // Timed out: the child was killed, so there is no meaningful exit status.
-    if (e.code === 'ETIMEDOUT' || e.killed) {
+    case 'timeout':
+      return { kind: 'failed', status: null, detail: `timed out after ${timeoutMs}ms` };
+    case 'overflow':
       return {
         kind: 'failed',
         status: null,
-        detail: `timed out after ${BWRAP_VERSION_TIMEOUT_MS}ms`,
+        detail: `probe output exceeded the ${BWRAP_VERSION_MAX_BUFFER_BYTES}-byte cap`,
       };
+    case 'spawnError':
+      return { kind: 'failed', status: null, detail: result.detail };
+    case 'completed':
+      if (result.status !== 0) {
+        return {
+          kind: 'failed',
+          status: result.status,
+          detail: result.stderr.trim() || (result.signal ? `signal ${result.signal}` : ''),
+        };
+      }
+      return { kind: 'output', stdout: result.stdout };
+  }
+}
+
+/**
+ * Run `bwrap --version` beneath a detached Node sentinel that anchors the
+ * process group. A child helper performs asynchronous, bounded I/O; the
+ * supervising worker holds the helper's bounded result until the anchor closes
+ * after tearing down the sentinel-owned group.
+ *
+ * The probe and the worker run against deadlines derived from `timeoutMs`, so
+ * this call returns within `timeoutMs` even when every inner layer stalls.
+ *
+ * @internal Exported for a real-subprocess regression test.
+ */
+export function _runBwrapVersionCommand(
+  timeoutMs = BWRAP_VERSION_TIMEOUT_MS,
+): BwrapVersionResult {
+  const started = performance.now();
+  const deadline = started + Math.max(0, timeoutMs);
+  const shared = new SharedArrayBuffer(12 + BWRAP_HELPER_RESULT_BYTES);
+  const header = new Int32Array(shared, 0, 3);
+  const setupRemainingMs = Math.floor(deadline - performance.now());
+  if (setupRemainingMs < 2) {
+    return { kind: 'failed', status: null, detail: `timed out after ${timeoutMs}ms` };
+  }
+  const { probeTimeoutMs, publishTimeoutMs } = _bwrapProbeDeadlines(setupRemainingMs);
+  let worker: Worker;
+  try {
+    worker = bwrapProbeWorkerFactory(BWRAP_PROBE_WORKER_BOOTSTRAP, {
+      eval: true,
+      workerData: {
+        shared,
+        workerPath: resolveBwrapProbeScript('bwrap-probe-worker.js'),
+        anchorPath: resolveBwrapProbeScript('bwrap-probe-anchor.js'),
+        helperPath: resolveBwrapProbeScript('bwrap-probe-helper.js'),
+        probeTimeoutMs,
+        publishTimeoutMs,
+        outputLimit: BWRAP_VERSION_MAX_BUFFER_BYTES,
+      },
+    });
+  } catch (err) {
+    if (performance.now() >= deadline) {
+      return { kind: 'failed', status: null, detail: `timed out after ${timeoutMs}ms` };
     }
     return {
       kind: 'failed',
-      status: e.status ?? null,
-      detail: e.stderr?.toString().trim() || e.message,
+      status: null,
+      detail: err instanceof Error ? err.message : String(err),
     };
   }
+  worker.on('error', (error) => {
+    // The inline bootstrap and the worker's own protocol report recoverable
+    // startup/runtime failures synchronously. This catches only catastrophic
+    // worker failures that escaped both and avoids an unhandled event.
+    platformDiagnosticLogger(`Bubblewrap probe worker failed: ${error.message}`);
+  });
+  const waitRemainingMs = Math.max(0, deadline - performance.now());
+  const waitResult = Atomics.wait(header, 0, 0, waitRemainingMs);
+  if (waitResult === 'timed-out') {
+    if (Atomics.compareExchange(header, 0, 0, -1) === 0) {
+      // The worker owns process cleanup. It may not have published the anchor
+      // PID yet, so leave it alive to observe -1 and terminate the group
+      // without exposing a stale PID to this process.
+      worker.unref();
+      return { kind: 'failed', status: null, detail: `timed out after ${timeoutMs}ms` };
+    }
+    // The worker published just as Atomics.wait timed out. Consume that result
+    // instead of overwriting it with a timeout or signalling its former PID.
+  }
+  const length = Atomics.load(header, 1);
+  const result = parseBwrapHelperResult(Buffer.from(shared, 12, length));
+  // The worker owns the anchor's ChildProcess handle and must remain alive
+  // long enough for libuv to reap it after process-group cleanup.
+  worker.unref();
+  return result
+    ? _mapBwrapHelperResult(result, timeoutMs)
+    : { kind: 'failed', status: null, detail: 'probe helper returned no result' };
+}
+
+/** Default runner, replaceable in unit tests via {@link _setBwrapVersionRunner}. */
+function defaultBwrapVersionRunner(): BwrapVersionResult {
+  return _runBwrapVersionCommand();
 }
 
 let bwrapVersionRunner: () => BwrapVersionResult = defaultBwrapVersionRunner;
@@ -505,8 +712,8 @@ function compareVersions(
  * fails closed — without a version we cannot assert the required flags exist.
  *
  * Mirrors `probe_bwrap` in
- * `src/backends/bubblewrap/common/src/bwrap_version.rs`, including the
- * distinction between a missing binary and a present-but-broken one.
+ * `src/backends/bubblewrap/common/src/bwrap_version.rs`. A missing command is
+ * distinct from observed process failures.
  *
  * @internal Exported for unit tests.
  */
@@ -517,20 +724,23 @@ export function _probeBubblewrap(): BubblewrapProbe {
   if (result.kind === 'notFound') {
     return {
       available: false,
-      reason: `Bubblewrap (bwrap) is not installed or not on PATH; version ${minVersion} or newer is required`,
+      reason:
+        `Bubblewrap (bwrap) is not installed or not on PATH. ` +
+        `Install it via your package manager (e.g., apt install bubblewrap). ` +
+        `Version ${minVersion} or newer is required.`,
     };
   }
   if (result.kind === 'failed') {
-    // Present but broken: do not send the user to their package manager for a
-    // package they already have.
-    // Covers both a spawn failure and termination by a signal, neither of
-    // which yields an exit code.
+    // This includes failures before PATH lookup completes, so do not claim
+    // that a Bubblewrap executable was observed.
     const where =
       result.status === null ? 'failed without an exit status' : `exited with status ${result.status}`;
     const detail = result.detail ? `: ${result.detail}` : '';
     return {
       available: false,
-      reason: `Bubblewrap (bwrap) is present but \`bwrap --version\` ${where}${detail}; version ${minVersion} or newer is required`,
+      reason:
+        `The Bubblewrap (bwrap) availability probe \`bwrap --version\` ${where}${detail}. ` +
+        `Version ${minVersion} or newer is required; check PATH and the installation before using the Bubblewrap backend.`,
     };
   }
 
@@ -538,13 +748,17 @@ export function _probeBubblewrap(): BubblewrapProbe {
   if (!version) {
     return {
       available: false,
-      reason: `could not determine the Bubblewrap (bwrap) version from ${JSON.stringify(result.stdout.trim())}; version ${minVersion} or newer is required`,
+      reason:
+        `Could not determine the Bubblewrap (bwrap) version: \`bwrap --version\` printed ` +
+        `${JSON.stringify(result.stdout.trim())}. Version ${minVersion} or newer is required.`,
     };
   }
   if (compareVersions(version, MIN_BWRAP_VERSION) < 0) {
     return {
       available: false,
-      reason: `Bubblewrap (bwrap) ${version.join('.')} is too old; version ${minVersion} or newer is required`,
+      reason:
+        `Bubblewrap (bwrap) ${version.join('.')} is too old: version ${minVersion} or newer is required ` +
+        `(${MIN_BWRAP_VERSION_REASON}). Upgrade the bubblewrap package.`,
     };
   }
   return { available: true };

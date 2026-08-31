@@ -130,6 +130,8 @@ cannot mix both formats in one request.
                                            // only via { "url": "http://proxy.example:8080" }
                                            // (own-netns: localhost/builtinTestServer are
                                            //  unreachable, rejected)
+                                           // Seatbelt requires defaultPolicy "block": a proxy
+                                           //  alongside "allow" adds no enforcement and is rejected
                                            // Under LXC the proxy is enforced: forwarded egress is
                                            //  restricted to the proxy endpoint and nothing else, so
                                            //  the allow/block host lists and DNS are not opened.
@@ -188,6 +190,15 @@ cannot mix both formats in one request.
         "release": "3.19"
     },
 
+    "seatbelt": {                          // macOS Seatbelt settings (macOS only)
+        "profileOverride": null,           // Optional raw TinyScheme profile (escape hatch)
+        "guiAccess": false,                // Allow GUI Mach services / IOKit / pty for window-drawing apps
+        "launchMethod": "exec",            // "exec" or "open" (LaunchServices, for Apple-constrained apps)
+        "nestedPty": true,                 // Allow inner process to allocate its own pty (posix_openpt)
+        "keychainAccess": false,           // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
+        "extraMachLookups": []             // Additional Mach service global-names the inner process may resolve
+    },
+
     "experimental": {                      // Experimental features (requires --experimental)
         "wslc": {                          // WSL Container settings
             "image": "alpine:latest",      // Container image name
@@ -199,13 +210,6 @@ cannot mix both formats in one request.
             "portMappings": [              // Host<->container port forwarding. TCP only -- the WSLC SDK runtime returns E_NOTIMPL for UDP, so the parser hard-rejects "udp" entries with a clear message.
                 { "windowsPort": 8080, "containerPort": 80, "protocol": "tcp" }
             ]
-        },
-        "seatbelt": {                 // macOS sandbox settings (macOS only)
-            "profileOverride": null,       // Optional raw TinyScheme profile (escape hatch)
-            "guiAccess": false,            // Allow GUI Mach services / IOKit / pty for window-drawing apps
-            "launchMethod": "exec",        // "exec" or "open" (LaunchServices, for Apple-constrained apps)
-            "nestedPty": true,             // Allow inner process to allocate its own pty (posix_openpt)
-            "keychainAccess": false        // Allow Keychain via securityd / trustd / cfprefsd / lsd.*
         },
         "telemetry": {                // Telemetry (Windows only)
             "enabled": true                // Emit TraceLogging ETW events via pure Rust tracelogging crate
@@ -347,7 +351,7 @@ force a particular backend.
 | `"microvm"` | MicroVM isolation via Windows HyperV Platform (NanVix microkernel) |
 | `"hyperlight"` | MicroVM isolation via Hyperlight + Unikraft with an embedded CPython snapshot (experimental) |
 | `"isolation_session"` | Windows isolation session — runs the workload as a freshly-provisioned, per-execution isolated user account in its own OS-managed session (experimental). Dual-mode: one-shot and state-aware. |
-| `"seatbelt"` | macOS sandbox isolation (Seatbelt) |
+| `"seatbelt"` | macOS sandbox isolation (Seatbelt). Requires macOS 15 or later — see [`docs/seatbelt/seatbelt-backend.md`](seatbelt/seatbelt-backend.md). |
 | `"bubblewrap"` | Unprivileged Linux sandboxing via Bubblewrap/user namespaces (experimental) |
 
 Only the backend section matching the selected `containment` value is accepted;

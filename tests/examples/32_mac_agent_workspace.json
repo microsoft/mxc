@@ -1,0 +1,37 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Run an untrusted script or coding agent against your home directory for context, while keeping credentials unreachable and the network off. Shows that deniedPaths outranks a broad readonlyPaths grant, and that the host environment is never inherited. Scratch space is /tmp here for portability -- in real use point readwritePaths at just your output directory.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Agent workspace: broad read, narrow write, no secrets, no network'; echo '============================================================'; echo ''; python3 - <<'MXCEOF'\nimport errno, os, socket, sys\nrc = 0\ndef report(label, expect, got, detail):\n    global rc\n    ok = (got == expect)\n    if not ok:\n        rc = 1\n    print(\"  %-46s %s\" % (label, \"SUCCESS\" if ok else \"ERROR\"))\n    print(\"       expected %-14s got %s%s\" % (expect, got, detail))\ndef fs(path):\n    try:\n        os.listdir(path) if os.path.isdir(path) else open(path, \"rb\").read(1)\n        return \"READABLE\", \"\"\n    except OSError as e:\n        return errno.errorcode.get(e.errno, str(e.errno)), \"  (%s)\" % e.strerror\ndef tcp(host, port):\n    s = socket.socket(); s.settimeout(5)\n    try:\n        s.connect((host, port)); return \"CONNECTED\", \"\"\n    except OSError as e:\n        return errno.errorcode.get(e.errno, str(e.errno)), \"  (%s)\" % e.strerror\n    finally:\n        s.close()\n\nprint(\"Filesystem: deniedPaths must outrank a broader readonlyPaths grant.\")\nprint(\"EPERM means MXC blocked it. ENOENT would only mean the path is absent,\")\nprint(\"which would prove nothing -- so these checks demand EPERM specifically.\")\nprint(\"\")\ng, d = fs(\"/opt/homebrew/bin\");        report(\"readonlyPaths grant is readable\", \"READABLE\", g, d)\ng, d = fs(\"/opt/homebrew/Cellar\");     report(\"deniedPaths inside it is blocked\", \"EPERM\", g, d)\ng, d = fs(\"/opt/homebrew/zzz_absent\"); report(\"control: absent path is NOT EPERM\", \"ENOENT\", g, d)\ng, d = fs(\"/Users\");                   report(\"never-granted tree is blocked\", \"EPERM\", g, d)\nprint(\"\")\nprint(\"Network: egress.default is deny.\")\ng, d = tcp(\"1.1.1.1\", 443);            report(\"outbound to a public IP is blocked\", \"EPERM\", g, d)\nprint(\"\")\nprint(\"Environment: the host environment is never inherited.\")\nleaked = os.environ.get(\"MXC_HOST_SECRET\")\nreport(\"MXC_HOST_SECRET absent (export it and re-run)\", \"unset\",\n       \"leaked\" if leaked else \"unset\", \"\")\nprint(\"\")\nprint(\"Note: $HOME is not set inside the sandbox, so the ~/.ssh style rules in\")\nprint(\"this policy cannot be spelled by the script -- they are enforced by the\")\nprint(\"same deniedPaths mechanism proven above.\")\nsys.exit(rc)\nMXCEOF\nrc=$?; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Agent workspace test complete!'; else echo 'Agent workspace test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "timeout": 30000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "~",
+            "/opt/homebrew"
+        ],
+        "deniedPaths": [
+            "~/.ssh",
+            "~/.aws",
+            "~/.gnupg",
+            "~/.config/gh",
+            "~/Library/Keychains",
+            "/opt/homebrew/Cellar"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "deny"
+        },
+        "ingress": {
+            "default": "deny",
+            "hostLoopback": "deny"
+        }
+    }
+}

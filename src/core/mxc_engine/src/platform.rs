@@ -48,6 +48,48 @@ pub struct PlatformSupport {
     pub bubblewrap_network: Option<BubblewrapNetworkSupport>,
 }
 
+/// The `bwrap --version` gate, injected so the reporting is testable without a
+/// host that has (or lacks) a suitable `bwrap`.
+#[cfg(target_os = "linux")]
+struct BwrapProbe<F>(F);
+
+/// The proxy-enforcement dependency walk, injected for the same reason.
+///
+/// Deliberately a different type from [`BwrapProbe`] rather than a second bare
+/// closure parameter: the two are passed adjacently, and a wrapper makes which
+/// is which readable at the call site instead of positional.
+#[cfg(target_os = "linux")]
+struct ProxyEnforcementProbe<G>(G);
+
+#[cfg(target_os = "linux")]
+fn linux_platform_support_with<F, G>(
+    bwrap: BwrapProbe<F>,
+    proxy_enforcement: ProxyEnforcementProbe<G>,
+) -> PlatformSupport
+where
+    F: FnOnce() -> Result<
+        bwrap_common::bwrap_version::BwrapVersion,
+        bwrap_common::bwrap_version::BwrapUnavailable,
+    >,
+    G: FnOnce() -> Result<(), String>,
+{
+    match (bwrap.0)() {
+        Ok(_) => PlatformSupport {
+            is_supported: true,
+            available_methods: vec!["bubblewrap".to_string()],
+            // Walked only once `bwrap` itself is usable. The network
+            // dependencies say nothing on a host that cannot run the backend at
+            // all, and the walk costs several subprocess spawns.
+            bubblewrap_network: Some(bubblewrap_network_support((proxy_enforcement.0)())),
+            ..Default::default()
+        },
+        Err(err) => PlatformSupport {
+            reason: Some(err.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
 /// Detect MXC support on the current host.
 ///
 /// Mirrors the SDK's `getPlatformSupport`, restricted to the backends the
@@ -84,20 +126,10 @@ pub fn platform_support() -> PlatformSupport {
         // `bwrap_common::bwrap_version::MIN_BWRAP_VERSION`). `lxc` is a
         // host-capability backend the SDK can't launch, so it is reported by
         // `available_backends()` rather than here.
-        match bwrap_common::bwrap_version::probe_bwrap() {
-            Ok(_) => PlatformSupport {
-                is_supported: true,
-                available_methods: vec!["bubblewrap".to_string()],
-                bubblewrap_network: Some(bubblewrap_network_support(
-                    bwrap_common::proxy_network::probe_proxy_enforcement(),
-                )),
-                ..Default::default()
-            },
-            Err(err) => PlatformSupport {
-                reason: Some(err.to_string()),
-                ..Default::default()
-            },
-        }
+        linux_platform_support_with(
+            BwrapProbe(bwrap_common::bwrap_version::probe_bwrap),
+            ProxyEnforcementProbe(bwrap_common::proxy_network::probe_proxy_enforcement),
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -179,9 +211,14 @@ pub fn isolation_session_available() -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::linux_platform_support_with;
     use super::platform_support;
     #[cfg(target_os = "linux")]
-    use super::{bubblewrap_network_support, ProxyEnforcement};
+    #[cfg(target_os = "linux")]
+    use super::{bubblewrap_network_support, BwrapProbe, ProxyEnforcement, ProxyEnforcementProbe};
+    #[cfg(target_os = "linux")]
+    use bwrap_common::bwrap_version::{BwrapUnavailable, BwrapVersion, MIN_BWRAP_VERSION};
     use wxc_common::wire::Containment;
 
     #[cfg(target_os = "linux")]
@@ -251,5 +288,57 @@ mod tests {
                 "reported method {method:?} is not a Containment wire name"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_bubblewrap_when_probe_succeeds() {
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
+            ProxyEnforcementProbe(|| Ok(())),
+        );
+        assert!(support.is_supported);
+        assert_eq!(support.reason, None);
+        assert_eq!(support.available_methods, ["bubblewrap"]);
+        assert_eq!(
+            support
+                .bubblewrap_network
+                .expect("network support is reported alongside a usable bwrap")
+                .proxy_enforcement,
+            ProxyEnforcement::Supported
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_preserves_probe_failure_reason() {
+        let failure = BwrapUnavailable::TooOld(BwrapVersion::new(0, 4, 1));
+        let expected = failure.to_string();
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Err(failure)),
+            ProxyEnforcementProbe(|| panic!("the network walk must not run without a usable bwrap")),
+        );
+        assert!(!support.is_supported);
+        assert_eq!(support.reason.as_deref(), Some(expected.as_str()));
+        assert!(support.available_methods.is_empty());
+        assert!(support.bubblewrap_network.is_none());
+    }
+
+    /// A host with `bwrap` but without the private-network tooling is still a
+    /// supported platform: only the proxy-enforcement capability is absent.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_support_reports_bubblewrap_without_proxy_enforcement() {
+        let support = linux_platform_support_with(
+            BwrapProbe(|| Ok(MIN_BWRAP_VERSION)),
+            ProxyEnforcementProbe(|| Err("slirp4netns not found".to_string())),
+        );
+        assert!(support.is_supported);
+        assert_eq!(support.available_methods, ["bubblewrap"]);
+        let network = support
+            .bubblewrap_network
+            .expect("network support is reported alongside a usable bwrap");
+        assert_eq!(network.proxy_enforcement, ProxyEnforcement::Unsupported);
+        assert_eq!(network.warnings, ["slirp4netns not found".to_string()]);
     }
 }

@@ -26,7 +26,14 @@ requiring root privileges or a container runtime.
   environment is built with `--clearenv` (bwrap 0.5.0+), so **bwrap 0.5.0 or
   newer** is required. Platform detection probes `bwrap --version` and reports
   the backend as unavailable — with the detected version — when the host is
-  below that floor.
+  below that floor. The probe has a 5-second deadline and retains at most 64 KB
+  from each output stream. On timeout, its process group is terminated with
+  `SIGKILL` so wrappers and descendants cannot keep the probe alive. Successful
+  Rust-executor advisory results are cached for the process lifetime; Rust
+  failures are not cached, and execution validation probes again before launch
+  so a changed PATH target cannot reuse an advisory result. The Node SDK caches
+  the complete `getPlatformSupport()` result, including failures, for the module
+  lifetime; restart the Node process after remediating the host.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
   plus `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX

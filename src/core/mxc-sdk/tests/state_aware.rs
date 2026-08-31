@@ -118,8 +118,9 @@ fn the_optin_admits_an_experimental_backend() {
     }
 }
 
-/// The gate's refusal carries no failing-API detail, because no platform API is
-/// in flight when it fires — the same shape a malformed request produces.
+/// The gate's refusal names no failing call, because no platform API is in
+/// flight when it fires — the same shape a malformed request produces. It
+/// offers no hint either.
 #[test]
 fn the_refusal_carries_no_api_call_detail() {
     let json = r#"{"phase":"provision","containment":"windows_sandbox"}"#;

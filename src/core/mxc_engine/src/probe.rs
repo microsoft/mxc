@@ -179,6 +179,14 @@ fn windows_backends(capture_denials_usable: bool) -> Vec<AvailableBackend> {
         ));
     }
 
+    // WHP is delay-loaded; check before pyhl::install warms a VM.
+    #[cfg(all(feature = "hyperlight", target_arch = "x86_64"))]
+    if hyperlight_common::is_whp_available() {
+        backends.push(AvailableBackend::tierless(
+            ContainmentBackend::Hyperlight.wire_name(),
+        ));
+    }
+
     backends
 }
 
@@ -335,7 +343,7 @@ mod tests {
     /// from `ContainmentBackend` (the same source as the `push` calls) so the
     /// emitted names can't be typo'd, and checked against the `wire::Containment`
     /// serde names so the two enums can't drift.
-    const EMITTABLE_BACKENDS: [ContainmentBackend; 7] = [
+    const EMITTABLE_BACKENDS: [ContainmentBackend; 8] = [
         ContainmentBackend::Seatbelt,
         ContainmentBackend::Bubblewrap,
         ContainmentBackend::Lxc,
@@ -343,6 +351,7 @@ mod tests {
         ContainmentBackend::WindowsSandbox,
         ContainmentBackend::Wslc,
         ContainmentBackend::IsolationSession,
+        ContainmentBackend::Hyperlight,
     ];
 
     /// Complements [`every_reported_backend_is_a_real_wire_name`] (host subset)

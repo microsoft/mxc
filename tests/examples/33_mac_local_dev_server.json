@@ -1,0 +1,28 @@
+{
+    "$schema": "../../schemas/stable/mxc-config.schema.0.8.0-alpha.json",
+    "_comment": "Run a test suite that talks to a local dev server. This is the config that avoids the hostLoopback trap -- ingress.default and ingress.hostLoopback must BOTH be 'allow', and omitting the ingress block entirely would silently deny localhost even with egress allowed. Seatbelt cannot scope the inbound grant, so this necessarily opens unscoped inbound too.",
+    "version": "0.8.0-alpha",
+    "containment": "seatbelt",
+    "process": {
+        "commandLine": "echo 'Local dev server access over loopback'; echo '============================================================'; echo ''; echo 'hostLoopback defaults to deny. Without the explicit ingress block below,'; echo 'this sandbox would reach the internet but NOT its own localhost.'; echo ''; rc=0; PORT=8931; python3 -m http.server $PORT --bind 127.0.0.1 > /dev/null 2>&1 & SRV=$!; sleep 2; echo \"Test 1: Serving on 127.0.0.1:$PORT and fetching it back...\"; if curl -s --max-time 5 --noproxy '*' http://127.0.0.1:$PORT/ > /dev/null 2>&1; then echo '  SUCCESS: loopback reachable'; else echo '  ERROR: loopback unreachable (this is what hostLoopback=deny looks like)'; rc=1; fi; kill $SRV 2>/dev/null; wait $SRV 2>/dev/null; echo ''; echo 'Test 2: Reaching the public internet (denied -- egress.default is deny)...'; if curl -s --max-time 5 --noproxy '*' https://example.com > /dev/null 2>&1; then echo '  ERROR: Should not have connected!'; rc=1; else echo '  SUCCESS: outbound blocked'; fi; echo ''; echo 'Note: allowing loopback also allows unscoped inbound -- Seatbelt cannot'; echo 'accept loopback while refusing LAN. See docs/seatbelt/seatbelt-backend.md.'; echo ''; echo '============================================================'; if [ $rc -eq 0 ]; then echo 'Local dev server test complete!'; else echo 'Local dev server test FAILED'; fi; exit $rc",
+        "cwd": "/tmp",
+        "timeout": 30000
+    },
+    "filesystem": {
+        "readwritePaths": [
+            "/tmp"
+        ],
+        "readonlyPaths": [
+            "/opt/homebrew"
+        ]
+    },
+    "network": {
+        "egress": {
+            "default": "deny"
+        },
+        "ingress": {
+            "default": "allow",
+            "hostLoopback": "allow"
+        }
+    }
+}

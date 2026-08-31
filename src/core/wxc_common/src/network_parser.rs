@@ -79,7 +79,7 @@ enum NetworkFormat {
 /// Use this to *reject* a host (LXC treats all of `127/8` as the container's
 /// own namespace loopback). Breadth is fail-safe here: a wider match rejects
 /// more. To *admit* a host, use [`host_is_canonical_loopback`].
-pub(crate) fn host_is_loopback(host: &str) -> bool {
+pub(crate) fn host_is_any_loopback(host: &str) -> bool {
     if host.eq_ignore_ascii_case("localhost") {
         return true;
     }
