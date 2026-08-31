@@ -33,12 +33,11 @@ use crate::network_iptables::{EgressHookPoint, NetworkIptablesManager};
 use wxc_common::logger::{Logger, Mode};
 
 /// What the watchdog needs to roll back on a fatal signal: the container
-/// name (so we can `lxc-destroy` it), the host-side veth interface when
-/// known (so we can also remove the iptables FORWARD hook the runner
-/// installed against it), the set of egress chains and hooks the runner has
-/// actually created so far (so we remove only those), and the container's init
-/// PID when known (so we can also remove the container-netns iptables INPUT
-/// rules the inbound chain installed inside it, before the container is
+/// name (so we can `lxc-destroy` it), the set of egress chains and hooks the
+/// runner has actually created so far (so we remove only those), and the
+/// container's init PID when known (so we can enter the container's network
+/// namespace to remove both the egress `OUTPUT` hooks and the inbound `INPUT`
+/// rules the two chains installed inside it, before the container is
 /// destroyed).
 ///
 /// All live behind one mutex on purpose. The watchdog takes a single

@@ -4,8 +4,8 @@
 //! Network policy enforcement via iptables rules scoped to the LXC container.
 //!
 //! Maps the platform-agnostic `ContainerPolicy` network settings to iptables
-//! and ip6tables rules applied to the container's virtual ethernet (veth)
-//! interface.
+//! and ip6tables rules installed inside the container's own network namespace,
+//! where they govern every packet the container sends.
 
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 use std::process::Command;
@@ -28,7 +28,7 @@ pub(crate) enum NetworkPlan {
     /// Loopback only, with no veth to filter.
     Isolated,
 
-    /// A veth, with chains scoped to it.
+    /// A veth, with chains governing what the container may send.
     Filtered,
 
     /// A veth with no chains, under a mode that asked for none.
@@ -518,7 +518,7 @@ pub fn chain_name_for(container_name: &str) -> String {
 /// Build the *inbound* (ingress) iptables chain name for a container.
 ///
 /// Uses a distinct `MXCI-` prefix (vs [`chain_name_for`]'s `MXC-`) so the
-/// inbound `INPUT` chain and the egress `FORWARD` chain for the same container
+/// inbound `INPUT` chain and the egress `OUTPUT` chain for the same container
 /// can never collide or be torn down for each other. Reuses the same base32
 /// hash machinery and stays within [`CHAIN_NAME_MAX_LEN`]; see
 /// [`INGRESS_CHAIN_SLUG_LEN`]. The hash is over the *original* container name,
@@ -577,7 +577,7 @@ impl NetworkIptablesManager {
         self.rules_applied
     }
 
-    /// Leave the chain and its FORWARD hooks installed when this manager is
+    /// Leave the chain and its OUTPUT hooks installed when this manager is
     /// dropped.
     pub fn set_preserve_policy(&mut self, preserve: bool) {
         self.preserve_policy = preserve;
@@ -1931,7 +1931,7 @@ impl NetworkIptablesManager {
     /// Apply network firewall rules based on the container policy.
     ///
     /// On any failure after resources are created, the inner call rolls back
-    /// exactly the per-family chains and FORWARD hooks this attempt installed
+    /// exactly the per-family chains and OUTPUT hooks this attempt installed
     /// before the error is returned, so a retry does not trip over a leftover
     /// `MXC-<name>` chain ("chain already exists") and a partial failure never
     /// tears down a chain this attempt did not create.
@@ -2079,7 +2079,7 @@ impl NetworkIptablesManager {
         }
     }
 
-    /// Install the per-family chains, rules, and FORWARD hooks, recording each
+    /// Install the per-family chains, rules, and OUTPUT hooks, recording each
     /// resource in `created` immediately after it is successfully installed so
     /// the caller can roll back precisely on any later failure.
     fn install_firewall_rules(
