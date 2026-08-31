@@ -96,7 +96,7 @@ Assign matching owner(s) with `assign_to_user` using this map:
 | @mgudgin | SDK configuration and policy (Area-SDK-Configuration, Area-SDK-Policy) |
 | @huzaifa-d | SDK API, executor schema, and TypeScript build (Area-SDK-Api, Area-Executor-Schema, Area-Build-TypeScript) |
 | @bbonaby | Rust build (Area-Build-Rust) |
-| @theelliotm | macOS / Seatbelt, SDK and executor and validation test infrastructure (Area-Test-SDK, Area-Test-Executor) |
+| @theelliotm | SDK and executor test infrastructure (Area-Test-SDK, Area-Test-Executor) |
 
 Rules:
 
