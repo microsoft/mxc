@@ -181,7 +181,7 @@ This is the cross-backend
 
 | Field | Behavior |
 |---|---|
-| `egress.default` | `"deny"` → no outbound rule; baseline `(deny default)` blocks all IP sockets. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
+| `egress.default` | `"deny"` → no *general* outbound rule; baseline `(deny default)` blocks IP sockets, except for the host-loopback path (`ingress.hostLoopback`) and a `runtimeConfig.networkProxy` endpoint, which are carved out of it. `"allow"` → `(allow network-outbound)`, `(allow network-bind (local ip))`, `(allow system-socket)`. |
 | `egress.allow` / `egress.deny` | **Rejected** if non-empty — no CIDR/port/protocol primitive exists |
 | `ingress.default` | `"allow"` → `(allow network-inbound (local ip))`. This is what permits `listen()` — `network-bind` alone is not enough. |
 | `ingress.hostLoopback` | Controls sandbox → host loopback. Must equal `ingress.default`. **Defaults to `"deny"`.** |
@@ -251,13 +251,13 @@ This distinction matters, and it's easy to get backwards.
 
 | Question | Enforced? |
 |---|---|
-| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced.** |
+| Can the sandbox reach anything *other than* the proxy? | **No — kernel-enforced**, provided `ingress.hostLoopback` stays `"deny"` (see the caveat below). |
 | Will a client actually *speak to* the proxy? | Not enforced — cooperative. |
 | Is traffic transparently redirected into the proxy? | No. |
 
 **Egress confinement is real.** A proxy is only ever accepted alongside a deny
-egress default (proxy + `"allow"` is [rejected](#network)), so the profile
-always ends up as:
+egress default (proxy + `"allow"` is [rejected](#network)), so with the
+recommended `hostLoopback: "deny"` the profile ends up as:
 
 ```lisp
 (deny default)
@@ -267,6 +267,15 @@ always ends up as:
 That single port is the sandbox's entire outbound universe. The kernel enforces
 it. A client that opens raw sockets and ignores `HTTP_PROXY` **cannot** reach
 the internet or any other host-local service — it simply fails to connect.
+
+> ⚠️ **`ingress.hostLoopback: "allow"` widens that.** It is accepted alongside a
+> proxy, and it emits `(allow network-outbound (remote ip "localhost:*"))` in
+> addition to the port-scoped proxy allow (the proxy rule is written last so it
+> survives if either ever becomes a deny). Outbound is then *every port on this
+> host*, not just the proxy port, and the confinement claim above no longer
+> holds. Keep `ingress: {"default": "deny", "hostLoopback": "deny"}` whenever
+> the proxy is meant to be the only way out. This won't prevent TCP responses
+> from reaching the sandbox.
 
 **Proxy usage is cooperative.** MXC injects `HTTP_PROXY` / `HTTPS_PROXY` /
 `ALL_PROXY` (and lowercase forms) and strips any caller-supplied proxy vars.
@@ -489,6 +498,7 @@ once you can see the rules that were emitted.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Internet works, but `localhost:3000` is refused | [The `hostLoopback` trap](#the-hostloopback-trap) — you set `egress.default: "allow"` and left `ingress` out, so `hostLoopback` defaulted to `deny` | Add `ingress: {default: "allow", hostLoopback: "allow"}` |
+| `egress.default: "deny"`, but the sandbox still reaches services on your machine | `ingress.hostLoopback: "allow"` opens every port on every address of this host — it isn't gated by `egress`. | Set/omit `ingress: {default: "deny", hostLoopback: "deny"}`, or use a loopback `runtimeConfig.networkProxy` for one port only |
 | All network fails and you didn't configure any | Omitting `network` denies everything — it isn't "unset", it's deny | Add an explicit `egress`/`ingress` block |
 | `guiAccess: true` rejected: "cannot be combined with `ui.disable=true`" | `ui.disable` defaults to `true`, so an omitted `ui` section conflicts | Add `ui: {disable: false}` |
 | `readwritePaths` on `/System` or `/usr` still can't write | SIP outranks the profile | Nothing to fix — pick a different path |
