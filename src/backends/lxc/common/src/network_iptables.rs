@@ -794,32 +794,57 @@ impl NetworkIptablesManager {
     /// The exemption keeping a container's own DHCP client alive.
     ///
     /// This chain hangs off OUTPUT inside the container's namespace, so unlike
-    /// a host-side FORWARD hook it sees the container's traffic to the bridge
-    /// itself. A DHCP client renewing its lease unicasts to the server it
-    /// leased from, and without this pair that renewal lands on the closing
-    /// DROP and the container silently loses its address.
+    /// a host-side FORWARD hook it sees the container's traffic to the DHCP
+    /// server on the bridge. Without this the exchange lands on the closing
+    /// DROP and the container eventually loses the address every other rule is
+    /// written against.
     ///
-    /// The match is the client half of the exchange only -- source port 68
-    /// (546 on IPv6) to destination port 67 (547) -- so it opens the lease
-    /// maintenance path and no other UDP destination. Both pairs are emitted
-    /// for both families: the rules are syntactically family-agnostic, and the
-    /// pair belonging to the other family simply never matches.
+    /// The rule is scoped three ways so it cannot become an egress bypass:
     ///
-    /// The reply is a conntrack-established response to this request, so the
-    /// ingress chain's `ESTABLISHED,RELATED` accept already readmits it and no
-    /// matching inbound rule is required.
-    fn build_dhcp_client_exemption_rule_args(chain_name: &str) -> Vec<Vec<String>> {
-        vec![
-            vec![
-                "-A", chain_name, "-p", "udp", "--sport", "68", "--dport", "67", "-j", "ACCEPT",
-            ],
-            vec![
-                "-A", chain_name, "-p", "udp", "--sport", "546", "--dport", "547", "-j", "ACCEPT",
-            ],
+    /// * **By destination**, to the link-scoped address the client broadcasts
+    ///   to -- `255.255.255.255` on IPv4, the `ff02::1:2` all-servers multicast
+    ///   group on IPv6. Neither is ever routed off the local link, so no rule
+    ///   here reaches an off-box destination the policy denies.
+    /// * **By port pair**, to the client half of the exchange only (68 to 67,
+    ///   546 to 547), so it opens no other UDP service.
+    /// * **By family**, so the IPv4 chain never carries the DHCPv6 ports and
+    ///   the IPv6 chain never carries the DHCPv4 ones.
+    ///
+    /// The unicast RENEW a client sends directly to its server at T1 is
+    /// deliberately *not* opened: permitting it needs an ACCEPT naming a host
+    /// discovered at runtime, and a client whose renewal goes unanswered
+    /// rebinds by broadcast at T2 (RFC 2131), which this rule covers. In
+    /// practice most clients never reach this chain at all -- `dhcpcd` and
+    /// `udhcpc` drive the exchange over an `AF_PACKET` raw socket, which
+    /// bypasses netfilter entirely.
+    ///
+    /// The reply is a conntrack-established response, so the ingress chain's
+    /// `ESTABLISHED,RELATED` accept readmits it and no inbound rule is needed.
+    fn build_dhcp_client_exemption_rule_args(
+        chain_name: &str,
+        family: IpFamily,
+    ) -> Vec<Vec<String>> {
+        let (destination, client_port, server_port) = match family {
+            IpFamily::V4 => ("255.255.255.255", "68", "67"),
+            IpFamily::V6 => ("ff02::1:2", "546", "547"),
+        };
+        vec![vec![
+            "-A",
+            chain_name,
+            "-d",
+            destination,
+            "-p",
+            "udp",
+            "--sport",
+            client_port,
+            "--dport",
+            server_port,
+            "-j",
+            "ACCEPT",
         ]
         .into_iter()
-        .map(|args| args.into_iter().map(String::from).collect())
-        .collect()
+        .map(String::from)
+        .collect()]
     }
 
     /// The unconditional port 53 accept that only the legacy host-list path
@@ -2145,25 +2170,39 @@ impl NetworkIptablesManager {
                 );
             }
         } else {
-            let mut base_rules = Self::build_base_chain_rule_args(&self.chain_name);
+            let base_rules = Self::build_base_chain_rule_args(&self.chain_name);
 
             // Lease maintenance is not egress the policy governs -- it is how
             // the container keeps the address every other rule is written
-            // against -- so both schemas carry it. Proxy mode deliberately
-            // does not: that posture is "the proxy and nothing else", and a
-            // client there falls back to broadcast rebinding, which udhcpc
-            // drives over an AF_PACKET raw socket that never reaches netfilter.
-            base_rules.extend(Self::build_dhcp_client_exemption_rule_args(
-                &self.chain_name,
-            ));
+            // against -- so both schemas carry it. It is emitted per family:
+            // the destination and the port pair differ, and the IPv4 chain has
+            // no business carrying DHCPv6 ports or vice versa. Proxy mode
+            // deliberately carries none of this: that posture is "the proxy and
+            // nothing else".
+            let mut tail_rules: Vec<Vec<String>> = Vec::new();
 
             // Only the legacy schema carries the unconditional port 53 accept.
             if !uses_directional_keys {
-                base_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
+                tail_rules.extend(Self::build_legacy_dns_exemption_rule_args(&self.chain_name));
             }
+
             self.run_iptables_rule_args(&base_rules, logger)?;
+            self.run_iptables_rule_args(
+                &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V4),
+                logger,
+            )?;
+            if !tail_rules.is_empty() {
+                self.run_iptables_rule_args(&tail_rules, logger)?;
+            }
             if ipv6_enabled {
                 self.run_ip6tables_rule_args(&base_rules, logger)?;
+                self.run_ip6tables_rule_args(
+                    &Self::build_dhcp_client_exemption_rule_args(&self.chain_name, IpFamily::V6),
+                    logger,
+                )?;
+                if !tail_rules.is_empty() {
+                    self.run_ip6tables_rule_args(&tail_rules, logger)?;
+                }
             }
 
             // Resolve every allow/block entry exactly once and reuse that single
@@ -3371,35 +3410,80 @@ mod tests {
         // builder may name an address family or a v4-only protocol.
         let base = NetworkIptablesManager::build_base_chain_rule_args("MXC-test");
         let dns = NetworkIptablesManager::build_legacy_dns_exemption_rule_args("MXC-test");
-        let dhcp = NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-test");
 
         assert_eq!(base.len(), 2);
         assert_eq!(dns.len(), 2);
-        assert_eq!(dhcp.len(), 2);
-        for rule in base.iter().chain(dns.iter()).chain(dhcp.iter()) {
+        for rule in base.iter().chain(dns.iter()) {
             assert!(!rule.iter().any(|arg| arg == "icmp"));
             assert!(!rule.iter().any(|arg| arg == "icmpv6"));
         }
     }
 
     #[test]
-    fn the_dhcp_exemption_opens_only_the_client_half_of_the_exchange() {
-        let rules = NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp");
+    fn the_dhcp_exemption_is_scoped_by_family_destination_and_port_pair() {
+        let v4 =
+            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V4);
+        let v6 =
+            NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", IpFamily::V6);
 
         assert_eq!(
-            rules,
-            vec![
-                strings(&[
-                    "-A", "MXC-dhcp", "-p", "udp", "--sport", "68", "--dport", "67", "-j",
-                    "ACCEPT",
-                ]),
-                strings(&[
-                    "-A", "MXC-dhcp", "-p", "udp", "--sport", "546", "--dport", "547", "-j",
-                    "ACCEPT",
-                ]),
-            ],
-            "a renewal leaves the client port for the server port; nothing else is opened"
+            v4,
+            vec![strings(&[
+                "-A",
+                "MXC-dhcp",
+                "-d",
+                "255.255.255.255",
+                "-p",
+                "udp",
+                "--sport",
+                "68",
+                "--dport",
+                "67",
+                "-j",
+                "ACCEPT",
+            ])],
+            "IPv4 opens the link-scoped broadcast and the client port pair only"
         );
+        assert_eq!(
+            v6,
+            vec![strings(&[
+                "-A",
+                "MXC-dhcp",
+                "-d",
+                "ff02::1:2",
+                "-p",
+                "udp",
+                "--sport",
+                "546",
+                "--dport",
+                "547",
+                "-j",
+                "ACCEPT",
+            ])],
+            "IPv6 opens the all-servers multicast group and the client port pair only"
+        );
+    }
+
+    #[test]
+    fn the_dhcp_exemption_never_names_an_unscoped_destination() {
+        // The bypass this guards: an ACCEPT matching the DHCP port pair with no
+        // destination lets container root send UDP from port 68 to *any*
+        // off-box host on port 67, straight through a default-deny policy.
+        for family in [IpFamily::V4, IpFamily::V6] {
+            for rule in
+                NetworkIptablesManager::build_dhcp_client_exemption_rule_args("MXC-dhcp", family)
+            {
+                let destination = rule
+                    .iter()
+                    .position(|arg| arg == "-d")
+                    .and_then(|i| rule.get(i + 1))
+                    .unwrap_or_else(|| panic!("every DHCP rule must name a destination: {rule:?}"));
+                assert!(
+                    !NetworkIptablesManager::covers_every_address(destination),
+                    "a DHCP rule must not match every address: {rule:?}"
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

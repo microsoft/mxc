@@ -412,24 +412,77 @@ fn a_filtered_chain_lets_the_dhcp_client_renew_its_lease() {
     let (manager, issued, result) = apply_and_collect("dhcp-renew", &policy);
     assert!(result.is_ok(), "apply must succeed, got {result:?}");
 
+    let v4 = appended_rules(&issued, "iptables", manager.chain_name());
+    let v6 = appended_rules(&issued, "ip6tables", manager.chain_name());
+    assert!(
+        !v4.is_empty() && !v6.is_empty(),
+        "both chains must have been programmed; issued: {issued:?}"
+    );
+
+    let dhcp_v4 = |rule: &Vec<String>| has_pair(rule, "--sport", "68");
+    let dhcp_v6 = |rule: &Vec<String>| has_pair(rule, "--sport", "546");
+
+    let renewal = v4
+        .iter()
+        .find(|rule| dhcp_v4(rule))
+        .expect("the IPv4 chain must let the DHCPv4 client through");
+    assert!(
+        has_pair(renewal, "-d", "255.255.255.255") && has_pair(renewal, "--dport", "67"),
+        "the DHCPv4 exemption must be scoped to the link broadcast; actual: {renewal:?}"
+    );
+
+    let renewal6 = v6
+        .iter()
+        .find(|rule| dhcp_v6(rule))
+        .expect("the IPv6 chain must let the DHCPv6 client through");
+    assert!(
+        has_pair(renewal6, "-d", "ff02::1:2") && has_pair(renewal6, "--dport", "547"),
+        "the DHCPv6 exemption must be scoped to the all-servers group; actual: {renewal6:?}"
+    );
+
+    // Each family carries only its own ports -- the other family's pair would
+    // be a rule that can never match.
+    assert!(
+        !v4.iter().any(|rule| dhcp_v6(rule)),
+        "the IPv4 chain must not carry the DHCPv6 ports; actual: {v4:?}"
+    );
+    assert!(
+        !v6.iter().any(|rule| dhcp_v4(rule)),
+        "the IPv6 chain must not carry the DHCPv4 ports; actual: {v6:?}"
+    );
+}
+
+// The DHCP exemption must not become an egress bypass: an ACCEPT on the port
+// pair with no destination lets container root send UDP from port 68 to any
+// off-box host on port 67, through a policy that denies exactly that.
+#[test]
+fn no_dhcp_rule_reaches_an_off_box_destination() {
+    let policy = ContainerPolicy {
+        network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        default_network_policy: NetworkPolicy::Block,
+        allowed_hosts: vec!["10.1.1.1".to_string()],
+        ..Default::default()
+    };
+
+    let (manager, issued, result) = apply_and_collect("dhcp-noexfil", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
     for binary in ["iptables", "ip6tables"] {
-        let rules = appended_rules(&issued, binary, manager.chain_name());
-        assert!(
-            !rules.is_empty(),
-            "the {binary} chain must have been programmed at all; issued: {issued:?}"
-        );
-        assert!(
-            rules
+        for rule in appended_rules(&issued, binary, manager.chain_name()) {
+            let is_dhcp = has_pair(rule, "--dport", "67") || has_pair(rule, "--dport", "547");
+            if !is_dhcp {
+                continue;
+            }
+            let destination = rule
                 .iter()
-                .any(|rule| has_pair(rule, "--sport", "68") && has_pair(rule, "--dport", "67")),
-            "a filtered chain must let the DHCPv4 client renew; actual: {rules:?}"
-        );
-        assert!(
-            rules
-                .iter()
-                .any(|rule| has_pair(rule, "--sport", "546") && has_pair(rule, "--dport", "547")),
-            "a filtered chain must let the DHCPv6 client renew; actual: {rules:?}"
-        );
+                .position(|arg| arg == "-d")
+                .and_then(|i| rule.get(i + 1))
+                .unwrap_or_else(|| panic!("a DHCP rule must name a destination: {rule:?}"));
+            assert!(
+                destination == "255.255.255.255" || destination == "ff02::1:2",
+                "a DHCP rule may only name a link-scoped destination; actual: {rule:?}"
+            );
+        }
     }
 }
 
