@@ -43,10 +43,11 @@ needed by the BaseContainer compatibility checks.
 ### Capability facts
 
 Add an always-serialized `nativeCaptureAvailable: bool` field to `ProbeFacts`.
-The value will be gathered from the existing native capture usability probe.
-It describes whether the host can use the preferred PSEC plus Learning Mode
-capture path; it does not describe overall `captureDenials` support because
-guarded WPR may provide that support.
+The value will be gathered from the same non-tracing PSEC and Learning Mode API
+predicate used by native runtime selection. It describes whether the host has
+the preferred native capture path; it does not describe overall
+`captureDenials` support because guarded WPR may provide that support, nor does
+it guarantee that a particular request is compatible with PSEC.
 
 The implementation will gather host facts once and pass them to a small
 side-effect-free internal decision helper. Unit tests can supply deterministic
