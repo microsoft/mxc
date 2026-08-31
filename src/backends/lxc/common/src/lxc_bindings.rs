@@ -7,6 +7,12 @@
 //! function pointer fields. This module provides an RAII `LxcContainer` wrapper
 //! that calls the appropriate function pointers and handles cleanup.
 
+/// Fences the `lxc.mount.entry` lines this backend owns, so a reused container
+/// can have them replaced without disturbing entries a template or an operator
+/// wrote into the same config.
+const MANAGED_MOUNTS_BEGIN: &str = "# BEGIN MXC managed mounts (rewritten every run)";
+const MANAGED_MOUNTS_END: &str = "# END MXC managed mounts";
+
 /// Resolve the default LXC storage path the way liblxc does.
 ///
 /// Replicates the algorithm liblxc applies when no explicit `-P <lxcpath>` is
@@ -284,6 +290,12 @@ impl LxcContainer {
     /// message includes the key, value, and target path so users can tell at
     /// a glance whether the failure is about the entry contents (e.g. a
     /// nonexistent mount source) or about the config file itself.
+    ///
+    /// This appends and never replaces, so it is the wrong primitive for
+    /// anything a reused container must not accumulate: a container preserved
+    /// by `destroyOnExit = false` carries every item written to it by every
+    /// earlier run. Per-run policy belongs in a replaceable block instead --
+    /// see [`Self::set_managed_mount_entries`].
     pub fn set_config_item(&self, key: &str, value: &str) -> Result<(), String> {
         let config_path = self.config_file_path();
         let entry = format!("{} = {}\n", key, value);
@@ -301,6 +313,92 @@ impl LxcContainer {
                     key, value, e, config_path
                 )
             })
+    }
+
+    /// Replace the block of `lxc.mount.entry` items this backend owns.
+    ///
+    /// A container config accumulates: `set_config_item` appends, and a
+    /// container preserved by `destroyOnExit = false` is reused by the next
+    /// run. Without this, a later run inherits every mount an earlier one was
+    /// granted, so a run given no filesystem policy at all can still read a
+    /// directory a previous run was handed.
+    ///
+    /// Only the lines this backend wrote are touched. They are fenced between
+    /// marker comments, so mount entries a template or an operator put in the
+    /// config by hand survive untouched -- as do the entries in the files the
+    /// config `lxc.include`s, which are never rewritten here.
+    ///
+    /// The rewrite goes through a sibling temporary file and a rename, so an
+    /// interrupted run leaves the previous config intact rather than a
+    /// half-written one. Passing an empty slice clears the block and writes no
+    /// replacement, which is what a run carrying no filesystem policy needs.
+    pub fn set_managed_mount_entries(&self, entries: &[String]) -> Result<(), String> {
+        let config_path = self.config_file_path();
+        let existing = std::fs::read_to_string(&config_path).map_err(|e| {
+            format!(
+                "Failed to read container config to replace its mount entries: {} (config file: {})",
+                e, config_path
+            )
+        })?;
+
+        let mut out = Self::strip_managed_mount_entries(&existing);
+        if !entries.is_empty() {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(MANAGED_MOUNTS_BEGIN);
+            out.push('\n');
+            for entry in entries {
+                out.push_str("lxc.mount.entry = ");
+                out.push_str(entry);
+                out.push('\n');
+            }
+            out.push_str(MANAGED_MOUNTS_END);
+            out.push('\n');
+        }
+
+        let temp_path = format!("{}.mxc-tmp", config_path);
+        std::fs::write(&temp_path, out.as_bytes()).map_err(|e| {
+            format!(
+                "Failed to stage rewritten container config: {} (temp file: {})",
+                e, temp_path
+            )
+        })?;
+        std::fs::rename(&temp_path, &config_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            format!(
+                "Failed to install rewritten container config: {} (config file: {})",
+                e, config_path
+            )
+        })
+    }
+
+    /// Drop the marker-fenced managed block from a container config body.
+    ///
+    /// Every other line is preserved verbatim, including comments, blanks, and
+    /// mount entries outside the block. A config holding an opening marker with
+    /// no closing one -- the shape a run interrupted mid-rewrite would leave --
+    /// is treated as fenced to end of file, so the leftovers are cleared rather
+    /// than inherited.
+    fn strip_managed_mount_entries(config: &str) -> String {
+        let mut out = String::with_capacity(config.len());
+        let mut inside = false;
+        for line in config.lines() {
+            let trimmed = line.trim();
+            if trimmed == MANAGED_MOUNTS_BEGIN {
+                inside = true;
+                continue;
+            }
+            if trimmed == MANAGED_MOUNTS_END {
+                inside = false;
+                continue;
+            }
+            if !inside {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out
     }
 
     /// Start the container with `network`.
@@ -704,6 +802,154 @@ mod tests {
             err.contains("ghost/config"),
             "error must mention container config path, got: {}",
             err
+        );
+    }
+
+    // ---- managed mount entries -------------------------------------------
+
+    /// Build a container whose config file lives in a fresh temp directory,
+    /// seeded with `body`. Returns the container and its config path.
+    fn container_with_config(body: &str) -> (LxcContainer, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "mxc-lxc-cfg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let dir = base.join("box");
+        std::fs::create_dir_all(&dir).expect("temp container dir");
+        let config = dir.join("config");
+        std::fs::write(&config, body).expect("seed config");
+        let container = LxcContainer::new("box", Some(base.to_str().unwrap()));
+        (container, config)
+    }
+
+    const TEMPLATE_CONFIG: &str = "# Template used to create this container\n\
+                                   lxc.include = /usr/share/lxc/config/common.conf\n\
+                                   lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n\
+                                   lxc.mount.entry = /opt/handwritten opt none bind 0 0\n";
+
+    #[test]
+    fn a_reused_container_does_not_inherit_an_earlier_runs_mounts() {
+        // The leak this guards: a container preserved by destroyOnExit=false is
+        // reused, and a later run granted nothing at all could still read the
+        // directory an earlier run was handed.
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        container
+            .set_managed_mount_entries(&["/tmp/secret tmp/secret none bind,create=dir 0 0".into()])
+            .expect("first run programs its mount");
+        let after_first = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            after_first.contains("/tmp/secret"),
+            "the first run's mount must be programmed; got:\n{after_first}"
+        );
+
+        container
+            .set_managed_mount_entries(&[])
+            .expect("second run grants nothing");
+        let after_second = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            !after_second.contains("/tmp/secret"),
+            "a run granting no filesystem policy must not inherit the earlier mount; got:\n{after_second}"
+        );
+    }
+
+    #[test]
+    fn rewriting_mounts_preserves_every_line_the_backend_does_not_own() {
+        // Mount entries a template or an operator wrote are not ours to
+        // remove; only the fenced block is.
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        container
+            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .expect("program mounts");
+        container
+            .set_managed_mount_entries(&[])
+            .expect("clear mounts");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        for line in [
+            "# Template used to create this container",
+            "lxc.include = /usr/share/lxc/config/common.conf",
+            "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs",
+            "lxc.mount.entry = /opt/handwritten opt none bind 0 0",
+        ] {
+            assert!(
+                body.contains(line),
+                "{line:?} must survive the rewrite; got:\n{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_runs_do_not_accumulate_managed_blocks() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+
+        for _ in 0..3 {
+            container
+                .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+                .expect("program mounts");
+        }
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        assert_eq!(
+            body.matches("lxc.mount.entry = /data").count(),
+            1,
+            "the block must be replaced, not appended; got:\n{body}"
+        );
+        assert_eq!(
+            body.matches(MANAGED_MOUNTS_BEGIN).count(),
+            1,
+            "exactly one managed block may exist; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_managed_block_is_cleared_rather_than_inherited() {
+        // The shape a run interrupted mid-rewrite would leave behind. Treating
+        // it as fenced to end of file fails closed: the stale grant goes away.
+        let truncated = format!(
+            "lxc.rootfs.path = dir:/var/lib/lxc/box/rootfs\n{}\nlxc.mount.entry = /tmp/secret tmp/secret none bind 0 0\n",
+            MANAGED_MOUNTS_BEGIN
+        );
+        let (container, config) = container_with_config(&truncated);
+
+        container
+            .set_managed_mount_entries(&[])
+            .expect("clear mounts");
+
+        let body = std::fs::read_to_string(&config).expect("read config");
+        assert!(
+            !body.contains("/tmp/secret"),
+            "an unterminated block must not survive; got:\n{body}"
+        );
+        assert!(
+            body.contains("lxc.rootfs.path"),
+            "lines before the marker must survive; got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn a_failed_rewrite_leaves_no_temporary_file_behind() {
+        let (container, config) = container_with_config(TEMPLATE_CONFIG);
+        let err = LxcContainer::new("ghost", Some("/nonexistent-mxc-base"))
+            .set_managed_mount_entries(&[])
+            .expect_err("a missing config must fail loudly");
+        assert!(
+            err.contains("ghost/config"),
+            "error must name the config file, got: {err}"
+        );
+
+        container
+            .set_managed_mount_entries(&["/data data none bind,create=dir 0 0".into()])
+            .expect("program mounts");
+        let temp = format!("{}.mxc-tmp", config.display());
+        assert!(
+            !std::path::Path::new(&temp).exists(),
+            "the staging file must not outlive a successful rewrite"
         );
     }
 
