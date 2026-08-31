@@ -31,6 +31,9 @@ public enum ContainmentBackend
 
     /// <summary>Linux Bubblewrap.</summary>
     Bubblewrap,
+
+    /// <summary>Windows Hyperlight micro-VM.</summary>
+    Hyperlight,
 }
 
 /// <summary>The effective Windows ProcessContainer isolation tier.</summary>
