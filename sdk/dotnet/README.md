@@ -132,12 +132,53 @@ every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
-`BackendCapability.CaptureDenials`.
+`BackendCapability.CaptureDenials`, and `Warnings` explains why an optional
+capability is absent.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
 Cross-check `GetPlatformSupport()` and continue handling
 `ErrorCode.BackendUnavailable`.
+
+#### Bubblewrap proxy-only egress (Linux)
+
+Schema `0.8.0-alpha`+ `network.proxy` runs the sandbox in a private network
+namespace and default-drops everything except the proxy endpoint. That needs
+host tooling (`slirp4netns`, util-linux `unshare` and `nsenter`, the `iptables`
+family) plus unprivileged user and network namespaces the kernel will actually
+grant — see
+[`docs/bwrap-support/bubblewrap-backend.md`](../../docs/bwrap-support/bubblewrap-backend.md).
+There is deliberately no fallback to the weaker shared-host-network model, so a
+request the host cannot satisfy fails rather than silently degrading.
+
+Unlike the TypeScript and Rust SDKs — which surface this as a
+`bubblewrapNetwork` field on platform support — the C# SDK reports it through
+the backend array, as a capability plus its absence reason:
+
+```csharp
+AvailableBackend? bubblewrap = MxcSandbox.GetAvailableBackends()
+    .FirstOrDefault(backend => backend.Backend == ContainmentBackend.Bubblewrap);
+
+if (bubblewrap is null)
+{
+    Console.Error.WriteLine("Bubblewrap is not available on this host.");
+}
+else if (bubblewrap.Capabilities.Contains(BackendCapability.ProxyEnforcement))
+{
+    // Safe to send an 0.8 network.proxy policy.
+}
+else
+{
+    // Warnings name the dependency that is missing or unusable.
+    Console.Error.WriteLine(string.Join(Environment.NewLine, bubblewrap.Warnings));
+}
+```
+
+Reported **fail closed**: when the probe cannot run, the capability is absent
+with a warning, never reported as supported. The check is advisory rather than
+a gate — the runner probes again at launch, because a package can be removed in
+between — and not exhaustive, since a missing `nf_conntrack` module is only
+detectable once the rules are installed and so still surfaces at launch.
 
 ### Full requests and explicit containment
 
