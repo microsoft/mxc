@@ -396,6 +396,67 @@ fn without_a_proxy_the_base_exemptions_and_host_lists_are_still_programmed() {
     );
 }
 
+// A chain hanging off OUTPUT inside the container's namespace sees the
+// container's own DHCP renewal, which a default-deny egress chain would
+// otherwise drop -- costing the container the address the rest of the policy
+// is written against.
+#[test]
+fn a_filtered_chain_lets_the_dhcp_client_renew_its_lease() {
+    let policy = ContainerPolicy {
+        network_enforcement_mode: NetworkEnforcementMode::Firewall,
+        default_network_policy: NetworkPolicy::Block,
+        allowed_hosts: vec!["10.1.1.1".to_string()],
+        ..Default::default()
+    };
+
+    let (manager, issued, result) = apply_and_collect("dhcp-renew", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    for binary in ["iptables", "ip6tables"] {
+        let rules = appended_rules(&issued, binary, manager.chain_name());
+        assert!(
+            !rules.is_empty(),
+            "the {binary} chain must have been programmed at all; issued: {issued:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|rule| has_pair(rule, "--sport", "68") && has_pair(rule, "--dport", "67")),
+            "a filtered chain must let the DHCPv4 client renew; actual: {rules:?}"
+        );
+        assert!(
+            rules
+                .iter()
+                .any(|rule| has_pair(rule, "--sport", "546") && has_pair(rule, "--dport", "547")),
+            "a filtered chain must let the DHCPv6 client renew; actual: {rules:?}"
+        );
+    }
+}
+
+// Proxy mode is "the proxy and nothing else", and a client that cannot
+// unicast a renewal falls back to broadcast rebinding, which udhcpc drives
+// over an AF_PACKET raw socket that never reaches netfilter at all.
+#[test]
+fn proxy_mode_opens_no_dhcp_port() {
+    let policy = policy_with_proxy("10.9.8.7", 3128);
+
+    let (manager, issued, result) = apply_and_collect("proxy-nodhcp", &policy);
+    assert!(result.is_ok(), "apply must succeed, got {result:?}");
+
+    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    assert!(
+        !rules.is_empty(),
+        "the proxied chain must have been programmed at all; issued: {issued:?}"
+    );
+
+    for rule in rules {
+        assert!(
+            !has_pair(rule, "--dport", "67") && !has_pair(rule, "--dport", "547"),
+            "a proxied chain must not open DHCP; actual: {rule:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IPv6 proxy endpoints.
 // ---------------------------------------------------------------------------
