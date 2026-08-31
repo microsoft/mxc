@@ -341,6 +341,7 @@ mod tests {
 
     #[test]
     fn request_capabilities_control_base_container_selection() {
+        let _lock = crate::test_env::lock();
         let request = ExecutionRequest::default();
         let probes = test_probe_facts(false);
 
@@ -353,12 +354,13 @@ mod tests {
     #[test]
     fn capture_denials_remains_launchable_on_appcontainer_fallback() {
         let _guard = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
-        let mut policy = ContainerPolicy::default();
-        policy.capture_denials = Some(Default::default());
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
         let request = request_with_policy(policy);
 
-        let output =
-            run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
+        let output = run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
         assert!(!output.probes.native_capture_available);
