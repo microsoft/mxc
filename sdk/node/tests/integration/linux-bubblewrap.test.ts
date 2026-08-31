@@ -185,6 +185,9 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
 // fixtures, but a fixture cannot catch the two drifting apart. This pins the
 // transport: the real `lxc-exec --available-backends` payload is fed to the
 // real SDK parser, so a rename or reshape on either side fails here.
+//
+// The gate is only "Linux with a bwrap on PATH" — whether that bwrap is
+// actually *usable* is what the tests below assert, not something they assume.
 describe('lxc-exec --available-backends contract', {
   skip: !isLinuxBubblewrap
     ? 'the backend-discovery contract test requires Linux with bwrap installed'
@@ -211,7 +214,8 @@ describe('lxc-exec --available-backends contract', {
         typeof entry.backend, 'string',
         `every entry needs a string 'backend' wire name, got: ${stdout}`);
       // The parser reads these as string arrays and would silently fall back
-      // to "unsupported" if either became an object or a bare string.      for (const field of ['capabilities', 'warnings'] as const) {
+      // to "unsupported" if either became an object or a bare string.
+      for (const field of ['capabilities', 'warnings'] as const) {
         if (entry[field] !== undefined) {
           assert.ok(Array.isArray(entry[field]), `'${field}' must be an array, got: ${stdout}`);
           for (const value of entry[field] as unknown[]) {
@@ -221,17 +225,36 @@ describe('lxc-exec --available-backends contract', {
         }
       }
     }
-
-    // bwrap is on PATH (the suite gate), so the native probe must report it
-    // under exactly the wire name the parser matches on.
-    assert.ok(
-      backends.some((entry) => entry.backend === 'bubblewrap'),
-      `expected a 'bubblewrap' entry, got: ${stdout}`);
   });
 
-  it('projects the native payload into PlatformSupport.bubblewrapNetwork', async () => {
+  // Deliberately an assertion rather than a skip gate. `isLinuxBubblewrap` only
+  // proves a `bwrap` file is on PATH; both probes additionally require it to run
+  // and be >= MIN_BWRAP_VERSION. Those two version floors live in different
+  // languages, so pin that they agree instead of trusting either.
+  it('agrees with getPlatformSupport on whether bubblewrap is usable', () => {
     const { stdout, backends } = runAvailableBackends();
-    const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap')!;
+
+    const nativeReportsBubblewrap = backends.some((entry) => entry.backend === 'bubblewrap');
+    const sdkReportsBubblewrap = sdk.getPlatformSupport().availableMethods.includes('bubblewrap');
+
+    assert.strictEqual(
+      nativeReportsBubblewrap,
+      sdkReportsBubblewrap,
+      'the native probe and the SDK disagree about whether bubblewrap is usable; ' +
+        'MIN_BWRAP_VERSION is mirrored between bwrap_version.rs and platform.ts and ' +
+        `may have drifted. --available-backends said: ${stdout}`,
+    );
+  });
+
+  it('projects the native payload into PlatformSupport.bubblewrapNetwork', async (t) => {
+    const { stdout, backends } = runAvailableBackends();
+    const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap');
+    if (!bubblewrap) {
+      // A `bwrap` on PATH can still be too old or not executable, in which case
+      // omitting it is the correct contract and there is nothing to project.
+      t.skip('this host has no usable bubblewrap to project');
+      return;
+    }
     const capabilities = (bubblewrap.capabilities ?? []) as string[];
     const cliSupportsProxyEnforcement = capabilities.includes('proxyEnforcement');
 

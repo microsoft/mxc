@@ -1,7 +1,7 @@
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
-import { execSync, execFileSync } from 'child_process';
+import { execSync, execFileSync, type ExecFileSyncOptionsWithStringEncoding } from 'child_process';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -233,18 +233,49 @@ export const _linuxProbeTimeouts = {
   nativeWorstCaseMs: NATIVE_PROBE_WORST_CASE_MS,
 } as const;
 
+/**
+ * The `execFileSync` call the default runner makes.
+ *
+ * Injectable so a test can assert the spawn options actually reach the child.
+ * Asserting the timeout *constant* is not enough — the option can stop being
+ * passed while every constant-level assertion stays green.
+ */
+type LinuxProbeExec = (
+  file: string,
+  args: string[],
+  options: ExecFileSyncOptionsWithStringEncoding,
+) => string;
+
+let linuxProbeExec: LinuxProbeExec = execFileSync;
+
+/** @internal Test-only: observe or stub the probe's `execFileSync` call. */
+export function _setLinuxProbeExec(exec: LinuxProbeExec | null): void {
+  linuxProbeExec = exec ?? (execFileSync as LinuxProbeExec);
+}
+
+/**
+ * Spawn the probe at an already-resolved path.
+ *
+ * @internal Test-only export: split from {@link defaultLinuxProbeRunner} so the
+ * spawn options are testable without a real `lxc-exec` on disk.
+ */
+export function _runLinuxProbe(lxcPath: string): string {
+  return linuxProbeExec(lxcPath, ['--available-backends'], {
+    // A backstop, not the real deadline: the native probe bounds each of its
+    // own checks. Killing it here is indistinguishable from an unsupported
+    // host, so stay above the native total rather than racing it.
+    timeout: LINUX_PROBE_TIMEOUT_MS,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
 function defaultLinuxProbeRunner(): string {
   const lxcPath = findLxcExecutable();
   if (!lxcPath) {
     throw new Error('lxc-exec not found');
   }
-  return execFileSync(lxcPath, ['--available-backends'], {
-    // A backstop, not the real deadline: the native probe bounds each of its
-    // own checks. Killing it here is indistinguishable from an unsupported
-    // host, so stay above the native total rather than racing it.    timeout: LINUX_PROBE_TIMEOUT_MS,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  return _runLinuxProbe(lxcPath);
 }
 
 /**

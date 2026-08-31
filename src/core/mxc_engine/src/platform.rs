@@ -234,6 +234,26 @@ mod tests {
         assert_eq!(support.warnings, vec!["slirp4netns not found".to_string()]);
     }
 
+    /// `bubblewrap_network` is a Linux-only fact. Off Linux the field must be
+    /// *absent* rather than `unsupported`, which would claim the host was
+    /// evaluated and found wanting. Nothing else pins the non-Linux shape.
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn non_linux_hosts_report_no_bubblewrap_network() {
+        let support = platform_support();
+        assert!(
+            support.bubblewrap_network.is_none(),
+            "bubblewrap_network must be absent off Linux, got: {:?}",
+            support.bubblewrap_network
+        );
+
+        let json = serde_json::to_string(&support).expect("PlatformSupport serializes");
+        assert!(
+            !json.contains("bubblewrapNetwork"),
+            "the field must be omitted from the wire form off Linux, got: {json}"
+        );
+    }
+
     fn wire_name(containment: &Containment) -> String {
         serde_json::to_string(containment)
             .expect("Containment serializes")

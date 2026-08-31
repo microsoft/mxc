@@ -1015,17 +1015,28 @@ fn run_probe(
     }
 
     let (deadline, deadline_source) = budget.command_deadline();
-    let timed_out = || match deadline_source {
-        DeadlineSource::Command => format!(
-            "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
-             the host's {label} installation appears to be hung"
-        ),
-        // The budget is shorter than the per-command ceiling, so this fires for
-        // a healthy-but-slow tool too; blaming it for hanging would be wrong.
-        DeadlineSource::Budget => format!(
-            "Bubblewrap: gave up while checking '{label}' after the host took \
-             longer than {PRE_FLIGHT_BUDGET:?} to answer the dependency checks"
-        ),
+    // `cleanup_error` means the probe could not prove it stopped the child it
+    // abandoned, so it is appended rather than dropped.
+    let timed_out = |cleanup_error: Option<std::io::Error>| {
+        let reason = match deadline_source {
+            DeadlineSource::Command => format!(
+                "Bubblewrap: '{label}' did not respond within {PROBE_TIMEOUT:?}; \
+                 the host's {label} installation appears to be hung"
+            ),
+            // The budget is shorter than the per-command ceiling, so this fires
+            // for a healthy-but-slow tool too; blaming it for hanging would be
+            // wrong.
+            DeadlineSource::Budget => format!(
+                "Bubblewrap: gave up while checking '{label}' after the host took \
+                 longer than {PRE_FLIGHT_BUDGET:?} to answer the dependency checks"
+            ),
+        };
+        match cleanup_error {
+            Some(error) => {
+                format!("{reason}; failed to terminate it, so it may still be running: {error}")
+            }
+            None => reason,
+        }
     };
 
     match probe_exec::run_bounded(&mut command, deadline) {
@@ -1046,7 +1057,7 @@ fn run_probe(
             })
         }
         Err(probe_exec::ProbeFailure::Spawn(error)) => Err(format!("{error}")),
-        Err(probe_exec::ProbeFailure::TimedOut { .. }) => Err(timed_out()),
+        Err(probe_exec::ProbeFailure::TimedOut { cleanup_error }) => Err(timed_out(cleanup_error)),
         Err(probe_exec::ProbeFailure::Wait { stage, error }) => Err(format!(
             "failed while {} '{label}': {error}",
             stage.as_str()
@@ -1057,32 +1068,26 @@ fn run_probe(
     }
 }
 
-/// The command that asks the kernel to actually grant the namespaces.
+/// Arguments for the namespace grant check, and the single definition of what
+/// the kernel is asked for — the walk builds the command through its injected
+/// factory.
 ///
-/// `--help` only proves the flags are compiled in; the kernel can still refuse
-/// (unprivileged userns disabled, AppArmor restriction, or
+/// `unshare --help` only proves the flags are compiled in; the kernel can still
+/// refuse (unprivileged userns disabled, AppArmor restriction, or
 /// `user.max_net_namespaces` exhausted), which would otherwise surface deep
 /// inside supervisor startup. Both namespaces are requested together, mirroring
 /// the `CLONE_NEWUSER|CLONE_NEWNET` bwrap asks for, and via `sh -c :` because
 /// the supervisor itself runs as `sh -c`.
-///
-/// Built here so a test can assert what the walk really asks for: a probe that
-/// quietly stopped requesting `--net` would pass everywhere while proving
-/// nothing.
-fn private_namespace_probe_command() -> Command {
-    let mut command = Command::new("unshare");
-    command.args([
-        "--user",
-        "--map-current-user",
-        "--keep-caps",
-        "--net",
-        "--",
-        "sh",
-        "-c",
-        ":",
-    ]);
-    command
-}
+const PRIVATE_NAMESPACE_PROBE_ARGS: [&str; 8] = [
+    "--user",
+    "--map-current-user",
+    "--keep-caps",
+    "--net",
+    "--",
+    "sh",
+    "-c",
+    ":",
+];
 
 /// Run the namespace grant check and turn a refusal into actionable guidance.
 ///
@@ -1467,14 +1472,39 @@ const SUPERVISOR_EXTERNAL_COMMANDS: &[(&str, SupervisorCommandCoverage)] = &[
     ),
 ];
 
+/// How each dependency check's command is built.
+///
+/// Injectable so a test can make one specific tool look missing or broken
+/// without depending on what the runner happens to have installed — and so the
+/// success path can be driven on a host that has none of the tooling.
+fn real_probe_command(program: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(program);
+    command.args(args);
+    command
+}
+
 fn probe_dependencies_uncached(
     use_case: PrivateNetworkUse,
     budget: ProbeBudget,
 ) -> Result<(), String> {
+    probe_dependencies_with(use_case, budget, real_probe_command)
+}
+
+fn probe_dependencies_with<F>(
+    use_case: PrivateNetworkUse,
+    budget: ProbeBudget,
+    command: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &[&str]) -> Command,
+{
     let requirement = use_case.requirement();
-    let mut slirp_command = Command::new("slirp4netns");
-    slirp_command.arg("--version");
-    let slirp = run_probe(slirp_command, "slirp4netns", budget).map_err(|error| {
+    let slirp = run_probe(
+        command("slirp4netns", &["--version"]),
+        "slirp4netns",
+        budget,
+    )
+    .map_err(|error| {
         format!(
             "Bubblewrap: {requirement} requires 'slirp4netns' on PATH: {error}. \
              Install slirp4netns or {}.",
@@ -1489,11 +1519,10 @@ fn probe_dependencies_uncached(
         ));
     }
 
-    let mut unshare_command = Command::new("unshare");
-    unshare_command.arg("--help");
-    let unshare = run_probe(unshare_command, "unshare", budget).map_err(|error| {
-        format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
-    })?;
+    let unshare =
+        run_probe(command("unshare", &["--help"]), "unshare", budget).map_err(|error| {
+            format!("Bubblewrap: {requirement} requires util-linux 'unshare' on PATH: {error}")
+        })?;
     if !unshare.status.success()
         || !unshare.stdout.contains("--map-current-user")
         || !unshare.stdout.contains("--keep-caps")
@@ -1504,14 +1533,16 @@ fn probe_dependencies_uncached(
         ));
     }
 
-    check_private_namespaces(private_namespace_probe_command(), use_case, budget)?;
+    check_private_namespaces(
+        command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS),
+        use_case,
+        budget,
+    )?;
 
     // The in-namespace rules are programmed with these, so a host missing them
     // must fail here rather than deep inside supervisor startup.
     for (binary, probe, has_backend) in RULE_TOOL_PROBES {
-        let mut command = Command::new(binary);
-        command.arg(probe);
-        let output = run_probe(command, binary, budget).map_err(|error| {
+        let output = run_probe(command(binary, &[probe]), binary, budget).map_err(|error| {
             format!(
                 "Bubblewrap: {requirement} requires '{binary}' on PATH to enforce {}: {error}",
                 use_case.mechanism()
@@ -3023,7 +3054,7 @@ mod tests {
     /// passing everywhere while proving nothing, so pin what it requests.
     #[test]
     fn the_namespace_probe_asks_for_both_namespaces_as_the_supervisor_does() {
-        let command = private_namespace_probe_command();
+        let command = real_probe_command("unshare", &PRIVATE_NAMESPACE_PROBE_ARGS);
         assert_eq!(command.get_program(), "unshare");
 
         let args: Vec<String> = command
@@ -3042,6 +3073,155 @@ mod tests {
                 .any(|pair| pair[0] == "sh" && pair[1] == "-c"),
             "the probe must run the supervisor's shell, got: {args:?}"
         );
+    }
+
+    /// A stand-in for the whole dependency walk: every tool succeeds with the
+    /// banner the walk demands, except `missing`, which is not on PATH.
+    ///
+    /// Makes each refusal reproducible on any host, including one with none of
+    /// the real tooling — where the host-conditional walk test proves nothing.
+    fn walk_where_only(missing: Option<&'static str>) -> impl Fn(&str, &[&str]) -> Command {
+        move |program, _args| {
+            if Some(program) == missing {
+                // A name that cannot exist on PATH, so the spawn fails with
+                // ENOENT exactly as a genuinely absent tool would.
+                return Command::new("mxc-probe-absent-tool-for-tests");
+            }
+            walk_stub_for(program, None)
+        }
+    }
+
+    /// A stand-in that succeeds, emitting the banner the walk parses for
+    /// `program`. `override_script` replaces that behaviour for one tool.
+    fn walk_stub_for(program: &str, override_script: Option<&str>) -> Command {
+        let script = override_script.unwrap_or(match program {
+            // The walk requires both flags to be advertised.
+            "unshare" => "printf '%s\\n' '--map-current-user --keep-caps'",
+            // The backend gate refuses anything that is not nf_tables.
+            "iptables" | "ip6tables" | "iptables-restore" | "ip6tables-restore" => {
+                "printf '%s\\n' 'iptables v1.8.9 (nf_tables)'"
+            }
+            _ => ":",
+        });
+        let mut command = Command::new("sh");
+        command.args(["-c", script]);
+        command
+    }
+
+    /// The deterministic counterpart to the host-conditional walk test: proves
+    /// the sequence completes on a fully equipped host regardless of what this
+    /// runner has installed.
+    #[test]
+    fn the_dependency_walk_succeeds_when_every_tool_answers() {
+        assert_eq!(
+            probe_dependencies_with(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                walk_where_only(None),
+            ),
+            Ok(())
+        );
+    }
+
+    /// Each tool the walk depends on must be named when it is absent — the
+    /// refusal is the only thing telling an operator what to install.
+    #[test]
+    fn every_missing_tool_is_named_in_the_refusal() {
+        for tool in [
+            "slirp4netns",
+            "unshare",
+            "nsenter",
+            "iptables",
+            "ip6tables",
+            "iptables-restore",
+            "ip6tables-restore",
+        ] {
+            let error = probe_dependencies_with(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                walk_where_only(Some(tool)),
+            )
+            .expect_err("a missing tool must fail the walk");
+
+            assert!(
+                error.contains(tool),
+                "a missing '{tool}' must be named, got: {error}"
+            );
+            assert!(
+                error.contains("network.proxy"),
+                "the refusal must name the config that required it, got: {error}"
+            );
+        }
+    }
+
+    /// The wording differs by use case, so firewall mode must not be told to
+    /// drop `network.proxy`.
+    #[test]
+    fn a_refusal_names_the_use_case_that_required_the_tool() {
+        let error = probe_dependencies_with(
+            PrivateNetworkUse::FirewallEnforcement,
+            ProbeBudget::unbounded(),
+            walk_where_only(Some("slirp4netns")),
+        )
+        .expect_err("a missing tool must fail the walk");
+
+        assert!(error.contains("enforcementMode"), "got: {error}");
+        assert!(!error.contains("omit network.proxy"), "got: {error}");
+    }
+
+    /// Present but broken is a different diagnosis from absent, and the walk
+    /// must not collapse the two.
+    #[test]
+    fn a_tool_that_exits_non_zero_is_reported_as_a_broken_installation() {
+        let factory = |program: &str, _args: &[&str]| {
+            if program == "nsenter" {
+                return walk_stub_for(program, Some("exit 3"));
+            }
+            walk_stub_for(program, None)
+        };
+
+        let error = probe_dependencies_with(
+            PrivateNetworkUse::ProxyOnlyEgress,
+            ProbeBudget::unbounded(),
+            factory,
+        )
+        .expect_err("a broken tool must fail the walk");
+
+        assert!(error.contains("nsenter"), "got: {error}");
+        assert!(
+            error.contains("working"),
+            "a broken install must not be reported as missing, got: {error}"
+        );
+    }
+
+    /// `unshare` on PATH is not enough — an implementation without the flags
+    /// the supervisor passes would fail at launch instead.
+    #[test]
+    fn an_unshare_missing_the_required_flags_is_refused() {
+        for banner in [
+            "printf '%s\\n' 'usage: unshare'",
+            "printf '%s\\n' '--map-current-user'",
+            "printf '%s\\n' '--keep-caps'",
+        ] {
+            let factory = move |program: &str, _args: &[&str]| {
+                if program == "unshare" {
+                    return walk_stub_for(program, Some(banner));
+                }
+                walk_stub_for(program, None)
+            };
+
+            let error = probe_dependencies_with(
+                PrivateNetworkUse::ProxyOnlyEgress,
+                ProbeBudget::unbounded(),
+                factory,
+            )
+            .expect_err("an unshare without both flags must fail the walk");
+
+            assert!(
+                error.contains("--map-current-user") && error.contains("--keep-caps"),
+                "the refusal must name the flags it needs, got: {error}"
+            );
+        }
     }
 
     /// The deadline tests cover the individual failure branches in isolation.
