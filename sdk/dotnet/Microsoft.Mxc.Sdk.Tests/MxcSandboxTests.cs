@@ -228,6 +228,56 @@ public class MxcSandboxTests
             MxcSandbox.ParseBackendCapability(wireName));
     }
 
+    /// <summary>
+    /// The payload a Linux host emits when it has bubblewrap but cannot enforce
+    /// proxy-only egress. The warning is the only actionable detail such a host
+    /// reports, so dropping it would leave callers with an absent capability and
+    /// no way to learn why.
+    /// </summary>
+    [Fact]
+    public void Discovery_CarriesWarningsFromAnUnsupportedCapability()
+    {
+        const string json = """
+            [
+              {
+                "backend": "bubblewrap",
+                "warnings": ["Bubblewrap: network.proxy requires 'slirp4netns' on PATH"]
+              },
+              { "backend": "lxc" }
+            ]
+            """;
+
+        var backends = MxcSandbox.ParseAvailableBackends(json);
+
+        var bubblewrap = Assert.Single(
+            backends,
+            backend => backend.Backend == ContainmentBackend.Bubblewrap);
+        Assert.Empty(bubblewrap.Capabilities);
+        Assert.Equal(
+            "Bubblewrap: network.proxy requires 'slirp4netns' on PATH",
+            Assert.Single(bubblewrap.Warnings));
+
+        // An entry the native side omitted `warnings` from must still project a
+        // usable (empty) collection rather than null.
+        var lxc = Assert.Single(backends, backend => backend.Backend == ContainmentBackend.Lxc);
+        Assert.Empty(lxc.Warnings);
+    }
+
+    [Fact]
+    public void Discovery_CarriesProxyEnforcementCapabilityWithoutWarnings()
+    {
+        const string json =
+            """[{ "backend": "bubblewrap", "capabilities": ["proxyEnforcement"] }]""";
+
+        var bubblewrap = Assert.Single(MxcSandbox.ParseAvailableBackends(json));
+
+        Assert.Equal(ContainmentBackend.Bubblewrap, bubblewrap.Backend);
+        Assert.Equal(
+            BackendCapability.ProxyEnforcement,
+            Assert.Single(bubblewrap.Capabilities));
+        Assert.Empty(bubblewrap.Warnings);
+    }
+
     [Fact]
     public void Run_MalformedPolicy_ThrowsMalformedRequest()
     {

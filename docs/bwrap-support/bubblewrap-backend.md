@@ -35,7 +35,8 @@ requiring root privileges or a container runtime.
   the complete `getPlatformSupport()` result, including failures, for the module
   lifetime; restart the Node process after remediating the host.
 - **Schema 0.8 private-namespace modes:** `slirp4netns` installed and on PATH,
-  plus `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
+  plus util-linux `unshare` (with `--map-current-user` and `--keep-caps`) and
+  `nsenter`, `iptables`, `ip6tables`, `iptables-restore`, and
   `ip6tables-restore` for the in-namespace egress and ingress rules, a POSIX
   `sh` (the supervisor runs as `sh -c`), and the
   `nf_conntrack` kernel module loaded for the inbound chain's connection-state
@@ -605,8 +606,9 @@ request fails if its private namespace cannot be configured.
    enough: the probe also reads the backend from the version banner and refuses
    a legacy backend whose `/run/xtables.lock` this user cannot open, because
    the unprivileged supervisor would otherwise die at the first rule. Each
-   probe is bounded by a short timeout: a
-   wedged binary is reported as hung and named, instead of stalling every
+   probe is bounded by a short timeout, and runs in its own process group so a
+   backgrounded descendant that inherited the probe's output cannot outlive it:
+   a wedged binary is reported as hung and named, instead of stalling every
    proxy-mode execution on the host indefinitely. A successful probe is cached
    for the life of the process; failures are not, so installing the missing
    tool takes effect without a restart.

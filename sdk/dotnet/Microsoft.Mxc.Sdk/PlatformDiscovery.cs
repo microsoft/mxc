@@ -77,6 +77,17 @@ public sealed class AvailableBackend
     /// <summary>Optional backend features usable on this host.</summary>
     public IReadOnlyList<BackendCapability> Capabilities { get; init; } =
         Array.Empty<BackendCapability>();
+
+    /// <summary>
+    /// Why an optional capability is absent from <see cref="Capabilities"/>.
+    /// </summary>
+    /// <remarks>
+    /// On a host that cannot enforce Bubblewrap proxy-only egress this carries
+    /// the probe's reason — which dependency is missing or unusable. It is the
+    /// only actionable detail such a host reports, so it is surfaced rather
+    /// than collapsed into the absent capability.
+    /// </remarks>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>Support for the containment backends the public SDK can launch.</summary>
@@ -103,6 +114,9 @@ internal sealed class NativeAvailableBackend
 
     [JsonPropertyName("capabilities")]
     public string[] Capabilities { get; init; } = [];
+
+    [JsonPropertyName("warnings")]
+    public string[] Warnings { get; init; } = [];
 }
 
 internal sealed class NativePlatformSupport
