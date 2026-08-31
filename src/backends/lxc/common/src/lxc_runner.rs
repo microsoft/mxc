@@ -31,6 +31,12 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 /// builtins and must never inherit the script's own timeout budget.
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How a failed run disposes of the container it started.
+enum ContainerRelease {
+    Destroy,
+    Stop,
+}
+
 /// Script runner that executes commands inside an LXC container.
 pub struct LxcScriptRunner {
     config: LxcConfig,
@@ -98,25 +104,29 @@ impl LxcScriptRunner {
         false
     }
 
-    fn enforce_network_readiness<P, D>(
+    fn enforce_network_readiness<P, R>(
         &self,
         container_name: &str,
         container_created: bool,
         timeout: Duration,
         logger: &mut Logger,
         readiness_probe: P,
-        mut destroy_container: D,
+        mut release_container: R,
     ) -> Option<ScriptResponse>
     where
         P: FnOnce(&str, Duration, &mut Logger) -> bool,
-        D: FnMut(),
+        R: FnMut(ContainerRelease),
     {
         if readiness_probe(container_name, timeout, logger) {
             return None;
         }
 
         if self.destroy_on_exit || container_created {
-            destroy_container();
+            release_container(ContainerRelease::Destroy);
+        } else {
+            // A reused container this run started would otherwise be left
+            // running without the rules the policy asked for.
+            release_container(ContainerRelease::Stop);
         }
 
         Some(ScriptResponse::error(&format!(
@@ -303,8 +313,13 @@ impl LxcScriptRunner {
                 timeout,
                 logger,
                 Self::wait_for_network,
-                || {
-                    let _ = container.destroy();
+                |release| match release {
+                    ContainerRelease::Destroy => {
+                        let _ = container.destroy();
+                    }
+                    ContainerRelease::Stop => {
+                        let _ = container.stop();
+                    }
                 },
             ) {
                 return response;
@@ -332,6 +347,11 @@ impl LxcScriptRunner {
                 // silently disable every rule the caller asked for, so abort.
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
+                } else {
+                    // This run started the container, and every exit from here
+                    // to the script leaves it running without the rules the
+                    // policy asked for.
+                    let _ = container.stop();
                 }
                 return ScriptResponse::error(
                     "Failed to discover the container init PID; cannot enter the container \
@@ -359,12 +379,16 @@ impl LxcScriptRunner {
             Ok(false) => {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
+                } else {
+                    let _ = container.stop();
                 }
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
                 if self.destroy_on_exit || container_created {
                     let _ = container.destroy();
+                } else {
+                    let _ = container.stop();
                 }
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
             }
@@ -381,6 +405,8 @@ impl LxcScriptRunner {
                 Ok(false) => {
                     if self.destroy_on_exit || container_created {
                         let _ = container.destroy();
+                    } else {
+                        let _ = container.stop();
                     }
                     return ScriptResponse::error(
                         "Failed to apply inbound network firewall rules.",
@@ -389,6 +415,8 @@ impl LxcScriptRunner {
                 Err(e) => {
                     if self.destroy_on_exit || container_created {
                         let _ = container.destroy();
+                    } else {
+                        let _ = container.stop();
                     }
                     return ScriptResponse::error(&format!("Inbound network policy error: {}", e));
                 }
@@ -996,9 +1024,10 @@ mod tests {
     fn fail_network_readiness(
         runner: &LxcScriptRunner,
         container_created: bool,
-    ) -> (ScriptResponse, bool) {
+    ) -> (ScriptResponse, bool, bool) {
         let mut logger = Logger::new(Mode::Buffer);
         let mut destroyed = false;
+        let mut stopped = false;
         let response = runner
             .enforce_network_readiness(
                 "mxc-network-test",
@@ -1006,10 +1035,13 @@ mod tests {
                 Duration::from_secs(1),
                 &mut logger,
                 |_name, _timeout, _logger| false,
-                || destroyed = true,
+                |release| match release {
+                    ContainerRelease::Destroy => destroyed = true,
+                    ContainerRelease::Stop => stopped = true,
+                },
             )
             .expect("a failing readiness probe should return an error response");
-        (response, destroyed)
+        (response, destroyed, stopped)
     }
 
     /// What the 0.8 parser produces for a config stating only `network.egress`:
@@ -1143,7 +1175,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_returns_the_fail_closed_error_response() {
         let runner = runner_for_network_readiness_tests(false);
-        let (response, _) = fail_network_readiness(&runner, false);
+        let (response, _, _) = fail_network_readiness(&runner, false);
 
         assert!(
             response
@@ -1161,7 +1193,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_preserves_a_reused_container_when_destroy_on_exit_is_false() {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed) = fail_network_readiness(&runner, false);
+        let (_, destroyed, _) = fail_network_readiness(&runner, false);
 
         assert!(
             !destroyed,
@@ -1170,10 +1202,35 @@ mod tests {
     }
 
     #[test]
+    fn network_readiness_timeout_stops_a_reused_container_when_destroy_on_exit_is_false() {
+        let runner = runner_for_network_readiness_tests(false);
+        let (_, _, stopped) = fail_network_readiness(&runner, false);
+
+        assert!(
+            stopped,
+            "a reused container this run started must be stopped on readiness timeout, \
+             not left running without the rules the policy asked for"
+        );
+    }
+
+    #[test]
+    fn network_readiness_timeout_does_not_stop_a_container_it_destroys() {
+        let runner = runner_for_network_readiness_tests(true);
+        let (_, destroyed, stopped) = fail_network_readiness(&runner, false);
+
+        assert!(destroyed, "destroyOnExit=true must destroy the container");
+        assert!(
+            !stopped,
+            "destroying the container already removes it; stopping it as well would act on a \
+             container that no longer exists"
+        );
+    }
+
+    #[test]
     fn network_readiness_timeout_destroys_newly_created_container_even_when_destroy_on_exit_is_false(
     ) {
         let runner = runner_for_network_readiness_tests(false);
-        let (_, destroyed) = fail_network_readiness(&runner, true);
+        let (_, destroyed, _) = fail_network_readiness(&runner, true);
 
         assert!(
             destroyed,
@@ -1184,7 +1241,7 @@ mod tests {
     #[test]
     fn network_readiness_timeout_destroys_a_reused_container_when_destroy_on_exit_is_true() {
         let runner = runner_for_network_readiness_tests(true);
-        let (_, destroyed) = fail_network_readiness(&runner, false);
+        let (_, destroyed, _) = fail_network_readiness(&runner, false);
 
         assert!(
             destroyed,

@@ -5,15 +5,14 @@
 //! own network namespace.
 //!
 //! Implements the `allowLocalNetwork` inbound control for the LXC backend:
-//! host-to-container and external inbound traffic is dropped by default. This
+//! host-to-container and external inbound traffic is dropped by default.  This
 //! is a **separate, orthogonal chain** from the egress control in
-//! [`crate::network_iptables`]: the egress chain lives in the host netns, is
-//! hooked into `FORWARD` on the container's veth interface, and filters by
-//! destination; this ingress chain lives in the *container's* netns (reached
-//! via `nsenter -t <init-pid> -n`), is hooked into `INPUT`, and filters by
-//! connection state. The two chains share only main's chain-naming and IPv6
-//! probing machinery, and they carry distinct chain names
-//! ([`ingress_chain_name_for`] vs
+//! [`crate::network_iptables`]: both live in the *container's* netns, reached
+//! via `nsenter -t <init-pid> -n`.  The egress chain is hooked into `OUTPUT`
+//! and filters by destination; this ingress chain is hooked into `INPUT` and
+//! filters by connection state.  The two chains share only main's
+//! chain-naming and IPv6 probing machinery, and they carry distinct chain
+//! names ([`ingress_chain_name_for`] vs
 //! [`chain_name_for`](crate::network_iptables::chain_name_for)) so neither can
 //! ever tear down or collide with the other.
 //!
