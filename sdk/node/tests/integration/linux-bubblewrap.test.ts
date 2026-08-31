@@ -6,6 +6,8 @@ import assert from 'node:assert';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import {
   sdk,
   supportedVersions,
@@ -14,6 +16,8 @@ import {
   debugSpawnOptions,
   spawnFromConfigAsync,
   startUnixTestProxy,
+  getSdkBinDir,
+  getSdkPackageRoot,
   NETWORK_TEST_URL,
 } from './test-helpers.js';
 import type { ChildProcess } from 'node:child_process';
@@ -174,5 +178,100 @@ describe('Linux Bubblewrap network proxy (schema 0.6.0-alpha)', {
     assert.ok(result.stdout.includes('SENTINEL_OK'), `missing SENTINEL_OK in: ${result.stdout}`);
     assert.ok(result.stdout.includes('BLOCKED_OK'), `disallowed host was not blocked: ${result.stdout}`);
     assert.ok(!result.stdout.includes('SENTINEL_BAD_LEAK'), `allowlist leaked: ${result.stdout}`);
+  });
+});
+
+// The Rust serializer and the TypeScript parser are each unit-tested against
+// fixtures, but a fixture cannot catch the two drifting apart. This pins the
+// transport: the real `lxc-exec --available-backends` payload is fed to the
+// real SDK parser, so a rename or reshape on either side fails here.
+describe('lxc-exec --available-backends contract', {
+  skip: !isLinuxBubblewrap
+    ? 'the backend-discovery contract test requires Linux with bwrap installed'
+    : undefined,
+}, () => {
+  /** Raw stdout of the real CLI, and the array it parses to. */
+  function runAvailableBackends(): { stdout: string; backends: Record<string, unknown>[] } {
+    const lxcExec = path.join(getSdkBinDir(), 'lxc-exec');
+    assert.ok(fs.existsSync(lxcExec), `lxc-exec not found at ${lxcExec}`);
+    const stdout = execFileSync(lxcExec, ['--available-backends'], {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const parsed = JSON.parse(stdout);
+    assert.ok(Array.isArray(parsed), `--available-backends must emit a JSON array, got: ${stdout}`);
+    return { stdout, backends: parsed };
+  }
+
+  it('emits the array shape the SDK parser consumes', () => {
+    const { stdout, backends } = runAvailableBackends();
+
+    for (const entry of backends) {
+      assert.strictEqual(
+        typeof entry.backend, 'string',
+        `every entry needs a string 'backend' wire name, got: ${stdout}`);
+      // The parser reads these as string arrays and would silently fall back
+      // to "unsupported" if either became an object or a bare string.      for (const field of ['capabilities', 'warnings'] as const) {
+        if (entry[field] !== undefined) {
+          assert.ok(Array.isArray(entry[field]), `'${field}' must be an array, got: ${stdout}`);
+          for (const value of entry[field] as unknown[]) {
+            assert.strictEqual(
+              typeof value, 'string', `'${field}' must hold strings, got: ${stdout}`);
+          }
+        }
+      }
+    }
+
+    // bwrap is on PATH (the suite gate), so the native probe must report it
+    // under exactly the wire name the parser matches on.
+    assert.ok(
+      backends.some((entry) => entry.backend === 'bubblewrap'),
+      `expected a 'bubblewrap' entry, got: ${stdout}`);
+  });
+
+  it('projects the native payload into PlatformSupport.bubblewrapNetwork', async () => {
+    const { stdout, backends } = runAvailableBackends();
+    const bubblewrap = backends.find((entry) => entry.backend === 'bubblewrap')!;
+    const capabilities = (bubblewrap.capabilities ?? []) as string[];
+    const cliSupportsProxyEnforcement = capabilities.includes('proxyEnforcement');
+
+    // Drive the real parser with the bytes this CLI just produced. Injecting
+    // them rather than re-probing keeps the comparison exact: a second live
+    // walk could legitimately disagree by exhausting its pre-flight budget.
+    const platform = await import(
+      pathToFileURL(path.join(getSdkPackageRoot(), 'dist', 'platform.js')).href
+    ) as {
+      getPlatformSupport(): { bubblewrapNetwork?: { proxyEnforcement: string; warnings: string[] } };
+      _setLinuxProbeRunner(runner: (() => string) | null): void;
+      _resetPlatformSupportCache(): void;
+    };
+
+    try {
+      platform._setLinuxProbeRunner(() => stdout);
+      platform._resetPlatformSupportCache();
+      const network = platform.getPlatformSupport().bubblewrapNetwork;
+
+      assert.ok(network, `bubblewrapNetwork must be reported when bubblewrap is available: ${stdout}`);
+      assert.strictEqual(
+        network.proxyEnforcement,
+        cliSupportsProxyEnforcement ? 'supported' : 'unsupported',
+        `the SDK disagreed with the CLI capability list: ${stdout}`);
+
+      if (cliSupportsProxyEnforcement) {
+        assert.deepStrictEqual(network.warnings, [], 'a supported host reports no warnings');
+      } else {
+        // Never fail closed anonymously: the reason is the only actionable
+        // detail an unsupported host gives a caller.
+        assert.ok(
+          network.warnings.length > 0,
+          `an unsupported host must explain why, got: ${JSON.stringify(network)}`);
+        for (const warning of network.warnings) {
+          assert.strictEqual(typeof warning, 'string');
+        }
+      }
+    } finally {
+      platform._setLinuxProbeRunner(null);
+      platform._resetPlatformSupportCache();
+    }
   });
 });

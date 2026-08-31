@@ -86,9 +86,8 @@ public sealed class AvailableBackend
     /// </summary>
     /// <remarks>
     /// On a host that cannot enforce Bubblewrap proxy-only egress this carries
-    /// the probe's reason — which dependency is missing or unusable. It is the
-    /// only actionable detail such a host reports, so it is surfaced rather
-    /// than collapsed into the absent capability.
+    /// which dependency is missing or unusable — the only actionable detail
+    /// such a host reports.
     /// </remarks>
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }

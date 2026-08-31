@@ -230,9 +230,8 @@ public class MxcSandboxTests
 
     /// <summary>
     /// The payload a Linux host emits when it has bubblewrap but cannot enforce
-    /// proxy-only egress. The warning is the only actionable detail such a host
-    /// reports, so dropping it would leave callers with an absent capability and
-    /// no way to learn why.
+    /// proxy-only egress. Dropping the warning would leave callers with an
+    /// absent capability and no way to learn why.
     /// </summary>
     [Fact]
     public void Discovery_CarriesWarningsFromAnUnsupportedCapability()
@@ -257,8 +256,8 @@ public class MxcSandboxTests
             "Bubblewrap: network.proxy requires 'slirp4netns' on PATH",
             Assert.Single(bubblewrap.Warnings));
 
-        // An entry the native side omitted `warnings` from must still project a
-        // usable (empty) collection rather than null.
+        // An entry the native side omitted `warnings` from must still project
+        // an empty collection rather than null.
         var lxc = Assert.Single(backends, backend => backend.Backend == ContainmentBackend.Lxc);
         Assert.Empty(lxc.Warnings);
     }

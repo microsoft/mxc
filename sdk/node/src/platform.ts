@@ -204,12 +204,34 @@ type LinuxProbeRunner = () => string;
 
 let linuxProbeRunner: LinuxProbeRunner = defaultLinuxProbeRunner;
 
-const LINUX_PROBE_TIMEOUT_MS = 10_000;
+/**
+ * Worst case for the native `--available-backends` walk on Linux, whose probes
+ * run **sequentially**: 5s `bwrap --version` (`BWRAP_VERSION_TIMEOUT`) + 3s
+ * proxy dependency walk (`PRE_FLIGHT_BUDGET`) + 3s `lxc-ls --version` (LXC
+ * `PROBE_TIMEOUT`). Keep in sync with those Rust constants.
+ */
+const NATIVE_PROBE_WORST_CASE_MS = 5_000 + 3_000 + 3_000;
+
+/**
+ * Backstop for the whole probe process, well above
+ * {@link NATIVE_PROBE_WORST_CASE_MS} plus startup and serialization.
+ *
+ * Killing the probe here is reported the same way as an unsupported host, so a
+ * backstop below the native total would misreport a *successful* proxy walk
+ * that happened to be followed by a slow `lxc-ls`.
+ */
+const LINUX_PROBE_TIMEOUT_MS = NATIVE_PROBE_WORST_CASE_MS + 9_000;
 
 /** @internal Test-only: override the Linux probe runner. */
 export function _setLinuxProbeRunner(runner: LinuxProbeRunner | null): void {
   linuxProbeRunner = runner ?? defaultLinuxProbeRunner;
 }
+
+/** @internal Test-only: the backstop and the native total it must exceed. */
+export const _linuxProbeTimeouts = {
+  backstopMs: LINUX_PROBE_TIMEOUT_MS,
+  nativeWorstCaseMs: NATIVE_PROBE_WORST_CASE_MS,
+} as const;
 
 function defaultLinuxProbeRunner(): string {
   const lxcPath = findLxcExecutable();
@@ -217,10 +239,9 @@ function defaultLinuxProbeRunner(): string {
     throw new Error('lxc-exec not found');
   }
   return execFileSync(lxcPath, ['--available-backends'], {
-    // A backstop, not the real deadline: the native probe bounds its own
-    // dependency walk. Killing it here is indistinguishable from an
-    // unsupported host, so leave headroom rather than race it.
-    timeout: LINUX_PROBE_TIMEOUT_MS,
+    // A backstop, not the real deadline: the native probe bounds each of its
+    // own checks. Killing it here is indistinguishable from an unsupported
+    // host, so stay above the native total rather than racing it.    timeout: LINUX_PROBE_TIMEOUT_MS,
     encoding: 'utf-8',
     stdio: ['ignore', 'pipe', 'pipe'],
   });

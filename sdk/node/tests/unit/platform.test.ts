@@ -20,6 +20,7 @@ import {
   _setBwrapVersionRunner,
   _probeBubblewrapNetwork,
   _setLinuxProbeRunner,
+  _linuxProbeTimeouts,
   _setLxcAvailabilityProbe,
   _setPlatformDiagnosticLogger,
   findWxcExecutable,
@@ -1336,6 +1337,24 @@ describe('_probeBubblewrapNetwork', () => {
   afterEach(() => {
     _setLinuxProbeRunner(null);
     _resetPlatformSupportCache();
+  });
+
+  // The SDK backstop and the native per-probe bounds are separate constants in
+  // separate languages. If the backstop drops below the native total, a slow
+  // but *successful* proxy walk followed by a slow `lxc-ls` gets killed here
+  // and reported as unsupported.
+  it('keeps the probe backstop above the native worst-case walk', () => {
+    assert.ok(
+      _linuxProbeTimeouts.backstopMs > _linuxProbeTimeouts.nativeWorstCaseMs,
+      `backstop ${_linuxProbeTimeouts.backstopMs}ms must exceed the native ` +
+        `${_linuxProbeTimeouts.nativeWorstCaseMs}ms worst case`,
+    );
+    // Startup, PATH resolution and serialization sit outside the native
+    // bounds, so a bare margin is not enough.
+    assert.ok(
+      _linuxProbeTimeouts.backstopMs - _linuxProbeTimeouts.nativeWorstCaseMs >= 5_000,
+      'the backstop needs real headroom over the native total, not a bare margin',
+    );
   });
 
   it('reports supported when the probe advertises proxyEnforcement', () => {

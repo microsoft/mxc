@@ -54,10 +54,8 @@ pub struct PlatformSupport {
 struct BwrapProbe<F>(F);
 
 /// The proxy-enforcement dependency walk, injected for the same reason.
-///
-/// Deliberately a different type from [`BwrapProbe`] rather than a second bare
-/// closure parameter: the two are passed adjacently, and a wrapper makes which
-/// is which readable at the call site instead of positional.
+/// A distinct type from [`BwrapProbe`] so the two adjacent arguments read as
+/// themselves rather than positionally.
 #[cfg(target_os = "linux")]
 struct ProxyEnforcementProbe<G>(G);
 
@@ -77,9 +75,9 @@ where
         Ok(_) => PlatformSupport {
             is_supported: true,
             available_methods: vec!["bubblewrap".to_string()],
-            // Walked only once `bwrap` itself is usable. The network
-            // dependencies say nothing on a host that cannot run the backend at
-            // all, and the walk costs several subprocess spawns.
+            // Walked only once `bwrap` itself is usable: the network
+            // dependencies say nothing on a host that cannot run the backend,
+            // and the walk costs several subprocess spawns.
             bubblewrap_network: Some(bubblewrap_network_support((proxy_enforcement.0)())),
             ..Default::default()
         },

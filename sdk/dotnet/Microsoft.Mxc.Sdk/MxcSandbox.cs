@@ -74,8 +74,7 @@ public static class MxcSandbox
     /// </summary>
     /// <remarks>
     /// Split from <see cref="GetAvailableBackends"/> so the projection is
-    /// testable against a fixed native payload, without a host that happens to
-    /// have (or lack) a given backend.
+    /// testable against a fixed native payload.
     /// </remarks>
     internal static IReadOnlyList<AvailableBackend> ParseAvailableBackends(string json)
     {

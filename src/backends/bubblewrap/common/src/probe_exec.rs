@@ -3,31 +3,21 @@
 
 //! Deadline-bounded subprocess capture shared by the host probes.
 //!
-//! Both probe sites — [`crate::bwrap_version`]'s `bwrap --version` gate and
-//! [`crate::proxy_network`]'s private-network dependency walk — need the same
-//! guarantee: run a short-lived command, capture a bounded prefix of its
-//! output, and be *certain* to return by a deadline. Neither can afford to
-//! hang, because both run underneath callers that are asking "can this host do
-//! it?" rather than executing a workload.
+//! Both probe sites — the `bwrap --version` gate and the private-network
+//! dependency walk — must run a short-lived command and be *certain* to return
+//! by a deadline. Two obvious approaches don't hold:
 //!
-//! Getting that right is subtle enough that it should exist once:
+//! * A pipe reports EOF only once *every* write end closes, so a backgrounded
+//!   descendant that inherited it blocks the read past the deadline, and killing
+//!   the direct child does not help.
+//! * A file fixes that but bounds only how much output is *read* — a wedged
+//!   descendant keeps writing to the unlinked inode.
 //!
-//! * `Command::output()` waits forever, so it is unusable here.
-//! * Waiting on the direct child alone is not enough. A wrapper script can exit
-//!   immediately while a background descendant inherits the pipes, and a pipe
-//!   reports EOF only once *every* write end closes — so the read blocks long
-//!   past the deadline the caller thought it had set, and killing the direct
-//!   child does not help.
-//! * Redirecting to a file instead of a pipe fixes the EOF problem but bounds
-//!   only how much output is *read*: a wedged descendant keeps writing to the
-//!   unlinked inode and can fill the temp filesystem.
-//!
-//! So the child gets its own process group, its pipes are drained by reader
-//! threads that `poll()` against the deadline, and the whole group is
-//! `SIGKILL`ed — on timeout *and* once the leader exits — which bounds what the
-//! child can write rather than only what we agree to read. The leader is left
-//! unreaped until both readers finish so its PID cannot be recycled out from
-//! under the group sweep.
+//! So the child gets its own process group, its pipes are drained by readers
+//! that `poll()` against the deadline, and the group is `SIGKILL`ed on timeout
+//! *and* once the leader exits — bounding what the child can write, not just
+//! what we agree to read. The leader stays unreaped until both readers finish so
+//! its PID cannot be recycled out from under the group sweep.
 
 use std::io::{self, Read};
 #[cfg(target_os = "linux")]
@@ -42,10 +32,8 @@ use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-/// Cap on how much of a probe's output is retained.
-///
-/// Probes emit version banners and help text, so this is generous; exceeding it
-/// means the command is not the one we thought we were running.
+/// Cap on how much of a probe's output is retained. Exceeding it means the
+/// command is not the one we thought we were running.
 pub(crate) const MAX_PROBE_OUTPUT_BYTES: usize = 64 * 1024;
 
 const INITIAL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -53,9 +41,8 @@ const MAX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// One captured stream, plus whether it outgrew [`MAX_PROBE_OUTPUT_BYTES`].
 ///
-/// Truncation is reported rather than silently accepted: a probe decides what a
-/// banner means, and a banner we only partly read is not one we can reason
-/// about.
+/// Truncation is reported, not silently accepted: a partly-read banner is not
+/// one a probe can reason about.
 #[derive(Debug)]
 pub(crate) struct CapturedOutput {
     pub(crate) bytes: Vec<u8>,
@@ -70,10 +57,9 @@ pub(crate) struct CapturedProcess {
     pub(crate) stderr: CapturedOutput,
     /// Failure from sweeping the process group after the leader exited.
     ///
-    /// Deliberately *not* folded into the error: a completed command is
-    /// authoritative, and some setuid installations refuse to signal their own
-    /// post-exit group with `EPERM`. Callers that want to surface it may, but a
-    /// cleanup diagnostic must not turn a valid answer into a failure.
+    /// Not folded into the error: a completed command is authoritative, and
+    /// some setuid installations refuse to signal their own post-exit group
+    /// with `EPERM`. A cleanup diagnostic must not invalidate a real answer.
     pub(crate) cleanup_error: Option<io::Error>,
 }
 
@@ -82,10 +68,8 @@ pub(crate) struct CapturedProcess {
 pub(crate) enum WaitStage {
     /// Polling for the child's exit.
     Waiting,
-    /// Collecting the exit status of an already-exited child.
-    ///
-    /// Only reachable on Linux, where the leader is deliberately left unreaped
-    /// until the readers finish; elsewhere `try_wait` reaps in one step.
+    /// Collecting the exit status of an already-exited child. Linux only, where
+    /// the leader stays unreaped until the readers finish.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Reaping,
 }
@@ -101,17 +85,16 @@ impl WaitStage {
 
 /// Why a bounded probe did not produce a [`CapturedProcess`].
 ///
-/// Carries causes, not prose: each probe site words its own diagnostics around
-/// the command it was running.
+/// Carries causes, not prose: each probe site words its own diagnostics.
 #[derive(Debug)]
 pub(crate) enum ProbeFailure {
     /// The command could not be started. Callers classify this themselves —
-    /// `ENOENT` means something different for a binary that should be on PATH
-    /// than for one addressed by absolute path.
+    /// `ENOENT` means something different for a PATH lookup than for an
+    /// absolute path.
     Spawn(io::Error),
-    /// The deadline expired. `cleanup_error` is set when terminating the
-    /// process group also failed, which is worth reporting *here* because the
-    /// probe is abandoning a process it could not prove it stopped.
+    /// The deadline expired. `cleanup_error` is set when terminating the group
+    /// also failed, i.e. the probe is abandoning a process it could not prove
+    /// it stopped.
     TimedOut { cleanup_error: Option<io::Error> },
     /// Waiting on the child itself failed.
     Wait { stage: WaitStage, error: io::Error },
@@ -123,8 +106,7 @@ pub(crate) enum ProbeFailure {
 ///
 /// `command` supplies the program and arguments; stdio, process group and
 /// termination are owned here so every probe gets identical semantics. Returns
-/// only once the child is reaped and both readers have finished, so there is no
-/// process left behind on any path.
+/// only once the child is reaped and both readers have finished.
 pub(crate) fn run_bounded(
     command: &mut Command,
     deadline: Instant,
@@ -139,9 +121,8 @@ pub(crate) fn run_bounded(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    // A dedicated group is what makes wrappers and inherited pipes tractable:
-    // it gives one handle that reaches every descendant, not just the child we
-    // spawned.
+    // A dedicated group is what reaches every descendant, not just the child
+    // we spawned.
     #[cfg(unix)]
     command.process_group(0);
 
@@ -292,8 +273,8 @@ pub(crate) fn run_bounded(
 
 /// Whether the child has exited without consuming its zombie entry.
 ///
-/// `WNOWAIT` is the point: it observes the exit while leaving the PID reserved,
-/// so the process-group id stays ours until the readers are done with it.
+/// `WNOWAIT` observes the exit while leaving the PID reserved, so the
+/// process-group id stays ours until the readers are done with it.
 #[cfg(target_os = "linux")]
 fn child_exited_without_reaping(child: &Child) -> io::Result<bool> {
     use nix::sys::wait::{waitid, Id, WaitPidFlag, WaitStatus};
@@ -361,9 +342,8 @@ fn spawn_reader(
 
 /// Drain `reader` until EOF, the cap, or `deadline`.
 ///
-/// The `poll()` is what bounds a descendant that inherited the write end: a
-/// plain `read` would block on it indefinitely, since the pipe stays open until
-/// every writer closes.
+/// The `poll()` bounds a descendant that inherited the write end: a plain
+/// `read` would block until every writer closes.
 #[cfg(unix)]
 pub(crate) fn read_bounded_until(
     mut reader: impl Read + AsRawFd,
@@ -495,8 +475,8 @@ mod tests {
 
     #[test]
     fn an_expired_deadline_does_not_spawn_anything() {
-        // A command that would fail to spawn: reaching the spawn at all would
-        // surface as `Spawn` rather than `TimedOut`.
+        // A command that fails to spawn: reaching the spawn would surface as
+        // `Spawn` rather than `TimedOut`.
         let mut command = Command::new("mxc-probe-command-that-does-not-exist");
         let error = run_bounded(&mut command, Instant::now() - Duration::from_secs(1)).unwrap_err();
         assert!(matches!(
@@ -520,9 +500,8 @@ mod tests {
         assert!(!captured.stdout.truncated);
     }
 
-    /// The failure mode the file-backed capture this replaced could not bound:
-    /// a descendant inherits the pipes and outlives the direct child, so a
-    /// plain read would block until *it* exited.
+    /// The failure mode the file-backed capture could not bound: a descendant
+    /// inherits the pipes and outlives the direct child.
     #[cfg(target_os = "linux")]
     #[test]
     fn returns_while_a_descendant_still_holds_the_pipes_open() {
