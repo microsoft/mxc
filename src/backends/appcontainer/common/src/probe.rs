@@ -46,7 +46,9 @@ pub struct ProbeFacts {
     /// Whether the preferred native PSEC plus Learning Mode capture path is usable.
     ///
     /// A false value does not mean `captureDenials` is unsupported: the executor
-    /// can use guarded WPR on a compatible fallback tier.
+    /// can use guarded WPR on a compatible fallback tier. A true value reports
+    /// host capability, not request compatibility; a request can still require
+    /// guarded WPR when its policy cannot be represented by PSEC.
     pub native_capture_available: bool,
     /// `bfscfg.exe` is on disk in `%SystemRoot%\System32`.
     ///
@@ -136,7 +138,7 @@ pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
         BaseContainerRunner::base_container_supports_deny_paths();
     let probes = ProbeFacts {
         base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
-        native_capture_available: BaseContainerRunner::is_capture_denials_usable(),
+        native_capture_available: BaseContainerRunner::is_native_capture_available(),
         bfscfg_present: fallback_detector::find_bfscfg_exe()
             .ok()
             .flatten()
@@ -207,7 +209,7 @@ pub fn to_json_pretty(output: &ProbeOutput) -> Result<String, serde_json::Error>
 mod tests {
     use super::*;
     use crate::fallback_detector::IsolationTier;
-    use crate::test_env::ForceTierGuard;
+    use crate::test_env::{CaptureCapabilityGuard, ForceTierGuard};
     use wxc_common::models::{ContainerPolicy, ExecutionRequest};
 
     fn all_ui_capabilities() -> UiCapabilitySupport {
@@ -345,6 +347,36 @@ mod tests {
         let output = run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
 
         assert_eq!(output.tier, Some("appcontainer-dacl"));
+        assert!(!output.probes.native_capture_available);
+        assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn public_probe_reports_native_capture_and_selects_base_container() {
+        let _guard = CaptureCapabilityGuard::set(true, true);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+
+        let output = run_probe(&request_with_policy(policy));
+
+        assert_eq!(output.tier, Some("base-container"));
+        assert!(output.probes.native_capture_available);
+        assert!(output.error.is_none());
+    }
+
+    #[test]
+    fn public_probe_keeps_capture_launchable_without_native_capture() {
+        let _guard = CaptureCapabilityGuard::set(false, false);
+        let policy = ContainerPolicy {
+            capture_denials: Some(Default::default()),
+            ..Default::default()
+        };
+
+        let output = run_probe(&request_with_policy(policy));
+
+        assert_ne!(output.tier, Some("base-container"));
         assert!(!output.probes.native_capture_available);
         assert!(output.error.is_none());
     }
