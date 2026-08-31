@@ -354,12 +354,16 @@ fn main() {
         .as_ref()
         .map(|c| telemetry::init(c, &mut logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints. The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -379,9 +383,10 @@ fn main() {
         Err(e) => {
             eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -397,9 +402,10 @@ fn main() {
     display_script_results(&response, &mut logger);
 
     // ── Telemetry emit ──────────────────────────────────────────────
-    telemetry::emit_completion(
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

@@ -371,6 +371,11 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
         .as_ref()
         .map(|c| telemetry::init(c, logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // This phase's Microsoft Correlation Vector (MS-CV), purely internal to
     // MXC — no caller supplies or relays one. `provision` seeds a fresh
@@ -391,7 +396,7 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
     // backtrace still prints) and is panic-free.
     if telemetry_active {
         if let Some(containment) = resolved_backend.as_ref() {
-            telemetry::set_process_context(containment);
+            telemetry::set_process_context_with_kind(containment, requested_sandbox_kind);
         }
         telemetry::set_process_phase(phase);
         // Stash this phase's correlation vector so out-of-band events
@@ -426,8 +431,9 @@ fn run_state_aware_main(parsed: ParsedStateAwareRequest, dry_run: bool, logger: 
 
     // Emit lifecycle telemetry (and shut the provider down) before flushing the
     // diagnostic buffer / envelope. Terminal path — safe to shutdown here.
-    telemetry::emit_state_aware(
+    telemetry::emit_state_aware_with_kind(
         telemetry_active,
+        requested_sandbox_kind,
         telemetry::TelemetryContext {
             backend,
             phase,
@@ -1110,13 +1116,17 @@ fn main() {
         .as_ref()
         .map(|c| telemetry::init(c, &mut logger))
         .unwrap_or(false);
+    let requested_sandbox_kind = request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
 
     // Install a crash-telemetry panic hook once telemetry is active, chaining
     // the previously-installed hook so the default stderr backtrace still
     // prints (also satisfying the "always emit a diagnostic" contract for the
     // panic case). The hook body is panic-free and emits no message text.
     if telemetry_active {
-        telemetry::set_process_context(&request.containment);
+        telemetry::set_process_context_with_kind(&request.containment, requested_sandbox_kind);
         telemetry::install_panic_hook();
     }
 
@@ -1130,9 +1140,10 @@ fn main() {
         Err(e) => {
             eprintln!("Request error\ninvalid CLI command override: {e}");
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -1157,9 +1168,10 @@ fn main() {
     if cli.audit {
         if let Err(message) = validate_audit_request(&request) {
             eprintln!("Error: {message}");
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::ConfigError,
             );
             process::exit(1);
@@ -1169,9 +1181,10 @@ fn main() {
             Ok(context) => context,
             Err(message) => {
                 eprintln!("Error: {message}");
-                telemetry::emit_early_exit(
+                telemetry::emit_early_exit_with_kind(
                     telemetry_active,
                     &request.containment,
+                    requested_sandbox_kind,
                     telemetry::FailureReason::ConfigError,
                 );
                 process::exit(1);
@@ -1193,9 +1206,10 @@ fn main() {
             "Error: no command to run. Provide `process.commandLine` in the policy or pass the command as arguments after the config path."
         );
         eprint!("{}", logger.get_buffer());
-        telemetry::emit_early_exit(
+        telemetry::emit_early_exit_with_kind(
             telemetry_active,
             &request.containment,
+            requested_sandbox_kind,
             telemetry::FailureReason::ConfigError,
         );
         process::exit(1);
@@ -1287,9 +1301,10 @@ fn main() {
         Err(e) => {
             eprintln!("error: {}", e.message);
             eprint!("{}", logger.get_buffer());
-            telemetry::emit_early_exit(
+            telemetry::emit_early_exit_with_kind(
                 telemetry_active,
                 &request.containment,
+                requested_sandbox_kind,
                 telemetry::FailureReason::InitError,
             );
             process::exit(1);
@@ -1358,9 +1373,10 @@ fn main() {
         eprintln!("{warning}");
     }
 
-    telemetry::emit_completion(
+    telemetry::emit_completion_with_kind(
         telemetry_active,
         &request.containment,
+        requested_sandbox_kind,
         &response,
         run_elapsed,
     );

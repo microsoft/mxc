@@ -200,7 +200,8 @@ cannot mix both formats in one request.
     },
 
     "telemetry": {                         // Telemetry (Windows only)
-        "enabled": true                    // Emit TraceLogging ETW events via pure Rust tracelogging crate
+        "enabled": true                    // Request emission for this run; MXC-owned user consent
+                                           // and a permitting administrative policy are also required
     },
 
     "experimental": {                      // Experimental features (requires --experimental)

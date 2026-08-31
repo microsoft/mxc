@@ -91,6 +91,9 @@ const CANCELLED_EXIT_CODE: i32 = 130;
 /// Backend attribution for out-of-band events.
 static PROCESS_BACKEND: Mutex<Option<&'static str>> = Mutex::new(None);
 
+/// Caller-requested containment attribution for out-of-band events.
+static PROCESS_SANDBOX_KIND: Mutex<Option<&'static str>> = Mutex::new(None);
+
 /// State-aware phase attribution for out-of-band events.
 static PROCESS_PHASE: Mutex<Option<&'static str>> = Mutex::new(None);
 
@@ -188,6 +191,9 @@ fn already_emitted() -> bool {
 fn reset_for_test() {
     HAS_EMITTED.store(false, Ordering::SeqCst);
     *PROCESS_BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *PROCESS_SANDBOX_KIND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
     *PROCESS_PHASE.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *PROCESS_CORRELATION_VECTOR
         .lock()
@@ -293,13 +299,30 @@ pub fn emit_completion(
     response: &ScriptResponse,
     elapsed: Duration,
 ) {
+    emit_completion_with_kind(active, containment, None, response, elapsed);
+}
+
+/// Emit completion telemetry with the caller-requested containment kind.
+pub fn emit_completion_with_kind(
+    active: bool,
+    containment: &ContainmentBackend,
+    requested_sandbox_kind: Option<&'static str>,
+    response: &ScriptResponse,
+    elapsed: Duration,
+) {
     let Some(auth) = EmissionAuthorization::for_invocation(active) else {
         return;
     };
     if already_emitted() {
         return;
     }
-    emit_completion_event(&auth, containment, response, elapsed, None);
+    emit_completion_event(
+        &auth,
+        containment,
+        response,
+        elapsed,
+        requested_sandbox_kind,
+    );
     shutdown();
 }
 
@@ -314,13 +337,14 @@ fn emit_completion_event(
     // emission (see `EmissionAuthorization`). Both writes below execute under
     // it — there is no per-write reread of consent/policy state.
     let backend = containment.wire_name();
+    let sandbox_kind = sandbox_kind_for(backend, requested_sandbox_kind);
     let failed = response.exit_code != 0;
     let outcome = if failed { "failure" } else { "success" };
     let failure_reason = failed.then(|| classify_failure(&response.failure_phase));
 
     log_execution(&ExecutionEvent {
         backend,
-        sandbox_kind: sandbox_kind_for(backend, requested_sandbox_kind),
+        sandbox_kind,
         exit_code: response.exit_code,
         outcome,
         duration_ms: elapsed.as_millis() as u64,
@@ -342,6 +366,7 @@ fn emit_completion_event(
                 phase: "",
                 correlation_vector: "",
             },
+            sandbox_kind,
             classify_failure(&response.failure_phase),
             response.exit_code,
         );
@@ -386,13 +411,23 @@ pub fn emit_sdk_completion_with_kind(
 /// bounded `reason` category and exit code, so config/policy/init failures are
 /// observable. `duration_ms` is reported as `0` because no execution occurred.
 pub fn emit_early_exit(active: bool, containment: &ContainmentBackend, reason: FailureReason) {
+    emit_early_exit_with_kind(active, containment, None, reason);
+}
+
+/// Emit early-exit telemetry with the caller-requested containment kind.
+pub fn emit_early_exit_with_kind(
+    active: bool,
+    containment: &ContainmentBackend,
+    requested_sandbox_kind: Option<&'static str>,
+    reason: FailureReason,
+) {
     let Some(auth) = EmissionAuthorization::for_invocation(active) else {
         return;
     };
     if already_emitted() {
         return;
     }
-    emit_early_exit_event(&auth, containment, reason, None);
+    emit_early_exit_event(&auth, containment, reason, requested_sandbox_kind);
     shutdown();
 }
 
@@ -406,10 +441,11 @@ fn emit_early_exit_event(
     // emission (see `EmissionAuthorization`). Both writes below execute under
     // it — there is no per-write reread of consent/policy state.
     let backend = containment.wire_name();
+    let sandbox_kind = sandbox_kind_for(backend, requested_sandbox_kind);
 
     log_execution(&ExecutionEvent {
         backend,
-        sandbox_kind: sandbox_kind_for(backend, requested_sandbox_kind),
+        sandbox_kind,
         exit_code: 1,
         outcome: "failure",
         duration_ms: 0,
@@ -426,6 +462,7 @@ fn emit_early_exit_event(
             phase: "",
             correlation_vector: "",
         },
+        sandbox_kind,
         reason,
         1,
     );
@@ -465,9 +502,27 @@ fn emit_sdk_with_release(active: bool, emit: impl FnOnce(&EmissionAuthorization)
 /// Call once, immediately after a successful [`init`]. Later calls are ignored
 /// (the value is set-once).
 pub fn set_process_context(containment: &ContainmentBackend) {
+    set_process_context_with_kind(containment, None);
+}
+
+/// Record both the resolved backend and the caller-requested containment kind
+/// for out-of-band events.
+pub fn set_process_context_with_kind(
+    containment: &ContainmentBackend,
+    requested_sandbox_kind: Option<&'static str>,
+) {
+    let backend = containment.wire_name();
     let mut slot = PROCESS_BACKEND.lock().unwrap_or_else(|e| e.into_inner());
     if slot.is_none() {
-        *slot = Some(containment.wire_name());
+        *slot = Some(backend);
+    }
+    drop(slot);
+
+    let mut slot = PROCESS_SANDBOX_KIND
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if slot.is_none() {
+        *slot = Some(sandbox_kind_for(backend, requested_sandbox_kind));
     }
 }
 
@@ -486,6 +541,16 @@ const UNKNOWN_BACKEND: &str = "unknown";
 fn process_backend() -> &'static str {
     let stored = PROCESS_BACKEND.try_lock().ok().and_then(|slot| *slot);
     resolve_backend_name(stored)
+}
+
+/// The caller-requested containment kind, defaulting to the resolved backend
+/// when no request-scoped value was recorded.
+fn process_sandbox_kind() -> &'static str {
+    PROCESS_SANDBOX_KIND
+        .try_lock()
+        .ok()
+        .and_then(|slot| *slot)
+        .unwrap_or_else(process_backend)
 }
 
 /// Pure defaulting for the process backend: the stashed value, or
@@ -574,14 +639,24 @@ pub fn install_panic_hook() {
 
 /// Build the `Execution` event for an out-of-band crash/cancellation. Pure
 /// (no ETW I/O) so the exit-code/reason/attribution mapping can be unit-tested.
+#[cfg(test)]
 fn crash_event<'a>(
     ctx: TelemetryContext<'a>,
     exit_code: i32,
     reason: FailureReason,
 ) -> ExecutionEvent<'a> {
+    crash_event_with_kind(ctx, ctx.backend, exit_code, reason)
+}
+
+fn crash_event_with_kind<'a>(
+    ctx: TelemetryContext<'a>,
+    sandbox_kind: &'a str,
+    exit_code: i32,
+    reason: FailureReason,
+) -> ExecutionEvent<'a> {
     ExecutionEvent {
         backend: ctx.backend,
-        sandbox_kind: ctx.backend,
+        sandbox_kind,
         exit_code,
         outcome: "failure",
         duration_ms: 0,
@@ -604,13 +679,23 @@ struct CrashTelemetry<'a> {
 /// and their tests. Takes the [`TelemetryContext`] attribution as a parameter
 /// (rather than reading the process globals) so the mapping can be asserted
 /// deterministically for any attribution without writing the globals.
+#[cfg(test)]
 fn plan_crash<'a>(
     ctx: TelemetryContext<'a>,
     exit_code: i32,
     reason: FailureReason,
 ) -> CrashTelemetry<'a> {
+    plan_crash_with_kind(ctx, ctx.backend, exit_code, reason)
+}
+
+fn plan_crash_with_kind<'a>(
+    ctx: TelemetryContext<'a>,
+    sandbox_kind: &'a str,
+    exit_code: i32,
+    reason: FailureReason,
+) -> CrashTelemetry<'a> {
     CrashTelemetry {
-        execution: crash_event(ctx, exit_code, reason),
+        execution: crash_event_with_kind(ctx, sandbox_kind, exit_code, reason),
         error: reason,
         exit_code,
     }
@@ -627,12 +712,13 @@ fn plan_crash<'a>(
 fn emit_crash(
     _auth: &EmissionAuthorization,
     ctx: TelemetryContext<'_>,
+    sandbox_kind: &str,
     exit_code: i32,
     reason: FailureReason,
 ) {
-    let plan = plan_crash(ctx, exit_code, reason);
+    let plan = plan_crash_with_kind(ctx, sandbox_kind, exit_code, reason);
     log_execution(&plan.execution);
-    log_error(ctx, plan.error, plan.exit_code);
+    log_error(ctx, sandbox_kind, plan.error, plan.exit_code);
 }
 
 /// Emit crash telemetry from a global panic hook.
@@ -662,6 +748,7 @@ pub fn emit_panic() {
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
+        process_sandbox_kind(),
         PANIC_EXIT_CODE,
         FailureReason::InternalError,
     );
@@ -695,6 +782,7 @@ pub fn emit_cancellation() {
             phase: process_phase(),
             correlation_vector: &correlation_vector,
         },
+        process_sandbox_kind(),
         CANCELLED_EXIT_CODE,
         FailureReason::Cancelled,
     );
@@ -828,13 +916,24 @@ pub fn emit_state_aware(
     outcome: &Result<DispatchOutcome, MxcError>,
     elapsed: Duration,
 ) {
+    emit_state_aware_with_kind(active, None, ctx, outcome, elapsed);
+}
+
+/// Emit state-aware telemetry with the caller-requested containment kind.
+pub fn emit_state_aware_with_kind(
+    active: bool,
+    requested_sandbox_kind: Option<&'static str>,
+    ctx: TelemetryContext<'_>,
+    outcome: &Result<DispatchOutcome, MxcError>,
+    elapsed: Duration,
+) {
     let Some(auth) = EmissionAuthorization::for_invocation(active) else {
         return;
     };
     if already_emitted() {
         return;
     }
-    emit_state_aware_event(&auth, ctx, outcome, elapsed, None);
+    emit_state_aware_event(&auth, ctx, outcome, elapsed, requested_sandbox_kind);
     shutdown();
 }
 
@@ -854,7 +953,7 @@ fn emit_state_aware_event(
 
     log_execution(&plan.execution);
     if let Some(reason) = plan.error {
-        log_error(ctx, reason, plan.execution.exit_code);
+        log_error(ctx, sandbox_kind, reason, plan.execution.exit_code);
     }
 }
 
@@ -898,9 +997,10 @@ pub fn emit_sdk_cancellation_with_kind(
 ) {
     emit_sdk_with_release(active, |auth| {
         let _auth = auth;
+        let sandbox_kind = sandbox_kind_for(ctx.backend, requested_sandbox_kind);
         log_execution(&ExecutionEvent {
             backend: ctx.backend,
-            sandbox_kind: sandbox_kind_for(ctx.backend, requested_sandbox_kind),
+            sandbox_kind,
             exit_code: CANCELLED_EXIT_CODE,
             outcome: "failure",
             duration_ms: elapsed.as_millis() as u64,
@@ -908,7 +1008,12 @@ pub fn emit_sdk_cancellation_with_kind(
             phase: ctx.phase,
             correlation_vector: ctx.correlation_vector,
         });
-        log_error(ctx, FailureReason::Cancelled, CANCELLED_EXIT_CODE);
+        log_error(
+            ctx,
+            sandbox_kind,
+            FailureReason::Cancelled,
+            CANCELLED_EXIT_CODE,
+        );
     });
 }
 
@@ -1137,7 +1242,7 @@ mod tests {
         events::test_sink::install();
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
         TEST_FORCE_ACTIVE.with(|f| f.set(true));
-        set_process_context(&ContainmentBackend::IsolationSession);
+        set_process_context_with_kind(&ContainmentBackend::IsolationSession, Some("vm"));
         set_process_phase("exec");
         set_process_correlation_vector("iso:wxc-abcd");
 
@@ -1147,7 +1252,7 @@ mod tests {
         assert_eq!(execs.len(), 1, "panic emits exactly one Execution");
         let exec = &execs[0];
         assert_eq!(exec.backend, "isolation_session");
-        assert_eq!(exec.sandbox_kind, "isolation_session");
+        assert_eq!(exec.sandbox_kind, "vm");
         assert_eq!(exec.exit_code, PANIC_EXIT_CODE);
         assert_eq!(exec.outcome, "failure");
         assert_eq!(exec.failure_reason, Some(FailureReason::InternalError));
@@ -1158,6 +1263,7 @@ mod tests {
         assert_eq!(errors.len(), 1, "panic emits exactly one Error");
         let error = &errors[0];
         assert_eq!(error.backend, "isolation_session");
+        assert_eq!(error.sandbox_kind, "vm");
         assert_eq!(error.error_type, FailureReason::InternalError);
         assert_eq!(error.exit_code, PANIC_EXIT_CODE);
         assert_eq!(error.phase, "exec");
@@ -1224,9 +1330,10 @@ mod tests {
         reset_for_test();
         events::test_sink::install();
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
-        emit_completion(
+        emit_completion_with_kind(
             true,
             &ContainmentBackend::IsolationSession,
+            Some("process"),
             &ScriptResponse {
                 exit_code: 1,
                 error_message: "launch failed".to_string(),
@@ -1239,9 +1346,11 @@ mod tests {
         assert_eq!(executions.len(), 1);
         assert_eq!(executions[0].outcome, "failure");
         assert_eq!(executions[0].exit_code, 1);
+        assert_eq!(executions[0].sandbox_kind, "process");
         assert_eq!(executions[0].failure_reason, Some(FailureReason::InitError));
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].sandbox_kind, "process");
         assert_eq!(errors[0].error_type, FailureReason::InitError);
 
         reset_for_test();
@@ -1254,9 +1363,10 @@ mod tests {
         events::test_sink::install();
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
 
-        emit_early_exit(
+        emit_early_exit_with_kind(
             true,
             &ContainmentBackend::IsolationSession,
+            Some("vm"),
             FailureReason::PolicyError,
         );
 
@@ -1264,12 +1374,14 @@ mod tests {
         assert_eq!(executions.len(), 1);
         assert_eq!(executions[0].outcome, "failure");
         assert_eq!(executions[0].exit_code, 1);
+        assert_eq!(executions[0].sandbox_kind, "vm");
         assert_eq!(
             executions[0].failure_reason,
             Some(FailureReason::PolicyError)
         );
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].sandbox_kind, "vm");
         assert_eq!(errors[0].error_type, FailureReason::PolicyError);
 
         reset_for_test();
@@ -1684,6 +1796,7 @@ mod tests {
         TEST_AUTHORIZATION_OVERRIDE.with(|allowed| allowed.set(Some(true)));
 
         let outcome = Ok(DispatchOutcome::Envelope(serde_json::json!({})));
+        let error = Err(MxcError::policy_validation("simulated"));
         emit_sdk_state_aware_with_kind(
             true,
             Some("process"),
@@ -1703,7 +1816,7 @@ mod tests {
                 phase: "exec",
                 correlation_vector: "corr-vm",
             },
-            &outcome,
+            &error,
             Duration::ZERO,
         );
 
@@ -1713,6 +1826,10 @@ mod tests {
         assert_eq!(executions[1].sandbox_kind, "vm");
         assert_eq!(executions[0].correlation_vector, "corr-process");
         assert_eq!(executions[1].correlation_vector, "corr-vm");
+        let errors = events::test_sink::take_errors();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].sandbox_kind, "vm");
+        assert_eq!(errors[0].backend, "windows_sandbox");
 
         reset_for_test();
     }
@@ -1763,10 +1880,12 @@ mod tests {
 
         let errors = events::test_sink::take_errors();
         assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].sandbox_kind, "process");
         assert_eq!(errors[0].error_type, FailureReason::Cancelled);
         assert_eq!(errors[0].exit_code, CANCELLED_EXIT_CODE);
         assert_eq!(errors[0].phase, "");
         assert_eq!(errors[0].correlation_vector, "");
+        assert_eq!(errors[1].sandbox_kind, "vm");
         assert_eq!(errors[1].error_type, FailureReason::Cancelled);
         assert_eq!(errors[1].exit_code, CANCELLED_EXIT_CODE);
         assert_eq!(errors[1].phase, "exec");

@@ -486,6 +486,17 @@ pub enum Containment {
     IsolationSession,
 }
 
+impl Containment {
+    fn telemetry_kind(&self) -> &'static str {
+        match self {
+            Self::Process => "process",
+            Self::ProcessContainer(_) => "processcontainer",
+            Self::Wslc(_) => "wslc",
+            Self::IsolationSession => "isolation_session",
+        }
+    }
+}
+
 /// WSL Container settings carried by [`Containment::Wslc`].
 ///
 /// [`Default`] matches the native backend's defaults: the `alpine:latest`
@@ -606,6 +617,7 @@ pub struct SandboxRequest {
     /// The internal execution model. `pub(crate)` so the SDK's own modules and
     /// unit tests can map/inspect it, while it stays out of the public API.
     pub(crate) inner: ExecutionRequest,
+    requested_sandbox_kind: &'static str,
 }
 
 impl SandboxRequest {
@@ -694,7 +706,7 @@ impl SandboxRequest {
     pub fn set_telemetry_enabled(&mut self, enabled: bool) -> &mut Self {
         self.inner.telemetry = Some(TelemetryConfig {
             enabled: Some(enabled),
-            ..Default::default()
+            requested_sandbox_kind: Some(self.requested_sandbox_kind),
         });
         self
     }
@@ -763,7 +775,10 @@ pub fn build_request_with_containment(
     // `script_code` before running), so tolerate a missing command.
     let inner = wxc_common::config_parser::load_request_from_value(config, &mut logger, true)
         .map_err(|e| MxcError::malformed_request(format!("failed to build request: {e}")))?;
-    Ok(SandboxRequest { inner })
+    Ok(SandboxRequest {
+        inner,
+        requested_sandbox_kind: containment.telemetry_kind(),
+    })
 }
 
 /// Construct the wire-format `ContainerConfig` JSON value for the supported
@@ -1629,6 +1644,14 @@ mod tests {
                 .and_then(|telemetry| telemetry.enabled),
             Some(true)
         );
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            Some("process")
+        );
         assert!(
             !request.inner.experimental_enabled,
             "stable telemetry enablement must not opt into experimental features"
@@ -1644,6 +1667,28 @@ mod tests {
             Some(false)
         );
         assert!(!request.inner.experimental_enabled);
+    }
+
+    #[test]
+    fn telemetry_enablement_preserves_explicit_containment_intent() {
+        let containment = ProcessContainer::default();
+        let mut request = build_request_with_containment(
+            &minimal_policy(),
+            &Containment::ProcessContainer(containment),
+            None,
+        )
+        .expect("build_request_with_containment");
+
+        request.set_telemetry_enabled(true);
+
+        assert_eq!(
+            request
+                .inner
+                .telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.requested_sandbox_kind),
+            Some("processcontainer")
+        );
     }
 
     #[test]
