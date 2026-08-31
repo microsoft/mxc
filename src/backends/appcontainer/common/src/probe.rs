@@ -43,6 +43,11 @@ pub struct ProbeOutput {
 pub struct ProbeFacts {
     /// `Experimental_CreateProcessInSandbox` is resolvable.
     pub base_container_api_present: bool,
+    /// Whether the preferred native PSEC plus Learning Mode capture path is usable.
+    ///
+    /// A false value does not mean `captureDenials` is unsupported: the executor
+    /// can use guarded WPR on a compatible fallback tier.
+    pub native_capture_available: bool,
     /// `bfscfg.exe` is on disk in `%SystemRoot%\System32`.
     ///
     /// Always `false` when [`Self::bfs_compiled_in`] is `false`, because
@@ -121,28 +126,40 @@ impl From<EffectiveUiRestrictions> for UiCapabilitySupport {
 
 /// Probe backend support for `request`.
 pub fn run_probe(request: &ExecutionRequest) -> ProbeOutput {
+    use crate::base_container_runner::BaseContainerRunner;
+
+    let base_container_usable = BaseContainerRunner::is_usable_for_request(request);
+    let supports_deny_paths = BaseContainerRunner::supports_deny_paths_for_request(request);
     let probes = ProbeFacts {
-        base_container_api_present:
-            crate::base_container_runner::BaseContainerRunner::is_base_container_api_present()
-                .is_ok(),
+        base_container_api_present: BaseContainerRunner::is_base_container_api_present().is_ok(),
+        native_capture_available: BaseContainerRunner::is_capture_denials_usable(),
         bfscfg_present: fallback_detector::find_bfscfg_exe()
             .ok()
             .flatten()
             .is_some(),
         bfs_compiled_in: cfg!(feature = "tier2_bfs"),
-        base_container_supports_deny_paths:
-            crate::base_container_runner::BaseContainerRunner::supports_native_denied_paths(),
+        base_container_supports_deny_paths: BaseContainerRunner::supports_native_denied_paths(),
         base_container_supports_ingress_host_loopback_allow:
-            crate::base_container_runner::BaseContainerRunner::supports_ingress_host_loopback_allow(
-            ),
+            BaseContainerRunner::supports_ingress_host_loopback_allow(),
         isolation_session_available: false,
         hyperlight_available: false,
         ui_capabilities: crate::job_object::supported_ui_restrictions().into(),
     };
-    let base_container_usable =
-        crate::base_container_runner::BaseContainerRunner::is_usable_for_request(request);
-    let supports_deny_paths =
-        crate::base_container_runner::BaseContainerRunner::supports_deny_paths_for_request(request);
+
+    run_probe_with_capabilities(
+        request,
+        probes,
+        base_container_usable,
+        supports_deny_paths,
+    )
+}
+
+fn run_probe_with_capabilities(
+    request: &ExecutionRequest,
+    probes: ProbeFacts,
+    base_container_usable: bool,
+    supports_deny_paths: bool,
+) -> ProbeOutput {
     match detect_request_tier(request, base_container_usable, supports_deny_paths) {
         Ok(decision) => ProbeOutput {
             tier: Some(decision.tier.as_str()),
@@ -202,6 +219,7 @@ mod tests {
     use super::*;
     use crate::fallback_detector::IsolationTier;
     use crate::test_env::ForceTierGuard;
+    use wxc_common::models::{ContainerPolicy, ExecutionRequest};
 
     fn all_ui_capabilities() -> UiCapabilitySupport {
         UiCapabilitySupport {
@@ -218,6 +236,26 @@ mod tests {
         }
     }
 
+    fn request_with_policy(policy: ContainerPolicy) -> ExecutionRequest {
+        ExecutionRequest {
+            policy,
+            ..Default::default()
+        }
+    }
+
+    fn test_probe_facts(native_capture_available: bool) -> ProbeFacts {
+        ProbeFacts {
+            base_container_api_present: true,
+            native_capture_available,
+            bfscfg_present: false,
+            bfs_compiled_in: false,
+            base_container_supports_deny_paths: false,
+            isolation_session_available: false,
+            hyperlight_available: false,
+            ui_capabilities: all_ui_capabilities(),
+        }
+    }
+
     #[test]
     fn probe_output_serializes() {
         let out = ProbeOutput {
@@ -226,6 +264,7 @@ mod tests {
             warnings: vec!["a warning".to_string()],
             probes: ProbeFacts {
                 base_container_api_present: true,
+                native_capture_available: true,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -242,6 +281,7 @@ mod tests {
         assert_eq!(v["needsDaclAugmentation"], false);
         assert_eq!(v["warnings"][0], "a warning");
         assert_eq!(v["probes"]["baseContainerApiPresent"], true);
+        assert_eq!(v["probes"]["nativeCaptureAvailable"], true);
         assert_eq!(v["probes"]["bfscfgPresent"], false);
         assert_eq!(v["probes"]["bfsCompiledIn"], false);
         assert_eq!(v["probes"]["baseContainerSupportsDenyPaths"], false);
@@ -270,6 +310,7 @@ mod tests {
             warnings: vec![],
             probes: ProbeFacts {
                 base_container_api_present: false,
+                native_capture_available: false,
                 bfscfg_present: false,
                 bfs_compiled_in: false,
                 base_container_supports_deny_paths: false,
@@ -296,6 +337,32 @@ mod tests {
             false
         );
         assert_eq!(v["probes"]["uiCapabilities"]["canBlockClipboardRead"], true);
+    }
+
+    #[test]
+    fn request_capabilities_control_base_container_selection() {
+        let request = ExecutionRequest::default();
+        let probes = test_probe_facts(false);
+
+        let selected = run_probe_with_capabilities(&request, probes, true, true);
+
+        assert_eq!(selected.tier, Some("base-container"));
+        assert!(selected.error.is_none());
+    }
+
+    #[test]
+    fn capture_denials_remains_launchable_on_appcontainer_fallback() {
+        let _guard = ForceTierGuard::set_tier(IsolationTier::AppContainerDacl);
+        let mut policy = ContainerPolicy::default();
+        policy.capture_denials = Some(Default::default());
+        let request = request_with_policy(policy);
+
+        let output =
+            run_probe_with_capabilities(&request, test_probe_facts(false), false, false);
+
+        assert_eq!(output.tier, Some("appcontainer-dacl"));
+        assert!(!output.probes.native_capture_available);
+        assert!(output.error.is_none());
     }
 
     #[test]
