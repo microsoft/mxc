@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+lifted_msi = []
+
 [dependencies]
 wxc_common = { workspace = true }
 serde = { workspace = true }

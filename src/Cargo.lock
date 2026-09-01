@@ -336,6 +336,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cidr"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
+
+[[package]]
 name = "cipher"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -344,12 +350,6 @@ dependencies = [
  "crypto-common 0.1.7",
  "inout",
 ]
-
-[[package]]
-name = "cidr"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "579504560394e388085d0c080ea587dfa5c15f7e251b4d5247d1e1a61d1d6928"
 
 [[package]]
 name = "clap"
@@ -1612,6 +1612,7 @@ version = "0.8.0"
 dependencies = [
  "bwrap_common",
  "libc",
+ "mxc_build_common",
  "mxc_engine",
  "serde_json",
  "wxc_common",
@@ -1622,6 +1623,7 @@ name = "mxc_build_common"
 version = "0.8.0"
 dependencies = [
  "winresource",
+ "zip",
 ]
 
 [[package]]
@@ -1685,6 +1687,7 @@ version = "0.8.0"
 dependencies = [
  "csbindgen",
  "mxc-sdk",
+ "mxc_build_common",
  "serde",
  "serde_json",
 ]
@@ -3392,7 +3395,6 @@ dependencies = [
  "windows",
  "wslc_common",
  "wxc_common",
- "zip",
 ]
 
 [[package]]

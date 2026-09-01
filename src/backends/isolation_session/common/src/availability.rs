@@ -10,6 +10,8 @@
 use std::sync::OnceLock;
 
 use isolation_session_bindings::bindings::{IsoSessionFeature, IsoSessionOps};
+#[cfg(feature = "lifted_msi")]
+use windows::Win32::Foundation::REGDB_E_CLASSNOTREG;
 use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
 use windows_core::HRESULT;
 
@@ -27,13 +29,33 @@ fn available_from(probe: Result<i32, HRESULT>) -> bool {
 }
 
 fn probe_feature_level() -> Result<i32, HRESULT> {
-    // Guard uninitializes on drop, so a panic in `IsoSessionOps::new()` still
-    // balances `CoInitializeEx`. The `ops` handle drops before `_apartment`
-    // (reverse declaration order), preserving COM's create-before-uninit rule.
+    // Guard uninitializes on drop, so a panic during activation still balances
+    // `CoInitializeEx`. The `ops` handle drops before `_apartment` (reverse
+    // declaration order), preserving COM's create-before-uninit rule.
     let _apartment = ComApartment::enter();
+
+    #[cfg(feature = "lifted_msi")]
+    let ops = match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
+        Some(result) => result.map_err(|error| {
+            eprintln!(
+                "[mxc isosession] lifted IsoSessionOps activation failed: {}",
+                error
+            );
+            error.code()
+        })?,
+        None => return Err(REGDB_E_CLASSNOTREG),
+    };
+    #[cfg(not(feature = "lifted_msi"))]
     let ops = IsoSessionOps::new().map_err(|e| e.code())?;
+
     ops.GetFeatureLevel(IsoSessionFeature::LocalAgentUser)
-        .map_err(|e| e.code())
+        .map_err(|error| {
+            eprintln!(
+                "[mxc isosession] GetFeatureLevel(LocalAgentUser) failed: {}",
+                error
+            );
+            error.code()
+        })
 }
 
 /// Owns the COM apartment for the duration of a probe and uninitializes it on

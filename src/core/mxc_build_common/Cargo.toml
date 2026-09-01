@@ -7,3 +7,4 @@ description = "Shared build-time helpers for embedding Windows VersionInfo in MX
 
 [target.'cfg(windows)'.dependencies]
 winresource = { version = "0.1.31", default-features = false }
+zip = "2"

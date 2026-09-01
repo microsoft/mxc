@@ -11,6 +11,9 @@
 use std::path::Path;
 use std::process::Command;
 
+#[cfg(windows)]
+use std::io::Read;
+
 /// Embed Windows VersionInfo resource metadata into the binary being compiled.
 ///
 /// On non-Windows hosts and when building non-Windows targets on a Windows host
@@ -56,6 +59,110 @@ pub fn embed_version_info_with_manifest(
     {
         let _ = (file_description, original_filename, manifest_xml);
     }
+}
+
+/// Stages the lifted IsolationSession activation payload from the pinned SDK
+/// package beside the consuming Cargo artifact.
+#[cfg(windows)]
+pub fn stage_isolation_session_runtime(sdk_dir: &Path) -> Option<String> {
+    const APP_DLL: &str = "IsoSessionApp.dll";
+    const RUNTIME_MANIFEST: &str = "IsoSession.manifest";
+    const VERSION_SIDECAR: &str = "IsoSessionApp.runtimeversion";
+
+    let nupkg = find_last_nupkg(sdk_dir)?;
+    println!("cargo:rerun-if-changed={}", nupkg.display());
+
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR");
+    let target_dir = Path::new(&out_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .expect("could not determine target dir from OUT_DIR");
+
+    let Some(app_dll) = extract_zip_entry(&nupkg, APP_DLL) else {
+        println!(
+            "cargo:warning=isosession: {} not found in {}; lifted activation will be unavailable",
+            APP_DLL,
+            nupkg.display()
+        );
+        return None;
+    };
+    std::fs::write(target_dir.join(APP_DLL), app_dll)
+        .unwrap_or_else(|e| panic!("stage {} to {}: {e}", APP_DLL, target_dir.display()));
+
+    let Some(version_bytes) = extract_zip_entry(&nupkg, VERSION_SIDECAR) else {
+        println!(
+            "cargo:warning=isosession: {} not found in {}; cannot stamp {}",
+            VERSION_SIDECAR,
+            nupkg.display(),
+            RUNTIME_MANIFEST
+        );
+        return None;
+    };
+    let instance = String::from_utf8(version_bytes)
+        .expect("IsoSessionApp.runtimeversion is valid UTF-8")
+        .trim()
+        .replace('_', ".");
+    let instance_bytes = instance.as_bytes();
+    assert!(
+        instance_bytes.len() == 7
+            && instance_bytes[4] == b'.'
+            && instance_bytes[..4]
+                .iter()
+                .all(|value| value.is_ascii_digit())
+            && instance_bytes[5..]
+                .iter()
+                .all(|value| value.is_ascii_digit()),
+        "IsoSessionApp.runtimeversion must identify a YYYY_MM instance"
+    );
+    let manifest = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+<assembly xmlns=\"urn:schemas-microsoft-com:asm.v1\" manifestVersion=\"1.0\">\n\
+  <assemblyIdentity name=\"IsoSession.Runtime\" version=\"1.0.0.0\" type=\"win32\" />\n\
+  <file name=\"IsoSessionApp.dll\" />\n\
+  <iso:instance xmlns:iso=\"urn:schemas-microsoft-com:agentic-runtime.v1\" name=\"{instance}\" />\n\
+</assembly>\n"
+    );
+    std::fs::write(target_dir.join(RUNTIME_MANIFEST), manifest.as_bytes()).unwrap_or_else(|e| {
+        panic!(
+            "stage {} to {}: {e}",
+            RUNTIME_MANIFEST,
+            target_dir.display()
+        )
+    });
+    Some(manifest)
+}
+
+#[cfg(windows)]
+fn find_last_nupkg(dir: &Path) -> Option<std::path::PathBuf> {
+    let mut packages: Vec<_> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nupkg"))
+        })
+        .collect();
+    packages.sort();
+    packages.into_iter().next_back()
+}
+
+#[cfg(windows)]
+fn extract_zip_entry(nupkg: &Path, file_name: &str) -> Option<Vec<u8>> {
+    let file =
+        std::fs::File::open(nupkg).unwrap_or_else(|e| panic!("open {}: {e}", nupkg.display()));
+    let mut archive =
+        zip::ZipArchive::new(file).unwrap_or_else(|e| panic!("read zip {}: {e}", nupkg.display()));
+    let wanted = file_name.to_ascii_lowercase();
+    let entry_name = (0..archive.len()).find_map(|index| {
+        let name = archive.by_index(index).ok()?.name().to_string();
+        let leaf = name.rsplit(['/', '\\']).next().unwrap_or(&name);
+        (leaf.to_ascii_lowercase() == wanted).then_some(name)
+    })?;
+    let mut entry = archive.by_name(&entry_name).ok()?;
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 #[cfg(windows)]

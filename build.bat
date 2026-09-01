@@ -157,6 +157,22 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
                 if exist "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll" del /Q "sdk\node\bin\!SDK_ARCH!\wslcsdk.dll"
             )
         )
+        if "!COPY_WSLC_RUNTIME!"=="1" (
+            if "%WITH_ISOLATION_SESSION%"=="1" (
+                for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                    if not exist "!BIN_DIR!\%%B" (
+                        echo ERROR: IsolationSession-enabled Node runtime is missing !BIN_DIR!\%%B
+                        exit /b 1
+                    )
+                    copy /Y "!BIN_DIR!\%%B" "sdk\node\bin\!SDK_ARCH!\" >nul
+                    echo   Copied !SDK_ARCH!\%%B
+                )
+            ) else (
+                for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                    if exist "sdk\node\bin\!SDK_ARCH!\%%B" del /Q "sdk\node\bin\!SDK_ARCH!\%%B"
+                )
+            )
+        )
     )
 
     :: Copy the C# SDK's native library (mxc_ffi) into its runtime assets so a
@@ -165,6 +181,11 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
     if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_WSLC%"=="1" (
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wxc-wslc-daemon.exe"
         if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\wslcsdk.dll"
+    )
+    if "!COPY_WSLC_RUNTIME!"=="1" if not "%WITH_ISOLATION_SESSION%"=="1" (
+        for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+            if exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\%%B" del /Q "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\%%B"
+        )
     )
     if exist "!BIN_DIR!\mxc_ffi.dll" (
         if not exist "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native" mkdir "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native"
@@ -178,6 +199,16 @@ for %%T in (x86_64-pc-windows-msvc aarch64-pc-windows-msvc) do (
             for %%B in (wxc-wslc-daemon.exe wslcsdk.dll) do (
                 if not exist "!BIN_DIR!\%%B" (
                     echo ERROR: WSLC-enabled C# runtime unit is missing !BIN_DIR!\%%B
+                    exit /b 1
+                )
+                copy /Y "!BIN_DIR!\%%B" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul
+                echo   Copied !RID!\native\%%B
+            )
+        )
+        if "%WITH_ISOLATION_SESSION%"=="1" if "!COPY_WSLC_RUNTIME!"=="1" (
+            for %%B in (IsoSessionApp.dll IsoSession.manifest) do (
+                if not exist "!BIN_DIR!\%%B" (
+                    echo ERROR: IsolationSession-enabled C# runtime unit is missing !BIN_DIR!\%%B
                     exit /b 1
                 )
                 copy /Y "!BIN_DIR!\%%B" "sdk\dotnet\Microsoft.Mxc.Sdk\runtimes\!RID!\native\" >nul

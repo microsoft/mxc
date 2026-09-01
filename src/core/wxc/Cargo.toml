@@ -34,13 +34,12 @@ mxc_build_common.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 nanvix_build_common = { path = "../../backends/nanvix/build_common" }
-zip = "2"
 
 [features]
 default = []
 microvm = ["dep:nanvix_binaries", "nanvix_binaries/microvm", "mxc_engine/microvm"]
 wslc = ["dep:wslc_common", "wslc_common/link-wslcsdk", "mxc_engine/wslc"]
 hyperlight = ["dep:hyperlight_common", "hyperlight_common/hyperlight", "mxc_engine/hyperlight"]
-isolation_session = ["mxc_engine/isolation_session"]
+isolation_session = ["mxc_engine/isolation_session_lifted_msi"]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs", "mxc_engine/tier2_bfs"]

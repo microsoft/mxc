@@ -53,9 +53,11 @@
     <MxcNativeUnitFileNames>$(MxcNativeFileName)</MxcNativeUnitFileNames>
     <MxcNativeUnitFileNames Condition="'$(MxcSidecarFileName)' != ''">$(MxcNativeFileName) and $(MxcSidecarFileName)</MxcNativeUnitFileNames>
     <MxcNativeUnitFileNames Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcNativeUnitFileNames), wxc-wslc-daemon.exe, and wslcsdk.dll</MxcNativeUnitFileNames>
+    <MxcNativeUnitFileNames Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$(MxcNativeUnitFileNames), IsoSessionApp.dll, and IsoSession.manifest</MxcNativeUnitFileNames>
     <MxcNativeUnitExpectedCount>1</MxcNativeUnitExpectedCount>
     <MxcNativeUnitExpectedCount Condition="'$(MxcSidecarFileName)' != ''">2</MxcNativeUnitExpectedCount>
     <MxcNativeUnitExpectedCount Condition="'$(MxcWithWslc)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">4</MxcNativeUnitExpectedCount>
+    <MxcNativeUnitExpectedCount Condition="'$(MxcWithIsolationSession)' == 'true' and $([MSBuild]::IsOSPlatform('Windows'))">$([MSBuild]::Add($(MxcNativeUnitExpectedCount), 2))</MxcNativeUnitExpectedCount>
     <MxcIsolationSessionFeatureBit>0</MxcIsolationSessionFeatureBit>
     <MxcIsolationSessionFeatureBit Condition="'$(MxcWithIsolationSession)' == 'true'">1</MxcIsolationSessionFeatureBit>
     <MxcWslcFeatureBit>0</MxcWslcFeatureBit>
@@ -185,9 +187,16 @@
                      Condition="'$(MxcWithWslc)' == 'true'" />
       <MxcNativeUnit Include="@(MxcWslcDaemon);@(MxcWslcSdkDll)"
                      Condition="'$(MxcWithWslc)' == 'true'" />
+      <MxcIsolationSessionRuntime Include="@(MxcFfiArtifact->'%(RootDir)%(Directory)IsoSessionApp.dll');
+                                           @(MxcFfiArtifact->'%(RootDir)%(Directory)IsoSession.manifest')"
+                                  Condition="'$(MxcWithIsolationSession)' == 'true'" />
+      <MxcNativeUnit Include="@(MxcIsolationSessionRuntime)"
+                     Condition="'$(MxcWithIsolationSession)' == 'true'" />
     </ItemGroup>
     <Error Condition="'$(MxcWithWslc)' == 'true' and !Exists('@(MxcWslcSdkDll)')"
            Text="mxc: the WSLC-enabled cargo build did not stage wslcsdk.dll beside mxc_ffi." />
+    <Error Condition="'$(MxcWithIsolationSession)' == 'true' and @(MxcIsolationSessionRuntime->Count()) != 2"
+           Text="mxc: the IsolationSession-enabled cargo build did not stage the complete lifted activation payload beside mxc_ffi." />
     <Error Condition="!Exists('$(MxcGeneratedBindings)')"
            Text="Binding generation did not produce $(MxcGeneratedBindings). Ensure the Rust toolchain (cargo) is installed and on PATH." />
   </Target>
@@ -272,6 +281,8 @@
          Text="mxc: pre-staged $(MxcOtherWindowsRid) is missing mxc_ffi.dll or plm.exe. Rebuild that RID before creating a multi-RID package." />
   <Error Condition="@(MxcOtherRidNative->Count()) != 0 and '$(MxcWithWslc)' == 'true' and (!Exists('runtimes/$(MxcOtherWindowsRid)/native/wxc-wslc-daemon.exe') or !Exists('runtimes/$(MxcOtherWindowsRid)/native/wslcsdk.dll'))"
          Text="mxc: pre-staged $(MxcOtherWindowsRid) does not contain the complete WSLC runtime unit. Rebuild it with WSLC enabled." />
+  <Error Condition="@(MxcOtherRidNative->Count()) != 0 and '$(MxcWithIsolationSession)' == 'true' and (!Exists('runtimes/$(MxcOtherWindowsRid)/native/IsoSessionApp.dll') or !Exists('runtimes/$(MxcOtherWindowsRid)/native/IsoSession.manifest'))"
+         Text="mxc: pre-staged $(MxcOtherWindowsRid) does not contain the complete lifted IsolationSession activation payload. Rebuild it with IsolationSession enabled." />
   <Error Condition="@(MxcOtherRidNative->Count()) != 0 and !Exists('runtimes/$(MxcOtherWindowsRid)/mxc-build-features.txt')"
          Text="mxc: pre-staged $(MxcOtherWindowsRid) has no optional-backend feature stamp. Rebuild that RID before creating a multi-RID package." />
   <Error Condition="@(MxcOtherRidNative->Count()) != 0 and '$(MxcOtherRidFeatureStamp)' != '$(MxcExpectedOptionalBackendStamp)'"

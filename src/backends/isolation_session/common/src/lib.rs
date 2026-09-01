@@ -31,7 +31,7 @@ mod pipe_relay;
 mod policy;
 #[cfg(target_os = "windows")]
 mod process_options;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "lifted_msi"))]
 mod regfree;
 #[cfg(target_os = "windows")]
 mod sandbox_id;

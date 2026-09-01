@@ -163,34 +163,23 @@ The runtime class `IsoSessionOps` (and `IsoSessionProcessOptions`) is activated
 through a single mechanism in
 `src/backends/isolation_session/common/src/regfree.rs`:
 
-**Reg-free private-CLSID activation.** `regfree::activate_via_private_clsid`
-calls
-`CoCreateInstance(<private CLSID>, CLSCTX_INPROC_SERVER, IID_IActivationFactory)`.
-`wxc-exec`'s **fused `<comClass>` manifest** redirects that private CLSID —
-reg-free, ahead of HKCR, and never catalog-shadowed — straight to the
-MSI-installed `IsoSessionApp.dll` shipped **co-located with `wxc-exec.exe`** in
-MXC's nuget. There is **no `LoadLibrary` in this Rust caller and no
-runtime-path logic in Rust**: the OS loader resolves the co-located App DLL,
-and the App DLL (C++) owns all knowledge of where the MSI runtime lives — it
-resolves the runtime directory, coresident-loads `IsoSessionClient.dll`, and
-binds the matching side-by-side service instance. No machine-wide registry
-mutation is involved. This is what lets a packaged product (openclaw) ship and
-run a specific runtime version without touching the inbox binaries.
+**Direct shim activation.** `regfree::activate_from_adjacent_shim` loads the
+co-located `IsoSessionApp.dll` by absolute path, resolves its
+`DllGetActivationFactory` export, and requests the projected runtime class
+factory directly. The co-located stamped `IsoSession.manifest` selects the
+matching version under `%ProgramFiles%\Microsoft\Agentic Runtime`. The shim
+then loads that version's `IsoSessionClient.dll` and binds the matching
+side-by-side service instance. This bypasses the inbox WinRT catalog without
+machine-wide registration or private classic-COM classes.
 
-Classic-COM (not reg-free WinRT) is used deliberately: a private `<comClass>`
-redirection is honored ahead of HKCR and is immune to the reserved-namespace
-catalog shadowing that would defeat a reg-free WinRT activation context on an
-image where the `Windows.AI.IsolationSession.*` classes are already registered
-inbox.
-
-**No-fallback rule.** `activate_via_private_clsid` returns
+**No-fallback rule.** `activate_from_adjacent_shim` returns
 `Option<Result<T>>`, and the callers
 (`manager::check_service_available_and_activate`,
 `process_options::build_iso_process_options`) treat it as:
 
-- **`None`** — the private CLSID is not registered (`REGDB_E_CLASSNOTREG`),
-  i.e. the manifest was not fused (an inbox-only build). This is turned into a
-  **hard, actionable error** (`error::regfree_not_fused`). MXC deliberately
+- **`None`** — the adjacent shim/manifest activation unit is absent (an
+  inbox-only build). This is turned into a
+  **hard, actionable error** (`error::lifted_payload_missing`). MXC deliberately
   does **not** fall back to the inbox `System32` runtime — silently binding a
   different, unversioned binary set is exactly the failure this design prevents.
 - **`Some(Err(e))`** — any other activation failure (including a fused-but-

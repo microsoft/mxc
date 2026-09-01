@@ -39,3 +39,4 @@ required-features = ["isolation_session"]
 
 [build-dependencies]
 csbindgen = { version = "1", optional = true }
+mxc_build_common.workspace = true

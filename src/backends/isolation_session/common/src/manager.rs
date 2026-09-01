@@ -28,9 +28,11 @@ use windows_core::{HSTRING, PCWSTR};
 
 use super::console_mode::{get_local_console_size, ConsoleModeRestorer, CtrlHandlerGuard};
 use super::console_relay::{create_console_relay_thread, ConsoleRelayParams};
+#[cfg(feature = "lifted_msi")]
+use super::error::lifted_payload_missing;
 use super::error::{
-    activation_error, check_result, format_iso_error, lifecycle_err, op, regfree_not_fused,
-    sta_refusal, transport_err, IsolationSessionError, StalePromotion,
+    activation_error, check_result, format_iso_error, lifecycle_err, op, sta_refusal,
+    transport_err, IsolationSessionError, StalePromotion,
 };
 use super::pipe_relay::{
     create_relay_thread, create_relay_thread_with_stop, duplicate_handle, PipeRelayWithStopParams,
@@ -140,10 +142,11 @@ fn classify_apartment(apartment: APTTYPE, qualifier: APTTYPEQUALIFIER) -> Apartm
 /// binding the version-pinned MSI-installed runtime.
 ///
 /// There is **no inbox fallback**: if the private-CLSID activator is not fused
-/// into this executable, this returns a hard [`regfree_not_fused`] error rather
+/// beside this executable, this returns a hard [`lifted_payload_missing`] error rather
 /// than silently binding the inbox `System32` runtime.
+#[cfg(feature = "lifted_msi")]
 fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
-    match super::regfree::activate_via_private_clsid::<IsoSessionOps>() {
+    match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
         Some(Ok(ops)) => Ok(ops),
         // The HRESULT→error mapping lives in `activation_error` so it stays
         // testable without depending on whether this host can activate the
@@ -151,8 +154,15 @@ fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSess
         Some(Err(e)) => Err(activation_error(e.code().0 as u32, &e.message())),
         // The fused manifest is absent: refuse to silently bind the inbox
         // runtime, and surface an actionable hard error instead.
-        None => Err(regfree_not_fused(op::ACTIVATE)),
+        None => Err(lifted_payload_missing(op::ACTIVATE)),
     }
+}
+
+/// Activates the system-registered API for embedders such as the Rust and C#
+/// SDKs. They do not carry `wxc-exec`'s fused lifted-MSI activation manifest.
+#[cfg(not(feature = "lifted_msi"))]
+fn check_service_available_and_activate() -> Result<IsoSessionOps, IsolationSessionError> {
+    IsoSessionOps::new().map_err(|e| activation_error(e.code().0 as u32, &e.message()))
 }
 
 /// Decides whether the host supports app-scoped registration — i.e. the
@@ -1285,14 +1295,14 @@ mod tests {
                 // Service is NOT available. Verify the error is clean and
                 // descriptive (not a panic or cryptic COM error), and that
                 // it names the activation operation it failed on. On a host
-                // without the fused private-CLSID manifest (the usual dev
-                // box), activation resolves to the reg-free hard error; on a
+                // without the adjacent lifted payload (the usual dev box),
+                // activation resolves to the lifted hard error; on a
                 // host where the class is inbox-registered but unavailable it
                 // is the "not available" message.
                 assert!(
                     failure.message.contains("not available")
                         || failure.message.contains("activation failed")
-                        || failure.message.contains("reg-free activation was not taken"),
+                        || failure.message.contains("lifted activation was not taken"),
                     "Expected descriptive error message, got: {}",
                     failure.message
                 );

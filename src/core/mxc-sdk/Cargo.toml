@@ -15,7 +15,8 @@ default = []
 # which links the WSLC SDK loader; see `mxc_engine`'s `wslc` feature.
 wslc = ["mxc_engine/wslc"]
 # IsolationSession backend (Windows only, experimental).
-isolation_session = ["mxc_engine/isolation_session"]
+isolation_session = ["mxc_engine/isolation_session_lifted_msi"]
+isolation_session_inbox = ["mxc_engine/isolation_session"]
 
 [dependencies]
 wxc_common.workspace = true
@@ -23,6 +24,9 @@ mxc_engine = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[build-dependencies]
+mxc_build_common.workspace = true
 
 # Manual operator driver for the in-process IsolationSession lifecycle. Gated on
 # the backend feature so `cargo build --examples` without it stays green.

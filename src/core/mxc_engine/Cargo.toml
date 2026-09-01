@@ -56,5 +56,9 @@ isolation_session = [
     "dep:isolation_session_bindings",
     "dep:isolation_session_common",
 ]
+isolation_session_lifted_msi = [
+    "isolation_session",
+    "isolation_session_common/lifted_msi",
+]
 # Forwards appcontainer_common/tier2_bfs. OFF by default; see appcontainer_common/Cargo.toml.
 tier2_bfs = ["appcontainer_common/tier2_bfs"]

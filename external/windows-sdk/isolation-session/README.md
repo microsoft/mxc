@@ -39,8 +39,14 @@ re-runs when the `.nupkg` changes (`cargo:rerun-if-changed`).
 
 1. Produce a new package with the OS-side
    `nuget/Microsoft.Windows.AI.IsolationSession.SDK/pack.ps1`.
-2. Replace the `.nupkg` in this directory (and update `GENERATION_INFO.toml`'s
-   `winmd_sha256`).
+2. From the MXC repository root, run:
+   ```powershell
+   .\external\windows-sdk\isolation-session\Update-IsoSessionSdk.ps1 `
+       -PackagePath C:\path\to\Microsoft.Windows.AI.IsolationSession.SDK.<version>.nupkg
+   ```
+   The script validates the package payload and runtime identity, removes the
+   previously pinned package, copies the new package, and regenerates
+   `GENERATION_INFO.toml`.
 3. `cargo build` — the new bindings are generated automatically. Review the
    downstream diff (e.g. `cargo check -p wxc --features isolation_session`).
 

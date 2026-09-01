@@ -331,31 +331,30 @@ pub(super) fn sta_refusal() -> IsolationSessionError {
     })
 }
 
-/// The reg-free private-CLSID activator is not fused into this executable, so
-/// the version-pinned MSI-installed IsolationSession runtime cannot be bound.
+/// The adjacent lifted activation payload is missing, so the version-pinned
+/// MSI-installed IsolationSession runtime cannot be bound.
 ///
 /// Raised for the `None` arm of
-/// [`super::regfree::activate_via_private_clsid`] (`REGDB_E_CLASSNOTREG` from
-/// `CoCreateInstance` on the private activator CLSID). MXC deliberately does
+/// [`super::regfree::activate_from_adjacent_shim`]. MXC deliberately does
 /// **not** fall back to the inbox `System32` runtime here — silently binding a
 /// different, unversioned binary set is exactly the failure mode this design
-/// exists to prevent — so the missing fused manifest surfaces as a hard,
+/// exists to prevent — so the missing payload surfaces as a hard,
 /// actionable error instead.
-pub(super) fn regfree_not_fused(operation: &str) -> IsolationSessionError {
+#[cfg(feature = "lifted_msi")]
+pub(super) fn lifted_payload_missing(operation: &str) -> IsolationSessionError {
     IsolationSessionError::ServiceUnavailable(IsoApiFailure::new(
         operation,
         Some(REGDB_E_CLASSNOTREG_HRESULT),
         Some(
-            "IsolationSession reg-free activation was not taken: the private-CLSID activator \
-             (IsoSessionApp.comClass.manifest) is not fused into this executable, so the \
+            "IsolationSession lifted activation was not taken: IsoSessionApp.dll and \
+             IsoSession.manifest are not co-located with this executable, so the \
              version-pinned MSI-installed IsolationSession runtime could not be bound. MXC will \
              not silently fall back to the inbox System32 runtime."
                 .to_string(),
         ),
         Some(
-            "Rebuild wxc-exec against the Microsoft.Windows.AI.IsolationSession.SDK nuget so the \
-             activation manifest is fused into the executable and IsoSessionApp.dll is \
-             co-located next to wxc-exec.exe."
+            "Rebuild against the Microsoft.Windows.AI.IsolationSession.SDK NuGet so \
+             IsoSessionApp.dll and its stamped IsoSession.manifest are staged beside the host."
                 .to_string(),
         ),
     ))
@@ -781,19 +780,21 @@ mod tests {
         assert!(mapped.message.contains("same OS commit"));
     }
 
-    /// The hard error raised when the reg-free activator is not fused must
-    /// carry the REGDB_E_CLASSNOTREG code, an operation, a message that refuses
-    /// the inbox fallback, and an actionable remediation.
+    /// The hard error raised when the lifted payload is absent must carry the
+    /// class-not-registered code, an operation, a message that refuses the
+    /// inbox fallback, and an actionable remediation.
+    #[cfg(feature = "lifted_msi")]
     #[test]
-    fn regfree_not_fused_is_a_hard_actionable_error() {
-        let mapped = map_lifecycle_error(regfree_not_fused(op::ACTIVATE));
+    fn lifted_payload_missing_is_a_hard_actionable_error() {
+        let mapped = map_lifecycle_error(lifted_payload_missing(op::ACTIVATE));
         assert_eq!(mapped.code, MxcErrorCode::BackendUnavailable);
         assert_eq!(mapped.operation(), Some("IsoSessionOps.ActivateInstance"));
         assert_eq!(mapped.native_code(), Some("0x80040154"));
         assert!(mapped.message.contains("not silently fall back"));
         assert!(mapped
-            .remediation()
-            .is_some_and(|r| r.contains("IsolationSession.SDK nuget")));
+            .remediation
+            .as_deref()
+            .is_some_and(|r| r.contains("IsolationSession.SDK NuGet")));
     }
 
     #[test]

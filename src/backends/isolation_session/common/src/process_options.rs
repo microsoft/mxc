@@ -10,7 +10,9 @@ use wxc_common::models::ExecutionRequest;
 use isolation_session_bindings::bindings::IsoSessionProcessOptions;
 use windows_core::HSTRING;
 
-use super::error::{op, regfree_not_fused, transport_err, IsolationSessionError};
+#[cfg(feature = "lifted_msi")]
+use super::error::lifted_payload_missing;
+use super::error::{op, transport_err, IsolationSessionError};
 
 const REDIRECT_STDIN: u32 = 0x1;
 const REDIRECT_STDOUT: u32 = 0x2;
@@ -149,14 +151,7 @@ pub(super) fn with_service_timeout_grace(mut options: ProcessOptions) -> Process
 pub(super) fn build_iso_process_options(
     options: &ProcessOptions,
 ) -> Result<IsoSessionProcessOptions, IsolationSessionError> {
-    let proc_options =
-        match super::regfree::activate_via_private_clsid::<IsoSessionProcessOptions>() {
-            Some(result) => {
-                result.map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))?
-            }
-            // No inbox fallback: the fused private-CLSID activator is absent.
-            None => return Err(regfree_not_fused(op::OPTIONS_NEW)),
-        };
+    let proc_options = new_iso_process_options()?;
 
     proc_options
         .SetTimeoutMilliseconds(options.timeout_ms)
@@ -201,6 +196,20 @@ pub(super) fn build_iso_process_options(
     }
 
     Ok(proc_options)
+}
+
+#[cfg(feature = "lifted_msi")]
+fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    match super::regfree::activate_from_adjacent_shim::<IsoSessionProcessOptions>() {
+        Some(result) => result.map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e)),
+        None => Err(lifted_payload_missing(op::OPTIONS_NEW)),
+    }
+}
+
+#[cfg(not(feature = "lifted_msi"))]
+fn new_iso_process_options() -> Result<IsoSessionProcessOptions, IsolationSessionError> {
+    IsoSessionProcessOptions::new()
+        .map_err(|e| transport_err(op::OPTIONS_NEW, "activation failed", &e))
 }
 
 #[cfg(test)]
