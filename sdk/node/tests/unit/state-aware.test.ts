@@ -29,7 +29,23 @@ describe('buildStateAwareEnvelope', () => {
       config: { telemetry: { enabled: true } },
     });
     assert.deepEqual(env.telemetry, { enabled: true });
+    assert.equal(env.version, '0.9.0-alpha');
     assert.equal(env.experimental, undefined);
+  });
+
+  it('rejects telemetry with an explicitly older schema version', () => {
+    assert.throws(
+      () => buildStateAwareEnvelope({
+        phase: 'start',
+        backendKey: 'windows_sandbox',
+        sandboxId: 'wsb:01234567',
+        config: { version: '0.8.0-alpha', telemetry: { enabled: true } },
+      }),
+      (error: unknown) =>
+        error instanceof MxcError &&
+        error.code === 'malformed_request' &&
+        error.message.includes('telemetry requires schema version 0.9.0-alpha'),
+    );
   });
 
   it('produces a provision envelope with cross-cutting fields lifted to top-level', () => {

@@ -235,11 +235,12 @@ pub fn init(config: &TelemetryConfig, logger: &mut Logger) -> bool {
 
     let activated = mxc_telemetry::init(MXC_VERSION, MXC_CHANNEL);
     if !activated && cfg!(target_os = "windows") {
-        logger
-            .log_line("telemetry: ETW provider registration failed; continuing without telemetry");
+        logger.retained_warning_line(
+            "telemetry: ETW provider registration failed; continuing without telemetry",
+        );
     }
     if activated && !mxc_telemetry::IS_UTC_ROUTED {
-        logger.log_line(
+        logger.retained_warning_line(
             "telemetry: events are emitted to local ETW only; this build has no provider group \
              GUID, so nothing is routed to the Microsoft pipeline (set \
              MXC_TELEMETRY_PROVIDER_GROUP_GUID at build time for an internal build)",

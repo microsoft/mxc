@@ -28,7 +28,7 @@ pub enum Mode {
 pub struct Logger {
     mode: Mode,
     buffer: String,
-    /// Security warnings emitted during the run, retained for library callers.
+    /// Warnings emitted during the run, retained for library callers.
     warnings: Vec<String>,
     /// Optional CLI-driven log file sink (`--log-file`).
     file: Option<File>,
@@ -264,7 +264,17 @@ impl Logger {
         self.log_diagnostic_line(msg);
     }
 
-    /// Security warnings emitted during the run.
+    /// Record a warning for library callers and the primary diagnostic stream.
+    ///
+    /// Use this when executor users must see the message in the ordinary
+    /// buffered/console output while in-process callers also need it through
+    /// [`warnings`](Self::warnings).
+    pub fn retained_warning_line(&mut self, msg: &str) {
+        self.warnings.push(msg.to_string());
+        self.log_line(msg);
+    }
+
+    /// Warnings emitted during the run.
     pub fn warnings(&self) -> &[String] {
         &self.warnings
     }
@@ -356,6 +366,16 @@ mod tests {
         assert!(logger.get_buffer().is_empty());
         assert_eq!(logger.take_warnings(), ["security warning"]);
         assert!(logger.warnings().is_empty());
+    }
+
+    #[test]
+    fn retained_warning_line_reaches_primary_output_and_callers() {
+        let mut logger = Logger::new(Mode::Buffer);
+
+        logger.retained_warning_line("operational warning");
+
+        assert_eq!(logger.warnings(), ["operational warning"]);
+        assert_eq!(logger.get_buffer(), "operational warning\n");
     }
 
     /// The body of the child process spawned by

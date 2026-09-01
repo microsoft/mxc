@@ -15,7 +15,7 @@
 //! [`wxc_common::state_aware_dispatch::run_state_aware`], which surfaces the
 //! `unsupported_phase` envelope.
 
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use wxc_common::logger::{Logger, Mode};
@@ -76,6 +76,12 @@ fn require_experimental_optin(
 /// see [`telemetry::correlation_state`].
 fn phase_correlation(active: bool, phase: Phase, sandbox_id: Option<&str>) -> String {
     telemetry::correlation_state::pre_dispatch_vector(active, phase == Phase::Provision, sandbox_id)
+}
+
+fn surface_attached_warnings(logger: &mut Logger, mut surface: impl FnMut(&str)) {
+    for warning in logger.take_warnings() {
+        surface(&warning);
+    }
 }
 
 /// Merge `warnings` from telemetry initialisation into the envelope's
@@ -342,14 +348,50 @@ fn exec_state_aware_attached_with(
     }
 
     exec_attached_gate(host_is_interactive)?;
+    let phase = parsed.phase;
+    let sandbox_id = parsed.sandbox_id.clone();
+    let requested_sandbox_kind = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .and_then(|config| config.requested_sandbox_kind);
+    let telemetry_active = parsed
+        .request
+        .telemetry
+        .as_ref()
+        .map(|config| telemetry::init(config, &mut logger))
+        .unwrap_or(false);
+    // This API explicitly attaches the workload to the host's stdio and has no
+    // warning-bearing return handle. Surface retained parser/init warnings on
+    // host stderr rather than silently dropping them as the buffered logger
+    // goes out of scope.
+    surface_attached_warnings(&mut logger, |warning| {
+        let _ = writeln!(std::io::stderr().lock(), "{warning}");
+    });
+    let backend = resolve_backend(&parsed)
+        .map(|backend| backend.wire_name().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let correlation = phase_correlation(telemetry_active, phase, sandbox_id.as_deref());
+    let started = std::time::Instant::now();
     let dispatched = with_attached_exec_claim(|| run_state_aware(parsed, /* dry_run */ false))
-        .ok_or_else(|| {
-            Error::from(MxcError::malformed_request(
+        .unwrap_or_else(|| {
+            Err(MxcError::malformed_request(
                 "another attached exec is already running in this process. An attached exec \
                  owns this process's console mode and control handler, so only one can run at \
                  a time. Nothing has been run.",
             ))
-        })?;
+        });
+    telemetry::emit_sdk_state_aware_with_kind(
+        telemetry_active,
+        requested_sandbox_kind,
+        telemetry::TelemetryContext {
+            backend: &backend,
+            phase: phase.as_str(),
+            correlation_vector: &correlation,
+        },
+        &dispatched,
+        started.elapsed(),
+    );
 
     match dispatched.map_err(Error::from)? {
         DispatchOutcome::ExecCompleted { exit_code } => Ok(ExecOutcome::Exited(exit_code)),
@@ -543,6 +585,19 @@ mod tests {
             phase_correlation(false, Phase::Provision, None),
             String::new()
         );
+    }
+
+    #[test]
+    fn attached_warning_surface_drains_retained_warnings() {
+        let mut logger = Logger::new(Mode::Buffer);
+        logger.warning_line("first");
+        logger.warning_line("second");
+        let mut surfaced = Vec::new();
+
+        surface_attached_warnings(&mut logger, |warning| surfaced.push(warning.to_string()));
+
+        assert_eq!(surfaced, ["first", "second"]);
+        assert!(logger.warnings().is_empty());
     }
 
     #[test]

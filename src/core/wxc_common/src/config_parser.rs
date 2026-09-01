@@ -221,7 +221,7 @@ pub fn load_request_with_options(
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
         let raw: serde_json::Value = config_deserialize::from_str(&json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_versioned_fields(&raw)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
     })();
@@ -289,6 +289,9 @@ pub fn load_request_from_json_with_hint_and_options(
 
         let cfg: wire::MxcConfig = config_deserialize::from_str(json_str)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        let raw: serde_json::Value = config_deserialize::from_str(json_str)
+            .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
+        validate_versioned_fields(&raw)?;
 
         convert_wire_config(cfg, logger, true, opts.allow_missing_command, false)
     })();
@@ -313,7 +316,7 @@ pub fn load_request_from_value(
         reject_legacy_telemetry_value(&config)?;
         let cfg: wire::MxcConfig = config_deserialize::from_value(config)
             .map_err(|error| WxcError::ConfigParse(error.to_string()))?;
-        validate_directional_network_field_versions(&raw)?;
+        validate_versioned_fields(&raw)?;
 
         convert_wire_config(cfg, logger, true, allow_missing_command, false)
     })();
@@ -434,7 +437,7 @@ fn parse_mxc_request_json_with_hint(
     if hint.kind() == RequestKind::StateAware {
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::Decode(WxcError::ConfigParse(error.to_string())))?;
-        validate_directional_network_field_versions(&raw).map_err(|error| {
+        validate_versioned_fields(&raw).map_err(|error| {
             ParseError::StateAware(MxcError::malformed_request(error.to_string()))
         })?;
         convert_wire_state_aware(
@@ -452,11 +455,16 @@ fn parse_mxc_request_json_with_hint(
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
         let raw: serde_json::Value = config_deserialize::from_str(json_str)
             .map_err(|error| ParseError::OneShot(WxcError::ConfigParse(error.to_string())))?;
-        validate_directional_network_field_versions(&raw).map_err(ParseError::OneShot)?;
+        validate_versioned_fields(&raw).map_err(ParseError::OneShot)?;
         convert_wire_config(cfg, logger, true, allow_missing_command, false)
             .map(MxcRequest::OneShot)
             .map_err(ParseError::OneShot)
     }
+}
+
+fn validate_versioned_fields(config: &serde_json::Value) -> Result<(), WxcError> {
+    validate_directional_network_field_versions(config)?;
+    validate_telemetry_field_version(config)
 }
 
 fn validate_directional_network_field_versions(config: &serde_json::Value) -> Result<(), WxcError> {
@@ -482,6 +490,29 @@ fn validate_directional_network_field_versions(config: &serde_json::Value) -> Re
 
     if has_directional_network || has_runtime_config || has_process_container_network {
         return Err(directional_network_version_error());
+    }
+    Ok(())
+}
+
+fn validate_telemetry_field_version(config: &serde_json::Value) -> Result<(), WxcError> {
+    let Some(config) = config.as_object() else {
+        return Ok(());
+    };
+    if !config.contains_key("telemetry") {
+        return Ok(());
+    }
+    let Some(version) = config.get("version").and_then(serde_json::Value::as_str) else {
+        return Ok(());
+    };
+    let Ok(version) = semver::Version::parse(version) else {
+        // The ordinary schema-version validator owns malformed-version
+        // diagnostics so this feature gate does not mask the more useful error.
+        return Ok(());
+    };
+    if version.major == 0 && version.minor < 9 {
+        return Err(WxcError::ConfigParse(
+            "top-level 'telemetry' requires config schema version 0.9.0-alpha or later".to_string(),
+        ));
     }
     Ok(())
 }
@@ -2004,6 +2035,7 @@ mod tests {
         // Telemetry is a stable cross-cutting setting parsed identically for
         // one-shot and state-aware requests.
         let json = r#"{
+            "version": "0.9.0-alpha",
             "phase": "provision",
             "containment": "isolation_session",
             "telemetry": {"enabled": true},
@@ -2018,6 +2050,25 @@ mod tests {
             }
             MxcRequest::OneShot(_) => panic!("expected state-aware"),
         }
+    }
+
+    #[test]
+    fn state_aware_telemetry_rejects_pre_09_schema_version() {
+        let error = load_mxc(
+            r#"{
+                "version": "0.8.0-alpha",
+                "phase": "start",
+                "sandboxId": "iso:abcd1234",
+                "telemetry": {"enabled": true}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("telemetry' requires config schema version 0.9.0-alpha"),
+            "got {error:?}"
+        );
     }
 
     #[test]
@@ -6759,13 +6810,34 @@ mod tests {
 
     #[test]
     fn telemetry_enabled_true() {
-        let json = r#"{"process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
+        let json = r#"{"version":"0.9.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
         let encoded = base64_encode(json.as_bytes());
         let mut logger = test_logger();
         let req = load_request(&encoded, &mut logger, true).unwrap();
         let telem = req.telemetry.expect("telemetry should be set");
         assert_eq!(telem.enabled, Some(true));
         assert_eq!(telem.requested_sandbox_kind, Some("process"));
+    }
+
+    #[test]
+    fn telemetry_rejects_pre_09_schema_version_across_one_shot_loaders() {
+        let json = r#"{"version":"0.8.0-alpha","process":{"commandLine":"echo hi"},"telemetry":{"enabled":true}}"#;
+        let expected = "telemetry' requires config schema version 0.9.0-alpha";
+
+        let encoded = base64_encode(json.as_bytes());
+        let mut logger = test_logger();
+        let error = load_request(&encoded, &mut logger, true).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error = load_request_from_json(json, &mut logger).unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
+
+        let mut logger = test_logger();
+        let error =
+            load_request_from_value(serde_json::from_str(json).unwrap(), &mut logger, false)
+                .unwrap_err();
+        assert!(error.to_string().contains(expected), "got {error:?}");
     }
 
     #[test]

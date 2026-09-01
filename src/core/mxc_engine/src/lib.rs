@@ -153,8 +153,8 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
 /// * [`SandboxProcess::kill`] — cancellation event after the wrapped process
 ///   confirms the kill succeeded. A failed kill leaves the slot active for a
 ///   later `wait` / successful `try_wait`.
-/// * [`Drop`] — synthesised process-error event, so a wrapper dropped without
-///   `wait` never releases the provider without accounting for the run.
+/// * [`Drop`] — polls once for a completed child and emits its real exit code;
+///   only a still-running or unpollable child is reported as abandoned.
 ///
 /// `active` doubles as the exactly-once flag: it starts `true`, and every
 /// terminal path calls [`TelemetryProcess::emit`] which flips it to `false`
@@ -347,14 +347,32 @@ enum SyntheticTerminal {
     PollError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DropDisposition {
+    Exited(i32),
+    Abandoned,
+}
+
+fn observe_before_drop(process: &mut dyn SandboxProcess) -> DropDisposition {
+    match process.try_wait() {
+        Ok(Some(exit_code)) => DropDisposition::Exited(exit_code),
+        Ok(None) | Err(_) => DropDisposition::Abandoned,
+    }
+}
+
 impl Drop for TelemetryProcess {
     fn drop(&mut self) {
         // If `wait` / `try_wait(Ok(Some))` / `kill` already emitted the
-        // terminal event, `active` is false and this is a no-op. Otherwise
-        // synthesise one so the "exactly-one terminal event" invariant holds
-        // for the drop-without-wait path as well. `emit` also releases the
-        // provider reference.
-        self.emit_synthetic(SyntheticTerminal::Dropped);
+        // terminal event, `active` is false and this is a no-op. Otherwise,
+        // preserve a completion that raced with Drop instead of misreporting a
+        // successful fire-and-forget run as abandonment.
+        if !self.active {
+            return;
+        }
+        match observe_before_drop(self.inner.as_mut()) {
+            DropDisposition::Exited(exit_code) => self.emit(&Ok(exit_code)),
+            DropDisposition::Abandoned => self.emit_synthetic(SyntheticTerminal::Dropped),
+        }
     }
 }
 
@@ -423,7 +441,7 @@ impl SandboxProcess for TelemetryProcess {
     }
 }
 
-/// A streaming process paired with security warnings emitted during spawn.
+/// A streaming process paired with warnings emitted during spawn.
 pub(crate) struct ProcessWithWarnings {
     inner: Box<dyn SandboxProcess>,
     warnings: Vec<String>,
@@ -609,6 +627,33 @@ mod telemetry_process_tests {
         assert!(process.active);
         process.emit_synthetic(SyntheticTerminal::Dropped);
         assert!(!process.active);
+    }
+
+    #[test]
+    fn drop_observation_preserves_completed_exit_code() {
+        let mut exited = StubProcess {
+            try_wait_result: TryWaitResult::Exited(7),
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(observe_before_drop(&mut exited), DropDisposition::Exited(7));
+
+        let mut running = StubProcess {
+            try_wait_result: TryWaitResult::Running,
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(
+            observe_before_drop(&mut running),
+            DropDisposition::Abandoned
+        );
+
+        let mut failed = StubProcess {
+            try_wait_result: TryWaitResult::Failed,
+            wait_result: Ok(0),
+            kill_fails: false,
+        };
+        assert_eq!(observe_before_drop(&mut failed), DropDisposition::Abandoned);
     }
 
     #[test]
