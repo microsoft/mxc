@@ -132,8 +132,11 @@ every backend the host can run, including lifecycle-only backends such as
 Windows Sandbox and IsolationSession. Its ProcessContainer `Tier` is the
 strongest tier the host can reach; policy can still select a weaker tier.
 `Capabilities` reports optional host features such as
-`BackendCapability.CaptureDenials`, and `Warnings` explains why an optional
-capability is absent.
+`BackendCapability.CaptureDenials` and `BackendCapability.ProxyEnforcement`.
+`Warnings` carries diagnostics for a capability the host cannot offer — but not
+for every absent one: only checks that produce a reason contribute. Bubblewrap's
+`ProxyEnforcement` does (see below); Windows omits `CaptureDenials` without a
+warning.
 
 Discovery is advisory. Availability can change before launch, and a backend in
 `GetAvailableBackends()` is not necessarily one the one-shot SDK can launch.
@@ -165,7 +168,7 @@ if (bubblewrap is null)
 }
 else if (bubblewrap.Capabilities.Contains(BackendCapability.ProxyEnforcement))
 {
-    // Safe to send an 0.8 network.proxy policy.
+    // Safe to send a 0.8 network.proxy policy.
 }
 else
 {

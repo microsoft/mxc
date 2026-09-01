@@ -39,6 +39,13 @@ pub(crate) const MAX_PROBE_OUTPUT_BYTES: usize = 64 * 1024;
 const INITIAL_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// Ceiling on reaping a child we have just tried to kill.
+///
+/// `SIGKILL` is uncatchable, so a successful kill is reaped almost instantly;
+/// this only bounds the case where the signal never landed.
+const REAP_TIMEOUT: Duration = Duration::from_millis(250);
+const REAP_POLL_INTERVAL: Duration = Duration::from_millis(1);
+
 /// One captured stream, plus whether it outgrew [`MAX_PROBE_OUTPUT_BYTES`].
 ///
 /// Truncation is reported, not silently accepted: a partly-read banner is not
@@ -140,8 +147,7 @@ pub(crate) fn run_bounded(
     let (stdout_reader, stdout_rx) = match spawn_reader(stdout, deadline) {
         Ok(reader) => reader,
         Err(err) => {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
+            terminate_and_reap(&mut child, process_group);
             return Err(ProbeFailure::Internal(format!(
                 "failed to start stdout reader: {err}"
             )));
@@ -150,8 +156,7 @@ pub(crate) fn run_bounded(
     let (stderr_reader, stderr_rx) = match spawn_reader(stderr, deadline) {
         Ok(reader) => reader,
         Err(err) => {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
+            terminate_and_reap(&mut child, process_group);
             let _ = stdout_reader.join();
             return Err(ProbeFailure::Internal(format!(
                 "failed to start stderr reader: {err}"
@@ -171,8 +176,7 @@ pub(crate) fn run_bounded(
         if let Err(err) = receive_reader(&stdout_rx, &mut stdout)
             .and_then(|_| receive_reader(&stderr_rx, &mut stderr))
         {
-            let _ = terminate_probe_tree(&mut child, process_group);
-            let _ = child.wait();
+            terminate_and_reap(&mut child, process_group);
             let _ = stdout_reader.join();
             let _ = stderr_reader.join();
             return Err(err);
@@ -190,8 +194,7 @@ pub(crate) fn run_bounded(
                 }
                 Ok(false) => {}
                 Err(error) => {
-                    let _ = terminate_probe_tree(&mut child, process_group);
-                    let _ = child.wait();
+                    terminate_and_reap(&mut child, process_group);
                     drop(stdout_reader);
                     drop(stderr_reader);
                     return Err(ProbeFailure::Wait {
@@ -204,6 +207,8 @@ pub(crate) fn run_bounded(
 
         #[cfg(target_os = "linux")]
         if leader_exited && stdout.is_some() && stderr.is_some() {
+            // Safe to block: `child_exited_without_reaping` already observed the
+            // exit with `WNOWAIT`, so the zombie is waiting to be collected.
             match child.wait() {
                 Ok(exit_status) => status = Some(exit_status),
                 Err(error) => {
@@ -223,8 +228,7 @@ pub(crate) fn run_bounded(
                 Ok(Some(exit_status)) => status = Some(exit_status),
                 Ok(None) => {}
                 Err(error) => {
-                    let _ = terminate_probe_tree(&mut child, process_group);
-                    let _ = child.wait();
+                    terminate_and_reap(&mut child, process_group);
                     drop(stdout_reader);
                     drop(stderr_reader);
                     return Err(ProbeFailure::Wait {
@@ -259,8 +263,7 @@ pub(crate) fn run_bounded(
             continue;
         }
 
-        let kill_error = terminate_probe_tree(&mut child, process_group).err();
-        let _ = child.wait();
+        let kill_error = terminate_and_reap(&mut child, process_group);
         let _ = stdout_reader.join();
         let _ = stderr_reader.join();
         #[cfg(target_os = "linux")]
@@ -449,6 +452,38 @@ fn terminate_probe_tree(child: &mut std::process::Child, _process_group: u32) ->
     child.kill()
 }
 
+/// Terminate the probe's process group, then reap the leader without blocking
+/// past [`REAP_TIMEOUT`].
+///
+/// The reap must be bounded, not unconditional. A `SIGKILL` can fail to land —
+/// a setuid probe can refuse it with `EPERM` — and the child is then still
+/// running, so a plain `wait()` would block until it chose to exit. That is
+/// unbounded on exactly the paths that already gave up on a deadline, which
+/// would defeat the guarantee this module exists to provide. An unreaped child
+/// is the lesser harm: the caller keeps its deadline and gets the error naming
+/// what could not be stopped.
+fn terminate_and_reap(child: &mut std::process::Child, process_group: u32) -> Option<io::Error> {
+    let kill_error = terminate_probe_tree(child, process_group).err();
+    reap_bounded(child);
+    kill_error
+}
+
+/// Collect `child`'s exit status, giving up after [`REAP_TIMEOUT`].
+///
+/// Split from [`terminate_and_reap`] so the bound is testable against a child
+/// that is still running — the case a successful kill never produces.
+fn reap_bounded(child: &mut std::process::Child) {
+    let deadline = Instant::now() + REAP_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            // Reaped, or unreapable and waiting cannot help.
+            Ok(Some(_)) | Err(_) => break,
+            Ok(None) if Instant::now() >= deadline => break,
+            Ok(None) => thread::sleep(REAP_POLL_INTERVAL),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +565,36 @@ mod tests {
             .expect_err("must time out");
         assert!(matches!(error, ProbeFailure::TimedOut { .. }));
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The reap after a kill must be bounded, not unconditional. A `SIGKILL`
+    /// that never lands leaves the child running, and a plain `wait()` would
+    /// then block forever on exactly the path that already gave up on a
+    /// deadline. Drive that by reaping a child nothing has killed.
+    #[cfg(unix)]
+    #[test]
+    fn reaping_a_live_child_gives_up_instead_of_blocking() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn");
+
+        let started = Instant::now();
+        reap_bounded(&mut child);
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < REAP_TIMEOUT * 4,
+            "the reap must stay bounded, took {elapsed:?}"
+        );
+        // The child outlived the reap, which is the point being asserted.
+        assert!(matches!(child.try_wait(), Ok(None)));
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[cfg(unix)]

@@ -41,7 +41,12 @@ pub struct AvailableBackend {
     /// Optional backend features usable on this host.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<BackendCapability>,
-    /// Why an optional capability is absent from `capabilities`.
+    /// Diagnostics for a capability this host cannot offer.
+    ///
+    /// Not a guarantee for every absent capability: only checks that produce a
+    /// reason populate this. Bubblewrap's `ProxyEnforcement` does, since its
+    /// dependency walk names what is missing; Windows omits `CaptureDenials`
+    /// without a warning.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }

@@ -82,12 +82,14 @@ public sealed class AvailableBackend
         Array.Empty<BackendCapability>();
 
     /// <summary>
-    /// Why an optional capability is absent from <see cref="Capabilities"/>.
+    /// Diagnostics for a capability this host cannot offer.
     /// </summary>
     /// <remarks>
-    /// On a host that cannot enforce Bubblewrap proxy-only egress this carries
-    /// which dependency is missing or unusable — the only actionable detail
-    /// such a host reports.
+    /// Not populated for every absent capability — only checks that produce a
+    /// reason contribute. Bubblewrap's
+    /// <see cref="BackendCapability.ProxyEnforcement"/> does, carrying which
+    /// dependency is missing or unusable; Windows omits
+    /// <see cref="BackendCapability.CaptureDenials"/> without a warning.
     /// </remarks>
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 }
