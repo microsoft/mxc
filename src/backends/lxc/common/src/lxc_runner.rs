@@ -32,6 +32,7 @@ const HOSTS_PIN_MARKER: &str = "#mxc-proxy-pin";
 const HOSTS_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How a failed run disposes of the container it started.
+#[derive(Clone, Copy)]
 enum ContainerRelease {
     Destroy,
     Stop,
@@ -104,6 +105,51 @@ impl LxcScriptRunner {
         false
     }
 
+    /// Destroy a container this run created, or one the caller asked to have
+    /// destroyed.  Otherwise stop it: a reused container this run started
+    /// would be left running without the rules the policy asked for.
+    fn release_kind(&self, container_created: bool) -> ContainerRelease {
+        if self.destroy_on_exit || container_created {
+            ContainerRelease::Destroy
+        } else {
+            ContainerRelease::Stop
+        }
+    }
+
+    /// Report a container the run could not dispose of.  A stop or destroy
+    /// that fails leaves it running with whatever access an earlier policy
+    /// gave it, and no other line records that.
+    fn report_release_failure(
+        release: ContainerRelease,
+        result: Result<(), String>,
+        logger: &mut Logger,
+    ) {
+        let Err(e) = result else {
+            return;
+        };
+        let verb = match release {
+            ContainerRelease::Destroy => "destroy",
+            ContainerRelease::Stop => "stop",
+        };
+        let _ = writeln!(logger, "Warning: failed to {} container: {}", verb, e);
+    }
+
+    /// Dispose of a container whose setup failed, before returning the error
+    /// that setup produced.
+    fn release_after_failure(
+        &self,
+        container: &LxcContainer,
+        container_created: bool,
+        logger: &mut Logger,
+    ) {
+        let release = self.release_kind(container_created);
+        let result = match release {
+            ContainerRelease::Destroy => container.destroy(),
+            ContainerRelease::Stop => container.stop(),
+        };
+        Self::report_release_failure(release, result, logger);
+    }
+
     fn enforce_network_readiness<P, R>(
         &self,
         container_name: &str,
@@ -115,19 +161,14 @@ impl LxcScriptRunner {
     ) -> Option<ScriptResponse>
     where
         P: FnOnce(&str, Duration, &mut Logger) -> bool,
-        R: FnMut(ContainerRelease),
+        R: FnMut(ContainerRelease) -> Result<(), String>,
     {
         if readiness_probe(container_name, timeout, logger) {
             return None;
         }
 
-        if self.destroy_on_exit || container_created {
-            release_container(ContainerRelease::Destroy);
-        } else {
-            // A reused container this run started would otherwise be left
-            // running without the rules the policy asked for.
-            release_container(ContainerRelease::Stop);
-        }
+        let release = self.release_kind(container_created);
+        Self::report_release_failure(release, release_container(release), logger);
 
         Some(ScriptResponse::error(&format!(
             "Container network did not initialize within {:.0}s; \
@@ -314,12 +355,8 @@ impl LxcScriptRunner {
                 logger,
                 Self::wait_for_network,
                 |release| match release {
-                    ContainerRelease::Destroy => {
-                        let _ = container.destroy();
-                    }
-                    ContainerRelease::Stop => {
-                        let _ = container.stop();
-                    }
+                    ContainerRelease::Destroy => container.destroy(),
+                    ContainerRelease::Stop => container.stop(),
                 },
             ) {
                 return response;
@@ -345,14 +382,7 @@ impl LxcScriptRunner {
                 // The run asked for a firewall but we could not find the
                 // container netns to enforce it in. Running anyway would
                 // silently disable every rule the caller asked for, so abort.
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                } else {
-                    // This run started the container, and every exit from here
-                    // to the script leaves it running without the rules the
-                    // policy asked for.
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(
                     "Failed to discover the container init PID; cannot enter the container \
                      network namespace to enforce the requested firewall. Aborting rather \
@@ -377,19 +407,11 @@ impl LxcScriptRunner {
         match fw_manager.apply_firewall_rules(&request.policy, logger) {
             Ok(true) => {}
             Ok(false) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                } else {
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error("Failed to apply network firewall rules.");
             }
             Err(e) => {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                } else {
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!("Network policy error: {}", e));
             }
         }
@@ -403,21 +425,13 @@ impl LxcScriptRunner {
             match mgr.apply_firewall_rules(&request.policy, logger) {
                 Ok(true) => {}
                 Ok(false) => {
-                    if self.destroy_on_exit || container_created {
-                        let _ = container.destroy();
-                    } else {
-                        let _ = container.stop();
-                    }
+                    self.release_after_failure(&container, container_created, logger);
                     return ScriptResponse::error(
                         "Failed to apply inbound network firewall rules.",
                     );
                 }
                 Err(e) => {
-                    if self.destroy_on_exit || container_created {
-                        let _ = container.destroy();
-                    } else {
-                        let _ = container.stop();
-                    }
+                    self.release_after_failure(&container, container_created, logger);
                     return ScriptResponse::error(&format!("Inbound network policy error: {}", e));
                 }
             }
@@ -455,13 +469,7 @@ impl LxcScriptRunner {
                 Err(e) => Some(e.to_string()),
             };
             if let Some(reason) = pin_error {
-                if self.destroy_on_exit || container_created {
-                    let _ = container.destroy();
-                } else {
-                    // A reused container this run will not destroy would
-                    // otherwise be left running with a policy it cannot use.
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!(
                     "Failed to pin the network proxy host inside the container: {}. \
                      The proxy would be unreachable, so the script was not run.",
@@ -489,11 +497,7 @@ impl LxcScriptRunner {
             // a failure still changes what the script would resolve. Refuse the
             // run rather than execute against a mapping this policy never made.
             if let Some(reason) = stale_pin_error {
-                if self.destroy_on_exit {
-                    let _ = container.destroy();
-                } else {
-                    let _ = container.stop();
-                }
+                self.release_after_failure(&container, container_created, logger);
                 return ScriptResponse::error(&format!(
                     "Failed to clear a stale network proxy pin from the container's \
                      /etc/hosts: {}. The script was not run, because it could have resolved \
@@ -1035,9 +1039,12 @@ mod tests {
                 Duration::from_secs(1),
                 &mut logger,
                 |_name, _timeout, _logger| false,
-                |release| match release {
-                    ContainerRelease::Destroy => destroyed = true,
-                    ContainerRelease::Stop => stopped = true,
+                |release| {
+                    match release {
+                        ContainerRelease::Destroy => destroyed = true,
+                        ContainerRelease::Stop => stopped = true,
+                    }
+                    Ok(())
                 },
             )
             .expect("a failing readiness probe should return an error response");
@@ -1223,6 +1230,28 @@ mod tests {
             !stopped,
             "destroying the container already removes it; stopping it as well would act on a \
              container that no longer exists"
+        );
+    }
+
+    #[test]
+    fn a_failed_release_is_reported_rather_than_discarded() {
+        let runner = runner_for_network_readiness_tests(false);
+        let mut logger = Logger::new(Mode::Buffer);
+
+        let _ = runner.enforce_network_readiness(
+            "mxc-network-test",
+            false,
+            Duration::from_secs(1),
+            &mut logger,
+            |_name, _timeout, _logger| false,
+            |_release| Err("lxc-stop exited 1".to_string()),
+        );
+
+        assert!(
+            logger.get_buffer().contains("lxc-stop exited 1"),
+            "a container still running because its stop failed is the fail-open this guard \
+             exists to prevent, and it must be named in the log rather than discarded: {}",
+            logger.get_buffer()
         );
     }
 
