@@ -327,15 +327,11 @@ fn spawn_open(
         Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
     };
 
-    // 2. Resolve the working directory exactly as the exec path does. `open`
-    //    launches Terminal, which runs the helper from *its own* directory
-    //    (normally the user's home), so unlike `spawn_exec` there is no
-    //    `Command::current_dir` for the child to inherit — the helper has to
-    //    perform the `cd` itself, and it has to be handed an absolute target
-    //    (see `absolute_working_directory`). Fail here rather than inside a
+    // 2. Resolve the working directory the way the exec path does. Terminal
+    //    runs the helper from its own directory, so the helper must `cd`
+    //    itself, and needs an absolute target. Fail here rather than inside a
     //    Terminal window: `open -W` reports its own exit status, not the
-    //    helper's, so an unusable directory would otherwise look like a clean
-    //    run that silently did nothing.
+    //    helper's.
     let cwd = match absolute_working_directory(&resolve_working_directory(request)) {
         Ok(cwd) => cwd,
         Err(e) => {
@@ -345,11 +341,9 @@ fn spawn_open(
             )));
         }
     };
-    if !Path::new(&cwd).is_dir() {
+    if let Some(reason) = working_directory_error(&cwd) {
         let _ = fs::remove_file(&profile_path);
-        return Err(error_response(format!(
-            "seatbelt working directory '{cwd}' is not an existing directory"
-        )));
+        return Err(error_response(reason));
     }
 
     // 3. Build environment exports for the helper script. When a proxy is
@@ -758,6 +752,37 @@ fn absolute_working_directory_with(
         return Ok(path.to_string());
     }
     Ok(launch_dir()?.join(candidate).to_string_lossy().into_owned())
+}
+
+/// Why the helper's `cd` into `path` would fail, or `None` if it will succeed.
+/// `chdir` needs search (`+x`) permission, which a stat check does not test and
+/// a read check over-tests — `access(X_OK)` is the exact bit.
+fn working_directory_error(path: &str) -> Option<String> {
+    match fs::metadata(path) {
+        Ok(meta) if !meta.is_dir() => Some(format!(
+            "seatbelt working directory '{path}' is not a directory"
+        )),
+        Ok(_) if !is_searchable(path) => Some(format!(
+            "seatbelt working directory '{path}' cannot be entered: no search (execute) permission"
+        )),
+        Ok(_) => None,
+        Err(e) => Some(format!(
+            "seatbelt working directory '{path}' cannot be used: {e}"
+        )),
+    }
+}
+
+/// Does the calling user hold search permission on `path`? Answers for the real
+/// uid — `mxc-exec` is not setuid — and cannot speak for a Terminal running as a
+/// different user, so the helper keeps its own `cd` guard.
+fn is_searchable(path: &str) -> bool {
+    let Ok(c_path) = CString::new(path) else {
+        // An interior NUL would be truncated by any C API it reaches.
+        return false;
+    };
+    // SAFETY: `access` reads the NUL-terminated string it is given and returns
+    // an int; `c_path` owns that buffer and outlives the call.
+    unsafe { libc::access(c_path.as_ptr(), libc::X_OK) == 0 }
 }
 
 /// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
@@ -1302,5 +1327,65 @@ mod tests {
         };
         let err = absolute_working_directory_with("work", gone).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A stat check passes a directory `chdir` refuses, so test the search bit.
+    #[test]
+    fn unsearchable_working_directory_is_rejected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("mxc_nox_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir(&dir).unwrap();
+        let path = dir.to_string_lossy().into_owned();
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let stat_says_directory = Path::new(&path).is_dir();
+        let reason = working_directory_error(&path);
+
+        // Restore before asserting so a failure cannot leave the dir behind.
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::remove_dir_all(&dir).unwrap();
+
+        assert!(
+            stat_says_directory,
+            "precondition: is_dir() sees a directory"
+        );
+        let reason = reason.expect("an unsearchable directory must be rejected");
+        assert!(reason.contains("search"), "{reason}");
+    }
+
+    /// A usable directory is accepted; a file or missing path names its reason.
+    #[test]
+    fn working_directory_error_accepts_usable_and_names_the_failure() {
+        let dir = std::env::temp_dir();
+        assert_eq!(working_directory_error(&dir.to_string_lossy()), None);
+
+        let file = dir.join(format!("mxc_file_{}", std::process::id()));
+        fs::write(&file, "x").unwrap();
+        let reason = working_directory_error(&file.to_string_lossy());
+        fs::remove_file(&file).unwrap();
+        assert!(
+            reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a directory"),
+            "{reason:?}"
+        );
+
+        let missing = working_directory_error("/tmp/mxc_definitely_absent_2f9a");
+        assert!(
+            missing
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot be used"),
+            "{missing:?}"
+        );
+    }
+
+    /// An interior NUL can never name a usable directory.
+    #[test]
+    fn working_directory_with_interior_nul_is_not_searchable() {
+        assert!(!is_searchable("/tmp/\0/etc"));
     }
 }
