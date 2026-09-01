@@ -171,10 +171,10 @@ impl Sandbox {
 
         // Take both streams before waiting so `wait` won't discard them, and
         // read each on its own thread so the child never blocks on a full pipe.
-        let warnings = self.inner.warnings().to_vec();
         let stdout = capture(self.inner.take_stdout());
         let stderr = capture(self.inner.take_stderr());
         let outcome = self.wait()?;
+        let warnings = self.inner.warnings().to_vec();
         let output_metadata = self.inner.output_metadata().cloned();
         Ok(Output {
             outcome,
@@ -210,6 +210,7 @@ mod tests {
 
     struct FakeProcess {
         warnings: Vec<String>,
+        wait_warning: Option<String>,
         output_metadata: Option<SandboxOutputMetadata>,
     }
 
@@ -247,6 +248,9 @@ mod tests {
         }
 
         fn wait(&mut self) -> std::io::Result<i32> {
+            if let Some(warning) = self.wait_warning.take() {
+                self.warnings.push(warning);
+            }
             Ok(0)
         }
     }
@@ -254,8 +258,10 @@ mod tests {
     #[test]
     fn sandbox_and_output_expose_security_warnings() {
         let warning = "permissive mode weakens containment".to_string();
+        let wait_warning = "telemetry emission failed".to_string();
         let sandbox = Sandbox::new(Box::new(FakeProcess {
             warnings: vec![warning.clone()],
+            wait_warning: Some(wait_warning.clone()),
             output_metadata: Some(SandboxOutputMetadata {
                 capture_denials: Some(CaptureDenialsOutput {
                     kind: CaptureDenialsOutput::KIND.to_string(),
@@ -272,7 +278,7 @@ mod tests {
         assert_eq!(sandbox.warnings(), [warning.as_str()]);
 
         let output = sandbox.wait_with_output().expect("wait succeeds");
-        assert_eq!(output.warnings, [warning]);
+        assert_eq!(output.warnings, [warning, wait_warning]);
         assert_eq!(
             output
                 .output_metadata

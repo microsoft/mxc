@@ -273,8 +273,8 @@ cargo test -p wxc_e2e_tests --test e2e_telemetry_etw -- --ignored
 
 ## Privacy review status
 
-The version 2 `en-US` consent wording requires privacy/release review. The
-canonical title, body, action labels, and privacy link are documented in
+The privacy-reviewed version 3 `en-US` consent wording is the canonical
+disclosure. Its title, body, action labels, and privacy link are documented in
 [Telemetry consent design](telemetry-consent-design.md#canonical-consent-resource)
 and must be rendered verbatim by every EXE and SDK presenter.
 
@@ -304,6 +304,6 @@ free-form error text.
 
 ### Review status
 
-The version 2 consent wording, verbose event inventory, WinExt
-classification, retention, access, regional processing, deletion, and
-localization/accessibility decisions require explicit privacy review.
+The verbose event inventory, WinExt classification, retention, access,
+regional processing, deletion, and localization/accessibility decisions
+require explicit privacy review.

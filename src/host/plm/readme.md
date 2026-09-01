@@ -11,7 +11,7 @@ PLM is invoked automatically by [`wxc-exec --audit`](../../../README.md#audit-mo
 1. **Capture** — the public `plm.exe` runs `asInvoker`; it does not add a service. It uses UAC once to launch a retained restricted child. That child acquires the host-wide singleton, starts WPR with the embedded profile, and remains alive through explicit stop or uncertain teardown.
 2. **Run** — the operator runs the workload. The OS-side permissive sandbox logs `EventID=14` / `EventID=27` for every access that *would* have been denied.
 3. **Stop** — the retained child returns ETL bytes and status over the original authenticated named pipe. The unelevated parent owns the trace, log, and config destinations, then analyzes the ETL through `EtlDenialAnalyzer`.
-4. **Emit** — actionable findings are written to `denials.json` in the log directory, and a one-line JSON result reports the trace, denials, and optional adjusted-config paths.
+4. **Emit** — actionable findings are written to `denials.json` and bounded sanitized diagnostics to `denials.verbose.json` in the log directory. A one-line JSON result reports the trace, denials, and optional adjusted-config paths.
 5. **Merge (temporary compatibility)** — file and capability denials are adapted into the existing adjusted-config generator until the shared regeneration engine replaces it.
 
 > **Capability merge caveats.** Capabilities are only merged into a `processContainer` block — backends that cannot express AppContainer capabilities (LXC, Windows Sandbox, …) are left untouched and the discovered set is reported on stderr instead. The reserved names `learningModeLogging` and `permissiveLearningMode` are never written back, because `processContainer.capabilities` rejects them.
