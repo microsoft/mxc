@@ -250,10 +250,11 @@ free-form error text.
 
 ### Privacy review status
 
-The version 2 consent wording, verbose-event inventory, current WinExt
-classification, retention, access, regional processing, deletion, and
-localization/accessibility decisions require explicit privacy/release review.
-The canonical wording and presenter contract are documented in
+The canonical version 3 `en-US` consent wording is privacy-reviewed. The
+verbose-event inventory, current WinExt classification, retention, access,
+regional processing, deletion, and localization/accessibility decisions
+require explicit privacy/release review. The canonical wording and presenter
+contract are documented in
 [Telemetry consent design](telemetry-consent-design.md).
 
 ### Correlating a lifecycle
@@ -385,6 +386,11 @@ Telemetry emission is gated by the per-run request, MXC-owned consent,
 administrative policy, and provider availability. See
 [`telemetry-consent-design.md`](telemetry-consent-design.md). Local diagnostic
 audit records are a separate operator-selected sink and are not uploaded.
+
+The privacy-reviewed version 3 `en-US` consent wording is the canonical
+disclosure. Its title, body, action labels, and privacy link are documented in
+[Telemetry consent design](telemetry-consent-design.md#canonical-consent-resource)
+and must be rendered verbatim by every EXE and SDK presenter.
 
 The optional ETW events contain MXC version/channel, debug-build state,
 caller-requested sandbox kind, selected backend, bounded outcomes and failure

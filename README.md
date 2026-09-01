@@ -225,7 +225,7 @@ See [docs/diagnostics.md](docs/diagnostics.md) for full diagnostics reference.
 wxc-exec.exe --audit policy.json
 ```
 
-Successful non-dry-run audits require capture metadata, actionable denials JSON, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json` and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps JSON and ETL but has no source config to snapshot or adjust. Truncated analysis keeps JSON, ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
+Successful non-dry-run audits require capture metadata, actionable denials JSON, its verbose diagnostic sibling, and a retained ETL. The CLI relocates the backend-selected paths to `denials.json`, `denials.verbose.json`, and `trace.etl` in the per-user audit directory, then generates a source-config snapshot and `Adjusted_*.json` from the actionable JSON without decoding the ETL again. Base64-only input keeps both JSON files and the ETL but has no source config to snapshot or adjust. Truncated analysis keeps both JSON files, the ETL, and the source snapshot but skips adjusted-config generation. Use `--audit-verbose` to print learned-policy details.
 
 > **Warning:** `--audit` injects `permissiveLearningMode` — AppContainer restrictions are **not** enforced for the duration of the run. Use only for policy authoring. It cannot be combined with `processContainer.captureDenials`; use `captureDenials.mode: "allow"` for permissive application-driven capture. `learningModeLogging` and `permissiveLearningMode` are reserved internal capability names and are rejected in `processContainer.capabilities`. See [docs/learning-mode/capabilities.md](docs/learning-mode/capabilities.md) for the three learning-mode flows.
 
@@ -261,7 +261,18 @@ Windows user consent is granted and administrative policy allows collection.
 
 Official/shipped Microsoft builds set a TraceLogging provider group GUID at build time and route `MXC.Execution`, `MXC.Error`, and `MXC.VerboseDenials` events to Microsoft through the UTC pipeline when telemetry is enabled — that same build-time setting also selects the correct Measures keyword and Product-and-Service-Usage privacy tag for the events, so telemetry routing and event classification always agree. **Local and open-source builds send nothing to Microsoft by default** — the public source ships without a provider group GUID, so events are emitted to the local ETW subsystem only, use a provider-local keyword with no UTC meaning, and carry no privacy classification tag, and are not routed to any Microsoft collection pipeline. Internal builds that set the `MXC_TELEMETRY_PROVIDER_GROUP_GUID` environment variable at build time enable the Microsoft-routed path.
 
-No PII is collected. Execution/error events contain only execution metrics (duration, backend type, exit code) and a bounded error category (`error_type`). When a ProcessContainer run successfully produces a Learning Mode verbose artifact, `MXC.VerboseDenials` can include its sanitized technical signatures. It excludes commands, credentials, complete file paths, usernames, sandbox output, raw ETL, actionable denial documents, general logger text, and free-form error text. The version 2 consent wording and verbose-event data inventory require explicit privacy/release review before shipment. If you use the SDK to build applications, you are responsible for providing appropriate telemetry notices to your own users.
+No PII is collected. Execution/error events contain only execution metrics
+(duration, backend type, exit code) and a bounded error category
+(`error_type`). When a ProcessContainer run successfully produces a Learning
+Mode verbose artifact, `MXC.VerboseDenials` can include sanitized
+provider/event identifiers, process IDs, closed outcome reasons,
+access/resource classifications, bounded redacted properties, occurrence
+counts, and truncation state. It excludes commands, credentials, complete file
+paths, usernames, sandbox output, raw ETL, actionable denial documents,
+general logger text, and free-form error text. The verbose-event data inventory
+requires explicit privacy/release review before shipment. If you use the SDK
+to build applications, you are responsible for providing appropriate telemetry
+notices to your own users.
 
 Privacy information can be found at https://privacy.microsoft.com and in the Microsoft privacy statement at https://go.microsoft.com/fwlink/?LinkID=824704.
 
