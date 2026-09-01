@@ -44,6 +44,10 @@ Any value MXC cannot read or cannot parse — a wrong type, a corrupt value, a
 registry error — is treated as `Blocked`. Telemetry collection is never the
 outcome of a failure.
 
+MXC reports each distinct unreadable or unrecognized policy failure once per
+process so operators can distinguish a broken deployment from an intentional
+block without weakening the fail-closed result.
+
 ## Deploying it
 
 ### Registry deployment
@@ -63,8 +67,9 @@ HKLM\SOFTWARE\Policies\Mxc\AllowTelemetry directly. For example:
 
 ### Verifying
 
-Whatever consent-management/status surface ships must report the user's
-recorded choice separately from the administrative ceiling.
+The consent status surface reports the user's recorded choice separately from
+the administrative ceiling. The consent APIs expose the stored and effective
+states, the policy state, and whether a prompt is needed.
 
 For example, if a user previously granted consent and an administrator later
 sets `AllowTelemetry=0`, the status must still make both facts visible:
@@ -127,8 +132,9 @@ administrative policy is an availability control, not an expression of a
 user's informed choice, and no Microsoft guidance treats an admin "allow" as
 consent on the user's behalf.
 
-The implementation should enforce that rule in one place rather than
-re-deriving it in each host surface.
+The implementation stack enforces this rule in one place rather than
+re-deriving it in each host surface. The telemetry gate combines the per-run
+request with the consent and administrative-policy states before each event.
 
 ## Relationship to the Windows `AllowTelemetry` policy
 

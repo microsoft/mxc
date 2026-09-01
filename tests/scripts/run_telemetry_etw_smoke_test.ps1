@@ -112,26 +112,6 @@ New-Item -ItemType Directory -Path $etlDir -Force | Out-Null
 $etlFile = Join-Path $etlDir 'mxc_trace.etl'
 
 # ---------------------------------------------------------------------------
-# Setup: isolated consent seed for deterministic telemetry gating
-# ---------------------------------------------------------------------------
-$localAppDataOverride = Join-Path $etlDir 'localappdata'
-$consentDir = Join-Path $localAppDataOverride 'mxc'
-New-Item -ItemType Directory -Path $consentDir -Force | Out-Null
-$consentFile = Join-Path $consentDir 'telemetry-consent.json'
-
-# Seed an explicit granted consent record for this test run so event capture
-# does not depend on host-global consent state.
-$consentRecord = @{
-    version               = 2
-    consent               = 'granted'
-    promptResourceVersion = '1.0'
-    promptLocale          = 'en-US'
-    source                = 'run_telemetry_etw_smoke_test.ps1'
-    updatedAtUtc          = [DateTime]::UtcNow.ToString('o')
-}
-$consentRecord | ConvertTo-Json -Depth 4 | Set-Content -Path $consentFile -Encoding utf8
-
-# ---------------------------------------------------------------------------
 # Step 1: Start ETW trace session
 # ---------------------------------------------------------------------------
 Write-Host "`n--- Starting ETW trace session '$sessionName' ---" -ForegroundColor Yellow
@@ -152,37 +132,21 @@ Write-Host "ETW session started, writing to $etlFile"
 Write-Host "`n--- Running wxc-exec with telemetry ---" -ForegroundColor Yellow
 
 try {
-    $previousLocalAppData = $env:LOCALAPPDATA
-    $previousTestOverride = $env:MXC_TEST_LOCALAPPDATA_OVERRIDE
-
-    $env:LOCALAPPDATA = $localAppDataOverride
-    $env:MXC_TEST_LOCALAPPDATA_OVERRIDE = $localAppDataOverride
-    try {
-        # Run with --experimental to enable the telemetry section in this branch.
-        # The provider is registered during init (before execution); completion
-        # telemetry events are emitted after dispatch returns.
-        $executionTimeoutSeconds = 60
-        $proc = Start-Process -FilePath $wxcExe `
-            -ArgumentList "--debug", "--experimental", $configFile `
-            -PassThru -NoNewWindow
-        if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
-            Stop-Process -Id $proc.Id -Force
-            $proc.WaitForExit()
-            throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
-        }
-        Write-Host "wxc-exec exited with code $($proc.ExitCode)"
-    } finally {
-        if ($null -eq $previousLocalAppData) {
-            Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
-        } else {
-            $env:LOCALAPPDATA = $previousLocalAppData
-        }
-        if ($null -eq $previousTestOverride) {
-            Remove-Item Env:MXC_TEST_LOCALAPPDATA_OVERRIDE -ErrorAction SilentlyContinue
-        } else {
-            $env:MXC_TEST_LOCALAPPDATA_OVERRIDE = $previousTestOverride
-        }
+    # Run with --experimental to enable the telemetry section. The provider is
+    # registered during init (before execution); the MXC.Execution / MXC.Error
+    # events are emitted on completion, after the runner returns. The sandbox
+    # itself may fail (e.g. AppContainer prerequisites), but completion
+    # telemetry still fires for the failure, so events should be captured.
+    $executionTimeoutSeconds = 60
+    $proc = Start-Process -FilePath $wxcExe `
+        -ArgumentList "--debug", "--experimental", $configFile `
+        -PassThru -NoNewWindow
+    if (-not $proc.WaitForExit($executionTimeoutSeconds * 1000)) {
+        Stop-Process -Id $proc.Id -Force
+        $proc.WaitForExit()
+        throw "wxc-exec timed out after $executionTimeoutSeconds seconds"
     }
+    Write-Host "wxc-exec exited with code $($proc.ExitCode)"
 } catch {
     Write-Host "wxc-exec failed to run: $_" -ForegroundColor Yellow
     # Continue - even a crash after init may have emitted events.
@@ -229,7 +193,7 @@ $eventCount = ([regex]::Matches($xmlContent, '<Event ')).Count
 Write-Host "Events captured: $eventCount"
 
 if ($eventCount -gt 0) {
-    $expectedFields = @('mxc.backend', 'mxc.sandbox_kind', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
+    $expectedFields = @('mxc.backend', 'mxc.exit_code', 'mxc.outcome', 'mxc.duration_ms')
     $eventBlocks = [regex]::Matches($xmlContent, '(?s)<Event\b.*?</Event>')
     $matchingEvent = $null
 

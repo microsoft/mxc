@@ -54,6 +54,7 @@ impl std::fmt::Display for FailureReason {
 #[derive(Debug, Clone, Copy)]
 pub struct TelemetryContext<'a> {
     pub backend: &'a str,
+    pub sandbox_kind: &'a str,
     /// State-aware lifecycle phase — one of `provision|start|exec|stop|
     /// deprovision`, or `""` for one-shot (non-state-aware) executions.
     pub phase: &'a str,
@@ -66,6 +67,7 @@ pub struct TelemetryContext<'a> {
 /// Data for an MXC.Execution ETW event.
 pub struct ExecutionEvent<'a> {
     pub backend: &'a str,
+    pub sandbox_kind: &'a str,
     pub exit_code: i32,
     pub outcome: &'a str,
     pub duration_ms: u64,
@@ -91,6 +93,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 
     mxc_telemetry::log_execution(
         event.backend,
+        event.sandbox_kind,
         event.exit_code,
         event.outcome,
         event.duration_ms,
@@ -113,6 +116,7 @@ pub fn log_execution(event: &ExecutionEvent<'_>) {
 pub fn log_error(ctx: TelemetryContext<'_>, error_type: FailureReason, exit_code: i32) {
     mxc_telemetry::log_error(
         ctx.backend,
+        ctx.sandbox_kind,
         error_type.as_str(),
         exit_code,
         ctx.phase,
@@ -138,6 +142,7 @@ pub(super) mod test_sink {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedExecution {
         pub backend: String,
+        pub sandbox_kind: String,
         pub exit_code: i32,
         pub outcome: String,
         pub duration_ms: u64,
@@ -150,6 +155,7 @@ pub(super) mod test_sink {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct CapturedError {
         pub backend: String,
+        pub sandbox_kind: String,
         pub error_type: FailureReason,
         pub exit_code: i32,
         pub phase: String,
@@ -201,6 +207,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedExecution {
                 backend: event.backend.to_owned(),
+                sandbox_kind: event.sandbox_kind.to_owned(),
                 exit_code: event.exit_code,
                 outcome: event.outcome.to_owned(),
                 duration_ms: event.duration_ms,
@@ -223,6 +230,7 @@ pub(super) mod test_sink {
             .unwrap_or_else(|e| e.into_inner())
             .push(CapturedError {
                 backend: ctx.backend.to_owned(),
+                sandbox_kind: ctx.sandbox_kind.to_owned(),
                 error_type,
                 exit_code,
                 phase: ctx.phase.to_owned(),
