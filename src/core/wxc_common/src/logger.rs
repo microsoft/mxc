@@ -253,7 +253,12 @@ impl Logger {
         self.diag_accumulate("\n");
     }
 
-    /// Record a security warning for in-process callers.
+    /// Record a caller-visible warning for in-process callers.
+    ///
+    /// Used for security warnings and for policy warnings a caller must be able
+    /// to act on (e.g. a network rule that installs but cannot carry traffic).
+    /// This is the only warning channel both front ends read: `log_line` output
+    /// lands in the console/debug buffer, which library callers never read back.
     ///
     /// Deliberately not written to stderr: a library must not write to an
     /// embedding host's terminal behind its back. Callers read warnings back
@@ -279,7 +284,7 @@ impl Logger {
         &self.warnings
     }
 
-    /// Take all retained security warnings, leaving the logger empty.
+    /// Take all retained warnings, leaving the logger empty.
     pub fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
     }

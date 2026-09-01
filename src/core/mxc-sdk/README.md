@@ -261,8 +261,9 @@ The handle is modelled on [`std::process::Child`]:
   caller-driven process-tree kill.
 - `try_wait()` for a non-blocking exit check.
 - `warnings()` returns policy and operational warnings detected while spawning
-  the sandbox, such as `permissiveLearningMode` weakening deny-by-default or
-  telemetry being unavailable/routed only to local ETW.
+  the sandbox, such as `permissiveLearningMode` weakening deny-by-default, a
+  network rule that installs but cannot carry traffic, or telemetry being
+  unavailable/routed only to local ETW.
 - `output_metadata()` returns structured feature outputs after a terminal wait.
   For `captureDenials`, it contains the generated JSON file path and summary,
   plus the retained ETL path when requested. Post-seal failures expose

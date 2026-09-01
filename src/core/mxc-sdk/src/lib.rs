@@ -132,6 +132,8 @@
 //! Policy and operational warnings are available through [`Sandbox::warnings`]
 //! and [`Output::warnings`]. [`exec_attached`] has no returned handle, so it
 //! writes those warnings to the host stderr that the caller explicitly attached.
+//! These include security warnings, network rules that cannot carry traffic,
+//! and operational warnings such as unavailable telemetry routing.
 //!
 //! ## Relationship to `mxc_engine`
 //!
