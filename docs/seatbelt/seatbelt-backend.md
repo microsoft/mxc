@@ -495,7 +495,7 @@ once you can see the rules that were emitted.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | Internet works, but `localhost:3000` is refused | [The `hostLoopback` trap](#the-hostloopback-trap) — you set `egress.default: "allow"` and left `ingress` out, so `hostLoopback` defaulted to `deny` | Add `ingress: {default: "allow", hostLoopback: "allow"}` |
-| `egress.default: "deny"`, but the sandbox still reaches services on your machine | `ingress.hostLoopback: "allow"` opens every port on every address of this host — it isn't gated by `egress`. | Set/omit `ingress: {default: "deny", hostLoopback: "deny"}`, or use a loopback `runtimeConfig.networkProxy` for one port only |
+| `egress.default: "deny"`, but the sandbox still reaches services on your machine | `ingress.hostLoopback: "allow"` opens every port on every address of this host — it isn't gated by `egress`. | Set `ingress: {default: "deny", hostLoopback: "deny"}` or omit `ingress` entirely. If one host port is still needed, also set a loopback `runtimeConfig.networkProxy`. |
 | All network fails and you didn't configure any | Omitting `network` denies everything — it isn't "unset", it's deny | Add an explicit `egress`/`ingress` block |
 | `guiAccess: true` rejected: "cannot be combined with `ui.disable=true`" | `ui.disable` defaults to `true`, so an omitted `ui` section conflicts | Add `ui: {disable: false}` |
 | `readwritePaths` on `/System` or `/usr` still can't write | SIP outranks the profile | Nothing to fix — pick a different path |
