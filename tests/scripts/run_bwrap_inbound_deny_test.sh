@@ -18,9 +18,10 @@
 #
 # What IS covered, and is covered nowhere else:
 #   1. The chain exists in the sandbox's namespace with exactly the intended
-#      rules, and INPUT actually jumps to it. Unit tests assert the rendered
-#      payload text; only a live run can show the payload reached the right
-#      namespace and was accepted by the kernel.
+#      rules, and INPUT actually jumps to it -- asserted for *both* families,
+#      since the supervisor renders and restores v4 and v6 separately. Unit
+#      tests assert the rendered payload text; only a live run can show the
+#      payload reached the right namespace and was accepted by the kernel.
 #   2. Unsolicited inbound is dropped as packets, not merely as policy.
 #   3. A schema 0.7 run gets no private namespace and therefore no chain at
 #      all. The chain is 0.8-only, so without this a regression in the schema
@@ -78,6 +79,10 @@ skip() {
 command -v slirp4netns >/dev/null 2>&1 || skip "slirp4netns not installed; there is no private namespace to filter."
 command -v nsenter >/dev/null 2>&1 || skip "nsenter is not installed."
 command -v iptables >/dev/null 2>&1 || skip "iptables is not installed."
+# The supervisor restores the v6 payloads unconditionally, so a missing
+# ip6tables would fail sandbox startup rather than this assertion; skipping
+# names the prerequisite instead.
+command -v ip6tables >/dev/null 2>&1 || skip "ip6tables is not installed."
 command -v ip >/dev/null 2>&1 || skip "iproute2 (ip) is not installed."
 
 WORK_DIR="$(mktemp -d)"
@@ -163,6 +168,9 @@ LEGACY_NETNS="$(sed -n 's/^SANDBOX_NETNS=//p' "$CURRENT_OUT" | head -n 1)"
 if iptables -S "$INGRESS_CHAIN" >/dev/null 2>&1; then
     fail "$INGRESS_CHAIN exists after a schema 0.7 run; the ingress chain must be 0.8-only."
 fi
+if ip6tables -S "$INGRESS_CHAIN" >/dev/null 2>&1; then
+    fail "$INGRESS_CHAIN exists in ip6tables after a schema 0.7 run; the ingress chain must be 0.8-only."
+fi
 
 echo "PASS: schema 0.7 stays on the host network with no $INGRESS_CHAIN chain"
 CURRENT_OUT="$WORK_DIR/run.out"
@@ -229,30 +237,46 @@ in_sandbox_net() {
 # 1. The chain is installed, in the right namespace, with the intended rules
 # ---------------------------------------------------------------------------
 
-CHAIN_RULES="$(in_sandbox_net iptables -S "$INGRESS_CHAIN" 2>/dev/null || true)"
-[ -n "$CHAIN_RULES" ] || fail "$INGRESS_CHAIN does not exist in the sandbox's namespace."
+# Both families are asserted because the supervisor renders and restores them
+# as separate transactions, and `IngressPlan::chain_lines` ignores the family,
+# so the two bodies are expected to be identical. No IPv6 connectivity is
+# needed -- this reads back the installed ruleset, which guards against a
+# change that silently stops rendering the family.
+assert_ingress_chain() {
+    local tool="$1"
+    local chain_rules input_rules expected
 
-# Asserted rule by rule rather than as one blob so a failure names the rule
-# that changed. iptables normalises 'ESTABLISHED,RELATED' to 'RELATED,ESTABLISHED'
-# on readback, which is why the expected text is not the rendered text.
-assert_rule() {
-    grep -Fxq -- "$1" <<<"$CHAIN_RULES" \
-        || fail "$INGRESS_CHAIN is missing the rule '$1'. Installed:
-$CHAIN_RULES"
+    chain_rules="$(in_sandbox_net "$tool" -S "$INGRESS_CHAIN" 2>/dev/null || true)"
+    [ -n "$chain_rules" ] \
+        || fail "$tool: $INGRESS_CHAIN does not exist in the sandbox's namespace."
+
+    # Asserted rule by rule rather than as one blob so a failure names the rule
+    # that changed. Both tools normalise 'ESTABLISHED,RELATED' to
+    # 'RELATED,ESTABLISHED' on readback, which is why the expected text is not
+    # the rendered text.
+    for expected in \
+        "-A $INGRESS_CHAIN -i lo -j ACCEPT" \
+        "-A $INGRESS_CHAIN -m state --state RELATED,ESTABLISHED -j ACCEPT" \
+        "-A $INGRESS_CHAIN -m state --state NEW -j DROP" \
+        "-A $INGRESS_CHAIN -j DROP"; do
+        grep -Fxq -- "$expected" <<<"$chain_rules" \
+            || fail "$tool: $INGRESS_CHAIN is missing the rule '$expected'. Installed:
+$chain_rules"
+    done
+
+    # A chain nothing jumps to filters nothing. This is the assertion that
+    # catches the hook being rendered into the wrong transaction or dropped
+    # entirely.
+    input_rules="$(in_sandbox_net "$tool" -S INPUT 2>/dev/null || true)"
+    grep -Fxq -- "-A INPUT -j $INGRESS_CHAIN" <<<"$input_rules" \
+        || fail "$tool: INPUT does not jump to $INGRESS_CHAIN. INPUT is:
+$input_rules"
+
+    echo "PASS: $tool $INGRESS_CHAIN is installed in the sandbox namespace and hooked to INPUT"
 }
-assert_rule "-A $INGRESS_CHAIN -i lo -j ACCEPT"
-assert_rule "-A $INGRESS_CHAIN -m state --state RELATED,ESTABLISHED -j ACCEPT"
-assert_rule "-A $INGRESS_CHAIN -m state --state NEW -j DROP"
-assert_rule "-A $INGRESS_CHAIN -j DROP"
 
-# A chain nothing jumps to filters nothing. This is the assertion that catches
-# the hook being rendered into the wrong transaction or dropped entirely.
-INPUT_RULES="$(in_sandbox_net iptables -S INPUT 2>/dev/null || true)"
-grep -Fxq -- "-A INPUT -j $INGRESS_CHAIN" <<<"$INPUT_RULES" \
-    || fail "INPUT does not jump to $INGRESS_CHAIN. INPUT is:
-$INPUT_RULES"
-
-echo "PASS: $INGRESS_CHAIN is installed in the sandbox namespace and hooked to INPUT"
+assert_ingress_chain iptables
+assert_ingress_chain ip6tables
 
 # ---------------------------------------------------------------------------
 # 2. Unsolicited inbound is dropped as packets

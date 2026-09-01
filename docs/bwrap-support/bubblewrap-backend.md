@@ -248,12 +248,18 @@ Rule addresses must be **IP literals or CIDR blocks**; a DNS name is rejected
 at validation time rather than resolved on the caller's behalf. The backend
 does not resolve, because the sandbox resolves names itself and a lookup that
 disagreed with the one behind the rules would hand the workload an address the
-chain never authorized. An IPv6 rule programs `ip6tables`, but the sandbox's
-namespace has no IPv6 connectivity today — slirp4netns is launched without
-`--enable-ipv6` — so an allowed IPv6 destination stays unreachable regardless
-of the rule (see #955). The terminal verdict of the unmatched family still
-follows `defaultPolicy`, so a v4-only allowlist under `block` does not leave
-IPv6 open.
+chain never authorized.
+
+**IPv6 rules are filtered, but IPv6 traffic has nowhere to go.** The two are
+separate concerns and only the second is missing. Filtering works: an IPv6 rule
+programs `ip6tables`, and the terminal verdict of the unmatched family follows
+`defaultPolicy`, so a v4-only allowlist under `block` does not leave IPv6 open.
+What the sandbox lacks is IPv6 *connectivity* — slirp4netns is launched without
+`--enable-ipv6`, so the namespace has no IPv6 route at all (see #955). The
+consequence is one-sided: an IPv6 **block** is already satisfied, while an IPv6
+**allow** grants nothing in practice, because the destination stays unreachable
+regardless of the rule. MXC emits a warning naming those allowed destinations
+rather than refusing them, since the posture fails closed.
 
 An IPv4-mapped address such as `::ffff:203.0.113.5` is programmed as IPv4:
 Linux puts a genuine IPv4 packet on the wire for one, so an `ip6tables` rule
