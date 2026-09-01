@@ -268,10 +268,7 @@ That single port is the sandbox's entire outbound universe. The kernel enforces
 it. A client that opens raw sockets and ignores `HTTP_PROXY` **cannot** reach
 the internet or any other host-local service — it simply fails to connect.
 
-> ⚠️ **`ingress.hostLoopback: "allow"` widens that.** It is accepted alongside a
-> proxy, and it emits `(allow network-outbound (remote ip "localhost:*"))` in
-> addition to the port-scoped proxy allow (the proxy rule is written last so it
-> survives if either ever becomes a deny). Outbound is then *every port on this
+> ⚠️ **`ingress.hostLoopback: "allow"` widens outbound** to *every port on this
 > host*, not just the proxy port, and the confinement claim above no longer
 > holds. Keep `ingress: {"default": "deny", "hostLoopback": "deny"}` whenever
 > the proxy is meant to be the only way out. This won't prevent TCP responses
