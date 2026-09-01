@@ -327,7 +327,23 @@ fn spawn_open(
         Err(e) => return Err(error_response(format!("failed to write profile: {e}"))),
     };
 
-    // 2. Build environment exports for the helper script. When a proxy is
+    // 2. Resolve the working directory exactly as the exec path does. `open`
+    //    launches Terminal, which runs the helper from *its own* directory
+    //    (normally the user's home), so unlike `spawn_exec` there is no
+    //    `Command::current_dir` for the child to inherit — the helper has to
+    //    perform the `cd` itself. Fail here rather than inside a Terminal
+    //    window: `open -W` reports its own exit status, not the helper's, so an
+    //    unusable directory would otherwise look like a clean run that silently
+    //    did nothing.
+    let cwd = resolve_working_directory(request);
+    if !Path::new(&cwd).is_dir() {
+        let _ = fs::remove_file(&profile_path);
+        return Err(error_response(format!(
+            "seatbelt working directory '{cwd}' is not an existing directory"
+        )));
+    }
+
+    // 3. Build environment exports for the helper script. When a proxy is
     //    active its HTTP_PROXY/HTTPS_PROXY vars are injected and caller-supplied
     //    proxy vars stripped (see `resolve_environment`).
     let mut env_exports = String::new();
@@ -340,23 +356,17 @@ fn spawn_open(
             continue; // Skip invalid env var names
         }
         // Shell-escape the value.
-        let escaped = value.replace('\'', "'\\''");
+        let escaped = escape_single_quoted(&value);
         let _ = writeln!(env_exports, "export {key}='{escaped}'");
     }
 
-    // 3. Create the sandbox helper script.
+    // 4. Create the sandbox helper script.
     // This script is executed inside the terminal app. It:
-    //   a) Calls sandbox-exec with the profile file to sandbox the shell
-    //   b) Execs the user's command inside the sandbox
-    let script_code = &request.script_code;
-    let helper_content = format!(
-        "#!/bin/sh\n\
-         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
-         {env_exports}\
-         exec /usr/bin/sandbox-exec -f '{profile_path}' /bin/sh -c 'clear; {script_escaped}'\n",
-        profile_path = profile_path,
-        script_escaped = script_code.replace('\'', "'\\''"),
-    );
+    //   a) Enters the resolved working directory and exports `PWD`
+    //   b) Calls sandbox-exec with the profile file to sandbox the shell
+    //   c) Execs the user's command inside the sandbox
+    let helper_content =
+        build_helper_script(&env_exports, &cwd, &profile_path, &request.script_code);
 
     let helper_path = match write_secure_temp_file("mxc_sb_helper_", &helper_content, 0o700) {
         Ok(p) => p,
@@ -368,7 +378,7 @@ fn spawn_open(
         }
     };
 
-    // 4. Create the .command file that Terminal will execute.
+    // 5. Create the .command file that Terminal will execute.
     let command_content = format!("#!/bin/sh\nexec '{}'\n", helper_path);
     let command_path = match write_secure_temp_file("mxc_sb_launch_", &command_content, 0o700) {
         Ok(p) => {
@@ -393,7 +403,7 @@ fn spawn_open(
 
     let _ = writeln!(logger, "Seatbelt: launching via: open -n -W {command_path}");
 
-    // 5. Launch via `open -n -W`.
+    // 6. Launch via `open -n -W`.
     let child = match Command::new("open")
         .args(["-n", "-W", "-a", "Terminal", &command_path])
         .stdin(Stdio::null())
@@ -717,6 +727,35 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
         Some(resolved) => expand(resolved.path),
         None => "/".to_string(),
     }
+}
+
+/// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
+/// close the quoted run, emit a literal `'`, then reopen it. The caller
+/// supplies the surrounding quotes.
+fn escape_single_quoted(value: &str) -> String {
+    value.replace('\'', "'\\''")
+}
+
+/// Build the `/bin/sh` helper script Terminal runs for the `open` launch
+/// method.
+fn build_helper_script(
+    env_exports: &str,
+    working_directory: &str,
+    profile_path: &str,
+    script_code: &str,
+) -> String {
+    let cwd = escape_single_quoted(working_directory);
+    format!(
+        "#!/bin/sh\n\
+         # MXC Seatbelt sandbox helper — auto-generated, do not edit.\n\
+         {env_exports}\
+         cd '{cwd}' || {{ echo 'mxc: cannot enter working directory {cwd}' >&2; exit 1; }}\n\
+         PWD='{cwd}'\n\
+         export PWD\n\
+         exec /usr/bin/sandbox-exec -f '{profile}' /bin/sh -c 'clear; {script}'\n",
+        profile = escape_single_quoted(profile_path),
+        script = escape_single_quoted(script_code),
+    )
 }
 
 /// Baseline `PATH` for the sandboxed child. We always start from a cleared
@@ -1098,5 +1137,86 @@ mod tests {
         for p in &paths {
             let _ = fs::remove_file(p);
         }
+    }
+
+    /// The `open` helper must place the child the same way `spawn_exec` does.
+    /// Terminal starts the script in its own directory, so without these two
+    /// lines the request's working directory is silently discarded.
+    #[test]
+    fn open_helper_enters_working_directory_and_exports_pwd() {
+        let script = build_helper_script("", "/tmp/mxc_work", "/tmp/profile.sb", "pwd");
+        assert!(script.contains("cd '/tmp/mxc_work' ||"), "{script}");
+        assert!(
+            script.contains("PWD='/tmp/mxc_work'\nexport PWD\n"),
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "exec /usr/bin/sandbox-exec -f '/tmp/profile.sb' /bin/sh -c 'clear; pwd'"
+            ),
+            "{script}"
+        );
+    }
+
+    /// A failed `cd` must abort. A bare `cd` would leave the shell in
+    /// Terminal's directory and run the workload in the wrong place.
+    #[test]
+    fn open_helper_aborts_when_the_working_directory_is_unusable() {
+        let script = build_helper_script("", "/tmp/gone", "/tmp/profile.sb", "pwd");
+        let cd_line = script
+            .lines()
+            .find(|line| line.starts_with("cd "))
+            .expect("cd line");
+        assert!(cd_line.contains("exit 1"), "{cd_line}");
+        assert!(
+            script.find("cd '/tmp/gone'").unwrap()
+                < script.find("exec /usr/bin/sandbox-exec").unwrap(),
+            "{script}"
+        );
+    }
+
+    /// `PWD` is assigned after the caller's exports so a request carrying its
+    /// own `PWD` cannot leave the variable disagreeing with the real directory.
+    #[test]
+    fn open_helper_pwd_export_wins_over_caller_environment() {
+        let script = build_helper_script("export PWD='/elsewhere'\n", "/tmp/real", "/p.sb", "pwd");
+        assert!(
+            script.find("export PWD='/elsewhere'").unwrap()
+                < script.find("PWD='/tmp/real'").unwrap(),
+            "{script}"
+        );
+    }
+
+    /// Every interpolated value lands inside a single-quoted shell word, so a
+    /// quote in any of them must be escaped rather than closing the word.
+    #[test]
+    fn open_helper_escapes_single_quotes() {
+        let script = build_helper_script("", "/tmp/it's", "/tmp/o'brien.sb", "echo 'hi'");
+        assert!(script.contains(r"cd '/tmp/it'\''s'"), "{script}");
+        assert!(script.contains(r"PWD='/tmp/it'\''s'"), "{script}");
+        assert!(script.contains(r"-f '/tmp/o'\''brien.sb'"), "{script}");
+        assert!(script.contains(r"'clear; echo '\''hi'\'''"), "{script}");
+    }
+
+    /// The `open` path resolves the directory through the same
+    /// `resolve_working_directory` the exec path uses, including its
+    /// policy-grant fallback when the request names no explicit directory.
+    #[test]
+    fn open_helper_uses_the_same_resolution_as_exec() {
+        let mut explicit = base_request();
+        explicit.working_directory = "/tmp/explicit".into();
+        assert_eq!(resolve_working_directory(&explicit), "/tmp/explicit");
+
+        let mut policy_fallback = base_request();
+        policy_fallback.policy.readwrite_paths = vec!["/tmp".into()];
+        assert_eq!(resolve_working_directory(&policy_fallback), "/tmp");
+
+        let script = build_helper_script(
+            "",
+            &resolve_working_directory(&policy_fallback),
+            "/p.sb",
+            "pwd",
+        );
+        assert!(script.contains("cd '/tmp' ||"), "{script}");
     }
 }

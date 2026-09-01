@@ -369,6 +369,12 @@ into untrusted code. This is unconditional.
 `readonlyPaths[0]` → `/`. A `~` default is tilde-expanded the same way policy
 paths are. `PWD` is exported to the resolved directory.
 
+**Note:** `getcwd()` only succeeds when the directory *itself* is readable under the profile. An
+out-of-policy `cwd` makes callers that resolve relative paths (`git`, Python's
+`os.getcwd`/`os.path.abspath`, and even `import` when `sys.path` contains `''`)
+fail with `Operation not permitted`. Grant the working directory in
+`readwritePaths` or `readonlyPaths`.
+
 ## Usage
 
 ### Command line
