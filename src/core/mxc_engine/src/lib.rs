@@ -90,7 +90,7 @@ pub fn spawn(request: &SandboxRequest) -> Result<Box<dyn SandboxProcess>, Error>
     }
 }
 
-/// A streaming process paired with security warnings emitted during spawn.
+/// A streaming process paired with warnings emitted during spawn.
 struct ProcessWithWarnings {
     inner: Box<dyn SandboxProcess>,
     warnings: Vec<String>,

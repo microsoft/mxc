@@ -32,7 +32,7 @@ public enum ContainmentBackend
     /// <summary>Linux Bubblewrap.</summary>
     Bubblewrap,
 
-    /// <summary>Windows Hyperlight micro-VM.</summary>
+    /// <summary>Hyperlight micro-VM.</summary>
     Hyperlight,
 }
 

@@ -27,6 +27,7 @@
 //! an integer prefix. A rejected string cannot reach the script, and an
 //! accepted one cannot carry anything but digits, dots, colons and a slash.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -936,6 +937,34 @@ impl EgressPlan {
         );
         lines.push(format!("-j {terminal}"));
         lines
+    }
+
+    /// The IPv6 destinations this plan allows.
+    ///
+    /// These install but never carry traffic: `slirp4netns` runs without
+    /// `--enable-ipv6`, so the namespace has no IPv6 route (see #955). Denies
+    /// are excluded -- an unreachable deny is the posture the caller asked for.
+    /// Deduplicated: directional rules lower as address x port, so one
+    /// destination appears once per port selector.
+    ///
+    /// Membership is tracked in a set rather than by scanning the output, which
+    /// is quadratic in the unique target count. A policy may lower into
+    /// [`MAX_EGRESS_RULES`] distinct addresses, where the scan costs seconds
+    /// before the sandbox even starts. The vector is still what is returned, so
+    /// the warning keeps naming destinations in policy order.
+    pub(crate) fn allowed_v6_targets(&self) -> Vec<&str> {
+        let mut targets: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
+        for rule in &self.rules {
+            let target = rule.address.text.as_str();
+            if rule.verdict == RuleVerdict::Accept
+                && rule.address.family == RuleFamily::V6
+                && seen.insert(target)
+            {
+                targets.push(target);
+            }
+        }
+        targets
     }
 }
 
@@ -2240,6 +2269,53 @@ mod tests {
 
         assert_eq!(v6(&plan), egress(&["-d 2001:db8::/32 -j ACCEPT"], "DROP"));
         assert_eq!(v4(&plan), egress(&[], "DROP"));
+    }
+
+    #[test]
+    fn only_reachable_looking_v6_allows_are_reported_as_unreachable() {
+        let allowed =
+            EgressPlan::for_policy(&request(NetworkPolicy::Block, &["2001:db8::/32"], &[]))
+                .expect("a v6 CIDR is enforceable");
+        assert_eq!(allowed.allowed_v6_targets(), vec!["2001:db8::/32"]);
+
+        // A v6 deny is already the posture the caller asked for.
+        let denied =
+            EgressPlan::for_policy(&request(NetworkPolicy::Allow, &[], &["2001:db8::/32"]))
+                .expect("a v6 CIDR is enforceable");
+        assert!(denied.allowed_v6_targets().is_empty());
+
+        let v4_only = EgressPlan::for_policy(&request(NetworkPolicy::Block, &["203.0.113.5"], &[]))
+            .expect("a v4 address is enforceable");
+        assert!(v4_only.allowed_v6_targets().is_empty());
+
+        // An IPv4-mapped address is programmed as IPv4, so it is reachable.
+        let mapped =
+            EgressPlan::for_policy(&request(NetworkPolicy::Block, &["::ffff:203.0.113.5"], &[]))
+                .expect("a mapped address is enforceable");
+        assert!(mapped.allowed_v6_targets().is_empty());
+    }
+
+    #[test]
+    fn a_v6_destination_with_several_ports_is_reported_once() {
+        let req = directional_rules_request(
+            NetworkAction::Deny,
+            vec![rule(
+                vec![peer("2001:db8::1/128", &[])],
+                vec![
+                    port(NetworkProtocol::Tcp, Some(80), Some(80)),
+                    port(NetworkProtocol::Tcp, Some(443), Some(443)),
+                ],
+            )],
+            Vec::new(),
+        );
+        let plan = EgressPlan::for_request(&req).expect("a v6 peer with ports is renderable");
+
+        // The cross-product really does repeat the destination...
+        let lines = v6(&plan);
+        assert!(lines.iter().any(|line| line.contains("--dport 80")));
+        assert!(lines.iter().any(|line| line.contains("--dport 443")));
+        // ...so the warning must not count it twice.
+        assert_eq!(plan.allowed_v6_targets(), vec!["2001:db8::1/128"]);
     }
 
     #[test]
