@@ -15,7 +15,7 @@ Schemas before 0.8 cannot use the new fields.
 | IP/CIDR entries in `blockedHosts` | `egress.deny[].to[].cidr` | Deny overrides allow |
 | DNS names in `allowedHosts` or `blockedHosts` | No GA equivalent | Schema 0.8 accepts only IP/CIDR rules |
 | `enforcementMode` | Removed | The backend enforces the policy or rejects it |
-| `allowLocalNetwork` | `ingress.default` | Capability gate; outbound follows `egress` |
+| `allowLocalNetwork` | `ingress.default` | Inbound policy; outbound follows `egress` |
 | No equivalent | `ingress.hostLoopback` | New bidirectional host-loopback connectivity control |
 | `proxy.localhost` | `runtimeConfig.networkProxy` | Loopback proxy endpoint becomes runtime data |
 | `proxy.url` with an HTTP/S loopback URL | `runtimeConfig.networkProxy` | Loopback URL remains supported |
@@ -24,14 +24,14 @@ Schemas before 0.8 cannot use the new fields.
 `proxy.builtinTestServer` has no schema 0.8 GA equivalent.
 
 On backends that cleanly separate private-network ingress from egress, `egress` governs all outbound traffic and
-`ingress` governs traffic entering the container. ProcessContainer also applies `egress` rules to all outbound
-destinations, but private-network traffic additionally requires `ingress.default: "allow"` to grant Windows'
-bidirectional `privateNetworkClientServer` capability.
+`ingress` governs traffic entering the container. ProcessContainer uses native ingress controls when available and
+does not emit the policy-owned `privateNetworkClientServer` capability. Its compatibility path maps
+`ingress.default: "allow"` to that bidirectional capability while WFP continues to govern outbound traffic.
 
 This table maps the immutable 0.7 wire fields. In schema 0.7, `allowLocalNetwork` expresses inbound bind/listen
 permission and is honored by Seatbelt; ProcessContainer capabilities are separate. It maps only to
-`ingress.default` and must not change `egress.default`. Under schema 0.8, ProcessContainer uses that ingress value as
-the capability gate for private-network traffic, while outbound private destinations remain subject to `egress`.
+`ingress.default` and must not change `egress.default`. Under schema 0.8, ProcessContainer applies that value through
+native ingress controls or the compatibility capability. Outbound private destinations remain subject to `egress`.
 
 ## Direct egress
 
@@ -125,9 +125,9 @@ migrates to deny-default egress with allowed private/LAN inbound:
 ```
 
 On backends that cleanly separate private-network ingress from egress, this does not grant outbound private-network or
-internet access. On ProcessContainer, `ingress.default: "allow"` grants the bidirectional private-network capability,
-but deny-default `egress` still blocks outbound public and private destinations unless an allow rule or the configured
-proxy path applies.
+internet access. ProcessContainer's native ingress path follows that model and emits no policy-owned private-network
+capability. The compatibility path grants the bidirectional capability, but deny-default WFP egress still blocks
+outbound public and private destinations unless an allow rule or the configured proxy path applies.
 
 Backend-specific migration can require an additional acknowledgment without changing the shared field mapping:
 

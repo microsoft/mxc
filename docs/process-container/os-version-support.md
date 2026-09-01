@@ -33,14 +33,12 @@ available bounds what policy can be enforced.
 
 | Tier | Mechanism | 23H2 | 24H2 | 25H2 | 25H2+ |
 |------|-----------|:--:|:--:|:--:|:--:|
-| **T1** BaseContainer | PSEC `CreateProcessSecurityEnvironment`, with transitional `Experimental_CreateProcessInSandbox` fallback (processmodel.dll) | ❌ | ❌ (no processmodel.dll) | ❌ (no processmodel.dll) | ✅ when an OS contract is enabled, else falls back to T3 |
+| **T1** BaseContainer | OS-native ProcessContainer APIs | ❌ | ❌ (OS support unavailable) | ❌ (OS support unavailable) | ✅ when enabled, else falls back to T3 |
 | **T2** AppContainer + BFS | `bfscfg.exe`-driven filesystem policy | ❌ (not shipped) | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF | ⚠️ present but `tier2_bfs` OFF |
 | **T3** AppContainer + DACL | Host-side DACL ACE augmentation | ✅ | ✅ | ✅ | ✅ |
 
-- **T1 (BaseContainer)** requires an enabled processmodel.dll BaseContainer
-  contract. MXC prefers PSEC when its runtime probe succeeds and otherwise
-  checks the transitional legacy SBOX FlatBuffer contract through CPIS. This is
-  a 25H2+ capability. Usability is resolved up front by
+- **T1 (BaseContainer)** requires enabled OS support. This is a 25H2+
+  capability. Usability is resolved up front by
   `BaseContainerRunner::is_usable_for_request()` so tier selection never picks
   a T1 that cannot launch the requested policy.
 - **T2 (BFS)** is compiled out by default. `bfscfg.exe` ships only on 24H2 and
@@ -50,32 +48,23 @@ available bounds what policy can be enforced.
 - **T3 (AppContainer + DACL)** is the universal fallback and enforces
   filesystem policy via host path ACEs on every release.
 
-## Process security environment preference
+## BaseContainer preference
 
-BaseContainer requests prefer the PSEC process-security-environment contract
-whenever its runtime probe succeeds, independent of schema version. During the
-transition, an ordinary request falls back to the legacy SBOX FlatBuffer
-contract through CPIS when PSEC is unavailable or cannot represent the
-requested policy, then continues through the existing AppContainer fallback
-tiers when neither BaseContainer contract is usable.
+MXC prefers native BaseContainer enforcement whenever runtime probing confirms
+that the host can represent the complete request. Otherwise it uses a
+compatibility path only when that path preserves the requested policy, then
+continues through the AppContainer fallback tiers.
 
-The PSEC probe requires:
+MXC also probes whether the host supports native ingress controls. When
+available, `ingress.default` and `ingress.hostLoopback` are enforced directly.
+Otherwise BaseContainer uses the compatibility capability mapping. That
+mapping preserves direction defaults, but requests for
+`ingress.hostLoopback: "allow"` fail as unsupported because no compatibility
+path can represent that control.
 
-- `CreateProcessSecurityEnvironment`
-- `QueryProcessSecurityEnvironmentSupport`
-- `CloseProcessSecurityEnvironment`
-
-When `processContainer.captureDenials` is present, MXC treats PSEC plus the
-official V2 Learning Mode exports as one native capture capability set:
-
-- `StartLearningModeTrace`
-- `StopLearningModeTrace`
-- `CloseLearningModeTrace`
-
-When that complete set is available, MXC uses PSEC with native V2 capture.
-Otherwise it retains the highest legacy containment tier that can fully honor
-the request (SBOX, AppContainer+BFS, or AppContainer+DACL) and pairs it with
-the guarded WPR capture provider. The elevated guardian filters the host-wide
+When `processContainer.captureDenials` is present, MXC prefers native capture.
+Otherwise it retains the highest containment tier that can fully honor the
+request and pairs it with the guarded WPR capture provider. The elevated guardian filters the host-wide
 trace to OS-observed process lifetime windows: before the suspended sandbox
 child resumes, the authenticated owner sends its job and still-owned root
 process HANDLE values. The guardian duplicates both from that authenticated
@@ -102,16 +91,10 @@ legacy containment rather than native capture, while the full V2 contract on
 build `26663.1000` is accepted. These builds are validation points, not a
 public release-floor commitment; runtime probing is the source of truth.
 
-The PSEC contract cannot represent `processContainer.leastPrivilege`, so
-requests using that option use the transitional SBOX contract instead of
-failing. MXC also does not yet supply the package-family or AppContainer-profile
-peer identity required by the current model-2 SBOX proxy contract. On hosts with
-`Experimental_QuerySandboxSupport`, proxy requests therefore skip
-BaseContainer and continue to the AppContainer fallback; older query-less hosts
-retain the legacy SBOX proxy path. Similarly, `filesystem.deniedPaths` uses
-PSEC only when `QueryProcessSecurityEnvironmentSupport` advertises
-`PSE_SUPPORT_FS_DENY`; otherwise MXC continues through the SBOX/AppContainer
-fallback chain.
+Requests using `processContainer.leastPrivilege` use a compatible fallback
+instead of failing. Legacy proxy requests also retain their compatibility
+behavior. `filesystem.deniedPaths` uses native enforcement only when the host
+advertises support; otherwise MXC continues through the fallback chain.
 
 ## Filesystem policy
 
@@ -122,8 +105,7 @@ fallback chain.
 | BFS brokering (T2) | ❌ | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds | ⚠️ disabled in shipping builds |
 
 Notes:
-- On 25H2+, T1 can grant `readwrite`/`readonly` paths natively via the FlatBuffer
-  `SandboxSpec` (`fs_read_write` / `fs_read_only`). `deniedPaths` under T1
+- On 25H2+, T1 can grant `readwrite`/`readonly` paths natively. `deniedPaths` under T1
   additionally requires the `SANDBOX_CAP_DENY_PATHS` capability bit reported by
   `Experimental_QuerySandboxSupport`
   (`BaseContainerRunner::base_container_supports_deny_paths()`); when the bit is
@@ -145,8 +127,7 @@ The release matrix describes the legacy schema 0.6/0.7 implementation.
 Notes:
 - Capability- and firewall-based network enforcement is an AppContainer
   primitive and works on every release.
-- OS-configured WinHTTP proxy (passed in the FlatBuffer spec to
-  `CreateProcessInSandbox`) is used only on legacy query-less T1 hosts. The
+- OS-configured WinHTTP proxy is used only on legacy query-less T1 hosts. The
   capability-aware model-2 contract requires a package-family or
   AppContainer-profile proxy peer identity that MXC does not yet author, so those hosts use the AppContainer
   compatibility fallback.
@@ -154,21 +135,24 @@ Notes:
   the forward-looking proxy architecture; support for the model-2 BaseContainer
   contract should replace this fallback in a separate change.
 
-Schema 0.8 support is selected by runtime contract rather than Windows release:
+Schema 0.8 support is selected by runtime capability rather than Windows release:
 
-| Schema 0.8 capability | PSEC | Legacy SBOX | AppContainer fallback |
+| Schema 0.8 capability | Native BaseContainer | BaseContainer compatibility | AppContainer fallback |
 |---|:---:|:---:|:---:|
-| Directional defaults represented by capabilities | ✅ | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
+| Directional defaults | ✅ native ingress controls when available; capability fallback otherwise | ✅ when the capability mapping preserves the request | ✅ when the capability mapping preserves the request |
 | Explicit egress IP/CIDR/port/protocol rules | ✅ WFP | ❌ | ❌ |
-| `allowedProxyPeer` or `ingress.hostLoopback: "allow"` | ✅ | ❌ | ❌ |
+| `allowedProxyPeer` | ✅ | ❌ | ❌ |
+| `ingress.hostLoopback: "allow"` | ✅ with native ingress support; otherwise unsupported | ❌ | ❌ |
 | `runtimeConfig.networkProxy` | ✅ | ❌ | ❌ |
 
-PSEC owns the WFP policy lifetime through workload completion. SBOX exposes no
-equivalent cleanup handle, so MXC never installs schema 0.8 WFP filters through
-that contract. The AppContainer fallback also rejects
-`egress.default: "deny"` with `ingress.default: "allow"` because
-`privateNetworkClientServer` is bidirectional and no schema 0.8 WFP filter is
-available there to block private-network egress.
+The native path owns the WFP policy lifetime through workload completion.
+Native ingress support requires no policy-owned
+`privateNetworkClientServer` capability. The BaseContainer compatibility path
+uses that bidirectional capability, with WFP preserving the outbound posture.
+The AppContainer fallback also rejects
+`egress.default: "deny"` with `ingress.default: "allow"` because it has the
+bidirectional capability but no schema 0.8 WFP filter to block private-network
+egress.
 
 ## UI restrictions
 
@@ -199,12 +183,11 @@ and later (`MIN_BUILD_FOR_INJECTION_LIMIT`) and is therefore unavailable on
 
 - Tier selection: `src/backends/appcontainer/common/src/fallback_detector.rs`,
   `src/backends/appcontainer/common/src/dispatcher.rs`
-- BaseContainer capability probing (`SANDBOX_CAP_*`,
-  `Experimental_QuerySandboxSupport`) and FlatBuffer `SandboxSpec` construction:
+- BaseContainer capability probing and policy construction:
   `src/backends/appcontainer/common/src/base_container_runner.rs`
 - UI-limit build gating (`MIN_BUILD_FOR_IME_LIMIT`,
   `MIN_BUILD_FOR_INJECTION_LIMIT`, `supported_ui_limit_mask_for_build`):
   `src/backends/appcontainer/common/src/job_object.rs`
-- FlatBuffer contract: `external/windows-sdk/BaseContainerSpecification.fbs`
+- Generated OS contract: `src/core/generated/base_container_specification/`
 - Product support floor: [README](../../README.md#platforms),
   [SDK README](../../sdk/node/README.md)

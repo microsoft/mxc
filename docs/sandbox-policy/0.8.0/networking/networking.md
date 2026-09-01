@@ -70,9 +70,10 @@ Throughout this document, the deny-all-except-proxy posture (the GA goal) refers
   `ingress.hostLoopback`; no other host-loopback endpoint is opened by the proxy configuration.
 - **What is NOT routed:** Non-HTTP traffic (raw TCP/UDP sockets, SSH, custom protocols, QUIC, WebRTC, etc.) is never
   redirected to the proxy. In model 2, direct internet traffic is blocked. On ProcessContainer, private-network
-  traffic follows `ingress.default` because AppContainer exposes one bidirectional private-network capability. In
-  model 1, non-HTTP traffic is subject to the IP/CIDR/port/protocol rules. Transparently routing this traffic through
-  the proxy is a gap that requires further design and is out of scope for GA.
+  ingress follows `ingress.default`, while outbound traffic follows `egress`; compatibility paths may use a
+  bidirectional capability to represent ingress. In model 1, non-HTTP traffic is subject to the
+  IP/CIDR/port/protocol rules. Transparently routing this traffic through the proxy is a gap that requires further
+  design and is out of scope for GA.
 
 **Direct outbound path (model 1 only):**
 
@@ -333,7 +334,7 @@ the exact endpoint in `runtimeConfig.networkProxy` is the sole sanctioned except
 
 | Platform | Enforcement Mechanism |
 |---|---|
-| Windows (Process Containers) | PSEC BaseContainer path: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. Legacy SBOX and AppContainer fallback reject schema 0.8 runtime proxy. |
+| Windows (Process Containers) | Native BaseContainer enforcement: per-AppContainer WinHTTP proxy configuration and scoped proxy-only access. Compatibility fallbacks reject schema 0.8 runtime proxy. |
 | WSLc | VM-level network policy permits only the translated proxy endpoint. Proxy variables are routing hints. |
 | Linux (LXC, Bubblewrap) | iptables permits only the proxy endpoint; proxy variables are routing hints. |
 | macOS (Seatbelt) | Seatbelt profile confines network-outbound to the loopback proxy port. MXC-set `HTTP_PROXY`/`HTTPS_PROXY` env variables are an advisory routing hint; a client that ignores the variables is denied by the profile (only the proxy port is reachable), so it is dropped, not bypassed. |
@@ -376,10 +377,10 @@ What is and is not routed through the proxy is described under Outbound Traffic 
 
 **Reality:** Enforcement fidelity varies. A capability available on one backend (e.g., per-AppContainer WFP filters) may not have an equivalent on another. Cooperation-dependent routing (e.g., honoring proxy env vars) is allowed only as an optimization above an enforcing layer that already blocks non-cooperative traffic; it is never the enforcement mechanism itself.
 
-Backends that cleanly separate private-network ingress from egress apply both directions independently. Windows
-AppContainer requires the bidirectional `privateNetworkClientServer` capability before private-network traffic can
-flow in either direction. ProcessContainer therefore requires `ingress.default: "allow"` for outbound private-network
-access, after which `egress` rules apply to both public and private outbound destinations.
+ProcessContainer applies native ingress controls when the host supports them and uses WFP for public and private
+outbound destinations. On compatibility paths, `ingress.default: "allow"` maps to the bidirectional
+`privateNetworkClientServer` capability. The BaseContainer compatibility path can still preserve the outbound posture
+with WFP; the final AppContainer fallback rejects direction combinations it cannot preserve.
 
 This capability coupling is a backend mapping, not a change to the shared
 meaning of `ingress.default`. The ProcessContainer section identifies which
@@ -404,35 +405,36 @@ already implemented.
 The strict host-loopback guarantee applies to the identity-scoped
 ProcessContainer path with OS-scoped proxy enforcement. The identity-less host
 proxy path requires broader host-loopback access and is an explicitly documented
-PSEC compatibility behavior rather than strict model-2 enforcement. Legacy SBOX
-and the AppContainer fallback reject schema 0.8 runtime proxy requests because
-they cannot preserve either posture.
+compatibility behavior rather than strict model-2 enforcement. Fallback paths
+reject schema 0.8 runtime proxy requests because they cannot preserve either
+posture.
 
 **Connectivity models:**
 
 - **Model 2 (recommended):** Grants no `internetClient`, so direct internet traffic is blocked. Any packaged proxy,
   with or without AppContainer isolation, uses its Package Family Name in `allowedProxyPeer`; an unpackaged
-  AppContainer proxy uses its profile name. Windows requires `ingress.default: "allow"` to grant the bidirectional
-  `privateNetworkClientServer` capability. With `allowedProxyPeer`, proxy reachability remains scoped to that peer and
-  endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less host proxy cannot use peer scoping and is the
-  documented development/testing compatibility path that requires `ingress.hostLoopback: "allow"`; it does not
-  provide the strict host-loopback-closure guarantee.
+  AppContainer proxy uses its profile name. `ingress.default: "allow"` uses native ingress enforcement when available
+  and the `privateNetworkClientServer` capability on the compatibility path. With `allowedProxyPeer`, proxy
+  reachability remains scoped to that peer and endpoint and `ingress.hostLoopback` stays `"deny"`. An identity-less
+  host proxy cannot use peer scoping and is the documented development/testing compatibility path that requires
+  `ingress.hostLoopback: "allow"`; it does not provide the strict host-loopback-closure guarantee.
 - **Model 1:** Grants `internetClient`, allowing direct internet egress under WFP IP/CIDR/port/protocol rules.
-  Private-network outbound also requires `ingress.default: "allow"` and remains subject to the same `egress` rules.
-- **Model 3:** Grants no `internetClient`, private-network capability, or loopback exemptions.
+  Private-network outbound remains subject to the same `egress` rules. Native controls govern ingress independently;
+  compatibility paths use the bidirectional capability when ingress is allowed.
+- **Model 3:** Grants no `internetClient`, private-network ingress, or loopback exemptions.
 
 **Enforcement:**
 
 | Configuration concept | Enforcement mechanism | Notes |
 |---|---|---|
-| IP/CIDR allow/block | PSEC IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on SBOX and AppContainer fallback |
+| IP/CIDR allow/block | IPv4/IPv6 WFP filters scoped to AppContainer SID | Public and private destinations; unsupported on compatibility fallbacks |
 | Port filtering | Port filtering via WFP | Port ranges supported. |
 | Protocol filtering | Protocol filtering via WFP | Schema values are `tcp`, `udp`, `icmp`, and `any`; WFP maps ICMP by address family. |
-| Default-deny | PSEC WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
-| Proxy (HTTP/S only) | PSEC per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing compatibility path requires `"allow"`; schema 0.8 proxy requests do not fall back to SBOX or AppContainer |
+| Default-deny | WFP block-all baseline filter at lower precedence than explicit allows. | A non-empty allow list grants `internetClient` only as the capability prerequisite; WFP still limits egress to explicit allows. With no allows, `internetClient` is absent. |
+| Proxy (HTTP/S only) | Per-AppContainer WinHTTP configuration, endpoint filtering, and optional scoped peer access | Identity-scoped proxies keep `hostLoopback: "deny"`; the identity-less development/testing path requires `"allow"`; schema 0.8 proxy requests do not use compatibility fallbacks |
 | Per-sandbox scoping | AppContainer SID, unique per sandbox instance | |
-| Private network | `privateNetworkClientServer` via `ingress.default` | Capability gate; `egress` filters outbound |
-| Inbound | Capabilities and loopback rules | Private network uses `ingress.default`; loopback is separate |
+| Private network | Native ingress controls or `privateNetworkClientServer` compatibility fallback | `egress` filters outbound on both paths |
+| Inbound | Native controls or the compatibility capability; loopback rules | `ingress.default` controls private-network inbound; `ingress.hostLoopback` is separate |
 | DNS | DNS queries follow same IP/CIDR allow/block rules as other traffic. No domain-based filtering. | If DNS resolver IP is blocked, DNS fails. If allowed, sandbox can resolve any domain. **For HTTP(S) via the proxy, DNS resolution happens in the proxy.** |
 | Bypass resistance | High. Kernel-enforced WFP filters. Bypass requires kernel compromise or AppContainer escape (elevation). | |
 
