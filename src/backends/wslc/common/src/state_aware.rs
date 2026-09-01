@@ -544,13 +544,8 @@ mod tests {
         assert!(runner.validate_deprovision(id, &request, None).is_err());
     }
 
-    /// Every one of the five hooks must refuse a supplied `ui`. A WSLc
-    /// container runs Linux, so there is no phase where the section could be
-    /// honoured — and because the dispatcher calls these hooks *before* the
-    /// phase body, the refusal happens before the backend contacts the daemon.
-    ///
-    /// Enumerating all five (rather than testing the two shared validators)
-    /// is what catches a hook that forgets to call its validator at all.
+    /// Enumerating all five hooks (rather than testing the shared validator) is
+    /// what catches a hook that forgets to call its validator at all.
     #[test]
     fn every_validate_hook_rejects_supplied_ui() {
         let runner = WslcStateAwareRunner::new();
@@ -587,10 +582,9 @@ mod tests {
         }
     }
 
-    /// `allowLocalNetwork` and a `firewall` enforcement mode are refused at
-    /// provision, the only phase where the network posture is settable — so
-    /// neither can be silently dropped into the daemon's `ProvisionConfig`,
-    /// which carries only the binary [`NetworkMode`].
+    /// Refused at provision, the only phase where the network posture is
+    /// settable — so neither can be silently dropped into the daemon's
+    /// `ProvisionConfig`, which carries only the binary [`NetworkMode`].
     #[test]
     fn validate_provision_rejects_unimplementable_network_posture() {
         let runner = WslcStateAwareRunner::new();
@@ -625,10 +619,9 @@ mod tests {
         }
     }
 
-    /// Guards against over-rejection, which the refusal tests cannot see. Each
-    /// value is the near-miss of a rejected one — `capabilities` vs `firewall`,
-    /// `allowLocalNetwork: false` vs `true`, absent `ui` vs supplied — so a gate
-    /// that flipped between value- and presence-based would fail here only.
+    /// Guards against over-rejection. Each value is the near-miss of a rejected
+    /// one, so a gate that flipped between value- and presence-based would fail
+    /// here only.
     #[test]
     fn validate_provision_accepts_the_postures_wslc_can_honour() {
         let runner = WslcStateAwareRunner::new();

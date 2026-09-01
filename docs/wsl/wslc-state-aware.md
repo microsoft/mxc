@@ -92,12 +92,12 @@ rules do not apply — see the empirical finding in the plan history). Proxy is 
 | `process.timeout` | n/a | n/a | honored → `ExecConfig.timeout_ms` |
 | `lifecycle` | rejected (whole section, at parse) | rejected | rejected |
 
-`ui` is rejected by **presence, not value**, on every phase. A WSLc container runs Linux, so the
-section's Windows job-object UI limits (`JOB_OBJECT_UILIMIT_*`) have no analogue inside it and no
-phase could honor it. Presence is the only workable test because `UiPolicy`'s defaults are full
-lockdown — an explicitly supplied lockdown `ui` is indistinguishable *by value* from an absent one,
-so a value-based check would let the single most restrictive request a caller can write through
-unenforced. The parse-derived `ContainerPolicy::ui_specified` flag is what closes that gap.
+`ui` is rejected by **presence, not value**, on every phase. WSLc has no mechanism to enforce UI
+restrictions on a container, so no phase could honor it. Presence is the only workable test because
+`UiPolicy`'s defaults are full lockdown — an explicitly supplied lockdown `ui` is indistinguishable
+*by value* from an absent one, so a value-based check would let the single most restrictive request
+a caller can write through unenforced. The parse-derived `ContainerPolicy::ui_specified` flag is
+what closes that gap.
 
 Every rejection above **aborts the phase before anything is created**: the dispatcher runs each
 `validate_*` hook ahead of the phase body, and `connect_daemon()` lives inside `provision()`, so a

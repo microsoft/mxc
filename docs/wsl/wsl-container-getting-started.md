@@ -374,12 +374,12 @@ full network cutoff and `"allow"` is full outbound (NAT).
 
 ### `enforcementMode` must be `capabilities`
 
-For the same reason, `network.enforcementMode: "firewall"` (or `"both"`) is
-**rejected**: both ask for per-rule firewall enforcement inside a container that
-has no `CAP_NET_ADMIN` to apply it with. The default `"capabilities"` is
-accepted — it is an honest description of WSLC's all-or-nothing network, so an
-explicitly supplied `"capabilities"` is accepted rather than refused merely for
-being present.
+`network.enforcementMode: "firewall"` (or `"both"`) is **rejected** for the same
+reason as per-host filtering: both ask for per-rule firewall enforcement inside a
+container that has no `CAP_NET_ADMIN` to apply it with. The default
+`"capabilities"` is accepted — it is an honest description of WSLC's
+all-or-nothing network, so an explicitly supplied `"capabilities"` is accepted
+rather than refused merely for being present.
 
 ### Inbound: `allowLocalNetwork` is not supported
 
@@ -412,9 +412,8 @@ the container.
 
 ### `ui` is not supported
 
-A `ui` section is **rejected**. The section maps to Windows job-object UI limits
-(`JOB_OBJECT_UILIMIT_*`); a WSLC container runs Linux inside the WSL2 VM, so
-those limits have no analogue and nothing in the backend could apply them.
+A `ui` section is **rejected** — the backend has no mechanism to enforce UI
+restrictions on a container.
 
 The check is on **presence, not value**. `ui`'s defaults are full lockdown, so
 an explicitly supplied lockdown `ui` is indistinguishable *by value* from an

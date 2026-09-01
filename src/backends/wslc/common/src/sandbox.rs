@@ -395,15 +395,12 @@ mod tests {
     use super::*;
     use crate::wsl_container_runner::START_CONTAINER_BANNER;
 
-    /// Rejections must abort, not tear down a container after building one.
-    ///
-    /// The message alone cannot prove that: on a host that *has* `wslcsdk.dll`,
-    /// a guard moved after `start_container` would leak a container and still
-    /// return this exact message. The banner is what makes the check
-    /// host-independent — `start_container` writes it as its first statement,
-    /// so an untouched buffer proves it was never entered.
+    /// The banner is what makes this host-independent: on a host that *has*
+    /// `wslcsdk.dll`, a guard moved after `start_container` would leak a
+    /// container and still return the same message. `start_container` writes the
+    /// banner first, so an untouched buffer proves it was never entered.
     #[test]
-    fn spawn_rejects_policy_before_touching_the_sdk() {
+    fn spawn_rejects_policy_before_touching_the_wslc_sdk() {
         let request = ExecutionRequest {
             containment: wxc_common::models::ContainmentBackend::Wslc,
             script_code: "echo hi".to_string(),

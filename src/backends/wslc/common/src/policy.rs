@@ -24,21 +24,11 @@
 //! mounted `rw`/`ro` parent is rejected, because WSLc has no overlay primitive
 //! to mask a subtree of a mounted volume.
 //!
-//! # Rejection ordering
-//!
-//! Checks run filesystem → ui → network so a request that trips several gets a
-//! stable, most-structural-first message rather than one that depends on field
-//! order. The precedence is asserted by tests, not just documented.
-//!
-//! # Shared with the one-shot surface
-//!
-//! [`reject_ui_policy`] and [`reject_unsupported_enforcement_mode`] describe the
-//! backend itself, not a phase, so `WSLContainerRunner::validate_runner` (which
-//! serves both the run-to-completion `ScriptRunner` and the streaming
-//! `SandboxBackend`) calls them too, retagging the message as a
-//! [`WslcError::Rejected`](crate::error::WslcError::Rejected). Every one of
-//! those call sites runs *before* any container is created, so a rejection
-//! always aborts rather than leaving a live container behind.
+//! Checks run filesystem → ui → network, so a request that trips several gets a
+//! stable message rather than one that depends on field order (asserted by
+//! tests). [`reject_ui_policy`] and [`reject_unsupported_enforcement_mode`]
+//! describe the backend rather than a phase, so the one-shot `validate_runner`
+//! calls them too.
 
 use wxc_common::models::{ExecutionRequest, NetworkEnforcementMode};
 use wxc_common::mxc_error::MxcError;
@@ -59,30 +49,28 @@ const ERR_PROXY_AT_PHASE: &str =
     "network.proxy is only honoured on the exec phase by the WSLc backend";
 const ERR_PROXY_URL_FORM: &str =
     "WSLc: network.proxy requires the 'url' form (a routable proxy URL); the localhost and \
-     builtinTestServer forms are not supported because a WSLc container runs in its own network \
+     builtinTestServer forms are not supported because a WSL container runs in its own network \
      namespace";
 const ERR_UI_POLICY: &str =
-    "WSLc: the ui section is not supported. A WSLc container runs Linux, while `ui` maps to \
-     Windows job-object UI restrictions (JOB_OBJECT_UILIMIT_*) that have no analogue inside it, \
-     so no ui posture is truthful here. Omitting the ui section is accepted but applies no \
-     restriction — it is not the lockdown the schema's default implies. Use a backend that \
-     enforces UI policy if you need one";
+    "WSLc: the ui section is not supported. The backend has no mechanism to enforce UI \
+     restrictions on a container, so no ui posture is truthful here. Omitting the ui section is \
+     accepted but applies no restriction — it is not the lockdown the schema's default implies. \
+     Use a backend that enforces UI policy if you need one";
 const ERR_ALLOW_LOCAL_NETWORK_STATE_AWARE: &str =
     "WSLc: network.allowLocalNetwork=true is not supported by the state-aware WSLc backend. The \
      container's network is all-or-nothing (defaultPolicy 'block' → isolated, 'allow' → bridged \
      NAT), and the state-aware provision phase has no port-mapping primitive to expose an \
      inbound port";
 const ERR_ENFORCEMENT_MODE: &str =
-    "WSLc: network.enforcementMode 'firewall' and 'both' are not supported. A WSLc container has \
+    "WSLc: network.enforcementMode 'firewall' and 'both' are not supported. A WSL container has \
      no CAP_NET_ADMIN for in-container firewall rules, and VM-level enforcement is not available \
      without breaking other security guarantees (e.g. MDE). Remove the field or set it to \
      'capabilities' — WSLc's network is all-or-nothing at the container level";
 
 /// Validate the request for the provision phase. `rw` / `ro` paths become
 /// volume mounts and `default_network_policy` selects the container network
-/// mode; both are honoured here. Overlapping denied paths, a UI policy, host
-/// filtering, inbound local networking, a non-default enforcement mode, and a
-/// provision-phase proxy are rejected.
+/// mode; both are honoured here. Everything else in the module table is
+/// rejected.
 pub(crate) fn validate_provision_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     validate_denied_path_overlap(
         &request.policy.readwrite_paths,
@@ -114,10 +102,9 @@ pub(crate) fn validate_post_provision_policy(request: &ExecutionRequest) -> Resu
     Ok(())
 }
 
-/// Validate the request for the exec phase. Filesystem and network mode are
-/// fixed at provision (rejected here), a UI policy is never supported, and the
-/// cooperative proxy is honoured and must be in `url` form so a routable value
-/// reaches the container.
+/// Validate the request for the exec phase. Filesystem, network mode and `ui`
+/// are rejected; the cooperative proxy is honoured and must be in `url` form so
+/// a routable value reaches the container.
 pub(crate) fn validate_exec_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     reject_filesystem_policy(request)?;
     reject_ui_policy(request)?;
@@ -161,16 +148,7 @@ fn reject_host_filtering(request: &ExecutionRequest) -> Result<(), MxcError> {
     Ok(())
 }
 
-/// Reject any supplied UI policy. Presence-based, not value-based: the domain
-/// `UiPolicy::default()` is full lockdown, so an explicitly-supplied lockdown
-/// `ui` is indistinguishable from an absent one by value — the same blind spot
-/// `network_specified` closes for the network policy.
-///
-/// Shared by every WSLc phase and by the one-shot / streaming
-/// `validate_runner`: the reason is the container's OS, not the lifecycle
-/// phase, so there is no phase on either surface where a `ui` section could be
-/// honoured. Runs after the filesystem check so a filesystem rejection keeps
-/// precedence, and before the network checks.
+/// Reject any supplied UI policy: WSLc cannot enforce UI restrictions.
 pub(crate) fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.ui_specified {
         return Err(MxcError::policy_validation(ERR_UI_POLICY));
@@ -178,22 +156,8 @@ pub(crate) fn reject_ui_policy(request: &ExecutionRequest) -> Result<(), MxcErro
     Ok(())
 }
 
-/// Reject an enforcement mode WSLc cannot implement.
-///
-/// Value-based, unlike [`reject_ui_policy`]: the default `capabilities` is an
-/// honest description of what WSLc does (the container's network is
-/// all-or-nothing, with nothing per-host to enforce), so an explicit
-/// `capabilities` is accepted. `firewall` and `both` ask for per-rule
-/// enforcement the container cannot perform — it has no `CAP_NET_ADMIN` — so
-/// accepting either would assert a guarantee that does not exist.
-///
-/// Called only by [`validate_provision_policy`] and the one-shot / streaming
-/// `WSLContainerRunner::validate_runner` — the two places a network posture is
-/// settable. Post-provision and exec deliberately do not call it: they reject
-/// the whole network mode by presence via [`reject_post_provision_network_mode`]
-/// (the parser sets `network_mode_specified` for `enforcementMode` too), which
-/// is broader — routing them here would wrongly accept `capabilities` after
-/// provision.
+/// Reject an enforcement mode WSLc cannot implement. Value-based: an explicit
+/// `capabilities` is accepted, since it describes what WSLc does.
 pub(crate) fn reject_unsupported_enforcement_mode(
     request: &ExecutionRequest,
 ) -> Result<(), MxcError> {
@@ -205,12 +169,9 @@ pub(crate) fn reject_unsupported_enforcement_mode(
     }
 }
 
-/// Reject inbound local networking at provision. The one-shot surface refuses
-/// the same value but points at `experimental.wslc.portMappings`; the
-/// state-aware provision phase has no such field, so its message must not offer
-/// that escape hatch. Post-provision phases reject it by presence via
-/// [`reject_post_provision_network_mode`] instead, since the posture is fixed
-/// once the container exists.
+/// Reject inbound local networking at provision. Separate from the one-shot
+/// message, which points at `experimental.wslc.portMappings` — a primitive the
+/// state-aware surface does not have.
 fn reject_provision_allow_local_network(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.allow_local_network {
         return Err(MxcError::policy_validation(
@@ -220,12 +181,10 @@ fn reject_provision_allow_local_network(request: &ExecutionRequest) -> Result<()
     Ok(())
 }
 
-/// Reject any network *mode* field supplied after provision. The network
-/// posture (`defaultPolicy` / `enforcementMode` / `allowLocalNetwork` / host
-/// lists) is bound to the provision phase; presence — not value — is checked so
-/// an explicit `defaultPolicy: "block"` (indistinguishable from an omitted
-/// block by value) is rejected too. The cooperative proxy is a separate
-/// exec-time concern handled by the callers.
+/// Reject any network *mode* field supplied after provision: the posture is
+/// bound to the provision phase. Presence, not value — an explicit
+/// `defaultPolicy: "block"` is indistinguishable from an omitted one by value.
+/// The cooperative proxy is a separate exec-time concern handled by the callers.
 fn reject_post_provision_network_mode(request: &ExecutionRequest) -> Result<(), MxcError> {
     if request.policy.network_mode_specified
         || request.policy.network_egress.is_some()
@@ -433,10 +392,6 @@ mod tests {
     }
 
     // ---- ui (rejected on every phase) ----
-    //
-    // A WSLc container runs Linux; `ui` maps to Windows job-object UI limits
-    // that have no analogue inside it. There is no phase where it could be
-    // honoured, so every validator refuses it.
 
     #[test]
     fn every_phase_rejects_supplied_ui() {
@@ -454,11 +409,8 @@ mod tests {
         }
     }
 
-    /// Presence, not value. `UiPolicy::default()` is full lockdown, so an
-    /// explicitly-supplied lockdown `ui` is byte-identical to an absent one by
-    /// value — only `ui_specified` can tell them apart. Were this check
-    /// value-based, the most restrictive request a caller can write would be
-    /// the one that slipped through unenforced.
+    /// A value-based check would let the most restrictive request a caller can
+    /// write through unenforced, since that is also the default.
     #[test]
     fn provision_rejects_lockdown_equivalent_ui() {
         let req = request_with_policy(ContainerPolicy {
@@ -496,9 +448,8 @@ mod tests {
     }
 
     /// Post-provision needs no dedicated `allowLocalNetwork` check: supplying
-    /// the field sets `network_mode_specified`, which the immutability check
-    /// already refuses. Pinned so the two rejections can't both be removed as
-    /// "redundant".
+    /// the field sets `network_mode_specified`, which immutability already
+    /// refuses. Pinned so both rejections can't be dropped as "redundant".
     #[test]
     fn post_provision_rejects_allow_local_network_as_a_mode_change() {
         let req = request_with_policy(ContainerPolicy {
@@ -532,10 +483,8 @@ mod tests {
         }
     }
 
-    /// Value-based, unlike `ui`: `capabilities` is an honest description of
-    /// what WSLc does (an all-or-nothing container network with nothing
-    /// per-host to enforce), so an explicit `capabilities` is accepted rather
-    /// than refused for merely being present.
+    /// Guards against over-rejection: `capabilities` is honoured, so unlike
+    /// `ui` it must not be refused for merely being present.
     #[test]
     fn provision_accepts_explicit_capabilities_enforcement_mode() {
         let req = request_with_policy(ContainerPolicy {
@@ -547,9 +496,8 @@ mod tests {
 
     // ---- rejection ordering ----
     //
-    // A request that trips several checks must get a stable, most-structural-
-    // first message: filesystem -> ui -> network. Documented in the module
-    // header; pinned here so a reordering of the validator bodies is caught.
+    // filesystem -> ui -> network. Pinned so reordering the validator bodies is
+    // caught.
 
     #[test]
     fn filesystem_error_takes_precedence_over_ui() {
