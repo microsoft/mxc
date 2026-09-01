@@ -739,20 +739,6 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
 }
 
 /// Anchor a resolved working directory to `base` when it is relative.
-///
-/// `process.cwd` is passed through the parser verbatim, so it may be relative.
-/// The exec path hands that value to `Command::current_dir`, where `chdir`
-/// resolves it against the MXC process's own directory. The helper script has
-/// no such anchor — it runs from Terminal's directory — so a relative value
-/// left as-is would either fail to `cd` or, worse, succeed into a *different
-/// directory of the same name* under Terminal's parent. Resolving it here, in
-/// the launching process, is what makes the two paths land in the same place,
-/// and it also makes the up-front `is_dir` check test the directory the helper
-/// will actually enter.
-///
-/// Symlinks are deliberately left unresolved: an absolute request reaches the
-/// child spelled the way the caller wrote it, matching the `PWD` `spawn_exec`
-/// exports.
 fn absolute_working_directory(path: &str, base: &Path) -> String {
     let candidate = Path::new(path);
     if candidate.is_absolute() {
