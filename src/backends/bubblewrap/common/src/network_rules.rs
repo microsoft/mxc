@@ -27,6 +27,7 @@
 //! an integer prefix. A rejected string cannot reach the script, and an
 //! accepted one cannot carry anything but digits, dots, colons and a slash.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -945,13 +946,20 @@ impl EgressPlan {
     /// are excluded -- an unreachable deny is the posture the caller asked for.
     /// Deduplicated: directional rules lower as address x port, so one
     /// destination appears once per port selector.
+    ///
+    /// Membership is tracked in a set rather than by scanning the output, which
+    /// is quadratic in the unique target count. A policy may lower into
+    /// [`MAX_EGRESS_RULES`] distinct addresses, where the scan costs seconds
+    /// before the sandbox even starts. The vector is still what is returned, so
+    /// the warning keeps naming destinations in policy order.
     pub(crate) fn allowed_v6_targets(&self) -> Vec<&str> {
         let mut targets: Vec<&str> = Vec::new();
+        let mut seen: HashSet<&str> = HashSet::new();
         for rule in &self.rules {
             let target = rule.address.text.as_str();
             if rule.verdict == RuleVerdict::Accept
                 && rule.address.family == RuleFamily::V6
-                && !targets.contains(&target)
+                && seen.insert(target)
             {
                 targets.push(target);
             }
