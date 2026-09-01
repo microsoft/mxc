@@ -89,9 +89,9 @@ The `process.cwd` and `process.env` fields from the standard schema are honored 
 | Field | LXC Implementation | Notes |
 |-------|-------------------|-------|
 | `process.cwd` | `cd -- "$1" && exec /bin/sh -c "$2"` wrapper prelude, with the cwd passed as a positional argument | Empty string preserves the container default cwd. A nonexistent or non-permitted path surfaces as a generic non-zero exit (typically `1`, from `cd`'s own status); callers needing strong cwd validation should pre-check the path. The positional-arg trick means cwd values with spaces, quotes, `$vars`, or backticks pass through verbatim with no shell escaping. |
-| `process.env` | Each `KEY=VAL` entry becomes a repeated `--set-var=KEY=VAL` flag to `lxc-attach` | Malformed entries — those without `=` (e.g. `"BADENTRY"`) or with an empty key (e.g. `"=foo"`) — are silently skipped. Embedded `=` in the value (e.g. `"X=a=b=c"`) is preserved. |
+| `process.env` | Each `KEY=VAL` entry becomes a repeated `--set-var=KEY=VAL` flag to `lxc-attach` | Malformed entries — those without `=` (e.g. `"BADENTRY"`) or with an empty key (e.g. `"=foo"`) — fail the run and name the offending entry, rather than being dropped and running the workload in an environment the caller did not describe. Embedded `=` in the value (e.g. `"X=a=b=c"`) is preserved. |
 
-**Replace semantics.** When `process.env` is non-empty, `lxc-exec` also passes `--clear-env` to `lxc-attach` so the host environment does **not** leak into the sandbox, regardless of how many entries survive the malformed-skip. This is the posture `lxc-attach(1)` recommends for sandbox-spawn callers. If a variable is set in both the host and `process.env`, the `process.env` value wins.
+**Replace semantics.** When `process.env` is non-empty, `lxc-exec` also passes `--clear-env` to `lxc-attach` so the host environment does **not** leak into the sandbox, and every entry the caller wrote is present, since a malformed one would have failed the run. This is the posture `lxc-attach(1)` recommends for sandbox-spawn callers. If a variable is set in both the host and `process.env`, the `process.env` value wins.
 
 When `process.env` is empty (or absent), the legacy keep-env behavior is preserved and the host environment is inherited.
 
@@ -154,13 +154,18 @@ wins" is not true without them:
 
 `allowedHosts` and `blockedHosts` entries may be bare IPv4/IPv6 literals, IPv4/IPv6 CIDR blocks, or hostnames. Hostnames are resolved to both A and AAAA records; IPv4 destinations are applied to the `iptables` chain and IPv6 destinations are applied to the `ip6tables` chain. Host-list rules match all ports and protocols. Port- and protocol-specific egress rules are a schema 0.8 feature, described below; the legacy host lists cannot express them.
 
-An entry that resolves to nothing — an unknown hostname, or a CIDR prefix out
-of range for its family — cannot be turned into a rule. What that costs
-depends on the entry and on `defaultPolicy`:
+A destination that could never match anything — a CIDR prefix out of range for
+its family, or text that is neither an address nor a hostname — is refused
+before any rule is programmed and before any chain is created. It names nothing
+that can exist on any host at any moment, so there is no run in which the
+caller gets what they wrote.
+
+A well-formed entry that resolves to no address right now cannot be turned into
+a rule either. What that costs depends on the entry and on `defaultPolicy`:
 
 | Entry | `defaultPolicy` | Behavior |
 |-------|-----------------|----------|
-| `allowedHosts` | either | Reported as unresolved and skipped. Failing to write an ACCEPT rule can only make the policy more restrictive |
+| `allowedHosts` | either | **Fails firewall setup.** The caller named a destination the container is meant to reach; skipping the ACCEPT silently leaves it unreachable, which is not the policy that was written |
 | `blockedHosts` | `block` | Reported as unresolved and skipped. The closing DROP already denies the destination, so the unwritten rule was redundant |
 | `blockedHosts` | `allow` | **Fails firewall setup.** The chain ends in ACCEPT, so the unwritten DROP was the only thing that would have denied that destination, and skipping it silently converts a deny into an allow |
 
@@ -207,10 +212,16 @@ Before programming the IPv6 chain, MXC probes `ip6tables` with a read-only `ip6t
 | Classification | Condition | Behavior |
 |----------------|-----------|----------|
 | `Available` | The `ip6tables` probe succeeds | Programs the parallel `ip6tables` chain alongside the IPv4 chain |
-| `KernelIpv6Disabled` | The probe fails **and** the host has no active IPv6 | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
-| `UnusableButIpv6Active` | The probe fails **and** the host has active IPv6 | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
+| `KernelIpv6Disabled` | The probe fails **and** the host has no IPv6 stack at all | Skips the IPv6 chain and logs that there is no IPv6 egress to filter — safe, because there is nothing to filter |
+| `UnusableButIpv6Active` | The probe fails **and** the host's IPv6 state is active or unknown | **Fails firewall setup** rather than applying an IPv4-only policy that would silently leave IPv6 egress unfiltered |
 
-Host IPv6 activity is read from `/proc/net/if_inet6`: a non-loopback interface with an IPv6 address counts as active, while loopback-only `::1` on `lo` (present even on IPv4-only hosts) does not. If that file cannot be read at all — as opposed to being absent, which means IPv6 is disabled — the state is treated as *unknown* rather than as a confirmed "IPv6 is off", so an unreadable IPv6 state fails closed instead of leaving IPv6 unfiltered.
+Host IPv6 activity is read from `/proc/net/if_inet6`. A non-loopback interface
+carrying an IPv6 address counts as active. Everything short of that — loopback-only
+`::1` on `lo`, an empty file, or a file that cannot be read — is *unknown* rather
+than a confirmed "IPv6 is off", because the kernel creates that file only when the
+IPv6 stack is loaded, and an address can be configured at any point during the run.
+Only an absent file, meaning IPv6 was disabled at boot, is a confirmed negative.
+Unknown fails closed.
 
 The chains are hooked into `FORWARD` for container egress with **up to two
 rules per family**, because the input interface `FORWARD` sees depends on how
@@ -265,9 +276,9 @@ requests a firewall enforcement mode. Under 0.8.0 it is always installed.
 
 The chain uses an `MXCI-` prefix so it can never collide with, or be torn down for, the `MXC-` egress chain of the same container. Loopback, established and related traffic, and — for IPv6 — the ICMPv6 types required for Neighbor Discovery and Path MTU Discovery are permitted ahead of the terminal drop, so a default-deny container can still complete connections it initiated itself.
 
-IPv6 is classified with the same three-way probe as egress, but against the *container* namespace rather than the host, and from a different signal. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
+IPv6 is classified with the same three-way probe as egress, but against the *container* namespace rather than the host. A host that reports IPv6 disabled says nothing about the namespace actually being filtered. `UnusableButIpv6Active` inside that namespace fails the run closed rather than enforcing an IPv4-only inbound policy that would leave inbound IPv6 open.
 
-The signal differs because a container is not a long-running host. Egress reads the *contents* of `/proc/net/if_inet6` and treats loopback-only as inactive, which is a fair reading for a host that has been up for a while. A container has not been: `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off. Inbound therefore keys on that file's *existence*, which is stable — the kernel never creates `/proc/<pid>/net/if_inet6` when IPv6 is disabled at boot. A present but address-less file counts as active, so an unusable `ip6tables` fails the run closed instead of installing IPv4-only enforcement that an IPv6 address arriving moments later would slip past. The trade is deliberate and one-directional: this can abort a run that the egress rule would have let proceed, never the reverse.
+Both directions key on that file's *existence* rather than on finding an address written in it. The kernel creates `if_inet6` only when the IPv6 stack is loaded, so its presence is stable while its contents are not. `wait_for_network` returns on the first address of *any* family, so a container whose IPv6 address has not arrived yet presents exactly the same address-less file as one with IPv6 switched off; a host mid-configuration presents the same file for the same reason. Reading the contents would classify both as "no IPv6" and install IPv4-only enforcement that an address arriving moments later would slip past. Keying on existence can abort a run that would have completed harmlessly, and that is the direction this backend accepts.
 
 Inbound rules are installed after the container starts and after egress setup completes, so inbound is unfiltered for a short interval at container startup. The workload script is executed only after installation finishes, so no sandboxed code runs during that interval and the exposure is to external traffic only. Narrowing this interval is tracked separately.
 
@@ -305,7 +316,11 @@ silent corrections:
   would be injected while direct egress stayed open — a config that reads as
   deny-all-except-proxy and enforces neither half. MXC refuses it rather than
   auto-promoting the mode, so a stated enforcement level is never silently
-  rewritten.
+  rewritten. The refusal is not specific to the proxy: any configuration that
+  states a network posture under `capabilities` is refused, because this backend
+  filters with iptables and has no capability mechanism for the network. A
+  configuration that states no posture is not asking for enforcement and runs
+  unchanged.
 - **The `url` must not carry credentials.** LXC passes the proxy URL to
   `lxc-attach` as a `--set-var` argument, and process arguments are
   world-readable through `/proc/<pid>/cmdline`, so inline `user:pass@` would be
