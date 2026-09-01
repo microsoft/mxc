@@ -16,9 +16,9 @@ if ($wxcExec -match '\\release\\') {
     throw 'Release binaries are refused because consent isolation uses debug-only overrides.'
 }
 $expectedBody = @'
-Help improve MXC by sharing optional diagnostic data with Microsoft.
+Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
+
 If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
-You can change your choice at any time.
 '@ -replace "`r`n", "`n"
 
 function ConvertTo-Base64Json([object]$Value) {
@@ -60,9 +60,9 @@ function Invoke-ConsentRequest([string]$Decision) {
     if (-not $first.prompt -or -not $first.challenge) {
         throw "Unexpected consent presentation: $firstLine"
     }
-    if ($first.prompt.resourceVersion -ne 1 -or
+    if ($first.prompt.resourceVersion -ne 3 -or
         $first.prompt.locale -ne 'en-US' -or
-        $first.prompt.title.text -ne 'Help improve Microsoft eXecution Container (MXC)' -or
+        $first.prompt.title.text -ne 'Help improve Microsoft Products' -or
         $first.prompt.body.text -ne $expectedBody -or
         $first.prompt.affirmativeLabel.text -ne 'Yes' -or
         $first.prompt.negativeLabel.text -ne 'No' -or
@@ -125,7 +125,7 @@ try {
             consent = $seed
             source = 'smoke-proof'
             promptedMxcVersion = '0.0.0-smoke'
-            promptResourceVersion = 2
+            promptResourceVersion = 3
             promptLocale = 'en-US'
             updatedAtEpoch = 0
         }

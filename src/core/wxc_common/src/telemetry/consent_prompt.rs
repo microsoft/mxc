@@ -66,20 +66,14 @@ mod tests {
         let prompt = prompt_for_locale(Some("en-US"));
         assert_eq!(prompt.resource_version, CONSENT_RESOURCE_VERSION);
         assert_eq!(prompt.locale, "en-US");
-        assert_eq!(
-            prompt.title.text,
-            "Help improve Microsoft eXecution Container (MXC)"
-        );
+        assert_eq!(prompt.title.text, "Help improve Microsoft Products");
         assert_eq!(
             prompt.body.text,
-            "Help improve MXC by sharing optional diagnostic data with Microsoft.\n\
-             If enabled, MXC sends diagnostic information about product usage, performance, \
-             and reliability. When Learning Mode capture is used, this can include sanitized \
-             technical details about resource-access events, such as provider and event \
-             identifiers, process IDs, access classifications, and bounded redacted properties. \
-             MXC does not send your commands, credentials, complete file paths, usernames, or \
-             sandbox output.\n\
-             You can change your choice at any time."
+            "Help improve MXC and other Microsoft product including Windows by sharing optional \
+             diagnostic data with Microsoft.\n\n\
+             If enabled, MXC sends diagnostic information about product usage, performance, and \
+             reliability. MXC does not send your commands, file paths, credentials, or other \
+             customer content."
         );
         assert_eq!(prompt.affirmative_label.text, "Yes");
         assert_eq!(prompt.negative_label.text, "No");

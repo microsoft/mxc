@@ -5,6 +5,10 @@ MXC ships the canonical consent resource, persistent consent storage, and
 consent-management APIs described below. Telemetry remains off by default and
 is enabled only when every gate in this contract permits collection.
 
+The purpose of the MXC Learning Mode Data Loop is to analyze collected data to
+identify usage patterns, improve Windows security, and inform MXC about
+application compatibility in containers with minimal capabilities.
+
 MXC telemetry is Windows-only and fails closed. Collection requires all four
 conditions at the time each event is written:
 
@@ -30,7 +34,7 @@ native UI, but may not substitute wording.
 
 Current resource:
 
-- Resource version: `2`
+- Resource version: `3`
 - Locale: `en-US`
 - Mandatory fallback: `en-US`
 - Privacy link: <https://go.microsoft.com/fwlink/?linkid=521839>
@@ -38,15 +42,15 @@ Current resource:
 ### Title
 
 ```text
-Help improve Microsoft eXecution Container (MXC)
+Help improve Microsoft Products
 ```
 
 ### Body
 
 ```text
-Help improve MXC by sharing optional diagnostic data with Microsoft.
-If enabled, MXC sends diagnostic information about product usage, performance, and reliability. When Learning Mode capture is used, this can include sanitized technical details about resource-access events, such as provider and event identifiers, process IDs, access classifications, and bounded redacted properties. MXC does not send your commands, credentials, complete file paths, usernames, or sandbox output.
-You can change your choice at any time.
+Help improve MXC and other Microsoft product including Windows by sharing optional diagnostic data with Microsoft.
+
+If enabled, MXC sends diagnostic information about product usage, performance, and reliability. MXC does not send your commands, file paths, credentials, or other customer content.
 ```
 
 ### Actions
