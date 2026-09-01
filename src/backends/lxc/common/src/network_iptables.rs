@@ -1655,13 +1655,10 @@ impl NetworkIptablesManager {
     /// the whole of this backend's deny-precedence guarantee. See
     /// [`Self::lower_legacy_hosts`] for why that order is load-bearing.
     ///
-    /// An entry that resolves to nothing programs no rule, and the two
-    /// directions are not symmetric. An unwritten deny leaves reachable a
-    /// destination the operator named as unreachable, so it is a hard error
-    /// wherever something else in the chain would accept that destination.
-    /// An unwritten allow only withholds traffic that was meant to be
-    /// permitted, which costs availability and can never widen what the
-    /// container reaches, so it is always a warning.
+    /// An entry that resolves to nothing programs no rule. Neither direction
+    /// can be honored that way, and both refuse. A deny is the exception only
+    /// where the default already blocks what the entry named -- that default
+    /// enforces it with no rule of its own.
     fn build_policy_rules_logged(
         chain_name: &str,
         policy: &ContainerPolicy,
@@ -1672,6 +1669,7 @@ impl NetworkIptablesManager {
         let mut args = FirewallRuleArgs::default();
         let mut unresolved_denies: Vec<&str> = Vec::new();
         let mut catch_all_allows: Vec<&str> = Vec::new();
+        let mut programmed_lines: Vec<String> = Vec::new();
         let entries = Self::lower_egress(policy, uses_directional_schema);
         for entry in &entries {
             let host = entry.destination.as_str();
@@ -1687,9 +1685,15 @@ impl NetworkIptablesManager {
                         host
                     ));
                 }
-                if matches!(action, RuleAction::Deny) {
-                    unresolved_denies.push(host);
+                if matches!(action, RuleAction::Allow) {
+                    return Err(format!(
+                        "allowed host '{}' resolved to no address, so no rule can be \
+                         programmed to reach it; refusing to apply a policy that does \
+                         not grant a destination the configuration names",
+                        host
+                    ));
                 }
+                unresolved_denies.push(host);
                 logger.log_line(&format!("Warning: could not resolve host '{}'", host));
             } else if matches!(action, RuleAction::Allow)
 
@@ -1711,17 +1715,20 @@ impl NetworkIptablesManager {
                 &action,
                 entry.matching,
             );
-            // Log each destination rule that will be programmed, derived from
-            // the built args rather than from `destinations`, so that removing
-            // destination-rule emission also removes these lines. This is the
-            // observable surface the end-to-end scripts assert on to prove a
-            // rule for a specific destination was actually generated while the
-            // chain is live (a warning-only or chain-only run would not).
+            // Hold each line until the whole policy survives. A later entry can
+            // still refuse the run, and the caller submits nothing when it does,
+            // so a line emitted here would name a rule that never reached the
+            // chain. Derived from the built args rather than from
+            // `destinations`, so that removing destination-rule emission also
+            // removes these lines. This is the observable surface the
+            // end-to-end scripts assert on to prove a rule for a specific
+            // destination was actually generated while the chain is live (a
+            // warning-only or chain-only run would not).
             for rule in &rule_args.ipv4 {
-                logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
+                programmed_lines.push(format!("Programmed iptables rule: {}", rule.join(" ")));
             }
             for rule in &rule_args.ipv6 {
-                logger.log_line(&format!("Programmed ip6tables rule: {}", rule.join(" ")));
+                programmed_lines.push(format!("Programmed ip6tables rule: {}", rule.join(" ")));
             }
             args.extend(rule_args);
         }
@@ -1762,6 +1769,9 @@ impl NetworkIptablesManager {
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+        }
+        for line in &programmed_lines {
+            logger.log_line(line);
         }
         Ok(args)
     }
@@ -1827,6 +1837,11 @@ impl NetworkIptablesManager {
     /// egress-capable, so a line is treated as evidence of active IPv6 only
     /// when its device is something other than `lo`.
     ///
+    /// A successful read carrying no egress-capable line is `Unknown` rather
+    /// than `Inactive`: the file's existence already proves the stack is
+    /// loaded, and an address can be configured at any point during the run.
+    /// Only a kernel that never created the file is a confirmed negative.
+    ///
     /// The error handling is deliberate:
     /// - A `NotFound` error **while `/proc/net` exists** means the kernel
     ///   never created the file (IPv6 disabled at boot via `ipv6.disable=1`,
@@ -1865,7 +1880,11 @@ impl NetworkIptablesManager {
                 if has_egress_capable_interface {
                     HostIpv6State::Active
                 } else {
-                    HostIpv6State::Inactive
+                    // The file is there, so the kernel carries IPv6 and an
+                    // address can arrive while the container runs. Reporting
+                    // that as a confirmed negative installs IPv4-only rules
+                    // against a stack that may start carrying egress.
+                    HostIpv6State::Unknown
                 }
             }
             // A missing `/proc/net/if_inet6` is only evidence that IPv6 is off
@@ -2079,6 +2098,19 @@ impl NetworkIptablesManager {
                         .to_string(),
                 );
             }
+            if policy.network_mode_specified {
+                return Err(
+                    "network.enforcementMode='capabilities' names a posture LXC cannot \
+                     enforce. This backend filters with iptables and has no capability \
+                     mechanism for the network, so under 'capabilities' no rule is \
+                     installed in either direction and the container runs with the \
+                     network its host gives it -- not the one this configuration states. \
+                     Set network.enforcementMode to 'firewall' or 'both', or remove the \
+                     network policy. Refusing to apply rather than reporting success for \
+                     an enforcement that did not happen."
+                        .to_string(),
+                );
+            }
             logger.log_line("Network policy requests no firewall; skipping iptables.");
             return Ok(true);
         }
@@ -2223,8 +2255,7 @@ impl NetworkIptablesManager {
         // file, not a lookup that failed: it matches nothing on any host at any
         // moment. Refusing here, ahead of the ip6tables probe and the first
         // chain, means a mistyped entry never programs a partial policy and
-        // leaves nothing to roll back. This also covers proxy mode below, which
-        // never resolves the allow list and so cannot warn about it.
+        // leaves nothing to roll back.
         if let Some((field, entry)) = Self::malformed_destination(policy) {
             return Err(format!(
                 "{} entry '{}' is not a valid destination, so no rule can be programmed for \
@@ -2242,6 +2273,17 @@ impl NetworkIptablesManager {
                 "network.proxy cannot be combined with blockedHosts: the proxy can fetch a \
                  blocked destination on the container's behalf, so the block list would not \
                  be enforced"
+                    .to_string(),
+            );
+        }
+
+        // Proxy mode carries the proxy accepts and its closing drop and nothing
+        // else. An allow list supplied beside it is never programmed, and the
+        // caller named destinations that do not take effect.
+        if !proxy_endpoints.is_empty() && !policy.allowed_hosts.is_empty() {
+            return Err(
+                "network.proxy cannot be combined with allowedHosts: proxy mode permits the \
+                 proxy endpoint and nothing else, so the allow list would not be programmed"
                     .to_string(),
             );
         }
@@ -2293,17 +2335,12 @@ impl NetworkIptablesManager {
             //
             // The allow list is not programmed either: an entry naming
             // anything but the proxy contradicts the model, and one naming the
-            // proxy is already covered. A block list never reaches here.
+            // proxy is already covered. Supplying either list is refused ahead
+            // of this block.
             let proxy_rules = Self::build_proxy_chain_rule_args(&self.chain_name, proxy_endpoints);
             Self::run_iptables_rule_args(&proxy_rules, logger)?;
             for rule in &proxy_rules {
                 logger.log_line(&format!("Programmed iptables rule: {}", rule.join(" ")));
-            }
-            if !policy.allowed_hosts.is_empty() {
-                logger.log_line(
-                    "Warning: network.proxy is configured, so allowedHosts is not programmed; \
-                     the container may reach the proxy and nothing else.",
-                );
             }
             if ipv6_enabled {
                 logger.log_line(
@@ -2901,6 +2938,12 @@ mod ga_egress_spec;
 #[cfg(test)]
 #[path = "network_iptables_malformed_destination_spec.rs"]
 mod malformed_destination_spec;
+
+/// Black-box specification for refusing a policy this backend cannot enforce,
+/// kept in its own file for the same reason as `veth_spec`.
+#[cfg(test)]
+#[path = "network_iptables_error_standard_spec.rs"]
+mod error_standard_spec;
 
 #[cfg(test)]
 mod test_firewall {
@@ -4207,17 +4250,24 @@ mod tests {
     }
 
     #[test]
-    fn an_unresolvable_allow_does_not_arm_the_deny_precedence_failure() {
-        // An allow that resolved to nothing programs no ACCEPT, so it cannot
-        // preempt the closing DROP and must not be counted as one that did.
+    fn an_unresolvable_allow_is_refused_before_deny_precedence_is_considered() {
+        // An allow that resolved to nothing programs no ACCEPT and cannot
+        // preempt the closing DROP. The refusal now happens first, so the
+        // arming question this once asked can no longer arise.
         let policy = ContainerPolicy {
             default_network_policy: NetworkPolicy::Block,
             ..policy_with_hosts(&["allowed.invalid"], &[UNRESOLVABLE_HOST])
         };
         let mut logger = wxc_common::logger::Logger::new(wxc_common::logger::Mode::Buffer);
 
-        NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger)
-            .expect("an allow that programs no rule cannot accept the unresolved deny");
+        let result =
+            NetworkIptablesManager::build_policy_rules_logged("MXC-x", &policy, false, &mut logger);
+
+        let message = result.expect_err("an allow that programs no rule is refused");
+        assert!(
+            message.contains("allowed.invalid"),
+            "the refusal must name the allow entry, not the deny; actual: {message:?}"
+        );
     }
 
     #[test]
@@ -4994,8 +5044,9 @@ mod tests {
             NetworkIptablesManager::classify_host_ipv6_state(Ok(contents), PROC_NET_MOUNTED);
         assert_eq!(
             state,
-            HostIpv6State::Inactive,
-            "loopback-only `::1` on `lo` must classify as Inactive, not Active; got {state:?}"
+            HostIpv6State::Unknown,
+            "the file exists, so the stack is loaded and an address can arrive later; \
+             loopback-only is not a confirmed negative; got {state:?}"
         );
         assert_ne!(
             state,
@@ -5005,26 +5056,28 @@ mod tests {
     }
 
     #[test]
-    fn empty_contents_are_inactive() {
+    fn empty_contents_are_not_a_confirmed_negative() {
         let state =
             NetworkIptablesManager::classify_host_ipv6_state(Ok(String::new()), PROC_NET_MOUNTED);
         assert_eq!(
             state,
-            HostIpv6State::Inactive,
-            "an empty `/proc/net/if_inet6` means no IPv6 addresses; got {state:?}"
+            HostIpv6State::Unknown,
+            "an empty `/proc/net/if_inet6` carries no address today, but the kernel \
+             created the file and can add one; got {state:?}"
         );
     }
 
     #[test]
-    fn whitespace_only_contents_are_inactive() {
+    fn whitespace_only_contents_are_not_a_confirmed_negative() {
         let state = NetworkIptablesManager::classify_host_ipv6_state(
             Ok("\n  \n".to_string()),
             PROC_NET_MOUNTED,
         );
         assert_eq!(
             state,
-            HostIpv6State::Inactive,
-            "blank lines carry no interface, so the state is Inactive; got {state:?}"
+            HostIpv6State::Unknown,
+            "blank lines carry no interface, but the file's existence still proves \
+             the stack is loaded; got {state:?}"
         );
     }
 

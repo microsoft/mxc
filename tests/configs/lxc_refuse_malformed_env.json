@@ -1,0 +1,16 @@
+{
+  "version": "0.7.0-alpha",
+  "containerId": "CLI-LXC-Refuse-Malformed-Env",
+  "containment": "lxc",
+  "process": {
+    "commandLine": "echo MXC_WORKLOAD_RAN",
+    "env": ["MXC_TEST_OK=fine", "NOT_AN_ASSIGNMENT"]
+  },
+  "lifecycle": {
+    "destroyOnExit": true
+  },
+  "lxc": {
+    "distribution": "alpine",
+    "release": "3.23"
+  }
+}

@@ -5,10 +5,11 @@
 //! destination.
 //!
 //! A destination that cannot be parsed is a typo in the configuration file: it
-//! resolves to nothing on every host, at every moment, forever. That is a
-//! different fact from a well-formed hostname whose DNS lookup failed, which is
-//! environmental and transient. These tests pin the first to a refusal and the
-//! second to today's warning, so the two never collapse back together.
+//! resolves to nothing on every host, at every moment, forever. A well-formed
+//! hostname whose lookup returned nothing is a different fact about a different
+//! moment. Both are refused, because neither can be programmed into a rule.
+//! These tests pin the refusals and pin that the two say different things, so a
+//! caller can tell a mistyped entry from one their resolver could not answer.
 //!
 //! Written against the documented contract in
 //! `docs/sandbox-policy/0.8.0/networking/networking.md`, which requires a
@@ -168,18 +169,22 @@ fn a_malformed_entry_is_refused_in_proxy_mode_too() {
 }
 
 #[test]
-fn a_hostname_that_may_not_resolve_is_not_refused() {
+fn a_hostname_that_did_not_resolve_is_also_refused_but_says_something_different() {
     let policy = legacy_policy(&["no-such-host.invalid"], &[]);
-    let (result, _, logged) = apply_and_collect(&policy);
+    let (result, _, _) = apply_and_collect(&policy);
 
-    assert!(
-        result.is_ok(),
-        "a well-formed hostname that did not resolve is environmental, not a typo; \
-         refusing it would make sandbox startup depend on live DNS. got: {result:?}"
+    let message = result.expect_err(
+        "a destination that resolves to no address cannot be programmed, so the caller \
+         learns by the request failing",
     );
     assert!(
-        logged.contains("no-such-host.invalid"),
-        "an unresolved host stays a warning that names the host, got: {logged}"
+        message.contains("no-such-host.invalid"),
+        "the refusal must name the entry that was not honored, got: {message}"
+    );
+    assert!(
+        !message.contains("is not a valid destination"),
+        "a lookup that returned nothing is not a typo, and the two must not collapse \
+         into one message, got: {message}"
     );
 }
 

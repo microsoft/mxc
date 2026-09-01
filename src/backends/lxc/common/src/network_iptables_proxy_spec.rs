@@ -288,25 +288,17 @@ fn proxy_mode_emits_no_base_exemptions() {
 // Under "the proxy and nothing else" an allowed host contradicts the model,
 // so programming it would widen the posture the proxy defines.
 #[test]
-fn proxy_mode_does_not_program_the_allow_list() {
+fn proxy_mode_refuses_an_allow_list() {
     let mut policy = policy_with_proxy("10.9.8.7", 3128);
     policy.allowed_hosts = vec!["10.1.1.1".to_string()];
 
-    let (manager, issued, result) = apply_and_collect("proxy-nolists", &policy);
-    assert!(result.is_ok(), "apply must succeed, got {result:?}");
-
-    let rules = appended_rules(&issued, "iptables", manager.chain_name());
+    let (_, _, result) = apply_and_collect("proxy-nolists", &policy);
+    let message = result.expect_err("a proxied chain never programs the allow list");
     assert!(
-        !rules.is_empty(),
-        "the proxied chain must have been programmed at all; issued: {issued:?}"
+        message.contains("allowedHosts"),
+        "the caller must be told which part of their configuration cannot be honored \
+         beside a proxy; actual: {message:?}"
     );
-
-    for rule in rules {
-        assert!(
-            !has_pair(rule, "-d", "10.1.1.1"),
-            "a proxied chain must ignore the allow list; actual: {rule:?}"
-        );
-    }
 }
 
 // A blocked destination is still reachable by asking the permitted proxy to

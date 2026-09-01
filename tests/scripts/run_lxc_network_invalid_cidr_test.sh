@@ -1,8 +1,10 @@
 #!/bin/bash
 # LXC invalid CIDR network filtering test
 #
-# Invalid CIDR entries should be reported as unresolved hosts and then skipped;
-# they must not make firewall setup fail for the rest of the policy.
+# An entry like 10.0.0.0/33 matches nothing on any host at any moment, so no
+# rule can carry it. The run is refused and names the entry, rather than
+# programming the rest of the policy and leaving the caller believing a
+# destination they wrote down is being filtered.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -72,38 +74,42 @@ echo "Running LXC invalid CIDR network filtering test..."
 MXC_CHAINS_BEFORE_V4="$(mxc_chains iptables)"
 MXC_CHAINS_BEFORE_V6="$(mxc_chains ip6tables)"
 
-# The process may fail because the default policy blocks egress; this test is
-# only asserting firewall validation and setup behavior.
-OUTPUT=$("$LXC_EXEC" --debug "$CONFIG" 2>&1 || true)
+# The run must be refused. A zero exit means a policy naming an entry that can
+# never match was applied and reported as success.
+OUTPUT=""
+STATUS=0
+OUTPUT=$("$LXC_EXEC" --debug "$CONFIG" 2>&1) || STATUS=$?
 echo "$OUTPUT"
 
+[ "$STATUS" -ne 0 ] \
+    || fail "lxc-exec exited 0, so a policy carrying an unmatchable entry was accepted. If
+      this is unexpected, check that $LXC_EXEC is current -- a binary built before
+      this rule existed fails here in exactly the same way as a regression."
+
+# Refused for this reason, not by coincidence: a fixture broken some other way
+# also exits non-zero and would pass the check above on its own.
+echo "$OUTPUT" | grep -Fq "is not a valid destination" \
+    || fail "refused, but the message never said the destination was invalid."
+
+# The operator has to be told which entry to fix. Only the first is named --
+# the run stops at it -- so one match across the set is the contract, not three.
+named=0
 for host in "${INVALID_HOSTS[@]}"; do
-    if ! echo "$OUTPUT" | grep -Fq "Warning: could not resolve host '$host'"; then
-        fail "invalid host '$host' did not produce an unresolved-host warning."
+    if echo "$OUTPUT" | grep -Fq "$host"; then
+        named=$((named + 1))
     fi
 done
-
-# Invalid CIDRs are warned about and omitted from rule generation; applying the
-# remaining firewall policy should still succeed.
-if echo "$OUTPUT" | grep -qE "^(ip6?tables) .* failed:|Firewall setup failed:"; then
-    fail "invalid CIDR entry caused firewall setup to fail."
+if [ "$named" -eq 0 ]; then
+    fail "the refusal named none of the invalid entries, so it says nothing about what to fix."
 fi
 
-if ! echo "$OUTPUT" | grep -q "Default network policy: DROP"; then
-    fail "default-deny policy was not applied."
-fi
-
-# The FORWARD hook is what scopes the chain to this container's egress; a run
-# that skipped it enforces nothing, so PASS must require it. Fail on the
-# skipped-hook warning and require the positive install confirmation.
-if echo "$OUTPUT" | grep -Fq "Skipping FORWARD hook"; then
-    fail "FORWARD hook was skipped; the container's veth interface was not discovered."
-fi
-if ! echo "$OUTPUT" | grep -Fq "FORWARD hook installed"; then
-    fail "FORWARD hook installation was not confirmed."
+# The refusal has to land before the workload, or the container already ran
+# under a policy that was never programmed.
+if echo "$OUTPUT" | grep -Fq "MXC_WORKLOAD_RAN"; then
+    fail "the workload ran despite the refused policy."
 fi
 
 assert_firewall_chain_cleaned_up
 
-echo "PASS: invalid CIDR entries were warned about without failing firewall setup."
+echo "PASS: an unmatchable CIDR entry was refused, named, and rolled back."
 echo "LXC invalid CIDR network filtering test complete."
