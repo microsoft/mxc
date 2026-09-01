@@ -8,8 +8,8 @@
 //! The ordering the OS requires is:
 //!
 //! 1. `CreateProcessSecurityEnvironment(spec)` → env handle
-//! 2. `StartLearningModeTrace(env)` → trace handle (**before** the child launches, so no
-//!    early denials are missed)
+//! 2. `StartLearningModeTraceWithOptions(env, ACCESS | NETWORK)` → trace handle
+//!    (**before** the child launches, so no early denials are missed)
 //! 3. attach `env` as `PROC_THREAD_ATTRIBUTE_SECURITY_ENVIRONMENT`, then call
 //!    `CreateProcessW` (**runner's job**; the session exposes the handle via
 //!    [`CaptureSession::environment`])
@@ -56,8 +56,9 @@ impl CaptureSession {
     ///
     /// # Errors
     /// - [`LearningModeError::HResultCall`] if `CreateProcessSecurityEnvironment` fails.
-    /// - [`LearningModeError::HResultCall`] if `StartLearningModeTrace` fails — in which
-    ///   case the just-created environment is closed before returning so it is not leaked.
+    /// - [`LearningModeError::HResultCall`] if `StartLearningModeTraceWithOptions`
+    ///   fails — in which case the just-created environment is closed before
+    ///   returning so it is not leaked.
     pub fn begin(
         secenv_api: SecurityEnvironmentApi,
         learning_mode_api: LearningModeApi,
@@ -189,7 +190,7 @@ mod tests {
         record("env_close");
     }
 
-    unsafe extern "system" fn fake_start(_: HANDLE, out: *mut HANDLE) -> HRESULT {
+    unsafe extern "system" fn fake_start(_: HANDLE, _: i32, out: *mut HANDLE) -> HRESULT {
         record("start");
         let result = HRESULT(START_RESULT.load(Ordering::SeqCst));
         if result.is_ok() {
@@ -267,7 +268,7 @@ mod tests {
         assert!(matches!(
             error,
             LearningModeError::HResultCall {
-                function: "StartLearningModeTrace",
+                function: "StartLearningModeTraceWithOptions",
                 code
             } if code == E_FAIL.0
         ));

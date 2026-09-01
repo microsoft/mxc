@@ -12,6 +12,11 @@ The MVP diagnostic path works end to end:
 6. MXC decodes the event and places it in either canonical denials or verbose
    diagnostics.
 
+MXC starts native capture with `StartLearningModeTraceWithOptions`, requesting
+both `ACCESS` and `NETWORK`. AppInfo owns WFP startup, rollback, draining, and
+cleanup; MXC does not coordinate with WFP directly. If the combined start
+fails, MXC fails the trace rather than collecting partial access-only data.
+
 VM validation used an outbound TCP connection to `1.1.1.1:445`. The managed
 ETL contained one `NetworkDecisionV1` event with the expected package, endpoint,
 protocol, direction, Tessera provider, and Tessera sublayer.
