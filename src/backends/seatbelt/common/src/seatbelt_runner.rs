@@ -24,7 +24,7 @@ use std::ffi::{CStr, CString};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -336,12 +336,12 @@ fn spawn_open(
     //    Terminal window: `open -W` reports its own exit status, not the
     //    helper's, so an unusable directory would otherwise look like a clean
     //    run that silently did nothing.
-    let cwd = match std::env::current_dir() {
-        Ok(base) => absolute_working_directory(&resolve_working_directory(request), &base),
+    let cwd = match absolute_working_directory(&resolve_working_directory(request)) {
+        Ok(cwd) => cwd,
         Err(e) => {
             let _ = fs::remove_file(&profile_path);
             return Err(error_response(format!(
-                "failed to read the current directory to resolve the seatbelt working directory: {e}"
+                "failed to read the current directory to anchor the relative seatbelt working directory: {e}"
             )));
         }
     };
@@ -738,13 +738,26 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
     }
 }
 
-/// Anchor a resolved working directory to `base` when it is relative.
-fn absolute_working_directory(path: &str, base: &Path) -> String {
+/// Anchor a resolved working directory to the launcher's directory when it is
+/// relative — `chdir` gives the exec path that anchor, the helper script (which
+/// runs from Terminal's directory) has none.
+fn absolute_working_directory(path: &str) -> std::io::Result<String> {
+    absolute_working_directory_with(path, std::env::current_dir)
+}
+
+/// [`absolute_working_directory`] with an injectable launch directory. Only
+/// consulted for a relative value: `chdir` accepts an absolute path even when
+/// the launcher's own directory has been removed, so querying it eagerly would
+/// reject a request the exec path launches fine.
+fn absolute_working_directory_with(
+    path: &str,
+    launch_dir: impl FnOnce() -> std::io::Result<PathBuf>,
+) -> std::io::Result<String> {
     let candidate = Path::new(path);
     if candidate.is_absolute() {
-        return path.to_string();
+        return Ok(path.to_string());
     }
-    base.join(candidate).to_string_lossy().into_owned()
+    Ok(launch_dir()?.join(candidate).to_string_lossy().into_owned())
 }
 
 /// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
@@ -1245,12 +1258,15 @@ mod tests {
     /// the same relative request must not be able to name both directories.
     #[test]
     fn relative_working_directory_is_anchored_to_the_launching_process() {
-        let launcher = Path::new("/tmp/launcher");
-        let terminal = Path::new("/Users/someone");
+        let launcher = || Ok(PathBuf::from("/tmp/launcher"));
+        let terminal = || Ok(PathBuf::from("/Users/someone"));
 
-        let anchored = absolute_working_directory("work", launcher);
+        let anchored = absolute_working_directory_with("work", launcher).unwrap();
         assert_eq!(anchored, "/tmp/launcher/work");
-        assert_ne!(anchored, absolute_working_directory("work", terminal));
+        assert_ne!(
+            anchored,
+            absolute_working_directory_with("work", terminal).unwrap()
+        );
 
         // Anchored means absolute, so the directory the helper runs from can no
         // longer change where it lands.
@@ -1260,12 +1276,31 @@ mod tests {
     }
 
     /// An absolute directory is passed through spelled exactly as written —
-    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports.
+    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports —
+    /// and needs no launch directory. `chdir` accepts it even from a launcher
+    /// whose own directory has been removed, so a failure to read that
+    /// directory must not fail the request: the panicking closure asserts it is
+    /// never consulted.
     #[test]
-    fn absolute_working_directory_is_left_untouched() {
+    fn absolute_working_directory_is_left_untouched_without_querying_the_launcher() {
+        let unused = || panic!("the launch directory must not be read for an absolute path");
         assert_eq!(
-            absolute_working_directory("/tmp/mxc_work", Path::new("/elsewhere")),
+            absolute_working_directory_with("/tmp/mxc_work", unused).unwrap(),
             "/tmp/mxc_work"
         );
+    }
+
+    /// A relative value cannot be anchored without the launcher's directory, so
+    /// that failure propagates rather than being silently left relative.
+    #[test]
+    fn relative_working_directory_propagates_a_missing_launch_directory() {
+        let gone = || {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "launch directory removed",
+            ))
+        };
+        let err = absolute_working_directory_with("work", gone).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }
