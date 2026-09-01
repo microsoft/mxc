@@ -331,11 +331,20 @@ fn spawn_open(
     //    launches Terminal, which runs the helper from *its own* directory
     //    (normally the user's home), so unlike `spawn_exec` there is no
     //    `Command::current_dir` for the child to inherit — the helper has to
-    //    perform the `cd` itself. Fail here rather than inside a Terminal
-    //    window: `open -W` reports its own exit status, not the helper's, so an
-    //    unusable directory would otherwise look like a clean run that silently
-    //    did nothing.
-    let cwd = resolve_working_directory(request);
+    //    perform the `cd` itself, and it has to be handed an absolute target
+    //    (see `absolute_working_directory`). Fail here rather than inside a
+    //    Terminal window: `open -W` reports its own exit status, not the
+    //    helper's, so an unusable directory would otherwise look like a clean
+    //    run that silently did nothing.
+    let cwd = match std::env::current_dir() {
+        Ok(base) => absolute_working_directory(&resolve_working_directory(request), &base),
+        Err(e) => {
+            let _ = fs::remove_file(&profile_path);
+            return Err(error_response(format!(
+                "failed to read the current directory to resolve the seatbelt working directory: {e}"
+            )));
+        }
+    };
     if !Path::new(&cwd).is_dir() {
         let _ = fs::remove_file(&profile_path);
         return Err(error_response(format!(
@@ -727,6 +736,29 @@ fn resolve_working_directory(request: &ExecutionRequest) -> String {
         Some(resolved) => expand(resolved.path),
         None => "/".to_string(),
     }
+}
+
+/// Anchor a resolved working directory to `base` when it is relative.
+///
+/// `process.cwd` is passed through the parser verbatim, so it may be relative.
+/// The exec path hands that value to `Command::current_dir`, where `chdir`
+/// resolves it against the MXC process's own directory. The helper script has
+/// no such anchor — it runs from Terminal's directory — so a relative value
+/// left as-is would either fail to `cd` or, worse, succeed into a *different
+/// directory of the same name* under Terminal's parent. Resolving it here, in
+/// the launching process, is what makes the two paths land in the same place,
+/// and it also makes the up-front `is_dir` check test the directory the helper
+/// will actually enter.
+///
+/// Symlinks are deliberately left unresolved: an absolute request reaches the
+/// child spelled the way the caller wrote it, matching the `PWD` `spawn_exec`
+/// exports.
+fn absolute_working_directory(path: &str, base: &Path) -> String {
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return path.to_string();
+    }
+    base.join(candidate).to_string_lossy().into_owned()
 }
 
 /// Escape `value` for interpolation inside a single-quoted `/bin/sh` word:
@@ -1218,5 +1250,36 @@ mod tests {
             "pwd",
         );
         assert!(script.contains("cd '/tmp' ||"), "{script}");
+    }
+
+    /// A relative `process.cwd` means "relative to the launching process" —
+    /// that is what `chdir` gives the exec path. The helper script runs from
+    /// Terminal's directory instead, so the value must be anchored before it is
+    /// embedded. The two bases here stand in for the launcher and Terminal:
+    /// the same relative request must not be able to name both directories.
+    #[test]
+    fn relative_working_directory_is_anchored_to_the_launching_process() {
+        let launcher = Path::new("/tmp/launcher");
+        let terminal = Path::new("/Users/someone");
+
+        let anchored = absolute_working_directory("work", launcher);
+        assert_eq!(anchored, "/tmp/launcher/work");
+        assert_ne!(anchored, absolute_working_directory("work", terminal));
+
+        // Anchored means absolute, so the directory the helper runs from can no
+        // longer change where it lands.
+        let script = build_helper_script("", &anchored, "/p.sb", "pwd");
+        assert!(script.contains("cd '/tmp/launcher/work' ||"), "{script}");
+        assert!(script.contains("PWD='/tmp/launcher/work'"), "{script}");
+    }
+
+    /// An absolute directory is passed through spelled exactly as written —
+    /// symlinks stay unresolved so `PWD` matches what `spawn_exec` exports.
+    #[test]
+    fn absolute_working_directory_is_left_untouched() {
+        assert_eq!(
+            absolute_working_directory("/tmp/mxc_work", Path::new("/elsewhere")),
+            "/tmp/mxc_work"
+        );
     }
 }
