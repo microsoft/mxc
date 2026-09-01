@@ -30,6 +30,8 @@ mod nanvix_common;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "isolation_session")]
     build_isolation_session_bindings::run();
+    #[cfg(all(windows, feature = "isolation_session"))]
+    stage_isolation_session_runtime();
     build_mxc_telemetry::run();
     if let Some((bin_dir, use_prefetched_binaries)) = build_nanvix_binaries::run() {
         nanvix_build_common::stage_artifacts_next_to_exe(&bin_dir, !use_prefetched_binaries);
@@ -53,4 +55,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "wxc-wslc-daemon.exe",
     )?;
     Ok(())
+}
+
+#[cfg(all(windows, feature = "isolation_session"))]
+fn stage_isolation_session_runtime() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_dir = manifest_dir
+        .join("build")
+        .join("isolation_session_bindings");
+    let _ = mxc_build_common::stage_isolation_session_runtime(&sdk_dir);
 }

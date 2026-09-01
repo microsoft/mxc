@@ -10,6 +10,8 @@
 use std::sync::OnceLock;
 
 use crate::isolation_session_bindings::bindings::{IsoSessionFeature, IsoSessionOps};
+#[cfg(feature = "lifted_msi")]
+use windows::Win32::Foundation::REGDB_E_CLASSNOTREG;
 use windows_core::HRESULT;
 
 use super::owned_thread;
@@ -37,9 +39,28 @@ fn available_from(probe: Result<i32, HRESULT>) -> bool {
 }
 
 fn probe_feature_level() -> Result<i32, HRESULT> {
+    #[cfg(feature = "lifted_msi")]
+    let ops = match super::regfree::activate_from_adjacent_shim::<IsoSessionOps>() {
+        Some(result) => result.map_err(|error| {
+            eprintln!(
+                "[mxc isosession] lifted IsoSessionOps activation failed: {}",
+                error
+            );
+            error.code()
+        })?,
+        None => return Err(REGDB_E_CLASSNOTREG),
+    };
+    #[cfg(not(feature = "lifted_msi"))]
     let ops = IsoSessionOps::new().map_err(|e| e.code())?;
+
     ops.GetFeatureLevel(IsoSessionFeature::LocalAgentUser)
-        .map_err(|e| e.code())
+        .map_err(|error| {
+            eprintln!(
+                "[mxc isosession] GetFeatureLevel(LocalAgentUser) failed: {}",
+                error
+            );
+            error.code()
+        })
 }
 
 #[cfg(test)]

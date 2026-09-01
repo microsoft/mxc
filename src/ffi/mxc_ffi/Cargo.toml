@@ -53,3 +53,4 @@ csbindgen = { version = "1", optional = true }
 [target.'cfg(windows)'.build-dependencies]
 cc = "1"
 winresource.workspace = true
+zip = "2"

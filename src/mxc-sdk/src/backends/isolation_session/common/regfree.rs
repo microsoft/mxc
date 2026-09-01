@@ -1,193 +1,147 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Reg-free classic-COM activation for the IsoSession client surface.
+//! Activation for the lifted IsolationSession runtime.
 //!
-//! By default MXC would activate `Windows.AI.IsolationSession.Preview.*`
-//! through the system-installed WinRT registration (the OS image populates the
-//! activation catalog, which resolves to the inbox `System32` binaries). To
-//! bind the **version-pinned MSI-installed** runtime instead, MXC ships
-//! `IsoSessionApp.dll` in its own nuget package (co-located with `wxc-exec.exe`)
-//! and activates it through a **private classic-COM CLSID** that `wxc-exec`'s
-//! fused manifest redirects (reg-free) to that DLL.
-//!
-//! Mechanism: [`activate_via_private_clsid`] calls
-//! `CoCreateInstance(<private CLSID>, CLSCTX_INPROC_SERVER, IID_IActivationFactory)`.
-//! The fused `<comClass>` redirection resolves the CLSID straight to the
-//! co-located `IsoSessionApp.dll` -- there is **no `LoadLibrary` in this caller
-//! and no runtime-path logic in Rust**. All knowledge of where the MSI runtime
-//! lives is owned by `IsoSessionApp.dll` (C++), which resolves the runtime
-//! directory and coresident-loads `IsoSessionClient.dll`, then binds the
-//! matching side-by-side service instance.
-//!
-//! Why classic-COM and not reg-free WinRT: a classic `<comClass>` redirection
-//! is honored **ahead of** HKCR and is never catalog-shadowed (a private CLSID
-//! is in no inbox catalog), so it is immune to the reserved-namespace shadowing
-//! that defeats a reg-free WinRT activation context on an image where the
-//! `Windows.AI.IsolationSession.*` classes are already registered inbox.
-//!
-//! No-fallback contract: when the private CLSID is not registered
-//! (`REGDB_E_CLASSNOTREG`) -- i.e. the manifest was not fused, such as an
-//! inbox-only build -- [`activate_via_private_clsid`] returns `None`. The
-//! callers (`manager::check_service_available_and_activate` and
-//! `process_options::build_iso_process_options`) turn that `None` into a hard,
-//! actionable error (`error::regfree_not_fused`): MXC deliberately does **not**
-//! fall back to the inbox `System32` runtime, because silently binding a
-//! different, unversioned binary set is exactly the failure this design exists
-//! to prevent. Any *other* activation error is surfaced as `Some(Err(..))`
-//! rather than silently redirected to a different binary set.
-//!
-//! GUID contract: the two private activator CLSIDs below are a hard contract
-//! duplicated in THREE places -- change all together:
-//!   * OS: `onecoreuap/windows/core/isoenvbroker/src/app/dll.cpp`
-//!   * nuget manifest fragment: `.../IsoSessionApp.comClass.manifest`
-//!   * this file (`backends/isolation_session/common/src/regfree.rs`)
+//! The lifted SDK places `IsoSessionApp.dll` and a stamped
+//! `IsoSession.manifest` beside the host. The shim exports
+//! `DllGetActivationFactory`; loading that export directly prevents the inbox
+//! WinRT catalog from shadowing the lifted implementation.
 
-use isolation_session_bindings::bindings::{IsoSessionOps, IsoSessionProcessOptions};
-use windows::Win32::Foundation::REGDB_E_CLASSNOTREG;
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+#![allow(unsafe_code)]
+
+use std::os::windows::ffi::OsStrExt;
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
+use windows::core::{s, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{GetLastError, REGDB_E_CLASSNOTREG};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
+use windows::Win32::System::LibraryLoader::{
+    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
 };
 use windows::Win32::System::WinRT::IActivationFactory;
-use windows_core::{Interface, RuntimeName, GUID};
+use windows_core::{Interface, RuntimeName, HRESULT};
 
-/// Maps a WinRT runtime class to the private classic-COM CLSID that
-/// `IsoSessionApp.dll` exposes (reg-free, via the fused manifest) as its in-proc
-/// activator. The CLSID is what MXC hands to `CoCreateInstance`; the shim's
-/// class factory then forwards to the matching WinRT class.
+const SHIM_NAME: &str = "IsoSessionApp.dll";
+const MANIFEST_NAME: &str = "IsoSession.manifest";
+
+type DllGetActivationFactory =
+    unsafe extern "system" fn(*mut std::ffi::c_void, *mut *mut std::ffi::c_void) -> HRESULT;
+
+static GET_ACTIVATION_FACTORY: OnceLock<DllGetActivationFactory> = OnceLock::new();
+
+/// Activates `T` through the lifted shim staged beside the current executable.
 ///
-/// See the module-level GUID contract note: these values must stay in sync with
-/// the OS `dll.cpp` and the nuget `.comClass.manifest`.
-pub(crate) trait ActivatorClsid {
-    /// The private activator CLSID for this runtime class.
-    const ACTIVATOR_CLSID: GUID;
-}
-
-impl ActivatorClsid for IsoSessionOps {
-    // {6EF3155B-D1A2-4A34-BCAA-089F8A6D9916}
-    const ACTIVATOR_CLSID: GUID = GUID::from_u128(0x6ef3155b_d1a2_4a34_bcaa_089f8a6d9916);
-}
-
-impl ActivatorClsid for IsoSessionProcessOptions {
-    // {36B03FF1-21AA-4F3C-819D-2430EC830DD0}
-    const ACTIVATOR_CLSID: GUID = GUID::from_u128(0x36b03ff1_21aa_4f3c_819d_2430ec830dd0);
-}
-
-/// Activates the WinRT runtime class `T` by resolving its private classic-COM
-/// activator CLSID (reg-free, via the fused manifest) to the co-located
-/// `IsoSessionApp.dll` and driving its activation factory.
-///
-/// Returns:
-/// - `None` when the private CLSID is not registered (`REGDB_E_CLASSNOTREG`) --
-///   the manifest was not fused / this is an inbox-only build. The caller turns
-///   this into a hard `error::regfree_not_fused` error (NO inbox fallback).
-/// - `Some(Err(..))` when activation was attempted but failed (the shim could
-///   not load the client, the factory failed, an unexpected HRESULT, ...). The
-///   caller must surface this rather than silently bind a different binary set.
-/// - `Some(Ok(instance))` on success.
-pub(crate) fn activate_via_private_clsid<T>() -> Option<windows_core::Result<T>>
+/// Returns `None` only when the lifted activation payload is not present.
+/// Other failures are returned to the caller and must not fall back to inbox
+/// activation because that would silently mix the lifted WinMD with inbox code.
+pub(crate) fn activate_from_adjacent_shim<T>() -> Option<windows_core::Result<T>>
 where
-    T: Interface + RuntimeName + ActivatorClsid,
+    T: Interface + RuntimeName,
 {
-    // `CoCreateInstance` requires an initialized COM apartment on this thread.
-    // `wxc-exec`'s `main` already initializes an MTA, so the expected result
-    // here is `S_FALSE` (already initialized); `RPC_E_CHANGED_MODE` (a
-    // different apartment already in force) is likewise fine -- the existing
-    // apartment is reused. We deliberately do NOT pair this with a
-    // `CoUninitialize`: the one extra init-count increment is leaked for the
-    // process lifetime (matching the prior implementation) and reclaimed at
-    // process teardown.
-    //
-    // SAFETY: `CoInitializeEx` is safe to call with a null reserved pointer.
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+    // Some callers enter through a native thread without initializing COM.
+    // RPC_E_CHANGED_MODE only means another apartment model is already active.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+
+    let directory = adjacent_runtime_directory()?;
+    let factory = match load_activation_factory::<T>(&directory.join(SHIM_NAME)) {
+        Ok(factory) => factory,
+        Err(error) if error.code() == REGDB_E_CLASSNOTREG => return None,
+        Err(error) => return Some(Err(error)),
+    };
+
+    Some(activate_from_factory(factory))
+}
+
+fn load_activation_factory<T>(
+    dll_path: &std::path::Path,
+) -> windows_core::Result<IActivationFactory>
+where
+    T: Interface + RuntimeName,
+{
+    let get_factory = resolve_get_activation_factory(dll_path)?;
+
+    let class_name = HSTRING::from(T::NAME);
+    // HSTRING is a transparent handle; pass the handle, not its UTF-16 buffer.
+    let class_name_handle = unsafe { std::mem::transmute_copy(&class_name) };
+    let mut factory = std::ptr::null_mut();
+    unsafe { get_factory(class_name_handle, &mut factory) }.ok()?;
+    if factory.is_null() {
+        return Err(windows_core::Error::from_hresult(HRESULT(
+            0x8000_4003u32 as i32,
+        )));
     }
 
-    // SAFETY: `T::ACTIVATOR_CLSID` is a valid CLSID; the fused manifest (or, on
-    // an inbox-only build, its absence) determines resolution. Requesting
-    // `IActivationFactory` matches what the shim's class factory returns.
-    let factory: IActivationFactory =
-        match unsafe { CoCreateInstance(&T::ACTIVATOR_CLSID, None, CLSCTX_INPROC_SERVER) } {
-            Ok(factory) => factory,
-            // Not registered: no fused manifest / inbox-only build. Let the
-            // caller fall back to inbox `T::new()`.
-            Err(e) if e.code() == REGDB_E_CLASSNOTREG => return None,
-            // Any other failure is a real activation error -- surface it.
-            Err(e) => {
-                eprintln!(
-                    "[mxc isosession] CoCreateInstance(<activator for '{}'>) failed: {}",
-                    <T as RuntimeName>::NAME,
-                    e
-                );
-                return Some(Err(e));
-            }
-        };
-
-    Some(activate_from_factory::<T>(factory))
+    // The module intentionally remains loaded so the returned vtable stays valid.
+    Ok(unsafe { IActivationFactory::from_raw(factory) })
 }
 
-/// Drives a resolved `IActivationFactory` to produce an instance of `T`.
+fn resolve_get_activation_factory(
+    dll_path: &std::path::Path,
+) -> windows_core::Result<DllGetActivationFactory> {
+    if let Some(get_factory) = GET_ACTIVATION_FACTORY.get() {
+        return Ok(*get_factory);
+    }
+
+    let source: Vec<u16> = dll_path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // The absolute path plus constrained dependency search prevents DLL planting.
+    let module = unsafe {
+        LoadLibraryExW(
+            PCWSTR(source.as_ptr()),
+            None,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
+        )
+    }?;
+    let export =
+        unsafe { GetProcAddress(module, s!("DllGetActivationFactory")) }.ok_or_else(|| {
+            windows_core::Error::from_hresult(HRESULT::from_win32(unsafe { GetLastError().0 }))
+        })?;
+    let get_factory: DllGetActivationFactory = unsafe { std::mem::transmute(export) };
+
+    // A racing activation may load the same module twice, but both handles remain
+    // valid for the process lifetime and every caller uses the cached export.
+    let _ = GET_ACTIVATION_FACTORY.set(get_factory);
+    Ok(*GET_ACTIVATION_FACTORY.get().unwrap_or(&get_factory))
+}
+
+fn adjacent_runtime_directory() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let executable_directory = executable.parent()?;
+    let directory = [Some(executable_directory), executable_directory.parent()]
+        .into_iter()
+        .flatten()
+        .find(|directory| {
+            directory.join(SHIM_NAME).is_file() && directory.join(MANIFEST_NAME).is_file()
+        })
+        .map(PathBuf::from);
+    directory
+}
+
 fn activate_from_factory<T>(factory: IActivationFactory) -> windows_core::Result<T>
 where
     T: Interface + RuntimeName,
 {
-    // SAFETY: `factory` came from the runtime class's own activator DLL.
-    let instance = match unsafe { factory.ActivateInstance() } {
-        Ok(instance) => instance,
-        Err(e) => {
-            eprintln!(
-                "[mxc isosession] ActivateInstance('{}') failed: {}",
-                <T as RuntimeName>::NAME,
-                e
-            );
-            return Err(e);
-        }
-    };
-
-    instance.cast::<T>().map_err(|e| {
-        // A cast failure here means the activated `IsoSessionApp.dll` produced
-        // an object that does not implement the interface IID the Preview WinMD
-        // was built against -- the winmd/MSI version-pin mismatch. The
-        // actionable mapping lives in `error::activation_error`
-        // (E_NOINTERFACE branch); this stays a diagnostic breadcrumb.
+    let instance = unsafe { factory.ActivateInstance() }.map_err(|error| {
         eprintln!(
-            "[mxc isosession] cast to '{}' failed (winmd/MSI version-pin mismatch? the \
-             activated IsoSessionApp.dll does not implement the expected interface IID): {}",
-            <T as RuntimeName>::NAME,
-            e
+            "[mxc isosession] ActivateInstance('{}') failed: {}",
+            T::NAME,
+            error
         );
-        e
+        error
+    })?;
+
+    instance.cast::<T>().map_err(|error| {
+        eprintln!(
+            "[mxc isosession] cast to '{}' failed (WinMD/MSI version mismatch?): {}",
+            T::NAME,
+            error
+        );
+        error
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The two private activator CLSIDs are the hard cross-repo contract. Guard
-    /// against an accidental edit that zeroes or aliases one of them.
-    #[test]
-    fn activator_clsids_match_contract() {
-        assert_eq!(
-            <IsoSessionOps as ActivatorClsid>::ACTIVATOR_CLSID,
-            GUID::from_u128(0x6ef3155b_d1a2_4a34_bcaa_089f8a6d9916),
-            "IsoSessionOps activator CLSID drifted from the OS dll.cpp / manifest contract"
-        );
-        assert_eq!(
-            <IsoSessionProcessOptions as ActivatorClsid>::ACTIVATOR_CLSID,
-            GUID::from_u128(0x36b03ff1_21aa_4f3c_819d_2430ec830dd0),
-            "IsoSessionProcessOptions activator CLSID drifted from the OS dll.cpp / manifest contract"
-        );
-    }
-
-    /// The two activators must be distinct and non-nil -- a typo collapsing them
-    /// would silently activate the wrong class.
-    #[test]
-    fn activator_clsids_are_distinct_and_nonzero() {
-        let ops = <IsoSessionOps as ActivatorClsid>::ACTIVATOR_CLSID;
-        let opts = <IsoSessionProcessOptions as ActivatorClsid>::ACTIVATOR_CLSID;
-        assert_ne!(ops, opts, "the two activator CLSIDs must differ");
-        assert_ne!(ops, GUID::from_u128(0), "IsoSessionOps activator CLSID must be non-nil");
-        assert_ne!(opts, GUID::from_u128(0), "IsoSessionProcessOptions activator CLSID must be non-nil");
-    }
 }

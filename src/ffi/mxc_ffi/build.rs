@@ -26,8 +26,23 @@ fn main() {
     println!("cargo:rerun-if-changed=src/state_aware.rs");
     println!("cargo:rerun-if-changed=build.rs");
 
+    #[cfg(all(windows, feature = "isolation_session"))]
+    stage_isolation_session_runtime();
+
     #[cfg(feature = "dotnetsdk")]
     generate_csharp_bindings();
+}
+
+#[cfg(all(windows, feature = "isolation_session"))]
+fn stage_isolation_session_runtime() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk_dir = manifest_dir
+        .join("..")
+        .join("..")
+        .join("mxc-sdk")
+        .join("build")
+        .join("isolation_session_bindings");
+    let _ = mxc_build_common::stage_isolation_session_runtime(&sdk_dir);
 }
 
 #[cfg(feature = "dotnetsdk")]

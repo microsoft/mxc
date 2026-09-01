@@ -31,11 +31,19 @@ default = []
 wslc = ["link-wslcsdk", "dep:libloading", "dep:tar"]
 link-wslcsdk = ["dep:zip"]
 isolation_session = [
+    "lifted_msi",
     "dep:windows-bindgen",
     "dep:windows-collections",
     "dep:windows-future",
     "dep:zip",
 ]
+isolation_session_inbox = [
+    "dep:windows-bindgen",
+    "dep:windows-collections",
+    "dep:windows-future",
+    "dep:zip",
+]
+lifted_msi = []
 test-support = []
 microvm = []
 hyperlight = [

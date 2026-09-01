@@ -440,6 +440,11 @@ public class MxcContainerTests
                 backends,
                 backend => backend.Backend == ContainmentBackend.ProcessContainer);
             Assert.NotNull(processContainer.Tier);
+#if MXC_WITH_ISOLATION_SESSION
+            Assert.Contains(
+                backends,
+                backend => backend.Backend == ContainmentBackend.IsolationSession);
+#endif
         }
     }
 

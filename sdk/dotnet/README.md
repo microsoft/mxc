@@ -237,6 +237,19 @@ sandbox on the current host. `MxcPlatform.GetAvailableBackends()` reports
 host backend capabilities; availability is advisory and launch-time
 validation still applies.
 
+The switches compose, so either backend can be enabled independently. Passing
+one on Linux or macOS fails the build instead of silently ignoring it. An
+IsolationSession build additionally stages and packages the lifted activation
+unit from the pinned IsolationSession SDK NuGet: `IsoSessionApp.dll` and a
+stamped `IsoSession.manifest`. These files let in-process Rust and C# callers
+load the shim and request its WinRT activation factory directly without
+binding the inbox WinRT catalog. A WSLC build
+additionally builds, stages, and packages `wxc-wslc-daemon.exe` and the pinned
+`wslcsdk.dll`. Every selected backend's native files must stay together beside
+the loaded `mxc_ffi.dll`. `build.bat --with-wslc` stages the same complete unit
+into the Windows RID package directories. A multi-RID pack fails if the
+pre-staged second RID was built with a different optional-backend set.
+
 Creation telemetry is supplied through `Telemetry` on `RunOptions`,
 `SpawnOptions`, or `SpawnWithPtyOptions`, not on `ContainerRequest`. Omission
 leaves telemetry disabled; `new TelemetryConfig { Enabled = false }`
