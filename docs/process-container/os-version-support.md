@@ -68,7 +68,7 @@ The PSEC probe requires:
 When `processContainer.captureDenials` is present, MXC treats PSEC plus the
 official V2 Learning Mode exports as one native capture capability set:
 
-- `StartLearningModeTrace`
+- `StartLearningModeTraceWithOptions`
 - `StopLearningModeTrace`
 - `CloseLearningModeTrace`
 

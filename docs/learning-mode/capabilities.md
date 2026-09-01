@@ -136,7 +136,7 @@ ungranted access is handled while it is recorded:
 
 > **Host selection.** MXC prefers native capture on a feature-enabled Windows
 > build exposing the complete official V2 API set:
-> `StartLearningModeTrace`, `StopLearningModeTrace`,
+> `StartLearningModeTraceWithOptions`, `StopLearningModeTrace`,
 > `CloseLearningModeTrace`, `CreateProcessSecurityEnvironment`,
 > `QueryProcessSecurityEnvironmentSupport`, and
 > `CloseProcessSecurityEnvironment`. When that set is unavailable or cannot
@@ -233,6 +233,9 @@ Mode ETL through the manifested
 `NetworkDecisionV1`, with schema version `1`. The OS Learning Mode broker owns
 the WFP subscription, runtime-filter lookup, subject scoping, event
 normalization, queue draining, and ETW flush before the trace is sealed.
+MXC requests both `ACCESS` and `NETWORK` sources when it starts native capture;
+a failed combined start fails the trace rather than retrying with partial
+access-only collection. MXC does not coordinate with WFP directly.
 
 MXC currently recognizes two normalized source domains:
 

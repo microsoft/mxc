@@ -583,7 +583,8 @@ impl BaseContainerRunner {
     ///
     /// The successful probe session is dropped immediately, which closes and discards the trace.
     pub fn is_capture_denials_usable() -> bool {
-        // Do not cache: StartLearningModeTrace can fail transiently, so later probes must retry.
+        // Do not cache: StartLearningModeTraceWithOptions can fail transiently,
+        // so later probes must retry.
         if !Self::is_process_security_environment_usable() {
             return false;
         }
@@ -3499,13 +3500,13 @@ mod tests {
         use learning_mode_windows::LearningModeError;
 
         let disabled = LearningModeError::HResultCall {
-            function: "StartLearningModeTrace",
+            function: "StartLearningModeTraceWithOptions",
             code: E_NOTIMPL.0,
         };
         assert!(learning_mode_api_not_implemented(&disabled));
 
         let ordinary = LearningModeError::HResultCall {
-            function: "StartLearningModeTrace",
+            function: "StartLearningModeTraceWithOptions",
             code: windows::Win32::Foundation::E_INVALIDARG.0,
         };
         assert!(!learning_mode_api_not_implemented(&ordinary));
@@ -3513,7 +3514,7 @@ mod tests {
         assert!(learning_mode_api_not_implemented(
             &LearningModeError::ExportMissing {
                 api: "Learning Mode trace",
-                export: "StartLearningModeTrace",
+                export: "StartLearningModeTraceWithOptions",
                 detail: "not found".to_string(),
             }
         ));
@@ -3526,7 +3527,7 @@ mod tests {
     fn capture_factory_injects_begin_failure() {
         let factory = Arc::new(FakeCaptureFactory {
             begin_error: Some((
-                "StartLearningModeTrace",
+                "StartLearningModeTraceWithOptions",
                 windows::Win32::Foundation::E_FAIL.0,
             )),
             finish_error: None,
@@ -3543,7 +3544,9 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("StartLearningModeTrace"));
+        assert!(error
+            .to_string()
+            .contains("StartLearningModeTraceWithOptions"));
         assert_eq!(factory.begin_calls.load(Ordering::SeqCst), 1);
         assert_eq!(factory.finish_calls.load(Ordering::SeqCst), 0);
     }

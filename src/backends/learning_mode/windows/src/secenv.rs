@@ -6,12 +6,13 @@
 //! `HPROCESS_SECURITY_ENVIRONMENT` handle that [`crate::LearningModeApi::start_trace`]
 //! keys the Learning Mode trace on.
 //!
-//! `StartLearningModeTrace` is keyed on a security-environment handle (the broker
-//! resolves it to the target AppContainer SID server-side). Neither of MXC's existing
-//! launch paths yields that handle — classic AppContainer uses `CreateProcess` +
-//! `SECURITY_CAPABILITIES`, and BaseContainer uses the one-shot RPC-brokered
-//! `Experimental_CreateProcessInSandbox`. To capture denials, MXC uses the
-//! official process security-environment model exported by `processmodel.dll`:
+//! `StartLearningModeTraceWithOptions` is keyed on a security-environment handle
+//! (the broker resolves it to the target AppContainer SID server-side). Neither of
+//! MXC's existing launch paths yields that handle — classic AppContainer uses
+//! `CreateProcess` + `SECURITY_CAPABILITIES`, and BaseContainer uses the one-shot
+//! RPC-brokered `Experimental_CreateProcessInSandbox`. To capture denials, MXC
+//! uses the official process security-environment model exported by
+//! `processmodel.dll`:
 //!
 //! ```c
 //! HRESULT CreateProcessSecurityEnvironment(

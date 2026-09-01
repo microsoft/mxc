@@ -4,7 +4,7 @@
 //! Manual validation probe for the Learning Mode trace + security-environment API.
 //!
 //! Prints whether `processmodel.dll` on this machine exposes the Learning Mode trace
-//! exports (`StartLearningModeTrace` / `StopLearningModeTrace` /
+//! exports (`StartLearningModeTraceWithOptions` / `StopLearningModeTrace` /
 //! `CloseLearningModeTrace`) and the 2-phase security-environment exports
 //! (`CreateProcessSecurityEnvironment` /
 //! `QueryProcessSecurityEnvironmentSupport` /

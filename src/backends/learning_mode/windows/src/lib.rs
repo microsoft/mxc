@@ -8,7 +8,10 @@
 //! ETW trace behind three official flat C exports in `processmodel.dll`:
 //!
 //! ```c
-//! HRESULT StartLearningModeTrace(HPROCESS_SECURITY_ENVIRONMENT environment, HLEARNINGMODE_TRACE* trace);
+//! HRESULT StartLearningModeTraceWithOptions(
+//!     HPROCESS_SECURITY_ENVIRONMENT environment,
+//!     LEARNING_MODE_TRACE_SOURCE_OPTIONS options,
+//!     HLEARNINGMODE_TRACE* trace);
 //! HRESULT StopLearningModeTrace(HLEARNINGMODE_TRACE trace, PCWSTR outputEtlPath);
 //! void CloseLearningModeTrace(HLEARNINGMODE_TRACE trace);
 //! ```
@@ -164,11 +167,11 @@ mod stub_tests {
     fn error_messages_are_actionable() {
         let e = LearningModeError::ExportMissing {
             api: "Learning Mode trace",
-            export: "StartLearningModeTrace",
+            export: "StartLearningModeTraceWithOptions",
             detail: "GetLastError = 127".to_string(),
         };
         let msg = e.to_string();
-        assert!(msg.contains("StartLearningModeTrace"));
+        assert!(msg.contains("StartLearningModeTraceWithOptions"));
         assert!(msg.contains("Learning Mode trace API"));
     }
 }
